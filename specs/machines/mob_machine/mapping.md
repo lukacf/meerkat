@@ -36,6 +36,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverRosterMemberRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `RecoverRosterMemberResetRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `RecoverRosterMemberRetiredRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `RecoverRosterMemberRetiredAlreadyAbsent`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `ReconcileRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `flow-and-run-lifecycle`
@@ -141,6 +150,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverMemberRestoreFailureRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `AdmitDestroyCleanup`
+  - anchors: `mob_actor_authority`
+  - scenarios: `orchestrator-coordinator-cleanup`
 - `MarkCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -195,6 +207,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverRosterWiringAlreadyRecovered`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`
+- `RecoverRosterUnwireRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+- `RecoverRosterUnwireAlreadyAbsent`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
 - `UnwireMembersRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
@@ -207,6 +225,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverExternalPeerWiringAlreadyRecovered`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `RecoverExternalPeerUnwireRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `RecoverExternalPeerUnwireAlreadyAbsent`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`
 - `UnwireExternalPeerRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`

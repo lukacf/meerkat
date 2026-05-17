@@ -908,6 +908,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "ExternalPeerEndpoint",
                 "crate::catalog::dsl::mob_machine::ExternalPeerEndpoint",
             ),
+            NamedTypeBinding::type_path(
+                "ExternalPeerKey",
+                "crate::catalog::dsl::mob_machine::ExternalPeerKey",
+            ),
             NamedTypeBinding::string("FlowNodeId"),
             NamedTypeBinding::string_enum("FlowNodeKind", &["Step", "Loop"]),
             NamedTypeBinding::string_enum(

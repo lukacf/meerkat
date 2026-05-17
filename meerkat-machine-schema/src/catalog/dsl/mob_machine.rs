@@ -10,6 +10,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         state {
             lifecycle_phase: MobPhase,
+            destroy_admitted: bool,
             live_runtime_ids: Set<AgentRuntimeId>,
             externally_addressable_runtime_ids: Set<AgentRuntimeId>,
             runtime_fence_tokens: Map<AgentRuntimeId, FenceToken>,
@@ -115,6 +116,7 @@ macro_rules! mob_catalog_machine_dsl {
             // machine-owned fact instead of being projected into WiringEdge by
             // peer name.
             external_peer_edges: Set<ExternalPeerEdge>,
+            external_peer_edges_by_key: Map<ExternalPeerKey, ExternalPeerEdge>,
             // Identity → current runtime binding. Survives within a
             // generation; respawn replaces the runtime id for the same
             // identity.
@@ -125,6 +127,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         init(Running) {
+            destroy_admitted = false,
             live_runtime_ids = EmptySet,
             externally_addressable_runtime_ids = EmptySet,
             runtime_fence_tokens = EmptyMap,
@@ -215,6 +218,7 @@ macro_rules! mob_catalog_machine_dsl {
             member_state_markers = EmptyMap,
             wiring_edges = EmptySet,
             external_peer_edges = EmptySet,
+            external_peer_edges_by_key = EmptyMap,
             identity_to_runtime = EmptyMap,
             member_session_bindings = EmptyMap,
             pending_session_ingress_detach_runtime_ids = EmptySet,
@@ -403,9 +407,14 @@ macro_rules! mob_catalog_machine_dsl {
             DestroyMob { session_id: SessionId },
             ObserveRuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             RecoverRosterMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, external_addressable: bool },
+            RecoverRosterMemberReset { agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            RecoverRosterMemberRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
             RecoverRosterWiring { edge: WiringEdge },
-            RecoverExternalPeerWiring { edge: ExternalPeerEdge },
+            RecoverRosterUnwire { edge: WiringEdge },
+            RecoverExternalPeerWiring { key: ExternalPeerKey, edge: ExternalPeerEdge },
+            RecoverExternalPeerUnwire { key: ExternalPeerKey },
             RecoverMemberRestoreFailure { agent_identity: AgentIdentity, reason: String },
+            AdmitDestroyCleanup,
             MarkCompleted,
             StartRun,
             FinishRun,
@@ -631,6 +640,65 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.topology_epoch += 1;
+            }
+            to Running
+        }
+
+        transition RecoverRosterMemberResetRunning {
+            on signal RecoverRosterMemberReset { agent_identity, previous_agent_runtime_id, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "previous_runtime_recovered" { self.live_runtime_ids.contains(previous_agent_runtime_id) == true }
+            guard "identity_recovered" { self.identity_to_runtime.get_cloned(agent_identity) == Some(previous_agent_runtime_id) }
+            update {
+                self.live_runtime_ids.remove(previous_agent_runtime_id);
+                self.runtime_fence_tokens.remove(previous_agent_runtime_id);
+                self.member_startup_binding_requested.remove(previous_agent_runtime_id);
+                self.member_startup_runtime_ready.remove(previous_agent_runtime_id);
+                self.member_startup_ready.remove(previous_agent_runtime_id);
+                self.member_state_markers.remove(previous_agent_runtime_id);
+                self.live_runtime_ids.insert(agent_runtime_id);
+                if self.externally_addressable_runtime_ids.contains(previous_agent_runtime_id) {
+                    self.externally_addressable_runtime_ids.remove(previous_agent_runtime_id);
+                    self.externally_addressable_runtime_ids.insert(agent_runtime_id);
+                } else {
+                    self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                }
+                self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
+                self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.member_restore_failures.remove(agent_identity);
+                self.topology_epoch += 1;
+            }
+            to Running
+        }
+
+        transition RecoverRosterMemberRetiredRunning {
+            on signal RecoverRosterMemberRetired { agent_identity, agent_runtime_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            update {
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
+                self.identity_to_runtime.remove(agent_identity);
+                self.member_session_bindings.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.topology_epoch += 1;
+            }
+            to Running
+        }
+
+        transition RecoverRosterMemberRetiredAlreadyAbsent {
+            on signal RecoverRosterMemberRetired { agent_identity, agent_runtime_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "runtime_not_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            update {
+                self.identity_to_runtime.remove(agent_identity);
+                self.member_session_bindings.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
             }
             to Running
         }
@@ -936,6 +1004,19 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        transition AdmitDestroyCleanup {
+            on signal AdmitDestroyCleanup
+            guard {
+                self.lifecycle_phase == Phase::Running
+                || self.lifecycle_phase == Phase::Stopped
+                || self.lifecycle_phase == Phase::Completed
+            }
+            update {
+                self.destroy_admitted = true;
+            }
+            to Running
+        }
+
         transition MarkCompleted {
             on signal MarkCompleted
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped }
@@ -954,8 +1035,15 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "session_ingress_detaches_closed" { self.pending_session_ingress_detach_runtime_ids == EmptySet }
             update {
+                self.destroy_admitted = true;
                 self.live_runtime_ids = EmptySet;
+                self.externally_addressable_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
+                self.wiring_edges = EmptySet;
+                self.external_peer_edges = EmptySet;
+                self.external_peer_edges_by_key = EmptyMap;
+                self.identity_to_runtime = EmptyMap;
+                self.member_session_bindings = EmptyMap;
                 self.member_startup_binding_requested = EmptySet;
                 self.member_startup_runtime_ready = EmptySet;
                 self.member_startup_ready = EmptySet;
@@ -1147,6 +1235,25 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        transition RecoverRosterUnwireRunning {
+            on signal RecoverRosterUnwire { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_recovered" { self.wiring_edges.contains(edge) == true }
+            update {
+                self.wiring_edges.remove(edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+        }
+
+        transition RecoverRosterUnwireAlreadyAbsent {
+            on signal RecoverRosterUnwire { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_not_recovered" { self.wiring_edges.contains(edge) == false }
+            update {}
+            to Running
+        }
+
         transition UnwireMembersRunning {
             on input UnwireMembers { edge }
             guard { self.lifecycle_phase == Phase::Running }
@@ -1174,20 +1281,43 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition RecoverExternalPeerWiringRunning {
-            on signal RecoverExternalPeerWiring { edge }
+            on signal RecoverExternalPeerWiring { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
             guard "external_peer_not_already_recovered" { self.external_peer_edges.contains(edge) == false }
             update {
                 self.external_peer_edges.insert(edge);
+                self.external_peer_edges_by_key.insert(key, edge);
                 self.topology_epoch += 1;
             }
             to Running
         }
 
         transition RecoverExternalPeerWiringAlreadyRecovered {
-            on signal RecoverExternalPeerWiring { edge }
+            on signal RecoverExternalPeerWiring { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
             guard "external_peer_already_recovered" { self.external_peer_edges.contains(edge) == true }
+            update {
+                self.external_peer_edges_by_key.insert(key, edge);
+            }
+            to Running
+        }
+
+        transition RecoverExternalPeerUnwireRunning {
+            on signal RecoverExternalPeerUnwire { key }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_recovered" { self.external_peer_edges_by_key.contains_key(key) == true }
+            update {
+                self.external_peer_edges.remove(self.external_peer_edges_by_key.get_cloned(key).get("value"));
+                self.external_peer_edges_by_key.remove(key);
+                self.topology_epoch += 1;
+            }
+            to Running
+        }
+
+        transition RecoverExternalPeerUnwireAlreadyAbsent {
+            on signal RecoverExternalPeerUnwire { key }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_not_recovered" { self.external_peer_edges_by_key.contains_key(key) == false }
             update {}
             to Running
         }
@@ -2787,8 +2917,15 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "session_ingress_detaches_closed" { self.pending_session_ingress_detach_runtime_ids == EmptySet }
             update {
+                self.destroy_admitted = true;
                 self.live_runtime_ids = EmptySet;
+                self.externally_addressable_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
+                self.wiring_edges = EmptySet;
+                self.external_peer_edges = EmptySet;
+                self.external_peer_edges_by_key = EmptyMap;
+                self.identity_to_runtime = EmptyMap;
+                self.member_session_bindings = EmptyMap;
                 self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
@@ -3694,6 +3831,15 @@ impl ExternalPeerEdge {
     }
 }
 
+impl Default for ExternalPeerEdge {
+    fn default() -> Self {
+        Self {
+            local: AgentIdentity(String::new()),
+            endpoint: ExternalPeerEndpoint::default(),
+        }
+    }
+}
+
 #[derive(
     Debug,
     Clone,
@@ -3710,6 +3856,20 @@ pub struct PeerName(pub String);
 impl<T: Into<String>> From<T> for PeerName {
     fn from(s: T) -> Self {
         Self(s.into())
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct ExternalPeerKey {
+    pub local: AgentIdentity,
+    pub name: PeerName,
+}
+
+impl ExternalPeerKey {
+    pub fn new(local: AgentIdentity, name: PeerName) -> Self {
+        Self { local, name }
     }
 }
 

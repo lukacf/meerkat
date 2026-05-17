@@ -814,6 +814,15 @@ impl ExternalPeerEdge {
     }
 }
 
+impl Default for ExternalPeerEdge {
+    fn default() -> Self {
+        Self {
+            local: AgentIdentity(String::new()),
+            endpoint: ExternalPeerEndpoint::default(),
+        }
+    }
+}
+
 #[derive(
     Debug,
     Clone,
@@ -830,6 +839,20 @@ pub struct PeerName(pub String);
 impl<T: Into<String>> From<T> for PeerName {
     fn from(s: T) -> Self {
         Self(s.into())
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct ExternalPeerKey {
+    pub local: AgentIdentity,
+    pub name: PeerName,
+}
+
+impl ExternalPeerKey {
+    pub fn new(local: AgentIdentity, name: PeerName) -> Self {
+        Self { local, name }
     }
 }
 

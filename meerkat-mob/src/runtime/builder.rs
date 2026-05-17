@@ -105,6 +105,20 @@ fn finish_seeded_mob_authority_phase(
     }
 }
 
+fn seeded_mob_public_phase(state: &crate::machines::mob_machine::MobMachineState) -> MobState {
+    use crate::machines::mob_machine::MobPhase;
+
+    if state.destroy_admitted {
+        return MobState::Destroyed;
+    }
+    match state.lifecycle_phase {
+        MobPhase::Running => MobState::Running,
+        MobPhase::Stopped => MobState::Stopped,
+        MobPhase::Completed => MobState::Completed,
+        MobPhase::Destroyed => MobState::Destroyed,
+    }
+}
+
 #[cfg(feature = "runtime-adapter")]
 fn canonical_runtime_adapter_for_session_service(
     session_service: &Arc<dyn MobSessionService>,
@@ -124,84 +138,185 @@ fn canonical_runtime_adapter_for_session_service(
     }
 }
 
-/// Seed the DSL authority's membership-tracking fields from a reconstructed
-/// shell roster on resume paths.
-///
-/// The shell roster is projected from the event log (`Roster::project`), but
-/// the DSL authority has no corresponding event-projection because only the
-/// live spawn pipeline calls `MobMachineInput::Spawn`. On resume the DSL
-/// would otherwise start with empty `live_runtime_ids`, which breaks any
-/// MobMachine-owned guard that checks membership — including the work-lane
-/// `SubmitWork` transitions that own External/Internal legality.
-///
-/// This helper feeds every live roster entry into generated recovery signals
-/// that populate `live_runtime_ids`, `runtime_fence_tokens`,
-/// `externally_addressable_runtime_ids`, and `identity_to_runtime`. It also
-/// rehydrates machine-owned local and external wiring edges from the
-/// event-projected roster so respawn/reconcile restore logic can read topology
-/// from MobMachine instead of using roster fields as authority.
-/// `external_addressable` is resolved from the definition's inline profile
-/// (realm-profile overrides are resolved asynchronously elsewhere; callers
-/// that need realm overrides can re-feed spawn events through the live
-/// pipeline).
-fn seed_mob_authority_sync_from_roster(
+fn inline_external_addressable(definition: &MobDefinition, role: &ProfileName) -> bool {
+    definition
+        .profiles
+        .get(role)
+        .and_then(|binding| binding.as_inline())
+        .map(|profile| profile.external_addressable)
+        .unwrap_or(false)
+}
+
+fn dsl_external_peer_key(
+    local: &AgentIdentity,
+    peer_name: &meerkat_core::comms::PeerName,
+) -> crate::machines::mob_machine::ExternalPeerKey {
+    crate::machines::mob_machine::ExternalPeerKey::new(
+        crate::machines::mob_machine::AgentIdentity::from_domain(local),
+        crate::machines::mob_machine::PeerName(peer_name.as_str().to_owned()),
+    )
+}
+
+fn dsl_wiring_edge(
+    a: &AgentIdentity,
+    b: &AgentIdentity,
+) -> crate::machines::mob_machine::WiringEdge {
+    let dsl_a = crate::machines::mob_machine::AgentIdentity::from_domain(a);
+    let dsl_b = crate::machines::mob_machine::AgentIdentity::from_domain(b);
+    crate::machines::mob_machine::WiringEdge::new(dsl_a, dsl_b)
+}
+
+/// Replay typed durable mob events as recovery inputs to generated MobMachine
+/// authority. `Roster` remains a read model and is not used as the source of
+/// machine facts.
+fn seed_mob_authority_sync_from_events(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
-    roster: &Roster,
+    events: &[crate::event::MobEvent],
     definition: &MobDefinition,
 ) -> Result<(), MobError> {
     use crate::machines::mob_machine as mob_dsl;
-    for entry in roster.list_all() {
-        // Use the inline profile where available. Realm-profile overrides
-        // are not observed here (the realm store is async-only); resumes
-        // that depend on a realm override for addressability would need to
-        // also emit a spawn event through the normal async pipeline, which
-        // `handle_submit_work` would then see once the entry re-enters the
-        // DSL via that path.
-        let external_addressable = definition
-            .profiles
-            .get(&entry.role)
-            .and_then(|binding| binding.as_inline())
-            .map(|profile| profile.external_addressable)
-            .unwrap_or(false);
-        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
-        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
-        let dsl_fence = mob_dsl::FenceToken::from_domain(entry.fence_token);
-        apply_seeded_mob_signal(
-            authority,
-            mob_dsl::MobMachineSignal::RecoverRosterMember {
-                agent_identity: dsl_identity,
-                agent_runtime_id: dsl_runtime_id,
-                fence_token: dsl_fence,
-                external_addressable,
-            },
-            "recover_roster_member",
-        )?;
 
-        for peer_identity in &entry.wired_to {
-            if let Some(peer_entry) = roster.get_by_identity(peer_identity) {
+    for event in events {
+        match &event.kind {
+            MobEventKind::MobCreated { .. } => {}
+            MobEventKind::MobCompleted => {
+                apply_seeded_mob_input(
+                    authority,
+                    mob_dsl::MobMachineInput::Complete,
+                    "recover_mob_completed",
+                )?;
+            }
+            MobEventKind::MobDestroying => {
+                apply_seeded_mob_signal(
+                    authority,
+                    mob_dsl::MobMachineSignal::AdmitDestroyCleanup,
+                    "recover_destroy_admitted",
+                )?;
+            }
+            MobEventKind::MobDestroyStorageFinalizing => {
+                if !authority.state.destroy_admitted {
+                    apply_seeded_mob_signal(
+                        authority,
+                        mob_dsl::MobMachineSignal::AdmitDestroyCleanup,
+                        "recover_destroy_finalizing_admission",
+                    )?;
+                }
+                apply_seeded_mob_input(
+                    authority,
+                    mob_dsl::MobMachineInput::Destroy,
+                    "recover_destroy_storage_finalizing",
+                )?;
+            }
+            MobEventKind::MobReset => {}
+            MobEventKind::MemberSpawned(member_spawned) => {
+                apply_seeded_mob_signal(
+                    authority,
+                    mob_dsl::MobMachineSignal::RecoverRosterMember {
+                        agent_identity: mob_dsl::AgentIdentity::from_domain(
+                            &member_spawned.agent_identity,
+                        ),
+                        agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                            &member_spawned.agent_runtime_id,
+                        ),
+                        fence_token: mob_dsl::FenceToken::from_domain(member_spawned.fence_token),
+                        external_addressable: inline_external_addressable(
+                            definition,
+                            &member_spawned.role,
+                        ),
+                    },
+                    "recover_member_spawned",
+                )?;
+            }
+            MobEventKind::MemberReset {
+                agent_identity,
+                previous_generation,
+                fence_token,
+                agent_runtime_id,
+                ..
+            } => {
+                let previous_agent_runtime_id =
+                    AgentRuntimeId::new(agent_identity.clone(), *previous_generation);
+                apply_seeded_mob_signal(
+                    authority,
+                    mob_dsl::MobMachineSignal::RecoverRosterMemberReset {
+                        agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                        previous_agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                            &previous_agent_runtime_id,
+                        ),
+                        agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
+                        fence_token: mob_dsl::FenceToken::from_domain(*fence_token),
+                    },
+                    "recover_member_reset",
+                )?;
+            }
+            MobEventKind::MemberRetired {
+                agent_identity,
+                generation,
+                ..
+            } => {
+                let agent_runtime_id = AgentRuntimeId::new(agent_identity.clone(), *generation);
+                apply_seeded_mob_signal(
+                    authority,
+                    mob_dsl::MobMachineSignal::RecoverRosterMemberRetired {
+                        agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                        agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
+                    },
+                    "recover_member_retired",
+                )?;
+            }
+            MobEventKind::MemberKickoffUpdated { .. } => {}
+            MobEventKind::MembersWired { a, b } => {
                 apply_seeded_mob_signal(
                     authority,
                     mob_dsl::MobMachineSignal::RecoverRosterWiring {
-                        edge: mob_dsl::WiringEdge::new(
-                            mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
-                            mob_dsl::AgentIdentity::from_domain(&peer_entry.agent_identity),
-                        ),
+                        edge: dsl_wiring_edge(a, b),
                     },
-                    "recover_roster_wiring",
+                    "recover_members_wired",
                 )?;
             }
-        }
-        for spec in entry.external_peer_specs.values() {
-            apply_seeded_mob_signal(
-                authority,
-                mob_dsl::MobMachineSignal::RecoverExternalPeerWiring {
-                    edge: mob_dsl::ExternalPeerEdge::new(
-                        mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
-                        mob_dsl::ExternalPeerEndpoint::from(spec),
-                    ),
-                },
-                "recover_external_peer_wiring",
-            )?;
+            MobEventKind::MembersWiredBatch { edges } => {
+                for edge in edges {
+                    apply_seeded_mob_signal(
+                        authority,
+                        mob_dsl::MobMachineSignal::RecoverRosterWiring {
+                            edge: dsl_wiring_edge(&edge.a, &edge.b),
+                        },
+                        "recover_members_wired_batch",
+                    )?;
+                }
+            }
+            MobEventKind::MembersUnwired { a, b } => {
+                apply_seeded_mob_signal(
+                    authority,
+                    mob_dsl::MobMachineSignal::RecoverRosterUnwire {
+                        edge: dsl_wiring_edge(a, b),
+                    },
+                    "recover_members_unwired",
+                )?;
+            }
+            MobEventKind::ExternalPeerWired { local, spec } => {
+                apply_seeded_mob_signal(
+                    authority,
+                    mob_dsl::MobMachineSignal::RecoverExternalPeerWiring {
+                        key: dsl_external_peer_key(local, &spec.name),
+                        edge: mob_dsl::ExternalPeerEdge::new(
+                            mob_dsl::AgentIdentity::from_domain(local),
+                            mob_dsl::ExternalPeerEndpoint::from(spec),
+                        ),
+                    },
+                    "recover_external_peer_wired",
+                )?;
+            }
+            MobEventKind::ExternalPeerUnwired { local, peer_name } => {
+                apply_seeded_mob_signal(
+                    authority,
+                    mob_dsl::MobMachineSignal::RecoverExternalPeerUnwire {
+                        key: dsl_external_peer_key(local, peer_name),
+                    },
+                    "recover_external_peer_unwired",
+                )?;
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -496,21 +611,11 @@ fn seed_mob_authority_restore_failures(
 
 struct RuntimeWiring {
     roster: Arc<RwLock<RosterAuthority>>,
-    /// Observable phase threaded from the builder's reconstruction logic into
-    /// `start_runtime_with_components`. This can differ from the DSL authority
-    /// phase after a retained `MobDestroying` marker: public authority is
-    /// terminal, while the DSL authority must still be able to replay missing
-    /// retire/destroy cleanup transitions on retry.
-    public_phase: MobState,
-    destroy_admitted: bool,
-    /// DSL authority pre-seeded from the reconstructed roster on resume paths
+    /// DSL authority pre-seeded from generated recovery replay on resume paths
     /// (and from scratch on create paths). Carried through the wiring so the
     /// actor receives membership-populated authority state before the first
-    /// command is processed — MobMachine guards that check
-    /// `live_runtime_ids` / `externally_addressable_runtime_ids` see the
-    /// resumed members immediately. Boxed so `RuntimeWiring` stays slim
-    /// inside the async `resume()` future (the DSL state struct itself is
-    /// several hundred bytes worth of maps + sets).
+    /// command is processed. Boxed so `RuntimeWiring` stays slim inside the
+    /// async `resume()` future.
     dsl_authority: Box<crate::machines::mob_machine::MobMachineAuthority>,
     machine_state_watch_tx:
         tokio::sync::watch::Sender<crate::machines::mob_machine::MobMachineState>,
@@ -895,10 +1000,10 @@ impl MobBuilder {
             .into_iter()
             .filter(|event| event.mob_id == definition.id)
             .collect();
-        // Determine resumed state from events in the current epoch (after the
-        // last MobReset, or all events if no reset has occurred). Do this
-        // before supervisor-authority recovery so destroy-finalizing storage
-        // can fail closed instead of minting replacement live authority.
+        // Select the current durable epoch (after the last MobReset, or all
+        // events if no reset has occurred). Do this before
+        // supervisor-authority recovery so destroy-finalizing storage can fail
+        // closed instead of minting replacement live authority.
         let epoch_start = mob_events
             .iter()
             .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
@@ -907,31 +1012,11 @@ impl MobBuilder {
         let destroy_storage_finalizing = epoch_events
             .iter()
             .any(|event| matches!(event.kind, MobEventKind::MobDestroyStorageFinalizing));
-        let destroy_admitted = epoch_events.iter().any(|event| {
-            matches!(
-                event.kind,
-                MobEventKind::MobDestroying | MobEventKind::MobDestroyStorageFinalizing
-            )
-        });
-        let resumed_state = if destroy_admitted {
-            MobState::Destroyed
-        } else if epoch_events
-            .iter()
-            .any(|event| matches!(event.kind, MobEventKind::MobCompleted))
-        {
-            MobState::Completed
-        } else {
-            MobState::Running
-        };
-        let dsl_seed_state = if destroy_admitted && !destroy_storage_finalizing {
-            MobState::Running
-        } else {
-            resumed_state
-        };
+        let mut initial_dsl_authority = Box::new(seed_mob_authority());
+        seed_mob_authority_sync_from_events(&mut initial_dsl_authority, epoch_events, &definition)?;
+        let resumed_state = seeded_mob_public_phase(&initial_dsl_authority.state);
         // Runtime metadata owns supervisor authority. External-binding
-        // overlays are compatibility projections only: restart authority for
-        // member material, bridge bindings, and lifecycle status comes from
-        // the event-projected roster seeded into MobMachine below.
+        // overlays are compatibility projections only.
         if !destroy_storage_finalizing {
             Self::ensure_supervisor_authority(
                 storage.runtime_metadata.clone(),
@@ -978,7 +1063,6 @@ impl MobBuilder {
         let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
         let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
         let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
-        let initial_dsl_authority = Box::new(seed_mob_authority());
         let (machine_state_watch_tx, machine_state_watch_rx) =
             tokio::sync::watch::channel(initial_dsl_authority.state.clone());
         // Preview phase watch so the preview handle can answer status()
@@ -987,12 +1071,6 @@ impl MobBuilder {
         let (_preview_phase_tx, preview_phase_rx) = tokio::sync::watch::channel(resumed_state);
         let mut wiring = RuntimeWiring {
             roster: roster_state.clone(),
-            public_phase: resumed_state,
-            destroy_admitted,
-            // Placeholder; the final authority is seeded below after
-            // `reconcile_resume` finalizes the shell roster. The DSL
-            // membership state is populated from the finalized roster so
-            // MobMachine guards see the resumed members immediately.
             dsl_authority: initial_dsl_authority,
             machine_state_watch_tx,
             restore_diagnostics: restore_diagnostics.clone(),
@@ -1034,12 +1112,6 @@ impl MobBuilder {
             .await?;
         }
 
-        // Seed the DSL authority from the finalized roster. After
-        // `reconcile_resume` the roster reflects every member that was
-        // alive at resume time; generated recovery signals let MobMachine
-        // guards (SubmitWork legality, Retire membership, etc.) see
-        // resumed members on the first command.
-        seed_mob_authority_sync_from_roster(&mut wiring.dsl_authority, &roster, &definition)?;
         seed_mob_authority_sync_from_flow_runs(
             &mut wiring.dsl_authority,
             storage.runs.clone(),
@@ -1052,7 +1124,6 @@ impl MobBuilder {
             &mut wiring.dsl_authority,
             &restore_diagnostics_snapshot,
         )?;
-        finish_seeded_mob_authority_phase(&mut wiring.dsl_authority, dsl_seed_state)?;
         let _ = wiring
             .machine_state_watch_tx
             .send(wiring.dsl_authority.state.clone());
@@ -1644,13 +1715,7 @@ impl MobBuilder {
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
     ) -> Result<MobHandle, MobError> {
-        // Seed the DSL authority from the reconstructed shell roster so the
-        // MobMachine sees already-spawned members immediately on resume.
-        // Profile lookup is best-effort-sync here — resume paths thread a
-        // concrete profile via `start_runtime_with_components`; fresh create
-        // paths pass an empty roster so the replay is a no-op either way.
         let mut dsl_authority = Box::new(seed_mob_authority());
-        seed_mob_authority_sync_from_roster(&mut dsl_authority, &initial_roster, &definition)?;
         finish_seeded_mob_authority_phase(&mut dsl_authority, initial_state)?;
         let (machine_state_watch_tx, _machine_state_watch_rx) =
             tokio::sync::watch::channel(dsl_authority.state.clone());
@@ -1659,8 +1724,6 @@ impl MobBuilder {
         let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
         let wiring = RuntimeWiring {
             roster,
-            public_phase: initial_state,
-            destroy_admitted: initial_state == MobState::Destroyed,
             dsl_authority,
             machine_state_watch_tx,
             restore_diagnostics,
@@ -1702,8 +1765,6 @@ impl MobBuilder {
     ) -> MobHandle {
         let RuntimeWiring {
             roster,
-            public_phase: wiring_public_phase,
-            destroy_admitted,
             dsl_authority,
             machine_state_watch_tx,
             restore_diagnostics,
@@ -1714,6 +1775,7 @@ impl MobBuilder {
         } = wiring;
         let external_backend = definition.backend.external.clone();
         let handle_session_service = session_service.clone();
+        let wiring_public_phase = seeded_mob_public_phase(&dsl_authority.state);
         // Terminal-phase watch: seed with the initial phase so a status()
         // call before any DSL transition returns the right answer.
         let (phase_watch_tx_actor, phase_watch_rx) =
@@ -1836,7 +1898,6 @@ impl MobBuilder {
             realm_profile_store,
             composition_binding,
             pending_routed_effects: Vec::new(),
-            destroy_admitted: destroy_admitted || public_phase == MobState::Destroyed,
             destroy_cleanup_active: false,
         };
         tokio::spawn(actor.run(command_rx));

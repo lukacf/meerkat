@@ -434,10 +434,6 @@ pub(super) struct MobActor {
     /// first dispatch failure surfaces as a typed `MobError`, no silent
     /// drops.
     pub(super) pending_routed_effects: Vec<super::composition::MobSeamEffect>,
-    /// Durable destroy admission has been recorded. Once this flips, public
-    /// mutation authority is closed in-process even if cleanup returns
-    /// `Incomplete`; only a later destroy retry may continue cleanup.
-    pub(super) destroy_admitted: bool,
     pub(super) destroy_cleanup_active: bool,
 }
 
@@ -1345,11 +1341,15 @@ impl MobActor {
         project_dsl_phase(self.dsl_authority.state.lifecycle_phase)
     }
 
+    fn destroy_admitted(&self) -> bool {
+        self.dsl_authority.state.destroy_admitted
+    }
+
     /// Project observable shell phase. A durable `MobDestroying` event closes
     /// public live authority before all cleanup necessarily completes, so the
     /// same-process projection must match restart projection and fail closed.
     fn state(&self) -> MobState {
-        if self.destroy_admitted {
+        if self.destroy_admitted() {
             MobState::Destroyed
         } else {
             self.dsl_state()
@@ -1370,7 +1370,7 @@ impl MobActor {
     }
 
     fn ensure_destroy_mutation_allowed(&self, context: &str) -> Result<(), MobError> {
-        if self.destroy_admitted && !self.destroy_cleanup_active {
+        if self.destroy_admitted() && !self.destroy_cleanup_active {
             return Err(self.destroy_admitted_error(context));
         }
         Ok(())
@@ -3834,7 +3834,7 @@ impl MobActor {
             // dropping the effect. Once the spine lands C-6c, the
             // dispatcher resolves cleanly and this path becomes
             // everyday.
-            if self.destroy_admitted
+            if self.destroy_admitted()
                 && !self.destroy_cleanup_active
                 && !self.pending_routed_effects.is_empty()
             {
@@ -8680,9 +8680,11 @@ impl MobActor {
                 kind: MobEventKind::MobDestroying,
             })
             .await?;
-        self.destroy_admitted = true;
-        let _ = self.phase_watch_tx.send(MobState::Destroyed);
-        self.publish_machine_state_projection();
+        self.apply_dsl_signal(
+            mob_dsl::MobMachineSignal::AdmitDestroyCleanup,
+            "record_destroying_event",
+        )?;
+        let _ = self.phase_watch_tx.send(self.state());
         Ok(())
     }
 
@@ -9039,7 +9041,7 @@ impl MobActor {
 
         self.ensure_pending_spawn_alignment("handle_destroy preflight")
             .map_err(|error| {
-                if self.destroy_admitted {
+                if self.destroy_admitted() {
                     Self::incomplete_destroy_error(
                         report.clone(),
                         "pending spawn alignment during admitted destroy failed",
@@ -9052,7 +9054,7 @@ impl MobActor {
         self.ensure_flow_tracker_alignment("handle_destroy preflight")
             .await
             .map_err(|error| {
-                if self.destroy_admitted {
+                if self.destroy_admitted() {
                     Self::incomplete_destroy_error(
                         report.clone(),
                         "flow tracker alignment during admitted destroy failed",
@@ -9066,7 +9068,7 @@ impl MobActor {
             let roster = self.roster.read().await;
             roster.list_all().cloned().collect::<Vec<_>>()
         };
-        if !self.destroy_admitted
+        if !self.destroy_admitted()
             && destroy_input_needed
             && let Err(error) = self.record_destroying_event().await
         {

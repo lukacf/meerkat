@@ -7,6 +7,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## State
 - Phase enum: `Running | Stopped | Completed | Destroyed`
+- `destroy_admitted`: `Bool`
 - `live_runtime_ids`: `Set<AgentRuntimeId>`
 - `externally_addressable_runtime_ids`: `Set<AgentRuntimeId>`
 - `runtime_fence_tokens`: `Map<AgentRuntimeId, FenceToken>`
@@ -97,6 +98,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_state_markers`: `Map<AgentRuntimeId, MobMemberState>`
 - `wiring_edges`: `Set<WiringEdge>`
 - `external_peer_edges`: `Set<ExternalPeerEdge>`
+- `external_peer_edges_by_key`: `Map<ExternalPeerKey, ExternalPeerEdge>`
 - `identity_to_runtime`: `Map<AgentIdentity, AgentRuntimeId>`
 - `member_session_bindings`: `Map<AgentIdentity, SessionId>`
 - `pending_session_ingress_detach_runtime_ids`: `Set<AgentRuntimeId>`
@@ -180,9 +182,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DestroyMob`(session_id: SessionId)
 - `ObserveRuntimeDestroyed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `RecoverRosterMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, external_addressable: Bool)
+- `RecoverRosterMemberReset`(agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `RecoverRosterMemberRetired`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 - `RecoverRosterWiring`(edge: WiringEdge)
-- `RecoverExternalPeerWiring`(edge: ExternalPeerEdge)
+- `RecoverRosterUnwire`(edge: WiringEdge)
+- `RecoverExternalPeerWiring`(key: ExternalPeerKey, edge: ExternalPeerEdge)
+- `RecoverExternalPeerUnwire`(key: ExternalPeerKey)
 - `RecoverMemberRestoreFailure`(agent_identity: AgentIdentity, reason: String)
+- `AdmitDestroyCleanup`
 - `MarkCompleted`
 - `StartRun`
 - `FinishRun`
@@ -276,6 +283,28 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverRosterMember`(agent_identity, agent_runtime_id, fence_token, external_addressable)
 - Guards:
   - `identity_not_recovered`
+  - `runtime_not_recovered`
+- To: `Running`
+
+### `RecoverRosterMemberResetRunning`
+- From: `Running`
+- On: `RecoverRosterMemberReset`(agent_identity, previous_agent_runtime_id, agent_runtime_id, fence_token)
+- Guards:
+  - `previous_runtime_recovered`
+  - `identity_recovered`
+- To: `Running`
+
+### `RecoverRosterMemberRetiredRunning`
+- From: `Running`
+- On: `RecoverRosterMemberRetired`(agent_identity, agent_runtime_id)
+- Guards:
+  - `runtime_recovered`
+- To: `Running`
+
+### `RecoverRosterMemberRetiredAlreadyAbsent`
+- From: `Running`
+- On: `RecoverRosterMemberRetired`(agent_identity, agent_runtime_id)
+- Guards:
   - `runtime_not_recovered`
 - To: `Running`
 
@@ -541,6 +570,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverMemberRestoreFailure`(agent_identity, reason)
 - To: `Running`
 
+### `AdmitDestroyCleanup`
+- From: `Running`, `Stopped`, `Completed`
+- On: `AdmitDestroyCleanup`()
+- To: `Running`
+
 ### `MarkCompleted`
 - From: `Running`, `Stopped`
 - On: `MarkCompleted`()
@@ -654,6 +688,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `edge_already_recovered`
 - To: `Running`
 
+### `RecoverRosterUnwireRunning`
+- From: `Running`
+- On: `RecoverRosterUnwire`(edge)
+- Guards:
+  - `edge_recovered`
+- To: `Running`
+
+### `RecoverRosterUnwireAlreadyAbsent`
+- From: `Running`
+- On: `RecoverRosterUnwire`(edge)
+- Guards:
+  - `edge_not_recovered`
+- To: `Running`
+
 ### `UnwireMembersRunning`
 - From: `Running`
 - On: `UnwireMembers`(edge)
@@ -672,16 +720,30 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverExternalPeerWiringRunning`
 - From: `Running`
-- On: `RecoverExternalPeerWiring`(edge)
+- On: `RecoverExternalPeerWiring`(key, edge)
 - Guards:
   - `external_peer_not_already_recovered`
 - To: `Running`
 
 ### `RecoverExternalPeerWiringAlreadyRecovered`
 - From: `Running`
-- On: `RecoverExternalPeerWiring`(edge)
+- On: `RecoverExternalPeerWiring`(key, edge)
 - Guards:
   - `external_peer_already_recovered`
+- To: `Running`
+
+### `RecoverExternalPeerUnwireRunning`
+- From: `Running`
+- On: `RecoverExternalPeerUnwire`(key)
+- Guards:
+  - `external_peer_recovered`
+- To: `Running`
+
+### `RecoverExternalPeerUnwireAlreadyAbsent`
+- From: `Running`
+- On: `RecoverExternalPeerUnwire`(key)
+- Guards:
+  - `external_peer_not_recovered`
 - To: `Running`
 
 ### `UnwireExternalPeerRunning`

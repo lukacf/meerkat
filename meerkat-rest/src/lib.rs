@@ -11378,17 +11378,16 @@ mod tests {
         );
         let payload: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(payload["requested"], 3);
-        assert_eq!(payload["wired"].as_array().expect("wired array").len(), 2);
-        assert!(
-            payload["already_wired"]
-                .as_array()
-                .expect("already_wired array")
-                .is_empty()
-        );
         assert_eq!(
-            payload["wired"][0],
-            serde_json::json!({"a": "w-1", "b": "w-2"})
+            batch_edge_pairs(&payload, "wired"),
+            [
+                ("w-1".to_string(), "w-2".to_string()),
+                ("w-1".to_string(), "w-3".to_string())
+            ]
+            .into_iter()
+            .collect()
         );
+        assert!(batch_edge_pairs(&payload, "already_wired").is_empty());
 
         let repeat = axum::http::Request::builder()
             .method("POST")
@@ -11406,19 +11405,34 @@ mod tests {
             .to_bytes();
         let repeat_payload: serde_json::Value = serde_json::from_slice(&repeat_body).unwrap();
         assert_eq!(repeat_payload["requested"], 3);
-        assert!(
-            repeat_payload["wired"]
-                .as_array()
-                .expect("wired array")
-                .is_empty()
-        );
         assert_eq!(
-            repeat_payload["already_wired"]
-                .as_array()
-                .expect("already_wired array")
-                .len(),
-            2
+            batch_edge_pairs(&repeat_payload, "already_wired"),
+            [
+                ("w-1".to_string(), "w-2".to_string()),
+                ("w-1".to_string(), "w-3".to_string())
+            ]
+            .into_iter()
+            .collect()
         );
+        assert!(batch_edge_pairs(&repeat_payload, "wired").is_empty());
+    }
+
+    #[cfg(feature = "mob")]
+    fn batch_edge_pairs(
+        payload: &serde_json::Value,
+        key: &str,
+    ) -> std::collections::BTreeSet<(String, String)> {
+        payload[key]
+            .as_array()
+            .expect("edge array")
+            .iter()
+            .map(|edge| {
+                (
+                    edge["a"].as_str().expect("edge a").to_string(),
+                    edge["b"].as_str().expect("edge b").to_string(),
+                )
+            })
+            .collect()
     }
 
     #[cfg(feature = "mob")]

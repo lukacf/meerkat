@@ -245,9 +245,9 @@ agent-internal `mob_*` tool dispatcher:
 
 | Surface | Contract |
 |---------|----------|
-| JSON-RPC / SDKs | `mob/create`, `mob/list`, `mob/status`, `mob/lifecycle`, `mob/spawn`, `mob/spawn_many`, `mob/ensure_member`, `mob/reconcile`, `mob/list_members_matching`, `mob/members`, `mob/retire`, `mob/respawn`, `mob/wire`, `mob/unwire`, `mob/member_send`, `mob/turn_start`, `mob/ingress_interaction`, `mob/append_system_context`, `mob/events`, flow methods, helper methods, work-lane methods, `mob/wait_kickoff`, `mob/wait_ready`, `mob/snapshot`, `mob/destroy`, supervisor methods, profile methods, and stream open/close |
-| MCP | `meerkat_mob_*` tools from `meerkat-mob-mcp::public_tools_list()`, including lifecycle, membership, wiring, member interaction, events, flows, `meerkat_mob_wait_kickoff`, `meerkat_mob_wait_ready`, and profile CRUD (`meerkat_mob_profile_create|get|list|update|delete`) |
-| REST | Helper and observation endpoints (`/mob/{id}/events`, helper spawn/fork, member status/cancel/respawn, wait kickoff); full typed lifecycle remains RPC/SDK |
+| JSON-RPC / SDKs | `mob/create`, `mob/list`, `mob/status`, `mob/lifecycle`, `mob/spawn`, `mob/spawn_many`, `mob/ensure_member`, `mob/reconcile`, `mob/list_members_matching`, `mob/members`, `mob/retire`, `mob/respawn`, `mob/wire`, `mob/wire_members_batch`, `mob/unwire`, `mob/member_send`, `mob/turn_start`, `mob/ingress_interaction`, `mob/append_system_context`, `mob/events`, flow methods, helper methods, work-lane methods, `mob/wait_kickoff`, `mob/wait_ready`, `mob/snapshot`, `mob/destroy`, supervisor methods, profile methods, and stream open/close |
+| MCP | `meerkat_mob_*` tools from `meerkat-mob-mcp::public_tools_list()`, including lifecycle, membership, wiring, batch wiring, member interaction, events, flows, `meerkat_mob_wait_kickoff`, `meerkat_mob_wait_ready`, and profile CRUD (`meerkat_mob_profile_create|get|list|update|delete`) |
+| REST | Helper and observation endpoints (`/mob/{id}/events`, `/mob/{id}/wire-members-batch`, helper spawn/fork, member status/cancel/respawn, wait kickoff); full typed lifecycle remains RPC/SDK |
 
 For cross-surface behavior and examples (CLI/RPC/REST/MCP/Python/TypeScript), see [Mobs](/guides/mobs).
 

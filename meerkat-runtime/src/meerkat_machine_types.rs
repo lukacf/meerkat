@@ -642,6 +642,8 @@ meerkat_machine_runtime_internal_inputs!(
         ConsumeOnAccept,
         MarkApplied,
         MarkAppliedPendingConsumption,
+        DeferInputBehindBacklog,
+        PrioritizeInput,
         QueueAccepted,
         RecoverAdmittedInput,
         RecoverInputLifecycle,

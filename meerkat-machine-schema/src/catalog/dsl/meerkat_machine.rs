@@ -1329,6 +1329,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_run_associations: Map<String, String>,
             input_boundary_sequences: Map<String, u64>,
             next_admission_seq: u64,
+            next_priority_admission_seq: u64,
             input_admission_seq: Map<String, u64>,
             // Unified work-lane membership for admitted inputs. Mutual
             // exclusion between Queue and Steer is structural: an input
@@ -1585,7 +1586,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_attempt_counts = EmptyMap,
             input_run_associations = EmptyMap,
             input_boundary_sequences = EmptyMap,
-            next_admission_seq = 0,
+            next_admission_seq = 1000000000000,
+            next_priority_admission_seq = 999999999999,
             input_admission_seq = EmptyMap,
             input_lane = EmptyMap,
             recovered_admitted_inputs = EmptySet,
@@ -1837,6 +1839,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             QueueAccepted { input_id: String },
             SteerAccepted { input_id: String },
             ChangeLane { input_id: String, new_lane: Enum<InputLane> },
+            PrioritizeInput { input_id: String },
+            DeferInputBehindBacklog { input_id: String },
             StageForRun { input_id: String, run_id: String },
             IncrementAttemptCount { input_id: String },
             RollbackStaged { input_id: String, lane: Enum<InputLane> },
@@ -7268,6 +7272,36 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
                 self.input_lane.insert(input_id, new_lane);
+            }
+            to Idle
+        }
+
+        // PrioritizeInput: assign a machine-owned front-of-backlog order token.
+        // The shell may only observe the generated order when rebuilding its
+        // queue projection.
+        transition PrioritizeInput {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PrioritizeInput { input_id }
+            guard "input_queued" { self.input_lane.contains_key(input_id) }
+            guard "priority_sequence_available" { self.next_priority_admission_seq > 0 }
+            update {
+                self.input_admission_seq.insert(input_id, self.next_priority_admission_seq);
+                self.next_priority_admission_seq -= 1;
+            }
+            to Idle
+        }
+
+        // DeferInputBehindBacklog: reassign a queued input to the back of the
+        // current admission order using the machine's monotonic admission
+        // sequence. Used after an apply failure so other queued work can run
+        // before retrying the failed batch.
+        transition DeferInputBehindBacklog {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input DeferInputBehindBacklog { input_id }
+            guard "input_queued" { self.input_lane.contains_key(input_id) }
+            update {
+                self.input_admission_seq.insert(input_id, self.next_admission_seq);
+                self.next_admission_seq += 1;
             }
             to Idle
         }

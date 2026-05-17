@@ -194,6 +194,8 @@ impl DslAuthority {
 pub(crate) fn new_ingress_dsl_authority() -> SharedIngressDslAuthority {
     let state = mm_dsl::MeerkatMachineState {
         lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
+        next_admission_seq: 1000000000000,
+        next_priority_admission_seq: 999999999999,
         ..mm_dsl::MeerkatMachineState::default()
     };
     Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
@@ -381,14 +383,6 @@ impl EphemeralRuntimeDriver {
     fn with_dsl_state<R>(&self, body: impl FnOnce(&mm_dsl::MeerkatMachineState) -> R) -> R {
         let authority = self.dsl.lock();
         body(&authority.state)
-    }
-
-    fn with_dsl_state_mut<R>(
-        &mut self,
-        body: impl FnOnce(&mut mm_dsl::MeerkatMachineState) -> R,
-    ) -> R {
-        let mut authority = self.dsl.lock();
-        body(&mut authority.state)
     }
 
     /// Read the current queue lane (FIFO) in admission order, as tracked by
@@ -1032,19 +1026,12 @@ impl EphemeralRuntimeDriver {
                     }
                 }
                 let key = Self::dsl_key(input_id);
-                // Priority routing: reassign the admission sequence so this
-                // input sorts ahead of existing entries in the lane.
-                self.with_dsl_state_mut(|state| {
-                    let min_seq = state
-                        .input_admission_seq
-                        .values()
-                        .min()
-                        .copied()
-                        .unwrap_or(0);
-                    state
-                        .input_admission_seq
-                        .insert(key.clone(), min_seq.saturating_sub(1));
-                });
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::PrioritizeInput {
+                        input_id: key.clone(),
+                    },
+                    "PrioritizeInput",
+                )?;
                 let target_lane = mm_dsl::InputLane::from(target);
                 if target_lane != admission_lane {
                     self.dsl_apply(
@@ -1341,26 +1328,21 @@ impl EphemeralRuntimeDriver {
         })
     }
 
-    pub(crate) fn defer_queued_inputs_behind_backlog(&mut self, input_ids: &[InputId]) {
-        let keys: Vec<String> = input_ids.iter().map(Self::dsl_key).collect();
-        self.with_dsl_state_mut(|state| {
-            let mut next_seq = state
-                .input_admission_seq
-                .values()
-                .max()
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(1);
-            for key in &keys {
-                if state.input_lane.contains_key(key) {
-                    state.input_admission_seq.insert(key.clone(), next_seq);
-                    next_seq = next_seq.saturating_add(1);
-                }
-            }
-            state.next_admission_seq = state.next_admission_seq.max(next_seq);
-        });
+    pub(crate) fn defer_queued_inputs_behind_backlog(
+        &mut self,
+        input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        for input_id in input_ids {
+            self.dsl_apply(
+                mm_dsl::MeerkatMachineInput::DeferInputBehindBacklog {
+                    input_id: Self::dsl_key(input_id),
+                },
+                "DeferInputBehindBacklog",
+            )?;
+        }
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
+        Ok(())
     }
 
     fn existing_superseded_input(
@@ -2305,10 +2287,10 @@ mod tests {
     use crate::identifiers::LogicalRuntimeId;
     use crate::input::{
         Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention,
-        PeerInput,
+        PeerInput, PromptInput,
     };
     use crate::traits::RuntimeDriver;
-    use crate::{RuntimeState, WakeMode};
+    use crate::{QueueMode, RuntimeState, WakeMode};
     use chrono::Utc;
     use meerkat_core::lifecycle::{InputId, RunId};
 
@@ -2334,6 +2316,25 @@ mod tests {
             blocks: None,
             handling_mode: None,
         })
+    }
+
+    fn prompt_input(text: &str) -> Input {
+        Input::Prompt(PromptInput::new(text, None))
+    }
+
+    fn resolved_with_queue_mode(
+        driver: &EphemeralRuntimeDriver,
+        input: &Input,
+        queue_mode: QueueMode,
+    ) -> crate::accept::ResolvedAdmission {
+        let mut resolved = driver.resolve_admission(input);
+        resolved.policy.queue_mode = queue_mode;
+        resolved.admission_plan = crate::accept::admission_plan_from_policy(
+            &resolved.policy,
+            resolved.handling_mode,
+            None,
+        );
+        resolved
     }
 
     fn force_control_shadow(
@@ -2386,6 +2387,78 @@ mod tests {
         assert!(
             outcome.is_accepted(),
             "direct RuntimeDriver admission should follow DSL phase, not a stale control shadow",
+        );
+    }
+
+    #[tokio::test]
+    async fn priority_enqueue_order_is_assigned_by_machine() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("priority-order"));
+
+        let normal_a = prompt_input("normal-a");
+        let normal_a_id = normal_a.id().clone();
+        driver.accept_input(normal_a).await.unwrap();
+
+        let normal_b = prompt_input("normal-b");
+        let normal_b_id = normal_b.id().clone();
+        driver.accept_input(normal_b).await.unwrap();
+
+        let priority = prompt_input("priority");
+        let priority_id = priority.id().clone();
+        let resolved = resolved_with_queue_mode(&driver, &priority, QueueMode::Priority);
+        driver
+            .accept_resolved_input(priority, resolved)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            driver.dsl_queue_lane(),
+            vec![
+                priority_id.clone(),
+                normal_a_id.clone(),
+                normal_b_id.clone()
+            ]
+        );
+        let (priority_seq, normal_a_seq) = driver.with_dsl_state(|state| {
+            (
+                state.input_admission_seq[&priority_id.to_string()],
+                state.input_admission_seq[&normal_a_id.to_string()],
+            )
+        });
+        assert!(
+            priority_seq < normal_a_seq,
+            "priority order must be represented by generated admission sequence"
+        );
+    }
+
+    #[tokio::test]
+    async fn backlog_deferral_order_is_assigned_by_machine() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("backlog-deferral"));
+
+        let first = prompt_input("first");
+        let first_id = first.id().clone();
+        driver.accept_input(first).await.unwrap();
+
+        let second = prompt_input("second");
+        let second_id = second.id().clone();
+        driver.accept_input(second).await.unwrap();
+
+        driver
+            .defer_queued_inputs_behind_backlog(std::slice::from_ref(&first_id))
+            .unwrap();
+
+        assert_eq!(
+            driver.dsl_queue_lane(),
+            vec![second_id.clone(), first_id.clone()]
+        );
+        let (first_seq, second_seq) = driver.with_dsl_state(|state| {
+            (
+                state.input_admission_seq[&first_id.to_string()],
+                state.input_admission_seq[&second_id.to_string()],
+            )
+        });
+        assert!(
+            first_seq > second_seq,
+            "deferred order must be represented by generated admission sequence"
         );
     }
 

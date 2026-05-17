@@ -84,6 +84,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `input_run_associations`: `Map<String, String>`
 - `input_boundary_sequences`: `Map<String, u64>`
 - `next_admission_seq`: `u64`
+- `next_priority_admission_seq`: `u64`
 - `input_admission_seq`: `Map<String, u64>`
 - `input_lane`: `Map<String, InputLane>`
 - `recovered_admitted_inputs`: `Set<String>`
@@ -230,6 +231,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `QueueAccepted`(input_id: String)
 - `SteerAccepted`(input_id: String)
 - `ChangeLane`(input_id: String, new_lane: InputLane)
+- `PrioritizeInput`(input_id: String)
+- `DeferInputBehindBacklog`(input_id: String)
 - `StageForRun`(input_id: String, run_id: String)
 - `IncrementAttemptCount`(input_id: String)
 - `RollbackStaged`(input_id: String, lane: InputLane)
@@ -3255,6 +3258,81 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ChangeLane`(input_id, new_lane)
 - Guards:
   - `input_tracked`
+- To: `Stopped`
+
+### `PrioritizeInputIdle`
+- From: `Idle`
+- On: `PrioritizeInput`(input_id)
+- Guards:
+  - `input_queued`
+  - `priority_sequence_available`
+- To: `Idle`
+
+### `PrioritizeInputAttached`
+- From: `Attached`
+- On: `PrioritizeInput`(input_id)
+- Guards:
+  - `input_queued`
+  - `priority_sequence_available`
+- To: `Attached`
+
+### `PrioritizeInputRunning`
+- From: `Running`
+- On: `PrioritizeInput`(input_id)
+- Guards:
+  - `input_queued`
+  - `priority_sequence_available`
+- To: `Running`
+
+### `PrioritizeInputRetired`
+- From: `Retired`
+- On: `PrioritizeInput`(input_id)
+- Guards:
+  - `input_queued`
+  - `priority_sequence_available`
+- To: `Retired`
+
+### `PrioritizeInputStopped`
+- From: `Stopped`
+- On: `PrioritizeInput`(input_id)
+- Guards:
+  - `input_queued`
+  - `priority_sequence_available`
+- To: `Stopped`
+
+### `DeferInputBehindBacklogIdle`
+- From: `Idle`
+- On: `DeferInputBehindBacklog`(input_id)
+- Guards:
+  - `input_queued`
+- To: `Idle`
+
+### `DeferInputBehindBacklogAttached`
+- From: `Attached`
+- On: `DeferInputBehindBacklog`(input_id)
+- Guards:
+  - `input_queued`
+- To: `Attached`
+
+### `DeferInputBehindBacklogRunning`
+- From: `Running`
+- On: `DeferInputBehindBacklog`(input_id)
+- Guards:
+  - `input_queued`
+- To: `Running`
+
+### `DeferInputBehindBacklogRetired`
+- From: `Retired`
+- On: `DeferInputBehindBacklog`(input_id)
+- Guards:
+  - `input_queued`
+- To: `Retired`
+
+### `DeferInputBehindBacklogStopped`
+- From: `Stopped`
+- On: `DeferInputBehindBacklog`(input_id)
+- Guards:
+  - `input_queued`
 - To: `Stopped`
 
 ### `StageForRunIdle`

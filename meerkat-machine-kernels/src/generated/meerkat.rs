@@ -4146,6 +4146,7 @@ pub struct State {
     pub input_run_associations: std::collections::BTreeMap<String, String>,
     pub input_boundary_sequences: std::collections::BTreeMap<String, u64>,
     pub next_admission_seq: u64,
+    pub next_priority_admission_seq: u64,
     pub input_admission_seq: std::collections::BTreeMap<String, u64>,
     pub input_lane: std::collections::BTreeMap<String, InputLane>,
     pub recovered_admitted_inputs: std::collections::BTreeSet<String>,
@@ -4610,6 +4611,14 @@ pub mod inputs {
         pub new_lane: InputLane,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PrioritizeInput {
+        pub input_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeferInputBehindBacklog {
+        pub input_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StageForRun {
         pub input_id: String,
         pub run_id: String,
@@ -5059,6 +5068,8 @@ pub enum Input {
     QueueAccepted(inputs::QueueAccepted),
     SteerAccepted(inputs::SteerAccepted),
     ChangeLane(inputs::ChangeLane),
+    PrioritizeInput(inputs::PrioritizeInput),
+    DeferInputBehindBacklog(inputs::DeferInputBehindBacklog),
     StageForRun(inputs::StageForRun),
     IncrementAttemptCount(inputs::IncrementAttemptCount),
     RollbackStaged(inputs::RollbackStaged),
@@ -5230,6 +5241,8 @@ impl Input {
             Self::QueueAccepted(_) => InputKind::QueueAccepted,
             Self::SteerAccepted(_) => InputKind::SteerAccepted,
             Self::ChangeLane(_) => InputKind::ChangeLane,
+            Self::PrioritizeInput(_) => InputKind::PrioritizeInput,
+            Self::DeferInputBehindBacklog(_) => InputKind::DeferInputBehindBacklog,
             Self::StageForRun(_) => InputKind::StageForRun,
             Self::IncrementAttemptCount(_) => InputKind::IncrementAttemptCount,
             Self::RollbackStaged(_) => InputKind::RollbackStaged,
@@ -5402,6 +5415,8 @@ pub enum InputKind {
     QueueAccepted,
     SteerAccepted,
     ChangeLane,
+    PrioritizeInput,
+    DeferInputBehindBacklog,
     StageForRun,
     IncrementAttemptCount,
     RollbackStaged,
@@ -6317,6 +6332,16 @@ pub enum TransitionId {
     ChangeLaneRunning,
     ChangeLaneRetired,
     ChangeLaneStopped,
+    PrioritizeInputIdle,
+    PrioritizeInputAttached,
+    PrioritizeInputRunning,
+    PrioritizeInputRetired,
+    PrioritizeInputStopped,
+    DeferInputBehindBacklogIdle,
+    DeferInputBehindBacklogAttached,
+    DeferInputBehindBacklogRunning,
+    DeferInputBehindBacklogRetired,
+    DeferInputBehindBacklogStopped,
     StageForRunIdle,
     StageForRunAttached,
     StageForRunRunning,
@@ -6792,6 +6817,7 @@ pub fn initial_state() -> State {
         input_run_associations: Default::default(),
         input_boundary_sequences: Default::default(),
         next_admission_seq: 0,
+        next_priority_admission_seq: 0,
         input_admission_seq: Default::default(),
         input_lane: Default::default(),
         recovered_admitted_inputs: Default::default(),

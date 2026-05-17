@@ -1075,6 +1075,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ChangeLaneStopped`
   - anchors: `meerkat_machine`
   - scenarios: `model_routing_and_image_operation`
+- `PrioritizeInputIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+- `PrioritizeInputAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+- `PrioritizeInputRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `product_turn_streaming`
+- `PrioritizeInputRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+- `PrioritizeInputStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+- `DeferInputBehindBacklogIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+- `DeferInputBehindBacklogAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+- `DeferInputBehindBacklogRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `product_turn_streaming`
+- `DeferInputBehindBacklogRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+- `DeferInputBehindBacklogStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
 - `StageForRunIdle`
   - anchors: `meerkat_machine`
   - scenarios: `recycle_and_compaction`

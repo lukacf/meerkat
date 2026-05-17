@@ -730,6 +730,8 @@ runtime_internal_inputs!(
         QueueAccepted,
         RecordBoundarySeq,
         RecoverAdmittedInput,
+        PrioritizeInput,
+        DeferInputBehindBacklog,
         PublishLocalEndpoint,
         RecoverableFailure,
         RecoverInputLifecycle,

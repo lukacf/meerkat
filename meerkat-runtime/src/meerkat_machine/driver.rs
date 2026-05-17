@@ -378,7 +378,10 @@ impl DriverEntry {
         }
     }
 
-    pub(crate) fn defer_queued_inputs_behind_backlog(&mut self, input_ids: &[InputId]) {
+    pub(crate) fn defer_queued_inputs_behind_backlog(
+        &mut self,
+        input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(d) => d.defer_queued_inputs_behind_backlog(input_ids),
             DriverEntry::Persistent(d) => d.defer_queued_inputs_behind_backlog(input_ids),

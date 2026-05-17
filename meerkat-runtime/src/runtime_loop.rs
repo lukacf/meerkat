@@ -1061,7 +1061,13 @@ async fn process_queue(
                         let mut d = driver.lock().await;
                         let should_continue = d.has_queued_input_outside(&input_ids);
                         if should_continue {
-                            d.defer_queued_inputs_behind_backlog(&input_ids);
+                            if let Err(err) = d.defer_queued_inputs_behind_backlog(&input_ids) {
+                                tracing::error!(
+                                    error = %err,
+                                    "failed to defer failed input batch behind backlog"
+                                );
+                                return false;
+                            }
                             d.take_wake_requested();
                         }
                         drop(d);

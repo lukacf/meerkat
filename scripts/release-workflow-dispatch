@@ -8,10 +8,12 @@ usage: release-workflow-dispatch [--mode full|assets|packages|web-sdk|web-sdk-pu
 Dispatches the release workflow through the same public/default vs owner-only
 BuildBuddy backend split used by CI.
 
-Backend note: release_backend=buildbuddy covers release validation and binary
-asset builds. @rkat/web is built once as a release artifact before npm
-publishing. Credentialed registry publish jobs still run on GitHub-hosted
-runners; use the narrow recovery modes for retries.
+Backend note: release_backend=buildbuddy covers release validation and the
+Linux/macOS binary assets. Windows release binaries use the GitHub-hosted
+fallback because Windows is not currently a reliable BuildBuddy target. @rkat/web
+is built once as a release artifact before npm publishing. Credentialed registry
+publish jobs still run on GitHub-hosted runners; use the narrow recovery modes
+for retries.
 
 Environment equivalents:
   VERSION or RELEASE_TAG     Release tag, for example v0.6.1.
@@ -205,7 +207,7 @@ printf 'release workflow mode: %s\n' "${mode}"
 printf 'release workflow ref: %s\n' "${workflow_ref}"
 printf 'release workflow tag: %s\n' "${version}"
 if [[ "${backend}" == "buildbuddy" ]]; then
-  printf 'release workflow acceleration: BuildBuddy validation + binary asset builds\n'
+  printf 'release workflow acceleration: BuildBuddy validation + Linux/macOS binary builds; GitHub-hosted Windows fallback\n'
 else
   printf 'release workflow acceleration: GitHub-hosted validation + binary asset builds\n'
 fi

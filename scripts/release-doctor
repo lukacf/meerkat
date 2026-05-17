@@ -118,6 +118,19 @@ else
   bad "Release workflow does not publish @rkat/web from a prebuilt package artifact"
 fi
 
+if ! grep -Fq 'BUILDBUDDY_ENDPOINT' .github/workflows/release.yml &&
+  ! awk '
+    /^  build_binaries_buildbuddy:/ { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:/ { in_job = 0 }
+    in_job && /release-build-windows-x86/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' .github/workflows/release.yml &&
+  grep -Fq 'GitHub-hosted Windows release binary fallback' .github/workflows/release.yml; then
+  pass "Release workflow keeps Windows off BuildBuddy and uses the GitHub-hosted fallback"
+else
+  bad "Release workflow should build Linux/macOS on BuildBuddy and Windows via GitHub-hosted fallback"
+fi
+
 web_build_timeout="$(
   awk '
     /^  build_web_sdk_package:/ { in_job = 1; next }

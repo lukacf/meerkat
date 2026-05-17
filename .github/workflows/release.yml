@@ -61,7 +61,6 @@ env:
 #   PYPI_API_TOKEN        - PyPI API token (scoped to meerkat-sdk package)
 #   NPM_TOKEN             - npm access token (scoped to @meerkat org or publish)
 #   BUILDBUDDY_API_KEY    - optional owner-only BuildBuddy binary recovery path
-#   BUILDBUDDY_ENDPOINT   - optional owner-only Windows BB endpoint override
 
 jobs:
   require_ci_green:
@@ -332,33 +331,11 @@ jobs:
         needs.release_validate_gate.result == 'skipped')) &&
       (startsWith(github.ref, 'refs/tags/v') ||
        (github.event_name == 'workflow_dispatch' &&
-        github.event.inputs.publish_release_assets_only == 'true')) &&
-      !(github.actor == 'lukacf' &&
-        ((github.event_name == 'workflow_dispatch' &&
-          github.event.inputs.release_backend == 'buildbuddy') ||
-         (github.event_name != 'workflow_dispatch' &&
-          (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
-           vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))))
+        github.event.inputs.publish_release_assets_only == 'true'))
     runs-on: ${{ matrix.runs-on }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runs-on: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive_ext: tar.gz
-          - runs-on: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            archive_ext: tar.gz
-          - runs-on: macos-15
-            target: aarch64-apple-darwin
-            archive_ext: tar.gz
-          - runs-on: macos-15-large
-            target: x86_64-apple-darwin
-            archive_ext: tar.gz
-          - runs-on: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive_ext: zip
+      matrix: ${{ fromJSON((github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))) && '{"include":[{"runs-on":"windows-latest","target":"x86_64-pc-windows-msvc","archive_ext":"zip"}]}' || '{"include":[{"runs-on":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","archive_ext":"tar.gz"},{"runs-on":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","archive_ext":"tar.gz"},{"runs-on":"macos-15","target":"aarch64-apple-darwin","archive_ext":"tar.gz"},{"runs-on":"macos-15-large","target":"x86_64-apple-darwin","archive_ext":"tar.gz"},{"runs-on":"windows-latest","target":"x86_64-pc-windows-msvc","archive_ext":"zip"}]}') }}
 
     steps:
       - name: Checkout
@@ -487,9 +464,6 @@ jobs:
           - bb_command: release-build-macos-x86
             target: x86_64-apple-darwin
             archive_ext: tar.gz
-          - bb_command: release-build-windows-x86
-            target: x86_64-pc-windows-msvc
-            archive_ext: zip
 
     steps:
       - name: Checkout
@@ -505,7 +479,6 @@ jobs:
         shell: bash
         env:
           BUILDBUDDY_BAZEL_COMMAND: ${{ matrix.bb_command }}
-          BUILDBUDDY_ENDPOINT: ${{ matrix.bb_command == 'release-build-windows-x86' && secrets.BUILDBUDDY_ENDPOINT || '' }}
           BUILDBUDDY_OUTPUT_LANE: release-build-${{ matrix.target }}
           BUILDBUDDY_OUTPUT_BASE: ${{ runner.temp }}/bb-release-${{ matrix.target }}
           MEERKAT_BUILDBUDDY_OUTPUT_ROOT: ${{ runner.temp }}/bb-release
@@ -722,8 +695,8 @@ jobs:
 
           if [[ "${bb_selected}" == "true" ]]; then
             echo "BuildBuddy release binary build selected: ${buildbuddy_result}"
-            echo "GitHub-hosted release binary build skipped: ${github_result}"
-            [[ "${buildbuddy_result}" == "success" && "${github_result}" == "skipped" ]]
+            echo "GitHub-hosted Windows release binary fallback: ${github_result}"
+            [[ "${buildbuddy_result}" == "success" && "${github_result}" == "success" ]]
             exit $?
           fi
 

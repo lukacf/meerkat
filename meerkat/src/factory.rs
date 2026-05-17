@@ -76,7 +76,9 @@ use meerkat_tools::builtin::SqliteTaskStore;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::builtin::shell::ShellConfig;
 #[cfg(not(target_arch = "wasm32"))]
-use meerkat_tools::builtin::{BuiltinToolConfig, CompositeDispatcher, TaskStore, ToolPolicyLayer};
+use meerkat_tools::builtin::{
+    BuiltinToolConfig, CompositeDispatcher, TaskStore, ToolMode, ToolPolicyLayer,
+};
 use meerkat_tools::{CatalogControlDispatcher, CatalogControlVisibilityProvider};
 #[cfg(all(not(feature = "memory-store"), not(target_arch = "wasm32")))]
 use tokio::sync::RwLock;
@@ -7589,6 +7591,47 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
+    async fn image_generation_visibility_does_not_enable_general_builtins() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+        let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::default());
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .with_image_generation_machine(runtime);
+
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.override_builtins = ToolCategoryOverride::Disable;
+        build.override_image_generation = ToolCategoryOverride::Enable;
+        build.blob_store_override = Some(blob_store);
+
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .unwrap();
+        let visible_names = agent.tool_scope().visible_tool_names().unwrap();
+
+        assert!(
+            visible_names.contains("generate_image"),
+            "image_generation must own generate_image visibility independently of builtins"
+        );
+        assert!(
+            !visible_names.contains("task_list"),
+            "enabling image_generation must not expose general task builtins"
+        );
+        assert!(
+            !visible_names.contains("apply_patch"),
+            "enabling image_generation must not expose project mutation builtins"
+        );
+        assert!(
+            !visible_names.contains("browse_skills"),
+            "enabling image_generation must not expose skill browsing tools"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
     async fn session_owned_image_executor_resolution_publishes_auth_lease_visibility() {
         use meerkat_llm_core::provider_runtime::{
             ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
@@ -8494,7 +8537,9 @@ impl AgentFactory {
         web_search_executor: Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>>,
         web_search_visibility: ToolCategoryOverride,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
-        if !effective_builtins {
+        let compose_image_generation =
+            image_generation_visibility.resolve(false) && image_generation_machine.is_some();
+        if !effective_builtins && !compose_image_generation {
             // No builtins — return the external tools if provided, otherwise empty.
             return match external {
                 Some(ext) => {
@@ -8532,19 +8577,31 @@ impl AgentFactory {
             None
         };
 
-        // Create builtin tool config - enable shell tools in policy if shell is enabled
-        let builtin_config = if effective_shell {
-            BuiltinToolConfig {
-                policy: ToolPolicyLayer::new()
-                    .enable_tool("shell")
-                    .enable_tool("shell_job_status")
-                    .enable_tool("shell_jobs")
-                    .enable_tool("shell_job_cancel"),
-                ..Default::default()
+        // Create builtin tool config. When a non-builtin capability such as
+        // image generation needs the composite dispatcher, keep the general
+        // builtin namespace closed and let the capability registration add its
+        // own tool(s). This keeps profile category intent one-owner: enabling
+        // `image_generation` must not also expose task/patch/skill utilities.
+        let builtin_config = if effective_builtins {
+            if effective_shell {
+                BuiltinToolConfig {
+                    policy: ToolPolicyLayer::new()
+                        .enable_tool("shell")
+                        .enable_tool("shell_job_status")
+                        .enable_tool("shell_jobs")
+                        .enable_tool("shell_job_cancel"),
+                    ..Default::default()
+                }
+            } else {
+                BuiltinToolConfig::default()
             }
         } else {
-            BuiltinToolConfig::default()
+            BuiltinToolConfig {
+                policy: ToolPolicyLayer::new().with_mode(ToolMode::AllowList),
+                ..Default::default()
+            }
         };
+        let skill_engine = effective_builtins.then_some(skill_engine).flatten();
 
         let dispatcher = self
             .build_builtin_dispatcher_with_skills_internal(

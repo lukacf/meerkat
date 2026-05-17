@@ -405,7 +405,7 @@ impl AgentError {
     pub fn llm_empty_response(provider: &'static str) -> Self {
         Self::llm(
             provider,
-            LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+            LlmFailureReason::ProviderError(LlmProviderError::retryable(
                 LlmProviderErrorKind::IncompleteResponse,
                 serde_json::json!({
                     "reason": "provider completed without user-visible text, images, or tool calls"

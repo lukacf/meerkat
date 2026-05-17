@@ -57,6 +57,7 @@ struct LlmRetryRequest<'a> {
     max_tokens: u32,
     temperature: Option<f32>,
     provider_params: Option<&'a ProviderParamsOverride>,
+    allow_empty_success: bool,
 }
 
 fn turn_input_run_id(input: &TurnExecutionInput) -> Option<RunId> {
@@ -147,6 +148,17 @@ fn assistant_image_events_from_effects(
         }
     }
     images
+}
+
+fn assistant_blocks_have_user_visible_output(blocks: &[crate::types::AssistantBlock]) -> bool {
+    blocks.iter().any(|block| match block {
+        crate::types::AssistantBlock::Text { text, .. }
+        | crate::types::AssistantBlock::Transcript { text, .. }
+        | crate::types::AssistantBlock::Reasoning { text, .. } => !text.trim().is_empty(),
+        crate::types::AssistantBlock::Image { .. } => true,
+        crate::types::AssistantBlock::ToolUse { .. }
+        | crate::types::AssistantBlock::ServerToolContent { .. } => false,
+    })
 }
 
 fn validate_turn_input_failure_reason(input: &TurnExecutionInput) -> Result<(), AgentError> {
@@ -425,6 +437,7 @@ where
             max_tokens,
             temperature,
             provider_params,
+            allow_empty_success,
         } = request;
 
         let hydrated_messages = if let Some(blob_store) = self.blob_store.as_ref() {
@@ -539,7 +552,61 @@ where
 
             // 5. Handle call result
             match call_result {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    if !crate::types::assistant_blocks_have_visible_or_actionable_output(
+                        result.blocks(),
+                    ) {
+                        if allow_empty_success {
+                            return Ok(result);
+                        }
+                        let error = AgentError::llm_empty_response(self.client.provider());
+                        if let Some(retry_schedule) = self.retry_policy.schedule_retry(
+                            &error,
+                            attempt,
+                            self.budget.remaining_duration(),
+                        ) {
+                            tracing::warn!(
+                                "LLM completed without visible/actionable output (attempt {}), retrying in {}ms",
+                                retry_schedule.plan.attempt,
+                                retry_schedule.plan.selected_delay_ms,
+                            );
+                            let recover =
+                                self.apply_turn_input(TurnExecutionInput::RecoverableFailure {
+                                    run_id: run_id.clone(),
+                                    retry: retry_schedule.clone(),
+                                })?;
+                            self.execute_turn_effects(&recover, turn_count, event_tx)
+                                .await;
+                            let _ = crate::event_tap::tap_emit(
+                                &self.event_tap,
+                                event_tx.as_ref(),
+                                AgentEvent::Retrying {
+                                    attempt: retry_schedule.plan.attempt,
+                                    max_attempts: retry_schedule.plan.max_retries,
+                                    error: error.to_string(),
+                                    delay_ms: retry_schedule.plan.selected_delay_ms,
+                                    retry: Some(retry_schedule.clone()),
+                                },
+                            )
+                            .await;
+                            attempt += 1;
+                            tokio::time::sleep(retry_schedule.plan.selected_delay()).await;
+                            if let Some(exceeded) = self.budget.observe().exceeded() {
+                                return Err(exceeded.to_agent_error());
+                            }
+                            let retry =
+                                self.apply_turn_input(TurnExecutionInput::RetryRequested {
+                                    run_id: run_id.clone(),
+                                    retry_attempt: retry_schedule.plan.attempt,
+                                })?;
+                            self.execute_turn_effects(&retry, turn_count, event_tx)
+                                .await;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                    return Ok(result);
+                }
                 Err(e) => {
                     if let Some(retry_schedule) = self.retry_policy.schedule_retry(
                         &e,
@@ -1163,6 +1230,7 @@ where
         let max_turns = self.config.max_turns.unwrap_or(100);
         let mut tool_call_count = 0u32;
         let mut event_stream_open = true;
+        let mut run_has_visible_or_actionable_output = false;
         self.extraction_state.reset();
 
         // --- Authority lifecycle: start a conversation run ---
@@ -1781,6 +1849,7 @@ where
                             max_tokens: effective_max_tokens,
                             temperature: effective_temperature,
                             provider_params: typed_provider_params.as_ref(),
+                            allow_empty_success: run_has_visible_or_actionable_output,
                         })
                         .await
                     {
@@ -1855,21 +1924,25 @@ where
                     let assistant_text = assistant_msg.to_string();
 
                     if !assistant_msg.has_visible_or_actionable_output() {
-                        let error = AgentError::llm_empty_response(self.client.provider());
-                        if in_extraction {
-                            return self
-                                .complete_extraction_failed(
-                                    &run_id,
-                                    turn_count,
-                                    tool_call_count,
-                                    error.to_string(),
-                                    &event_tx,
-                                )
-                                .await;
+                        if !run_has_visible_or_actionable_output {
+                            let error = AgentError::llm_empty_response(self.client.provider());
+                            if in_extraction {
+                                return self
+                                    .complete_extraction_failed(
+                                        &run_id,
+                                        turn_count,
+                                        tool_call_count,
+                                        error.to_string(),
+                                        &event_tx,
+                                    )
+                                    .await;
+                            }
+                            self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
+                                .await?;
+                            return Err(error);
                         }
-                        self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
-                            .await?;
-                        return Err(error);
+                    } else if assistant_blocks_have_user_visible_output(&assistant_msg.blocks) {
+                        run_has_visible_or_actionable_output = true;
                     }
 
                     let post_llm_invocation = HookInvocation {
@@ -2249,6 +2322,15 @@ where
                         if !pre_tool_effects.is_empty() {
                             self.apply_session_effects(&pre_tool_effects)?;
                         }
+                        let tool_batch_produced_output =
+                            tool_results.iter().any(|result| !result.is_error)
+                                || post_tool_effects.iter().any(|effect| {
+                                    matches!(
+                                        effect,
+                                        crate::ops::SessionEffect::AppendAssistantBlocks { blocks }
+                                            if crate::types::assistant_blocks_have_visible_or_actionable_output(blocks)
+                                    )
+                                });
 
                         // Add tool results to session
                         self.session.push(Message::tool_results(tool_results));
@@ -2257,6 +2339,9 @@ where
                             assistant_image_events_from_effects(&post_tool_effects);
                         if !post_tool_effects.is_empty() {
                             self.apply_session_effects(&post_tool_effects)?;
+                        }
+                        if tool_batch_produced_output {
+                            run_has_visible_or_actionable_output = true;
                         }
                         for image in assistant_image_events {
                             emit_event!(AgentEvent::AssistantImageAppended { image });
@@ -5288,6 +5373,48 @@ mod tests {
         }
     }
 
+    struct EmptyAfterImageEffectClient {
+        call_count: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for EmptyAfterImageEffectClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let mut calls = self.call_count.lock().unwrap();
+            let response = if *calls == 0 {
+                super::LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "image-call".to_string(),
+                        name: "image_effect".into(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                    Usage::default(),
+                )
+            } else {
+                super::LlmStreamResult::new(Vec::new(), StopReason::EndTurn, Usage::default())
+            };
+            *calls += 1;
+            Ok(response)
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
     struct DirectImageClient;
 
     #[async_trait]
@@ -5655,6 +5782,50 @@ mod tests {
             image_event_index
         };
         assert!(image_event_index > 0);
+    }
+
+    #[tokio::test]
+    async fn empty_completion_after_successful_tool_effect_completes_turn() {
+        let client = Arc::new(EmptyAfterImageEffectClient {
+            call_count: Mutex::new(0),
+        });
+        let tools = Arc::new(ImageEffectDispatcher::new());
+        let turn_handle =
+            Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle.clone())
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(2);
+
+        let result = agent
+            .run("prompt".to_string().into())
+            .await
+            .expect("empty final completion after a successful effectful tool call should succeed");
+
+        assert_eq!(result.text, "");
+        assert_eq!(
+            *client.call_count.lock().unwrap(),
+            2,
+            "empty terminal follow-up should not be retried after successful tool output"
+        );
+        assert!(agent.session().messages().iter().any(|message| matches!(
+            message,
+            Message::BlockAssistant(blocks)
+                if blocks
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, AssistantBlock::Image { .. }))
+        )));
+        assert_eq!(
+            turn_handle.run_completed_effect_count(),
+            1,
+            "the canonical turn authority should complete, not fail"
+        );
+        assert_eq!(turn_handle.run_failed_effect_count(), 0);
     }
 
     #[tokio::test]
@@ -7055,6 +7226,89 @@ mod tests {
             "should not retry endlessly; got {} calls",
             times.len()
         );
+    }
+
+    struct EmptyThenSucceedClient {
+        calls: Mutex<u32>,
+    }
+
+    impl EmptyThenSucceedClient {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(0),
+            }
+        }
+
+        fn calls(&self) -> u32 {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for EmptyThenSucceedClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            let call = *calls;
+            drop(calls);
+
+            if call == 1 {
+                Ok(super::LlmStreamResult::new(
+                    Vec::new(),
+                    StopReason::EndTurn,
+                    Usage::default(),
+                ))
+            } else {
+                Ok(super::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "ok after empty retry".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                ))
+            }
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_llm_completion_retries_before_terminal_failure() {
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(EmptyThenSucceedClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .retry_policy(RetryPolicy {
+                max_retries: 1,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                multiplier: 1.0,
+                call_timeout: None,
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent
+            .run("test".to_string().into())
+            .await
+            .expect("empty completed LLM response should retry and recover");
+        assert_eq!(result.text, "ok after empty retry");
+        assert_eq!(client.calls(), 2);
     }
 
     // -----------------------------------------------------------------------

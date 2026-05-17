@@ -17,7 +17,7 @@ use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -715,14 +715,15 @@ impl AnthropicClient {
             let tools: Vec<Value> = request
                 .tools
                 .iter()
-                .map(|t| {
-                    serde_json::json!({
+                .map(|t| -> Result<Value, LlmError> {
+                    let input_schema = normalize_anthropic_tool_input_schema(&t.input_schema)?;
+                    Ok(serde_json::json!({
                         "name": t.name,
                         "description": t.description,
-                        "input_schema": t.input_schema
-                    })
+                        "input_schema": input_schema
+                    }))
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             body["tools"] = Value::Array(tools);
         }
 
@@ -1449,6 +1450,145 @@ impl LlmClient for AnthropicClient {
             schema,
             warnings: Vec::new(),
         })
+    }
+}
+
+fn normalize_anthropic_tool_input_schema(schema: &Value) -> Result<Value, LlmError> {
+    let mut unresolved_refs = Vec::new();
+    let mut normalized =
+        inline_local_schema_refs(schema, schema, &mut Vec::new(), 0, &mut unresolved_refs);
+    if !unresolved_refs.is_empty() {
+        unresolved_refs.sort();
+        unresolved_refs.dedup();
+        return Err(LlmError::InvalidRequest {
+            message: format!(
+                "Anthropic tool input schema contains unresolved $ref values: {}. \
+                 Only local refs (for example '#/$defs/...') are supported for inlining.",
+                unresolved_refs.join(", ")
+            ),
+        });
+    }
+    strip_anthropic_tool_schema_definition_keywords(&mut normalized);
+    Ok(normalized)
+}
+
+fn inline_local_schema_refs(
+    node: &Value,
+    root: &Value,
+    active_refs: &mut Vec<String>,
+    depth: usize,
+    unresolved_refs: &mut Vec<String>,
+) -> Value {
+    const MAX_REF_DEPTH: usize = 64;
+    if depth > MAX_REF_DEPTH {
+        return node.clone();
+    }
+
+    match node {
+        Value::Object(obj) => {
+            if let Some(reference) = obj.get("$ref").and_then(Value::as_str)
+                && let Some(resolved) = resolve_local_schema_ref(root, reference)
+                && !active_refs.iter().any(|r| r == reference)
+            {
+                active_refs.push(reference.to_string());
+                let mut inlined = inline_local_schema_refs(
+                    resolved,
+                    root,
+                    active_refs,
+                    depth + 1,
+                    unresolved_refs,
+                );
+                active_refs.pop();
+
+                if let Value::Object(ref mut inlined_obj) = inlined {
+                    for (key, value) in obj {
+                        if key == "$ref" {
+                            continue;
+                        }
+                        inlined_obj.insert(
+                            key.clone(),
+                            inline_local_schema_refs(
+                                value,
+                                root,
+                                active_refs,
+                                depth + 1,
+                                unresolved_refs,
+                            ),
+                        );
+                    }
+                    return inlined;
+                }
+
+                return inlined;
+            }
+            if let Some(reference) = obj.get("$ref").and_then(Value::as_str) {
+                unresolved_refs.push(reference.to_string());
+            }
+
+            let mut mapped = Map::new();
+            for (key, value) in obj {
+                mapped.insert(
+                    key.clone(),
+                    inline_local_schema_refs(value, root, active_refs, depth + 1, unresolved_refs),
+                );
+            }
+            Value::Object(mapped)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| {
+                    inline_local_schema_refs(item, root, active_refs, depth + 1, unresolved_refs)
+                })
+                .collect(),
+        ),
+        _ => node.clone(),
+    }
+}
+
+fn resolve_local_schema_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    if !reference.starts_with("#/") {
+        return None;
+    }
+
+    let mut cursor = root;
+    for segment in reference.trim_start_matches("#/").split('/') {
+        let key = segment.replace("~1", "/").replace("~0", "~");
+        cursor = cursor.get(&key)?;
+    }
+
+    Some(cursor)
+}
+
+fn strip_anthropic_tool_schema_definition_keywords(value: &mut Value) {
+    match value {
+        Value::Object(obj) => {
+            obj.remove("$schema");
+            obj.remove("$defs");
+            obj.remove("defs");
+            obj.remove("definitions");
+            obj.remove("$ref");
+            obj.remove("$id");
+            obj.remove("$anchor");
+
+            for (key, child) in obj.iter_mut() {
+                if key == "properties" {
+                    if let Value::Object(props) = child {
+                        for prop_schema in props.values_mut() {
+                            strip_anthropic_tool_schema_definition_keywords(prop_schema);
+                        }
+                    }
+                } else {
+                    strip_anthropic_tool_schema_definition_keywords(child);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_anthropic_tool_schema_definition_keywords(item);
+            }
+        }
+        _ => {}
     }
 }
 

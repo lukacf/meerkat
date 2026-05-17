@@ -783,6 +783,48 @@ impl MeerkatMachine {
         .map(|_| ())
     }
 
+    /// Realize pending-input abandonment after the machine has already entered
+    /// the Retired terminal phase.
+    pub async fn abandon_retired_pending_inputs(
+        &self,
+        session_id: &SessionId,
+        reason: impl Into<String>,
+    ) -> Result<usize, RuntimeDriverError> {
+        let reason = reason.into();
+        let state = self
+            .existing_session_runtime_state(session_id)
+            .await
+            .unwrap_or(RuntimeState::Destroyed);
+        if state != RuntimeState::Retired {
+            return Err(RuntimeDriverError::NotReady { state });
+        }
+
+        let gate = self.session_mutation_gate(session_id).await;
+        let _gate_guard = match gate {
+            Some(ref g) => Some(g.lock().await),
+            None => None,
+        };
+
+        let (driver, completions) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (entry.driver.clone(), entry.completions.clone())
+        };
+
+        let abandoned = {
+            let mut driver = driver.lock().await;
+            driver
+                .abandon_pending_inputs(crate::input_state::InputAbandonReason::Retired)
+                .await?
+        };
+        completions.lock().await.resolve_all_terminated(&reason);
+        Ok(abandoned)
+    }
+
     /// Stage a durable session visibility filter through the machine-owned visibility state.
     pub async fn stage_persistent_filter(
         &self,

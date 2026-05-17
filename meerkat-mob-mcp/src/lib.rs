@@ -995,11 +995,59 @@ impl MobMcpState {
             .ok_or_else(|| SessionControlError::InvalidRequest {
                 message: format!("member has no session: {identity}"),
             })?;
+        self.wait_for_member_system_context_boundary(&bridge_session_id)
+            .await?;
         let result = self
             .session_service()
             .append_system_context(&bridge_session_id, req)
             .await?;
         Ok((bridge_session_id, result))
+    }
+
+    async fn wait_for_member_system_context_boundary(
+        &self,
+        bridge_session_id: &SessionId,
+    ) -> Result<(), SessionControlError> {
+        let Some(adapter) = &self.runtime_adapter else {
+            return Ok(());
+        };
+        if !adapter.contains_session(bridge_session_id).await {
+            return Ok(());
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            if !adapter.contains_session(bridge_session_id).await {
+                return Ok(());
+            }
+            let Some(snapshot) = adapter
+                .meerkat_machine_spine_snapshot(bridge_session_id)
+                .await
+            else {
+                return Ok(());
+            };
+            let active_boundary = snapshot.control.phase == meerkat_runtime::RuntimeState::Running
+                || snapshot.control.current_run_id.is_some()
+                || snapshot.inputs.current_run_id.is_some()
+                || !snapshot.inputs.queue.is_empty()
+                || !snapshot.inputs.steer_queue.is_empty();
+            if !active_boundary {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(SessionControlError::Session(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "timed out waiting for member runtime boundary before appending system context for {bridge_session_id}: phase={:?}, control_run={:?}, ingress_run={:?}, queue_len={}, steer_queue_len={}",
+                        snapshot.control.phase,
+                        snapshot.control.current_run_id,
+                        snapshot.inputs.current_run_id,
+                        snapshot.inputs.queue.len(),
+                        snapshot.inputs.steer_queue.len(),
+                    )),
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     pub async fn mob_resolve_bridge_session_id(

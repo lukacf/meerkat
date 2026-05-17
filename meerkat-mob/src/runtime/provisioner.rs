@@ -27,6 +27,8 @@ use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OperationStatus;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionError, StartTurnRequest};
+#[cfg(feature = "runtime-adapter")]
+use meerkat_core::time_compat::{Duration, Instant};
 use meerkat_core::types::SessionId;
 #[cfg(feature = "runtime-adapter")]
 #[allow(unused_imports)]
@@ -39,8 +41,6 @@ use meerkat_runtime::{
 use serde::de::DeserializeOwned;
 #[cfg(feature = "runtime-adapter")]
 use std::collections::HashMap;
-#[cfg(feature = "runtime-adapter")]
-use std::time::{Duration, Instant};
 #[cfg(feature = "runtime-adapter")]
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 
@@ -461,6 +461,7 @@ impl SessionBackend {
             return Ok(());
         };
         let deadline = Instant::now() + Duration::from_secs(30);
+        let mut terminal_abandon_requested = false;
 
         loop {
             if !adapter.contains_session(session_id).await {
@@ -480,17 +481,38 @@ impl SessionBackend {
             );
             let no_run_bound = snapshot.control.current_run_id.is_none()
                 && snapshot.inputs.current_run_id.is_none();
-            if ingress_quiescent && (lifecycle_retired || no_run_bound) {
+            let no_completion_waiters = snapshot.completion_waiters.input_count == 0
+                && snapshot.completion_waiters.waiter_count == 0;
+            if (ingress_quiescent && (lifecycle_retired || no_run_bound))
+                || (lifecycle_retired && no_run_bound && no_completion_waiters)
+            {
                 return Ok(());
+            }
+            if lifecycle_retired && no_run_bound && !terminal_abandon_requested {
+                terminal_abandon_requested = true;
+                adapter
+                    .abandon_retired_pending_inputs(
+                        session_id,
+                        "mob archive terminal retire drain cleanup".to_string(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        Self::runtime_archive_error(format!(
+                            "runtime stop after terminal retire before mob archive failed for {session_id}: {error}"
+                        ))
+                    })?;
+                continue;
             }
             if Instant::now() >= deadline {
                 return Err(Self::runtime_archive_error(format!(
-                    "timed out waiting for runtime retire drain before mob archive for {session_id}: phase={:?}, control_run={:?}, ingress_run={:?}, queue_len={}, steer_queue_len={}",
+                    "timed out waiting for runtime retire drain before mob archive for {session_id}: phase={:?}, control_run={:?}, ingress_run={:?}, queue_len={}, steer_queue_len={}, completion_inputs={}, completion_waiters={}",
                     snapshot.control.phase,
                     snapshot.control.current_run_id,
                     snapshot.inputs.current_run_id,
                     snapshot.inputs.queue.len(),
                     snapshot.inputs.steer_queue.len(),
+                    snapshot.completion_waiters.input_count,
+                    snapshot.completion_waiters.waiter_count,
                 )));
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

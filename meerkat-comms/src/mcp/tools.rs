@@ -98,7 +98,13 @@ pub struct SendRequestInput {
     pub intent: CommsPeerRequestIntent,
     /// "steer" for immediate processing (normal), "queue" for next turn boundary
     pub handling_mode: HandlingMode,
-    /// Request parameters
+    /// Request parameters. Shape is validated against the selected intent at
+    /// the typed dispatch boundary; model-facing schema stays compact so
+    /// internal bridge wire variants do not dominate ordinary comms turns.
+    #[schemars(
+        with = "Value",
+        description = "Request parameters for the selected intent. For checksum_token use {\"subject\":\"image_receipt_check\"}. For supervisor.bridge use the bridge command payload described in the tool text."
+    )]
     pub params: CommsPeerRequestParams,
     /// Optional multimodal blocks. Use image_ref entries such as
     /// {"type":"image_ref","source":"current_turn","index":0} to forward
@@ -155,8 +161,13 @@ pub struct SendResponseInput {
     pub in_reply_to: String,
     /// Response status: "accepted", "completed", or "failed"
     pub status: ResponseStatus,
-    /// Response result data (optional)
+    /// Response result data (optional). Shape is validated against the
+    /// original request contract at the typed dispatch boundary.
     #[serde(default)]
+    #[schemars(
+        with = "Option<Value>",
+        description = "Typed response payload. For checksum_token use {\"request_intent\":\"checksum_token\",\"request_subject\":\"image_receipt_check\",\"token\":\"generated-image-response-ok\"}. For supervisor.bridge use simple bridge reply objects such as {\"result\":\"ack\",\"ok\":true}."
+    )]
     pub result: Option<CommsPeerResponseResult>,
     /// Optional multimodal blocks. Use image_ref entries such as
     /// {"type":"image_ref","source":"current_turn","index":0} to forward

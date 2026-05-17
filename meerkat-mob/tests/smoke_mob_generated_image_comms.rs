@@ -3,7 +3,8 @@
 
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
 use meerkat_core::types::{
-    AssistantBlock, ContentBlock, ContentInput, HandlingMode, Message, text_content,
+    AssistantBlock, ContentBlock, ContentInput, HandlingMode, Message, SystemNoticeBlock,
+    text_content,
 };
 use meerkat_core::{AssistantImageRef, BlobRef};
 use meerkat_mob::definition::{RoleWiringRule, WiringRules};
@@ -63,7 +64,7 @@ fn generated_image_comms_profile(
         model: model.to_string(),
         skills: vec![],
         tools: ToolConfig {
-            builtins: image_generation,
+            builtins: false,
             comms: true,
             image_generation,
             ..Default::default()
@@ -114,7 +115,7 @@ fn image_relay_profile(model: &str, peer_description: &str, image_generation: bo
         model: model.to_string(),
         skills: vec![],
         tools: ToolConfig {
-            builtins: image_generation,
+            builtins: false,
             comms: true,
             image_generation,
             ..Default::default()
@@ -282,12 +283,6 @@ async fn spawn_generated_image_comms_members(
     handle
         .spawn_spec(
             SpawnMemberSpec::new("maker", AgentIdentity::from("maker"))
-                .with_initial_message(ContentInput::Text(
-                    "Stand by for the two-turn generated-image comms smoke. \
-                     For this spawn turn, do not call tools and do not contact peers. \
-                     Reply exactly MAKER-GENERATED-IMAGE-COMMS-READY."
-                        .to_string(),
-                ))
                 .with_additional_instructions(vec![
                     "When asked to run the generated-image comms smoke, use tools, not prose. \
                      If a user says 'Turn 1', your only valid action is one generate_image tool call. \
@@ -301,12 +296,6 @@ async fn spawn_generated_image_comms_members(
     handle
         .spawn_spec(
             SpawnMemberSpec::new("reviewer", AgentIdentity::from("reviewer"))
-                .with_initial_message(ContentInput::Text(
-                    "Stand by as reviewer for the generated-image comms smoke. \
-                     For this spawn turn, do not call tools and do not contact peers. \
-                     Reply exactly REVIEWER-GENERATED-IMAGE-COMMS-READY."
-                        .to_string(),
-                ))
                 .with_additional_instructions(vec![
                     "You are reviewer. When maker sends a checksum_token request about image_receipt_check that includes an image, \
                      generate a tiny receipt image with generate_image using provider gemini and model \
@@ -328,18 +317,12 @@ async fn spawn_image_relay_members(handle: &MobHandle) -> Result<(), Box<dyn std
     handle
         .spawn_spec(
             SpawnMemberSpec::new("relay", AgentIdentity::from("relay"))
-                .with_initial_message(ContentInput::Text(
-                    "Stand by as relay for the image relay smoke. \
-                     For this spawn turn, do not call tools and do not contact peers. \
-                     Reply exactly RELAY-IMAGE-READOUT-READY."
-                        .to_string(),
-                ))
                 .with_additional_instructions(vec![
                     "When maker sends an image relay task, do not read or describe the image yourself. \
                      Extract the blob_id and media_type from maker's message. Then call send_message to \
-                     peer_id image-relay/reader/reader with handling_mode steer, a body asking reader to \
-                     read the visible text, and a blob-backed image_ref block using exactly that blob_id \
-                     and media_type. When reader replies, call send_message back to maker with body \
+                     the reader member's canonical peer_id with handling_mode steer, a body asking reader \
+                     to read the visible text, and a blob-backed image_ref block using exactly that blob_id \
+                     and media_type. If needed, call peers first to find reader's peer_id. When reader replies, call send_message back to maker with body \
                      READOUT: <reader's text>. Never invent the readout yourself."
                         .to_string(),
                 ]),
@@ -348,12 +331,6 @@ async fn spawn_image_relay_members(handle: &MobHandle) -> Result<(), Box<dyn std
     handle
         .spawn_spec(
             SpawnMemberSpec::new("reader", AgentIdentity::from("reader"))
-                .with_initial_message(ContentInput::Text(
-                    "Stand by as reader for the image relay smoke. \
-                     For this spawn turn, do not call tools and do not contact peers. \
-                     Reply exactly READER-IMAGE-READOUT-READY."
-                        .to_string(),
-                ))
                 .with_additional_instructions(vec![
                     "When relay sends you an image, inspect the image pixels and read the visible text. \
                      Reply to relay using send_message with handling_mode steer and body exactly \
@@ -366,12 +343,6 @@ async fn spawn_image_relay_members(handle: &MobHandle) -> Result<(), Box<dyn std
     handle
         .spawn_spec(
             SpawnMemberSpec::new("maker", AgentIdentity::from("maker"))
-                .with_initial_message(ContentInput::Text(
-                    "Stand by as maker for the image relay smoke. \
-                     For this spawn turn, do not call tools and do not contact peers. \
-                     Reply exactly MAKER-IMAGE-READOUT-READY."
-                        .to_string(),
-                ))
                 .with_additional_instructions(vec![
                     "When asked to run the relay smoke, use tools rather than prose. Generate the image first. \
                      After generate_image returns, send the generated image to relay with a blob-backed image_ref. \
@@ -418,7 +389,15 @@ async fn wait_for_member_histories_to_settle(
 }
 
 fn message_has_image(message: &Message) -> bool {
-    matches!(message, Message::User(user) if meerkat_core::has_images(&user.content))
+    match message {
+        Message::User(user) => meerkat_core::has_images(&user.content),
+        Message::SystemNotice(notice) => notice.blocks.iter().any(|block| match block {
+            SystemNoticeBlock::Comms { content, .. }
+            | SystemNoticeBlock::ExternalEvent { content, .. } => meerkat_core::has_images(content),
+            _ => false,
+        }),
+        _ => false,
+    }
 }
 
 fn tool_uses(message: &Message) -> Vec<(&str, Value)> {
@@ -501,6 +480,13 @@ async fn member_messages(
         .await
         .map(|page| page.messages)
         .unwrap_or_default()
+}
+
+async fn member_peer_id(handle: &MobHandle, member: &str) -> Option<String> {
+    handle
+        .get_member(&AgentIdentity::from(member))
+        .await
+        .and_then(|entry| entry.peer_id().map(|peer_id| peer_id.to_string()))
 }
 
 fn message_summary(message: &Message) -> String {
@@ -910,6 +896,13 @@ async fn wait_for_image_relay_readout_success(
     timeout: Duration,
 ) -> Result<BlobRef, String> {
     let deadline = Instant::now() + timeout;
+    let relay_peer_ids = {
+        let mut ids = vec!["image-relay/relay/relay".to_string(), "relay".to_string()];
+        if let Some(peer_id) = member_peer_id(handle, "relay").await {
+            ids.push(peer_id);
+        }
+        ids
+    };
     loop {
         let maker = member_messages(handle, service, "maker").await;
         let relay = member_messages(handle, service, "relay").await;
@@ -918,10 +911,10 @@ async fn wait_for_image_relay_readout_success(
         let maker_image = first_generated_image(&maker);
         let maker_sent_blob_to_relay = maker_image.as_ref().is_some_and(|image| {
             maker.iter().any(|message| {
-                image_ref_matches_blob_to_peer(
+                image_ref_matches_blob_to_any_peer(
                     message,
                     "send_message",
-                    "image-relay/relay/relay",
+                    &relay_peer_ids,
                     &image.blob_ref,
                 )
             })
@@ -1004,11 +997,12 @@ async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
         .send(
             ContentInput::Text(
                 "Turn 1 of the generated-image comms smoke. \
-                 You MUST call the generate_image tool exactly once now. \
-                 Use request provider gemini, model gemini-3.1-flash-image-preview, \
-                 prompt 'a simple cyan square with a small magenta dot, no text', size square1024, \
-                 quality low, format png, count 1. After the tool returns, stop. Do not call send_request, \
-                 send_message, or send_response in this turn. Do not answer with prose instead of the tool call."
+                 Call generate_image exactly once now with this JSON argument: \
+                 {\"request\":{\"intent\":\"generate\",\"provider\":\"gemini\",\
+                 \"model\":\"gemini-3.1-flash-image-preview\",\"prompt\":\"a simple cyan square with a small magenta dot, no text\",\
+                 \"size\":\"1024x1024\",\"quality\":\"low\",\"format\":\"png\",\"count\":1}}. \
+                 After the tool returns, stop. Do not call send_request, send_message, or send_response in this turn. \
+                 Do not answer with prose instead of the tool call."
                     .to_string(),
             ),
             HandlingMode::Queue,
@@ -1099,27 +1093,29 @@ async fn e2e_smoke_s86_mob_provider_image_relay_readout() {
     .await
     .expect("spawn turns should settle before relay smoke");
 
+    let relay_peer_id = member_peer_id(&handle, "relay")
+        .await
+        .expect("relay should expose a canonical comms peer id");
     let maker = handle
         .member(&AgentIdentity::from("maker"))
         .await
         .expect("maker member");
     maker
         .send(
-            ContentInput::Text(
+            ContentInput::Text(format!(
                 "Run the provider image relay smoke now. Use exactly this tool sequence, in this order:\n\
                  1. Call generate_image exactly once. The request must use provider openai, model gpt-image-2, \
                  prompt \"Create a simple white poster with only the exact large black text RKAT 7319 centered. \
                  No other letters, numbers, watermarks, captions, or symbols.\", size 1024x1024, quality low, \
                  format png, count 1.\n\
-                 2. After generate_image returns, call send_message to peer_id \"image-relay/relay/relay\" with \
+                 2. After generate_image returns, call send_message to peer_id \"{relay_peer_id}\" with \
                  handling_mode \"steer\". Attach the generated image as a blob-backed image_ref using the exact \
                  blob_id and media_type returned by generate_image. The body must tell relay to forward that same \
                  blob-backed image to reader, ask reader to read visible text, and then return reader's READOUT to you. \
                  The body and any text block you send to relay MUST NOT contain the target text from the image prompt. \
                  It may contain only the blob_id, media_type, routing instructions, and the word READOUT.\n\
                  Do not answer with prose until the tools are done."
-                    .to_string(),
-            ),
+            )),
             HandlingMode::Queue,
         )
         .await

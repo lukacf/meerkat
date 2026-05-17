@@ -2752,15 +2752,18 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         ordinary_init["error"].is_null(),
         "ordinary rpc surface should initialize cleanly: {ordinary_init}"
     );
-    // Keep this leg short: we only need to prove that an ordinary session with
-    // a mob-shaped comms name routes through the ordinary session surface.
+    // Keep this leg focused: we only need to prove that an ordinary session
+    // with a mob-shaped comms name routes through the ordinary session surface.
+    // Use the Anthropic smoke model already exercised by the mob image lanes
+    // rather than coupling this routing assertion to the moving default.
+    let ordinary_model = "claude-sonnet-4-5";
     eprintln!("[scenario 54] ordinary session/create start");
     let ordinary_started_at = Instant::now();
     rpc_send_line(
         &mut ordinary_rpc,
         &format!(
             r#"{{"jsonrpc":"2.0","id":350,"method":"session/create","params":{{"prompt":"Create an ordinary session with a mob-shaped comms name and confirm ORDINARY_SHAPED_54.","model":"{}","max_tokens":32,"comms_name":"{mob_id}/reviewer/alice"}}}}"#,
-            smoke_model()
+            ordinary_model
         ),
     )
     .await?;

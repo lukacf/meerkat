@@ -55,25 +55,123 @@ pub struct CoarseAdmissionFlags {
 /// Typed machine input that authorized a live admission resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MachineAdmissionAuthority {
-    pub input_id: String,
-    pub input_kind: mm_dsl::AdmissionInputKind,
-    pub requested_lane: Option<mm_dsl::InputLane>,
-    pub silent_intent_match: bool,
-    pub existing_superseded: bool,
-    pub runtime_running: bool,
-    pub without_wake: bool,
+    input_id: String,
+    input_kind: mm_dsl::AdmissionInputKind,
+    requested_lane: Option<mm_dsl::InputLane>,
+    silent_intent_match: bool,
+    existing_superseded: bool,
+    runtime_running: bool,
+    without_wake: bool,
+}
+
+impl MachineAdmissionAuthority {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        input_id: String,
+        input_kind: mm_dsl::AdmissionInputKind,
+        requested_lane: Option<mm_dsl::InputLane>,
+        silent_intent_match: bool,
+        existing_superseded: bool,
+        runtime_running: bool,
+        without_wake: bool,
+    ) -> Self {
+        Self {
+            input_id,
+            input_kind,
+            requested_lane,
+            silent_intent_match,
+            existing_superseded,
+            runtime_running,
+            without_wake,
+        }
+    }
+
+    pub(crate) fn input_id(&self) -> &str {
+        &self.input_id
+    }
+
+    pub(crate) fn without_wake(&self) -> bool {
+        self.without_wake
+    }
+
+    pub(crate) fn to_dsl_input(&self) -> mm_dsl::MeerkatMachineInput {
+        mm_dsl::MeerkatMachineInput::ResolveAdmissionPlan {
+            input_id: self.input_id.clone(),
+            input_kind: self.input_kind,
+            requested_lane: self.requested_lane,
+            silent_intent_match: self.silent_intent_match,
+            existing_superseded: self.existing_superseded,
+            runtime_running: self.runtime_running,
+            without_wake: self.without_wake,
+        }
+    }
 }
 
 /// Machine-owned resolution of an accepted input's semantic admission path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAdmission {
-    pub policy: PolicyDecision,
-    pub handling_mode: HandlingMode,
-    pub runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
-    pub primitive_projection: crate::ingress_types::RuntimeInputProjection,
-    pub admission_plan: AdmissionPlan,
-    pub coarse_flags: CoarseAdmissionFlags,
-    pub(crate) authority: MachineAdmissionAuthority,
+    policy: PolicyDecision,
+    handling_mode: HandlingMode,
+    runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
+    primitive_projection: crate::ingress_types::RuntimeInputProjection,
+    admission_plan: AdmissionPlan,
+    coarse_flags: CoarseAdmissionFlags,
+    authority: MachineAdmissionAuthority,
+}
+
+impl ResolvedAdmission {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_machine_resolution(
+        policy: PolicyDecision,
+        handling_mode: HandlingMode,
+        runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
+        primitive_projection: crate::ingress_types::RuntimeInputProjection,
+        admission_plan: AdmissionPlan,
+        coarse_flags: CoarseAdmissionFlags,
+        authority: MachineAdmissionAuthority,
+    ) -> Self {
+        Self {
+            policy,
+            handling_mode,
+            runtime_semantics,
+            primitive_projection,
+            admission_plan,
+            coarse_flags,
+            authority,
+        }
+    }
+
+    pub(crate) fn coarse_flags(&self) -> CoarseAdmissionFlags {
+        self.coarse_flags
+    }
+
+    pub(crate) fn requires_active_runtime_pre_admission(&self) -> bool {
+        self.coarse_flags.request_immediate_processing
+            || self.coarse_flags.interrupt_yielding
+            || self.coarse_flags.wake_if_idle
+    }
+
+    pub(crate) fn authority(&self) -> &MachineAdmissionAuthority {
+        &self.authority
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        PolicyDecision,
+        HandlingMode,
+        crate::ingress_types::RuntimeInputSemantics,
+        crate::ingress_types::RuntimeInputProjection,
+        AdmissionPlan,
+    ) {
+        (
+            self.policy,
+            self.handling_mode,
+            self.runtime_semantics,
+            self.primitive_projection,
+            self.admission_plan,
+        )
+    }
 }
 
 /// Typed reason why an input was rejected at the accept boundary.
@@ -163,63 +261,6 @@ impl AcceptOutcome {
     /// Check if the input was rejected.
     pub fn is_rejected(&self) -> bool {
         matches!(self, Self::Rejected { .. })
-    }
-}
-
-/// Classify the machine-owned admission disposition for an accepted input.
-///
-/// This is the semantic answer to “what happens to an accepted input?” Helpers
-/// should only apply the already-decided queue/lifecycle mutations.
-pub fn admission_plan_from_policy(
-    policy: &PolicyDecision,
-    handling_mode: HandlingMode,
-    existing_superseded_id: Option<InputId>,
-) -> AdmissionPlan {
-    if policy.apply_mode == crate::policy::ApplyMode::Ignore
-        && policy.consume_point == crate::policy::ConsumePoint::OnAccept
-    {
-        return AdmissionPlan::ConsumedOnAccept;
-    }
-
-    if policy.apply_mode == crate::policy::ApplyMode::Ignore {
-        return AdmissionPlan::Queued {
-            persist_and_queue: false,
-            queue_action: AdmissionQueueAction::None,
-            existing_action: None,
-        };
-    }
-
-    match policy.queue_mode {
-        crate::policy::QueueMode::Coalesce => AdmissionPlan::Queued {
-            persist_and_queue: true,
-            queue_action: AdmissionQueueAction::EnqueueTo {
-                target: handling_mode,
-            },
-            existing_action: existing_superseded_id
-                .map(|existing_id| ExistingQueuedAdmissionAction::Coalesce { existing_id }),
-        },
-        crate::policy::QueueMode::Supersede => AdmissionPlan::Queued {
-            persist_and_queue: true,
-            queue_action: AdmissionQueueAction::EnqueueTo {
-                target: handling_mode,
-            },
-            existing_action: existing_superseded_id
-                .map(|existing_id| ExistingQueuedAdmissionAction::Supersede { existing_id }),
-        },
-        crate::policy::QueueMode::Priority => AdmissionPlan::Queued {
-            persist_and_queue: true,
-            queue_action: AdmissionQueueAction::EnqueueFront {
-                target: handling_mode,
-            },
-            existing_action: None,
-        },
-        crate::policy::QueueMode::Fifo | crate::policy::QueueMode::None => AdmissionPlan::Queued {
-            persist_and_queue: true,
-            queue_action: AdmissionQueueAction::EnqueueTo {
-                target: handling_mode,
-            },
-            existing_action: None,
-        },
     }
 }
 

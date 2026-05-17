@@ -2197,19 +2197,6 @@ impl SessionRuntime {
         adapter.unregister_session(session_id).await;
     }
 
-    fn runtime_input_requires_active_pre_admission(input: &meerkat_runtime::Input) -> bool {
-        let idle_policy = meerkat_runtime::DefaultPolicyTable::resolve(input, true);
-        matches!(
-            idle_policy.wake_mode,
-            meerkat_runtime::policy::WakeMode::WakeIfIdle
-        ) && matches!(
-            idle_policy.apply_mode,
-            meerkat_runtime::policy::ApplyMode::StageRunStart
-                | meerkat_runtime::policy::ApplyMode::StageRunBoundary
-                | meerkat_runtime::policy::ApplyMode::InjectNow
-        )
-    }
-
     fn completion_outcome_requires_runtime_cleanup(
         outcome: &meerkat_runtime::CompletionOutcome,
     ) -> bool {
@@ -4606,15 +4593,6 @@ impl SessionRuntime {
         self.reject_archived_persisted_session_without_live(session_id)
             .await?;
         let input_id = input.id().clone();
-        let should_pre_admit = Self::runtime_input_requires_active_pre_admission(&input);
-        let cleanup_protects_active_admission = !should_pre_admit;
-        let mut pre_admission = if should_pre_admit {
-            Some(RuntimePreAdmissionGuard::new(
-                self.reserve_or_join_active_turn(session_id).await?,
-            ))
-        } else {
-            None
-        };
 
         if self.live_session_is_stale(session_id).await? {
             self.discard_stale_live_session(session_id).await;
@@ -4628,6 +4606,43 @@ impl SessionRuntime {
         let staged_session_existed = self.staged_sessions.contains(session_id).await;
         self.ensure_runtime_executor_on_adapter(adapter, session_id)
             .await?;
+
+        let should_pre_admit = match adapter
+            .input_requires_active_pre_admission(session_id, &input)
+            .await
+        {
+            Ok(should_pre_admit) => should_pre_admit,
+            Err(error) => {
+                self.unregister_new_runtime_registration_if_idle(
+                    adapter,
+                    session_id,
+                    runtime_was_registered,
+                    staged_session_existed,
+                    true,
+                )
+                .await;
+                return Err(runtime_driver_error_to_rpc(error));
+            }
+        };
+        let cleanup_protects_active_admission = !should_pre_admit;
+        let mut pre_admission = if should_pre_admit {
+            match self.reserve_or_join_active_turn(session_id).await {
+                Ok(admission) => Some(RuntimePreAdmissionGuard::new(admission)),
+                Err(err) => {
+                    self.unregister_new_runtime_registration_if_idle(
+                        adapter,
+                        session_id,
+                        runtime_was_registered,
+                        staged_session_existed,
+                        cleanup_protects_active_admission,
+                    )
+                    .await;
+                    return Err(err);
+                }
+            }
+        } else {
+            None
+        };
 
         if let Some(admission) = pre_admission.as_mut() {
             let admission_guard =

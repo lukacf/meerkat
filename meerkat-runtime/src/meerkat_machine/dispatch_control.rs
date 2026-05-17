@@ -52,17 +52,16 @@ impl MeerkatMachine {
                     let resolved = drv
                         .resolve_admission(&input)
                         .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
+                    let flags = resolved.coarse_flags();
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
                             input_id: crate::meerkat_machine::dsl::InputId::from_domain(
                                 &InputId::new(),
                             ),
-                            request_immediate_processing: resolved
-                                .coarse_flags
-                                .request_immediate_processing,
-                            interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
-                            wake_if_idle: resolved.coarse_flags.wake_if_idle,
+                            request_immediate_processing: flags.request_immediate_processing,
+                            interrupt_yielding: flags.interrupt_yielding,
+                            wake_if_idle: flags.wake_if_idle,
                         },
                         "AcceptWithCompletion(Ingest)",
                     )
@@ -79,6 +78,7 @@ impl MeerkatMachine {
                     };
                     let signal = match &result {
                         AcceptOutcome::Accepted { input_id, .. } => {
+                            let flags = resolved.coarse_flags();
                             let (accept_previous_dsl_state, effects) = self
                                 .apply_session_dsl_input(
                                     &session_id,
@@ -86,11 +86,9 @@ impl MeerkatMachine {
                                         input_id: crate::meerkat_machine::dsl::InputId::from_domain(
                                             input_id,
                                         ),
-                                        request_immediate_processing: resolved
-                                            .coarse_flags
-                                            .request_immediate_processing,
-                                        interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
-                                        wake_if_idle: resolved.coarse_flags.wake_if_idle,
+                                        request_immediate_processing: flags.request_immediate_processing,
+                                        interrupt_yielding: flags.interrupt_yielding,
+                                        wake_if_idle: flags.wake_if_idle,
                                     },
                                     "AcceptWithCompletion(Ingest)",
                                 )

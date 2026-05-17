@@ -333,6 +333,14 @@ impl EphemeralRuntimeDriver {
         input: mm_dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<(), RuntimeDriverError> {
+        self.dsl_apply_effects(input, context).map(|_| ())
+    }
+
+    fn dsl_apply_effects(
+        &mut self,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, RuntimeDriverError> {
         let transition = {
             let mut authority = self.dsl.lock();
             mm_dsl::MeerkatMachineMutator::apply(&mut *authority, input).map_err(|err| {
@@ -340,7 +348,7 @@ impl EphemeralRuntimeDriver {
             })?
         };
         self.absorb_dsl_effects(&transition.effects);
-        Ok(())
+        Ok(transition.effects)
     }
 
     fn dsl_preview(
@@ -1831,15 +1839,7 @@ impl EphemeralRuntimeDriver {
     fn resolve_admission_plan_input(
         authority: &MachineAdmissionAuthority,
     ) -> mm_dsl::MeerkatMachineInput {
-        mm_dsl::MeerkatMachineInput::ResolveAdmissionPlan {
-            input_id: authority.input_id.clone(),
-            input_kind: authority.input_kind,
-            requested_lane: authority.requested_lane,
-            silent_intent_match: authority.silent_intent_match,
-            existing_superseded: authority.existing_superseded,
-            runtime_running: authority.runtime_running,
-            without_wake: authority.without_wake,
-        }
+        authority.to_dsl_input()
     }
 
     fn handling_mode_from_admission_lane(lane: mm_dsl::InputLane) -> HandlingMode {
@@ -1965,10 +1965,10 @@ impl EphemeralRuntimeDriver {
             wake_if_idle,
         ) = effect;
 
-        if input_id != authority.input_id {
+        if input_id != authority.input_id() {
             return Err(RuntimeDriverError::Internal(format!(
                 "ResolveAdmissionPlan returned input id '{input_id}' for '{}'",
-                authority.input_id
+                authority.input_id()
             )));
         }
 
@@ -1998,19 +1998,19 @@ impl EphemeralRuntimeDriver {
             existing_superseded_id,
         );
 
-        Ok(ResolvedAdmission {
+        Ok(ResolvedAdmission::from_machine_resolution(
             policy,
             handling_mode,
             runtime_semantics,
-            primitive_projection: crate::input::runtime_input_projection(input),
+            crate::input::runtime_input_projection(input),
             admission_plan,
-            coarse_flags: CoarseAdmissionFlags {
+            CoarseAdmissionFlags {
                 request_immediate_processing,
                 interrupt_yielding,
                 wake_if_idle,
             },
             authority,
-        })
+        ))
     }
 
     fn resolve_admission_with_wake_policy(
@@ -2019,18 +2019,15 @@ impl EphemeralRuntimeDriver {
         without_wake: bool,
     ) -> Result<ResolvedAdmission, RuntimeDriverError> {
         let existing_superseded_id = self.existing_superseded_input(input).map(|(id, _)| id);
-        let authority = MachineAdmissionAuthority {
-            input_id: input.id().to_string(),
-            input_kind: mm_dsl::AdmissionInputKind::from(input.kind()),
-            requested_lane: input.handling_mode().map(mm_dsl::InputLane::from),
-            silent_intent_match: crate::silent_intent::matches_silent_intent(
-                input,
-                &self.silent_comms_intents,
-            ),
-            existing_superseded: existing_superseded_id.is_some(),
-            runtime_running: self.runtime_phase_snapshot() == RuntimeState::Running,
+        let authority = MachineAdmissionAuthority::new(
+            input.id().to_string(),
+            mm_dsl::AdmissionInputKind::from(input.kind()),
+            input.handling_mode().map(mm_dsl::InputLane::from),
+            crate::silent_intent::matches_silent_intent(&input, &self.silent_comms_intents),
+            existing_superseded_id.is_some(),
+            self.runtime_phase_snapshot() == RuntimeState::Running,
             without_wake,
-        };
+        );
         let effects = self.dsl_preview(
             Self::resolve_admission_plan_input(&authority),
             "ResolveAdmissionPlan",
@@ -2132,21 +2129,39 @@ impl EphemeralRuntimeDriver {
             self.ledger.accept(state.clone());
         }
 
-        if resolved.authority.input_id != input_id.to_string() {
+        if resolved.authority().input_id() != input_id.to_string() {
             return Err(RuntimeDriverError::Internal(format!(
                 "resolved admission authority id '{}' did not match accepted input '{input_id}'",
-                resolved.authority.input_id
+                resolved.authority().input_id()
             )));
         }
-        self.dsl_apply(
-            Self::resolve_admission_plan_input(&resolved.authority),
+        let existing_superseded_id = self.existing_superseded_input(&input).map(|(id, _)| id);
+        let authority = MachineAdmissionAuthority::new(
+            input_id.to_string(),
+            mm_dsl::AdmissionInputKind::from(input.kind()),
+            input.handling_mode().map(mm_dsl::InputLane::from),
+            crate::silent_intent::matches_silent_intent(&input, &self.silent_comms_intents),
+            existing_superseded_id.is_some(),
+            self.runtime_phase_snapshot() == RuntimeState::Running,
+            resolved.authority().without_wake(),
+        );
+        let effects = self.dsl_apply_effects(
+            Self::resolve_admission_plan_input(&authority),
             "ResolveAdmissionPlan",
         )?;
+        let resolved = self.resolved_admission_from_machine_effects(
+            &input,
+            authority,
+            existing_superseded_id,
+            effects,
+        )?;
+        let (policy, handling_mode, runtime_semantics, primitive_projection, admission_plan) =
+            resolved.into_parts();
 
         if let Some(s) = self.ledger.get_mut(&input_id) {
             s.policy = Some(PolicySnapshot {
-                version: resolved.policy.policy_version,
-                decision: resolved.policy.clone(),
+                version: policy.policy_version,
+                decision: policy.clone(),
             });
         }
         self.emit_event(RuntimeEvent::InputLifecycle(
@@ -2155,19 +2170,18 @@ impl EphemeralRuntimeDriver {
             },
         ));
 
-        let handling_mode = resolved.handling_mode;
         let content_shape = ContentShape::from_kind(input.kind());
         let is_prompt = matches!(input, Input::Prompt(_));
-        match resolved.admission_plan {
+        match admission_plan {
             AdmissionPlan::ConsumedOnAccept => {
                 self.record_admission_metadata(
                     &input_id,
                     &content_shape,
                     handling_mode,
-                    resolved.runtime_semantics,
-                    resolved.primitive_projection.clone(),
+                    runtime_semantics,
+                    primitive_projection.clone(),
                     is_prompt,
-                    &resolved.policy,
+                    &policy,
                     None,
                     None,
                 );
@@ -2207,10 +2221,10 @@ impl EphemeralRuntimeDriver {
                         &input,
                         &content_shape,
                         handling_mode,
-                        resolved.runtime_semantics,
-                        resolved.primitive_projection,
+                        runtime_semantics,
+                        primitive_projection,
                         is_prompt,
-                        &resolved.policy,
+                        &policy,
                         queue_action,
                         existing_action.as_ref(),
                     )?;
@@ -2223,7 +2237,7 @@ impl EphemeralRuntimeDriver {
         let final_state = self.ledger.get(&input_id).cloned().unwrap_or(state);
         Ok(AcceptOutcome::Accepted {
             input_id,
-            policy: resolved.policy,
+            policy,
             state: final_state,
         })
     }
@@ -2538,8 +2552,9 @@ mod tests {
         Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention,
         PeerInput, PromptInput,
     };
+    use crate::meerkat_machine::dsl as mm_dsl;
     use crate::traits::RuntimeDriver;
-    use crate::{QueueMode, RuntimeState, WakeMode};
+    use crate::{RuntimeState, WakeMode};
     use chrono::Utc;
     use meerkat_core::lifecycle::{InputId, RunId};
 
@@ -2569,21 +2584,6 @@ mod tests {
 
     fn prompt_input(text: &str) -> Input {
         Input::Prompt(PromptInput::new(text, None))
-    }
-
-    fn resolved_with_queue_mode(
-        driver: &EphemeralRuntimeDriver,
-        input: &Input,
-        queue_mode: QueueMode,
-    ) -> crate::accept::ResolvedAdmission {
-        let mut resolved = driver.resolve_admission(input).unwrap();
-        resolved.policy.queue_mode = queue_mode;
-        resolved.admission_plan = crate::accept::admission_plan_from_policy(
-            &resolved.policy,
-            resolved.handling_mode,
-            None,
-        );
-        resolved
     }
 
     fn force_control_shadow(
@@ -2653,11 +2653,16 @@ mod tests {
 
         let priority = prompt_input("priority");
         let priority_id = priority.id().clone();
-        let resolved = resolved_with_queue_mode(&driver, &priority, QueueMode::Priority);
+        driver.accept_input(priority).await.unwrap();
         driver
-            .accept_resolved_input(priority, resolved)
-            .await
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::PrioritizeInput {
+                    input_id: priority_id.to_string(),
+                },
+                "PrioritizeInput(test)",
+            )
             .unwrap();
+        driver.rebuild_queue_projections();
 
         assert_eq!(
             driver.dsl_queue_lane(),
@@ -2723,8 +2728,10 @@ mod tests {
 
         let input = peer_message_input();
         let projected = driver.resolve_admission(&input).unwrap();
-        assert_eq!(projected.policy.wake_mode, WakeMode::WakeIfIdle);
-        assert!(!projected.coarse_flags.interrupt_yielding);
-        assert!(!projected.coarse_flags.request_immediate_processing);
+        let flags = projected.coarse_flags();
+        let (policy, _, _, _, _) = projected.into_parts();
+        assert_eq!(policy.wake_mode, WakeMode::WakeIfIdle);
+        assert!(!flags.interrupt_yielding);
+        assert!(!flags.request_immediate_processing);
     }
 }

@@ -19,6 +19,44 @@ impl MeerkatMachine {
         }
     }
 
+    /// Preview generated admission feedback for shell capacity mechanics.
+    ///
+    /// The caller does not classify policy/defaults itself; it only observes
+    /// whether generated `ResolveAdmissionPlan` would ask the runtime to wake,
+    /// interrupt, or process immediately.
+    pub async fn input_requires_active_pre_admission(
+        &self,
+        session_id: &SessionId,
+        input: &Input,
+    ) -> Result<bool, RuntimeDriverError> {
+        let driver = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?
+                .driver
+                .clone()
+        };
+
+        let gate = self.session_mutation_gate(session_id).await;
+        let _gate_guard = match gate {
+            Some(ref g) => Some(g.lock().await),
+            None => None,
+        };
+
+        let visible_state = self
+            .existing_session_visible_runtime_state(session_id)
+            .await
+            .unwrap_or(RuntimeState::Destroyed);
+        Self::reject_visible_terminal_ingress(visible_state)?;
+
+        let driver = driver.lock().await;
+        let resolved = driver.resolve_admission(input)?;
+        Ok(resolved.requires_active_runtime_pre_admission())
+    }
+
     pub(super) async fn execute_meerkat_machine_ingress_command(
         &self,
         command: MeerkatMachineCommand,
@@ -60,17 +98,16 @@ impl MeerkatMachine {
                 let (resolved, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
                     let resolved = driver.resolve_admission(&input)?;
+                    let flags = resolved.coarse_flags();
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
                             input_id: crate::meerkat_machine::dsl::InputId::from_domain(
                                 &InputId::new(),
                             ),
-                            request_immediate_processing: resolved
-                                .coarse_flags
-                                .request_immediate_processing,
-                            interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
-                            wake_if_idle: resolved.coarse_flags.wake_if_idle,
+                            request_immediate_processing: flags.request_immediate_processing,
+                            interrupt_yielding: flags.interrupt_yielding,
+                            wake_if_idle: flags.wake_if_idle,
                         },
                         "AcceptWithCompletion",
                     )
@@ -79,9 +116,9 @@ impl MeerkatMachine {
                         let reason = format!(
                             "{reason}; input_kind={}; immediate={}; interrupt_yielding={}; wake_if_idle={}",
                             input.kind(),
-                            resolved.coarse_flags.request_immediate_processing,
-                            resolved.coarse_flags.interrupt_yielding,
-                            resolved.coarse_flags.wake_if_idle,
+                            flags.request_immediate_processing,
+                            flags.interrupt_yielding,
+                            flags.wake_if_idle,
                         );
                         Self::classify_ingress_dsl_rejection(state, reason)
                     })?;
@@ -157,6 +194,7 @@ impl MeerkatMachine {
                 let (signal, runtime_effect, effect_previous_dsl_state) = if let Some(input_id) =
                     accepted_input_id
                 {
+                    let flags = resolved.coarse_flags();
                     let (previous_dsl_state, effects) = self
                         .apply_session_dsl_input(
                             &session_id,
@@ -164,11 +202,9 @@ impl MeerkatMachine {
                                 input_id: crate::meerkat_machine::dsl::InputId::from_domain(
                                     &input_id,
                                 ),
-                                request_immediate_processing: resolved
-                                    .coarse_flags
-                                    .request_immediate_processing,
-                                interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
-                                wake_if_idle: resolved.coarse_flags.wake_if_idle,
+                                request_immediate_processing: flags.request_immediate_processing,
+                                interrupt_yielding: flags.interrupt_yielding,
+                                wake_if_idle: flags.wake_if_idle,
                             },
                             "AcceptWithCompletion",
                         )

@@ -194,8 +194,6 @@ impl DslAuthority {
 pub(crate) fn new_ingress_dsl_authority() -> SharedIngressDslAuthority {
     let state = mm_dsl::MeerkatMachineState {
         lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
-        next_admission_seq: 1000000000000,
-        next_priority_admission_seq: 999999999999,
         ..mm_dsl::MeerkatMachineState::default()
     };
     Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
@@ -545,6 +543,10 @@ impl EphemeralRuntimeDriver {
     pub fn admitted_runtime_semantics(&self, input_id: &InputId) -> Option<RuntimeInputSemantics> {
         self.runtime_semantics.get(input_id).copied()
     }
+    pub fn input_admission_sequence(&self, input_id: &InputId) -> Option<u64> {
+        let key = Self::dsl_key(input_id);
+        self.with_dsl_state(|state| state.input_admission_seq.get(&key).copied())
+    }
 
     /// Conversation projection decided at admission time.
     pub fn admitted_primitive_projection(
@@ -825,6 +827,7 @@ impl EphemeralRuntimeDriver {
                     .as_ref()
                     .map(std::string::ToString::to_string),
                 boundary_sequence: recovered_seed.last_boundary_sequence,
+                admission_sequence: recovered_seed.admission_sequence,
                 lane,
             },
             "RecoverInputLifecycle",
@@ -1387,6 +1390,7 @@ impl EphemeralRuntimeDriver {
             phase,
             last_run_id: self.input_last_run_id(input_id),
             last_boundary_sequence: self.input_last_boundary_sequence(input_id),
+            admission_sequence: self.input_admission_sequence(input_id),
             terminal_outcome: self.input_terminal_outcome(input_id),
             attempt_count: self.input_attempt_count(input_id),
         };
@@ -1409,6 +1413,7 @@ impl EphemeralRuntimeDriver {
                     phase,
                     last_run_id: self.input_last_run_id(input_id),
                     last_boundary_sequence: self.input_last_boundary_sequence(input_id),
+                    admission_sequence: self.input_admission_sequence(input_id),
                     terminal_outcome: self.input_terminal_outcome(input_id),
                     attempt_count: self.input_attempt_count(input_id),
                 };

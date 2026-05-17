@@ -2968,7 +2968,7 @@ pub fn initial_state() -> State {
         loop_active_body_frame: Default::default(),
         pending_spawn_count: 0,
         pending_spawn_sessions: Default::default(),
-        coordinator_bound: false,
+        coordinator_bound: true,
         member_startup_binding_requested: Default::default(),
         member_startup_runtime_ready: Default::default(),
         member_startup_ready: Default::default(),

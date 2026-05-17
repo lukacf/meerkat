@@ -1789,6 +1789,7 @@ mod tests {
     fn queued_seed() -> InputStateSeed {
         let mut seed = InputStateSeed::new_accepted();
         seed.phase = InputLifecycleState::Queued;
+        seed.admission_sequence = Some(1_000_000_000_000);
         seed
     }
 
@@ -2872,6 +2873,12 @@ mod recovery_tests {
         seed
     }
 
+    fn queued_seed_with_admission_sequence(sequence: u64) -> InputStateSeed {
+        let mut seed = queued_seed();
+        seed.admission_sequence = Some(sequence);
+        seed
+    }
+
     fn recovered_admission_rejection(state: crate::input_state::InputState) -> String {
         let entry = machine_build_recovered_ingress_entry(&state)
             .expect("test state should carry the recovered admission witness fields");
@@ -3141,6 +3148,103 @@ mod recovery_tests {
             driver.input_state(&input_id).is_none(),
             "failed recovery must not leave a ledger-only input row"
         );
+    }
+
+    #[tokio::test]
+    async fn persistent_recovery_rejects_queued_state_without_admission_sequence() {
+        use crate::store::RuntimeStore;
+
+        let runtime_id = LogicalRuntimeId::new("missing-admission-sequence");
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let input_id = input.id().clone();
+        let decision = policy(ApplyMode::StageRunStart);
+        let runtime_semantics = crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+            &decision,
+            input.kind(),
+        );
+        let state = state_with_runtime_semantics(input, decision, runtime_semantics);
+        let bundle = crate::input_state::StoredInputState {
+            state,
+            seed: queued_seed(),
+        };
+        let store = crate::store::memory::InMemoryRuntimeStore::new();
+        store
+            .persist_input_state(&runtime_id, &bundle)
+            .await
+            .expect("persist corrupt recovered input state");
+
+        let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(runtime_id.clone());
+        let err = machine_recover_persistent_driver(&store, &runtime_id, &mut driver)
+            .await
+            .expect_err("queued recovery must fail closed without generated order witness");
+
+        assert!(
+            err.to_string().contains("RecoverInputLifecycle"),
+            "unexpected recovery error: {err}"
+        );
+        assert!(
+            driver.input_state(&input_id).is_none(),
+            "failed recovery must not leave a ledger-only input row"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_recovery_restores_queue_order_from_admission_sequence() {
+        use crate::store::RuntimeStore;
+
+        let runtime_id = LogicalRuntimeId::new("restore-admission-sequence");
+        let first_input = Input::Prompt(crate::input::PromptInput::new("first", None));
+        let second_input = Input::Prompt(crate::input::PromptInput::new("second", None));
+        let first_id = first_input.id().clone();
+        let second_id = second_input.id().clone();
+        let first_decision = policy(ApplyMode::StageRunStart);
+        let second_decision = policy(ApplyMode::StageRunStart);
+        let first_state = state_with_runtime_semantics(
+            first_input,
+            first_decision.clone(),
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &first_decision,
+                crate::identifiers::InputKind::Prompt,
+            ),
+        );
+        let second_state = state_with_runtime_semantics(
+            second_input,
+            second_decision.clone(),
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &second_decision,
+                crate::identifiers::InputKind::Prompt,
+            ),
+        );
+        let first_bundle = crate::input_state::StoredInputState {
+            state: first_state,
+            seed: queued_seed_with_admission_sequence(10),
+        };
+        let second_bundle = crate::input_state::StoredInputState {
+            state: second_state,
+            seed: queued_seed_with_admission_sequence(20),
+        };
+        let store = crate::store::memory::InMemoryRuntimeStore::new();
+        store
+            .persist_input_state(&runtime_id, &second_bundle)
+            .await
+            .expect("persist later input first");
+        store
+            .persist_input_state(&runtime_id, &first_bundle)
+            .await
+            .expect("persist earlier input second");
+
+        let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(runtime_id.clone());
+        machine_recover_persistent_driver(&store, &runtime_id, &mut driver)
+            .await
+            .expect("recover queued inputs");
+
+        assert_eq!(
+            driver.queue_lane(),
+            vec![first_id.clone(), second_id.clone()],
+            "queue projection must follow the machine-owned recovered admission sequence, not store iteration order"
+        );
+        assert_eq!(driver.input_admission_sequence(&first_id), Some(10));
+        assert_eq!(driver.input_admission_sequence(&second_id), Some(20));
     }
 
     #[tokio::test]

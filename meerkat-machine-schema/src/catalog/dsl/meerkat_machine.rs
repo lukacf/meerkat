@@ -1834,6 +1834,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 attempt_count: u64,
                 run_id: Option<String>,
                 boundary_sequence: Option<u64>,
+                admission_sequence: Option<u64>,
                 lane: Option<Enum<InputLane>>,
             },
             QueueAccepted { input_id: String },
@@ -7156,6 +7157,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 attempt_count,
                 run_id,
                 boundary_sequence,
+                admission_sequence,
                 lane
             }
             guard "recovered_lifecycle_has_admission_witness" {
@@ -7170,6 +7172,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (phase == InputPhase::Queued
                     && self.recovered_admitted_lanes.contains_key(input_id)
                     && lane == Some(self.recovered_admitted_lanes.get_cloned(input_id).get("value")))
+            }
+            guard "recovered_queued_order_has_witness" {
+                phase != InputPhase::Queued || admission_sequence != None
             }
             update {
                 self.input_phases.insert(input_id, phase);
@@ -7214,9 +7219,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                     self.input_boundary_sequences.remove(input_id);
                 }
 
-                if !self.input_admission_seq.contains_key(input_id) {
-                    self.input_admission_seq.insert(input_id, self.next_admission_seq);
-                    self.next_admission_seq += 1;
+                if admission_sequence != None {
+                    self.input_admission_seq.insert(input_id, admission_sequence.get("value"));
+                    if self.next_admission_seq <= admission_sequence.get("value") {
+                        self.next_admission_seq = admission_sequence.get("value") + 1;
+                    }
+                } else {
+                    self.input_admission_seq.remove(input_id);
                 }
 
                 if lane != None {

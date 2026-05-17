@@ -124,7 +124,7 @@ pub const MAX_STAGE_ATTEMPTS: u32 = 3;
 /// (`input_phases`, `input_run_associations`, `input_boundary_sequences`,
 /// `input_terminal_kind` + `input_superseded_by` / `input_aggregate_id` /
 /// `input_abandon_reason` / `input_abandon_attempt_count`, and
-/// `input_attempt_counts`) so they can travel alongside a persisted
+/// `input_attempt_counts` / `input_admission_seq`) so they can travel alongside a persisted
 /// [`InputState`] at the store boundary, where no live DSL is available to
 /// query. Inside a running driver, these values are always read from the DSL
 /// directly, never from the seed.
@@ -133,6 +133,7 @@ pub struct InputStateSeed {
     pub phase: InputLifecycleState,
     pub last_run_id: Option<RunId>,
     pub last_boundary_sequence: Option<u64>,
+    pub admission_sequence: Option<u64>,
     pub terminal_outcome: Option<InputTerminalOutcome>,
     pub attempt_count: u32,
 }
@@ -145,6 +146,7 @@ impl InputStateSeed {
             phase: InputLifecycleState::Accepted,
             last_run_id: None,
             last_boundary_sequence: None,
+            admission_sequence: None,
             terminal_outcome: None,
             attempt_count: 0,
         }
@@ -287,6 +289,8 @@ struct InputStateSerde {
     last_run_id: Option<RunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_boundary_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admission_sequence: Option<u64>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -308,6 +312,7 @@ impl Serialize for StoredInputState {
             persisted_input: self.state.persisted_input.clone(),
             last_run_id: self.seed.last_run_id.clone(),
             last_boundary_sequence: self.seed.last_boundary_sequence,
+            admission_sequence: self.seed.admission_sequence,
             created_at: self.state.created_at,
             updated_at: self.state.updated_at,
         };
@@ -337,6 +342,7 @@ impl<'de> Deserialize<'de> for StoredInputState {
             phase: helper.current_state,
             last_run_id: helper.last_run_id,
             last_boundary_sequence: helper.last_boundary_sequence,
+            admission_sequence: helper.admission_sequence,
             terminal_outcome: helper.terminal_outcome,
             attempt_count: helper.attempt_count,
         };
@@ -367,6 +373,7 @@ mod tests {
         assert_eq!(seed.phase, InputLifecycleState::Accepted);
         assert!(seed.last_run_id.is_none());
         assert!(seed.last_boundary_sequence.is_none());
+        assert!(seed.admission_sequence.is_none());
         assert!(seed.terminal_outcome.is_none());
         assert_eq!(seed.attempt_count, 0);
     }
@@ -438,6 +445,7 @@ mod tests {
                 phase: InputLifecycleState::Queued,
                 last_run_id: None,
                 last_boundary_sequence: None,
+                admission_sequence: Some(42),
                 terminal_outcome: None,
                 attempt_count: 0,
             },
@@ -447,6 +455,10 @@ mod tests {
         let parsed: StoredInputState = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.state.input_id, bundle.state.input_id);
         assert_eq!(parsed.seed.phase, bundle.seed.phase);
+        assert_eq!(
+            parsed.seed.admission_sequence,
+            bundle.seed.admission_sequence
+        );
         assert_eq!(
             parsed.state.runtime_semantics,
             bundle.state.runtime_semantics

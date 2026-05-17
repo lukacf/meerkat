@@ -144,6 +144,8 @@ pub(crate) fn project_state(
             (phase, _, _) => (phase, None, None),
         };
 
+    let default_state = mm_dsl::MeerkatMachineState::default();
+
     mm_dsl::MeerkatMachineState {
         lifecycle_phase: project_phase(effective_phase),
         session_id: Some(mm_dsl::SessionId::from_domain(session_id)),
@@ -225,8 +227,8 @@ pub(crate) fn project_state(
         input_attempt_counts: std::collections::BTreeMap::new(),
         input_run_associations: std::collections::BTreeMap::new(),
         input_boundary_sequences: std::collections::BTreeMap::new(),
-        next_admission_seq: 1000000000000,
-        next_priority_admission_seq: 999999999999,
+        next_admission_seq: default_state.next_admission_seq,
+        next_priority_admission_seq: default_state.next_priority_admission_seq,
         input_admission_seq: std::collections::BTreeMap::new(),
         input_lane: std::collections::BTreeMap::new(),
         recovered_admitted_inputs: std::collections::BTreeSet::new(),

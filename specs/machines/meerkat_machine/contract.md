@@ -227,7 +227,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, terminal_outcome: TurnTerminalOutcome, terminal_cause_kind: TurnTerminalCauseKind, error: String)
 - `RunCancelled`(run_id: RunId)
 - `RecoverAdmittedInput`(input_id: String, input_kind: RecoveredInputKind, policy_apply_mode: RecoveredPolicyApplyMode, policy_routing_disposition: RecoveredRoutingDisposition, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, lane: InputLane)
-- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, lane: Option<InputLane>)
+- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, lane: Option<InputLane>)
 - `QueueAccepted`(input_id: String)
 - `SteerAccepted`(input_id: String)
 - `ChangeLane`(input_id: String, new_lane: InputLane)
@@ -3102,46 +3102,51 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleIdle`
 - From: `Idle`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
+  - `recovered_queued_order_has_witness`
 - Emits: `InputLifecycleNotice`
 - To: `Idle`
 
 ### `RecoverInputLifecycleAttached`
 - From: `Attached`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
+  - `recovered_queued_order_has_witness`
 - Emits: `InputLifecycleNotice`
 - To: `Attached`
 
 ### `RecoverInputLifecycleRunning`
 - From: `Running`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
+  - `recovered_queued_order_has_witness`
 - Emits: `InputLifecycleNotice`
 - To: `Running`
 
 ### `RecoverInputLifecycleRetired`
 - From: `Retired`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
+  - `recovered_queued_order_has_witness`
 - Emits: `InputLifecycleNotice`
 - To: `Retired`
 
 ### `RecoverInputLifecycleStopped`
 - From: `Stopped`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
+  - `recovered_queued_order_has_witness`
 - Emits: `InputLifecycleNotice`
 - To: `Stopped`
 

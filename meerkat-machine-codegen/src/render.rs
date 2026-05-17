@@ -681,22 +681,24 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
     pushln!(&mut out, "}}");
     pushln!(&mut out);
 
-    let first_phase = schema
-        .state
-        .phase
-        .variants
-        .first()
-        .map(|variant| rust_ident(&variant.name))
-        .unwrap_or_else(|| "Running".to_string());
+    let init_phase = rust_ident(schema.state.init.phase.as_str());
     pushln!(&mut out, "pub fn initial_state() -> State {{");
     pushln!(&mut out, "    State {{");
-    pushln!(&mut out, "        phase: Phase::{first_phase},");
+    pushln!(&mut out, "        phase: Phase::{init_phase},");
     for field in &schema.state.fields {
+        let init_expr = schema
+            .state
+            .init
+            .fields
+            .iter()
+            .find(|item| item.field == field.name)
+            .map(|item| rust_initial_value_expr(&item.expr, &field.ty))
+            .unwrap_or_else(|| direct_default_value_expr(&field.ty));
         pushln!(
             &mut out,
             "        {}: {},",
             rust_field_ident(&field.name),
-            direct_default_value_expr(&field.ty)
+            init_expr
         );
     }
     pushln!(&mut out, "    }}");
@@ -716,6 +718,52 @@ fn direct_default_value_expr(ty: &TypeRef) -> String {
         TypeRef::Set(_) => "Default::default()".to_string(),
         TypeRef::Seq(_) => "Vec::new()".to_string(),
         TypeRef::Map(_, _) => "Default::default()".to_string(),
+    }
+}
+
+#[cfg(not(test))]
+fn rust_initial_value_expr(expr: &Expr, ty: &TypeRef) -> String {
+    match expr {
+        Expr::Bool(value) => value.to_string(),
+        Expr::U64(value) => value.to_string(),
+        Expr::String(value) => match ty {
+            TypeRef::Named(name) => {
+                format!("{}({value:?}.to_string())", rust_ident(name.as_str()))
+            }
+            _ => format!("{value:?}.to_string()"),
+        },
+        Expr::NamedVariant { enum_name, variant } => {
+            format!(
+                "{}::{}",
+                rust_ident(enum_name.as_str()),
+                rust_ident(variant.as_str())
+            )
+        }
+        Expr::EmptySet | Expr::EmptyMap => direct_default_value_expr(ty),
+        Expr::SeqLiteral(items) => {
+            let inner = match ty {
+                TypeRef::Seq(inner) => inner.as_ref(),
+                other => other,
+            };
+            format!(
+                "vec![{}]",
+                items
+                    .iter()
+                    .map(|item| rust_initial_value_expr(item, inner))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        Expr::None => "None".to_string(),
+        Expr::Some(inner) => {
+            let inner_ty = match ty {
+                TypeRef::Option(inner_ty) => inner_ty.as_ref(),
+                other => other,
+            };
+            format!("Some({})", rust_initial_value_expr(inner, inner_ty))
+        }
+        Expr::Phase(value) => format!("Phase::{}", rust_ident(value.as_str())),
+        other => panic!("unsupported generated kernel state initializer expression: {other:?}"),
     }
 }
 

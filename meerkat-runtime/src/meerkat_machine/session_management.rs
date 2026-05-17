@@ -135,7 +135,7 @@ impl MeerkatMachine {
 
         let (ops_lifecycle, epoch_id, cursor_state) = self
             .recover_or_create_ops_state(&session_id, &runtime_id)
-            .await;
+            .await?;
 
         let tool_visibility_owner = Arc::new(MachineToolVisibilityOwner::new());
         // Bind the DSL authority into the visibility owner so its staging
@@ -389,9 +389,20 @@ impl MeerkatMachine {
                 }
                 // Recover ops state OUTSIDE the sessions lock to avoid blocking
                 // other adapter operations behind potentially slow disk I/O.
-                let (recovered_ops, recovered_epoch, recovered_cursors) = self
+                let (recovered_ops, recovered_epoch, recovered_cursors) = match self
                     .recover_or_create_ops_state(&session_id, &runtime_id)
-                    .await;
+                    .await
+                {
+                    Ok(recovered) => recovered,
+                    Err(err) => {
+                        tracing::error!(
+                            %session_id,
+                            error = %err,
+                            "failed to recover ops lifecycle during executor registration"
+                        );
+                        return;
+                    }
+                };
 
                 // Double-check under the lock — another task may have inserted
                 // the entry while we were rebuilding runtime state.

@@ -1772,15 +1772,15 @@ pub(crate) async fn machine_recover_persistent_driver(
             }
 
             if bundle.seed.phase.is_terminal() {
-                let inserted = driver.ledger_mut().recover(bundle.state.clone());
-                if !inserted {
-                    continue;
-                }
                 driver.recover_terminal_input_lifecycle(
                     &bundle.state.input_id,
                     &bundle.seed,
                     bundle.state.idempotency_key.as_ref(),
                 )?;
+                let inserted = driver.ledger_mut().recover(bundle.state.clone());
+                if !inserted {
+                    continue;
+                }
                 continue;
             }
 

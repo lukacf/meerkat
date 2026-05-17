@@ -848,13 +848,27 @@ impl EphemeralRuntimeDriver {
                     None,
                     0,
                 ),
-                Some(InputTerminalOutcome::Abandoned { reason }) => (
-                    Some(mm_dsl::InputTerminalKind::Abandoned),
-                    None,
-                    None,
-                    Some(mm_dsl::InputAbandonReason::from(&reason)),
-                    u64::from(recovered_seed.attempt_count),
-                ),
+                Some(InputTerminalOutcome::Abandoned { reason }) => {
+                    let abandon_attempt_count = match &reason {
+                        InputAbandonReason::MaxAttemptsExhausted { attempts } => {
+                            if recovered_seed.attempt_count != *attempts {
+                                return Err(RuntimeDriverError::Internal(format!(
+                                    "store corruption: recovered input '{work_id}' max-attempts terminal reason carries {attempts} attempts but seed carries {}",
+                                    recovered_seed.attempt_count
+                                )));
+                            }
+                            u64::from(*attempts)
+                        }
+                        _ => u64::from(recovered_seed.attempt_count),
+                    };
+                    (
+                        Some(mm_dsl::InputTerminalKind::Abandoned),
+                        None,
+                        None,
+                        Some(mm_dsl::InputAbandonReason::from(&reason)),
+                        abandon_attempt_count,
+                    )
+                }
                 None => (None, None, None, None, 0),
             };
         let lane = matches!(lifecycle_state, InputLifecycleState::Queued)
@@ -2847,7 +2861,9 @@ mod tests {
         Input, InputDurability, InputHeader, InputOrigin, InputVisibility, OperationInput,
         PeerConvention, PeerInput, PromptInput,
     };
-    use crate::input_state::{InputLifecycleState, InputStateSeed, InputTerminalOutcome};
+    use crate::input_state::{
+        InputAbandonReason, InputLifecycleState, InputStateSeed, InputTerminalOutcome,
+    };
     use crate::meerkat_machine::dsl as mm_dsl;
     use crate::traits::{RuntimeDriver, RuntimeDriverError};
     use crate::{RuntimeState, WakeMode};
@@ -3295,6 +3311,30 @@ mod tests {
         assert!(
             matches!(&generated_err, RuntimeDriverError::Internal(message) if message.contains("RecoverInputLifecycle")),
             "unexpected generated recovery error: {generated_err:?}"
+        );
+    }
+
+    #[test]
+    fn recovered_max_attempts_terminal_reason_owns_attempt_payload() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("recover-max-attempts"));
+        let input_id = InputId::new();
+        let seed = InputStateSeed {
+            phase: InputLifecycleState::Abandoned,
+            last_run_id: None,
+            last_boundary_sequence: None,
+            admission_sequence: None,
+            terminal_outcome: Some(InputTerminalOutcome::Abandoned {
+                reason: InputAbandonReason::MaxAttemptsExhausted { attempts: 3 },
+            }),
+            attempt_count: 2,
+        };
+
+        let err = driver
+            .recover_terminal_input_lifecycle(&input_id, &seed, None)
+            .expect_err("max-attempts recovery must reject a split attempt witness");
+        assert!(
+            matches!(&err, RuntimeDriverError::Internal(message) if message.contains("max-attempts terminal reason")),
+            "unexpected recovery error: {err:?}"
         );
     }
 

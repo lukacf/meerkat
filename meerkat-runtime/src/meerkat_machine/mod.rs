@@ -1179,11 +1179,14 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
         runtime_id: &LogicalRuntimeId,
-    ) -> (
-        Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
-        meerkat_core::RuntimeEpochId,
-        Arc<meerkat_core::EpochCursorState>,
-    ) {
+    ) -> Result<
+        (
+            Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+            meerkat_core::RuntimeEpochId,
+            Arc<meerkat_core::EpochCursorState>,
+        ),
+        RuntimeDriverError,
+    > {
         if let Some(ref store) = self.store {
             match store.load_ops_lifecycle(runtime_id).await {
                 Ok(Some(snapshot)) => {
@@ -1195,7 +1198,22 @@ impl MeerkatMachine {
                     );
                     let recovered_ops_count = snapshot.completion_entries.len();
                     let registry =
-                        crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+                        match crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::from_recovered(
+                            snapshot,
+                        ) {
+                            Ok(registry) => registry,
+                            Err(err) => {
+                                tracing::error!(
+                                    %session_id,
+                                    %runtime_id,
+                                    error = %err,
+                                    "failed to recover ops lifecycle through generated authority"
+                                );
+                                return Err(RuntimeDriverError::Internal(format!(
+                                    "failed to recover ops lifecycle through generated authority: {err}"
+                                )));
+                            }
+                        };
                     tracing::info!(
                         %session_id,
                         %runtime_id,
@@ -1203,11 +1221,11 @@ impl MeerkatMachine {
                         recovered_ops = recovered_ops_count,
                         "ops lifecycle recovered from durable store (same epoch)"
                     );
-                    return (
+                    return Ok((
                         Arc::new(registry),
                         recovered_epoch,
                         Arc::new(recovered_cursors),
-                    );
+                    ));
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -1217,25 +1235,25 @@ impl MeerkatMachine {
                         error = %err,
                         "failed to load ops lifecycle; epoch rotated"
                     );
-                    return (
+                    return Ok((
                         Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
                         meerkat_core::RuntimeEpochId::new(),
                         Arc::new(meerkat_core::EpochCursorState::new()),
-                    );
+                    ));
                 }
             }
             tracing::debug!(%session_id, "no persisted ops lifecycle; fresh epoch");
-            (
+            Ok((
                 Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
                 meerkat_core::RuntimeEpochId::new(),
                 Arc::new(meerkat_core::EpochCursorState::new()),
-            )
+            ))
         } else {
-            (
+            Ok((
                 Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
                 meerkat_core::RuntimeEpochId::new(),
                 Arc::new(meerkat_core::EpochCursorState::new()),
-            )
+            ))
         }
     }
 

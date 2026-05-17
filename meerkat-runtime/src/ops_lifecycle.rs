@@ -1050,8 +1050,9 @@ impl RuntimeOpsLifecycleRegistry {
     ///
     /// Rebuilds DSL state (stripping non-terminal ops — only terminals
     /// survive recovery), creates fresh shell records from specs, and seeds
-    /// the feed buffer with persisted completion entries.
-    pub fn from_recovered(snapshot: PersistedOpsSnapshot) -> Self {
+    /// the feed buffer only with completion entries accepted by generated
+    /// recovery authority.
+    pub fn from_recovered(snapshot: PersistedOpsSnapshot) -> Result<Self, OpsLifecycleError> {
         let PersistedOpsSnapshot {
             authority_state,
             operation_specs,
@@ -1062,17 +1063,40 @@ impl RuntimeOpsLifecycleRegistry {
             authority_state.max_completed,
             authority_state.max_concurrent,
         );
-        let completion_sequences: HashMap<OperationId, CompletionSeq> = completion_entries
-            .iter()
-            .map(|entry| (entry.operation_id.clone(), entry.seq))
-            .collect();
+        let mut completion_sequences: HashMap<OperationId, CompletionSeq> = HashMap::new();
+        let mut seen_completion_seqs: HashSet<CompletionSeq> = HashSet::new();
+        for entry in &completion_entries {
+            if completion_sequences
+                .insert(entry.operation_id.clone(), entry.seq)
+                .is_some()
+            {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "persisted ops snapshot contains duplicate completion feed entry for {}",
+                    entry.operation_id
+                )));
+            }
+            if !seen_completion_seqs.insert(entry.seq) {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "persisted ops snapshot contains duplicate completion sequence {}",
+                    entry.seq
+                )));
+            }
+        }
 
         // Replay every persisted op through generated recovery authority.
         // The transition accepts only terminal records with outcome and
-        // completion-sequence witnesses; rejected rows are intentionally not
-        // re-materialized into canonical DSL maps.
+        // completion-sequence witnesses. Volatile non-terminal rows are not
+        // recovered; terminal/corrupt rows must fail closed instead of being
+        // projected into shell/public feed state.
         let mut retained_ids: HashSet<OperationId> = HashSet::new();
         for (op_id, op_state) in authority_state.operations {
+            let requires_terminal_recovery = op_state.status.is_terminal()
+                || op_state.terminal_outcome.is_some()
+                || completion_sequences.contains_key(&op_id);
+            if !requires_terminal_recovery {
+                continue;
+            }
+
             let (terminal_outcome, terminal_payload) = op_state
                 .terminal_outcome
                 .as_ref()
@@ -1089,24 +1113,77 @@ impl RuntimeOpsLifecycleRegistry {
                 terminal_payload,
                 completion_sequence: completion_sequences.get(&op_id).copied(),
             };
-            if shell.dsl_apply_raw(recovery).is_ok() {
-                retained_ids.insert(op_id);
+            shell.dsl_apply(recovery, "RecoverOpRecord")?;
+            let recovered_seq = shell.completion_sequence(&op_id).ok_or_else(|| {
+                OpsLifecycleError::Internal(format!(
+                    "generated op recovery accepted {op_id} without completion sequence"
+                ))
+            })?;
+            if completion_sequences.get(&op_id).copied() != Some(recovered_seq) {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated op recovery completion sequence mismatch for {op_id}"
+                )));
             }
+            retained_ids.insert(op_id);
         }
-        let _ = shell.dsl_apply_raw(mm_dsl::MeerkatMachineInput::RecoverOpsCompletionCursor {
-            next_completion_seq: authority_state.next_completion_seq,
-        });
+        shell.dsl_apply(
+            mm_dsl::MeerkatMachineInput::RecoverOpsCompletionCursor {
+                next_completion_seq: authority_state.next_completion_seq,
+            },
+            "RecoverOpsCompletionCursor",
+        )?;
 
-        // Rebuild completed_order keeping only retained ops.
-        shell.completed_order = authority_state
-            .completed_order
-            .into_iter()
-            .filter(|id| retained_ids.contains(id))
+        // Rebuild completed_order from generated completion-sequence truth,
+        // never from the persisted shell ordering mirror.
+        let mut recovered_completed: Vec<(CompletionSeq, OperationId)> = retained_ids
+            .iter()
+            .filter_map(|id| shell.completion_sequence(id).map(|seq| (seq, id.clone())))
             .collect();
+        recovered_completed.sort_by_key(|(seq, _)| *seq);
+        shell.completed_order = recovered_completed.into_iter().map(|(_, id)| id).collect();
 
-        // Seed the feed buffer from persisted entries.
-        for entry in &completion_entries {
-            shell.feed_buffer.push(entry.clone());
+        // Seed the feed buffer only for rows accepted by generated recovery,
+        // validating the public result facts against the recovered DSL maps.
+        let mut recovered_entries = completion_entries;
+        recovered_entries.sort_by_key(|entry| entry.seq);
+        for entry in recovered_entries {
+            let Some(recovered_seq) = shell.completion_sequence(&entry.operation_id) else {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "persisted completion feed entry for {} has no generated recovered operation",
+                    entry.operation_id
+                )));
+            };
+            if recovered_seq != entry.seq {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "persisted completion feed entry for {} has sequence {} but generated recovery owns {}",
+                    entry.operation_id, entry.seq, recovered_seq
+                )));
+            }
+            let Some(recovered_kind) = shell.kind(&entry.operation_id) else {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "persisted completion feed entry for {} has no generated recovered kind",
+                    entry.operation_id
+                )));
+            };
+            if recovered_kind != entry.kind {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "persisted completion feed entry for {} has kind {:?} but generated recovery owns {:?}",
+                    entry.operation_id, entry.kind, recovered_kind
+                )));
+            }
+            let Some(recovered_outcome) = shell.terminal_outcome(&entry.operation_id) else {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "persisted completion feed entry for {} has no generated recovered terminal outcome",
+                    entry.operation_id
+                )));
+            };
+            if recovered_outcome != entry.terminal_outcome {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "persisted completion feed entry for {} has terminal outcome {:?} but generated recovery owns {:?}",
+                    entry.operation_id, entry.terminal_outcome, recovered_outcome
+                )));
+            }
+            shell.feed_buffer.push(entry);
         }
 
         // Rebuild shell records from specs (fresh timestamps, no watchers)
@@ -1128,9 +1205,9 @@ impl RuntimeOpsLifecycleRegistry {
             }
         }
 
-        Self {
+        Ok(Self {
             state: RwLock::new(shell),
-        }
+        })
     }
 
     /// Capture a serializable snapshot of the current state for persistence.
@@ -2234,7 +2311,7 @@ mod tests {
         let cursor_state = meerkat_core::EpochCursorState::new();
         let snapshot = registry
             .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state);
-        let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+        let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
 
         assert!(recovered.snapshot(&completed_id).is_some());
         assert!(recovered.snapshot(&running_id).is_none());
@@ -2242,6 +2319,93 @@ mod tests {
         let collected = recovered.collect_completed().unwrap();
         assert_eq!(collected.len(), 1);
         assert_eq!(collected[0].0, completed_id);
+    }
+
+    #[test]
+    fn recovered_snapshot_rejects_completion_feed_without_generated_record() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let running_spec = background_spec("running");
+        let running_id = running_spec.id.clone();
+        registry.register_operation(running_spec.clone()).unwrap();
+        registry.provisioning_succeeded(&running_id).unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let mut snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state);
+        snapshot.completion_entries.push(CompletionEntry {
+            seq: 1,
+            operation_id: running_id.clone(),
+            kind: running_spec.kind,
+            display_name: running_spec.display_name,
+            terminal_outcome: OperationTerminalOutcome::Completed(OperationResult {
+                id: running_id,
+                content: "phantom".into(),
+                is_error: false,
+                duration_ms: 1,
+                tokens_used: 0,
+            }),
+            completed_at_ms: None,
+        });
+
+        let err = match RuntimeOpsLifecycleRegistry::from_recovered(snapshot) {
+            Ok(_) => panic!("public completion feed must not recover without generated op truth"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("RecoverOpRecord")),
+            "unexpected recovery error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn recovered_completed_order_uses_generated_completion_sequences() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let spec_a = background_spec("a");
+        let id_a = spec_a.id.clone();
+        registry.register_operation(spec_a).unwrap();
+        registry.provisioning_succeeded(&id_a).unwrap();
+        registry
+            .complete_operation(
+                &id_a,
+                OperationResult {
+                    id: id_a.clone(),
+                    content: "a".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        let spec_b = background_spec("b");
+        let id_b = spec_b.id.clone();
+        registry.register_operation(spec_b).unwrap();
+        registry.provisioning_succeeded(&id_b).unwrap();
+        registry
+            .complete_operation(
+                &id_b,
+                OperationResult {
+                    id: id_b.clone(),
+                    content: "b".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let mut snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state);
+        snapshot.authority_state.completed_order = VecDeque::from([id_b.clone(), id_a.clone()]);
+
+        let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
+        let collected = recovered.collect_completed().unwrap();
+
+        assert_eq!(collected[0].0, id_a);
+        assert_eq!(collected[1].0, id_b);
     }
 
     #[test]

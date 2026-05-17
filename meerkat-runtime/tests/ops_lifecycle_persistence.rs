@@ -107,7 +107,7 @@ fn recovered_registry_contains_terminal_completion_entries() {
     let snapshot = registry.capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state);
 
     // Recover
-    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
     let feed = recovered
         .completion_feed()
         .expect("recovered registry should have feed");
@@ -144,7 +144,7 @@ fn recovered_registry_strips_non_terminal_ops() {
         .unwrap();
 
     let snapshot = registry.capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state);
-    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
 
     // Terminal op present
     assert!(
@@ -181,7 +181,7 @@ fn recovered_feed_list_since_persisted_cursor_returns_unsurfaced() {
     let snapshot = registry.capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state);
 
     // Recover
-    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
     let feed = recovered
         .completion_feed()
         .expect("recovered registry should have feed");
@@ -215,7 +215,7 @@ fn recovered_registry_clears_wait_state() {
         .unwrap();
 
     let snapshot = registry.capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state);
-    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
 
     // Should be usable — no panic from stale wait state
     let new_spec = bg_spec("post-recovery-op");
@@ -251,7 +251,7 @@ fn recovered_feed_watermark_matches_persisted_sequence() {
     }
 
     let snapshot = registry.capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state);
-    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
     let feed = recovered.completion_feed().unwrap();
 
     // Watermark should be at least 3 (3 completions)
@@ -353,7 +353,7 @@ fn terminal_persistence_queue_captures_burst_without_loss_for_recovery() {
         "latest persisted snapshot must include the full terminal completion feed"
     );
 
-    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(latest_snapshot);
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(latest_snapshot).unwrap();
     let recovered_feed = recovered
         .completion_feed()
         .expect("recovered registry should expose completion feed");

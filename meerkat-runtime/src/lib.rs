@@ -104,8 +104,8 @@ pub fn session_runtime_bindings_have_machine_authority(
 // Re-exports for convenience
 pub use accept::{AcceptOutcome, RejectReason};
 pub use coalescing::{
-    AggregateDescriptor, CoalescingResult, SupersessionScope, apply_coalescing, apply_supersession,
-    check_supersession, create_aggregate_input, is_coalescing_eligible,
+    AggregateDescriptor, CoalescingResult, SupersessionScope, check_supersession,
+    create_aggregate_input, is_coalescing_eligible,
 };
 pub use completion::{CompletionHandle, CompletionOutcome};
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};

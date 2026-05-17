@@ -909,6 +909,68 @@ impl EphemeralRuntimeDriver {
         self.policy_snapshot.insert(work_id.clone(), policy.clone());
     }
 
+    fn sync_terminal_projection_from_machine(
+        &mut self,
+        input_id: &InputId,
+        from_phase: InputLifecycleState,
+        expected_phase: InputLifecycleState,
+        reason: &'static str,
+    ) -> Result<(), RuntimeDriverError> {
+        let phase = self.input_phase(input_id).ok_or_else(|| {
+            RuntimeDriverError::Internal(format!(
+                "machine terminal projection missing input phase for {input_id}"
+            ))
+        })?;
+        if phase != expected_phase {
+            return Err(RuntimeDriverError::Internal(format!(
+                "machine terminal projection for {input_id} was {phase:?}, expected {expected_phase:?}"
+            )));
+        }
+
+        let terminal_outcome = self.input_terminal_outcome(input_id).ok_or_else(|| {
+            RuntimeDriverError::Internal(format!(
+                "machine terminal projection missing terminal outcome for {input_id}"
+            ))
+        })?;
+        let terminal_matches_phase = matches!(
+            (&phase, &terminal_outcome),
+            (
+                InputLifecycleState::Superseded,
+                InputTerminalOutcome::Superseded { .. }
+            ) | (
+                InputLifecycleState::Coalesced,
+                InputTerminalOutcome::Coalesced { .. }
+            ) | (
+                InputLifecycleState::Consumed,
+                InputTerminalOutcome::Consumed
+            ) | (
+                InputLifecycleState::Abandoned,
+                InputTerminalOutcome::Abandoned { .. }
+            )
+        );
+        if !terminal_matches_phase {
+            return Err(RuntimeDriverError::Internal(format!(
+                "machine terminal projection for {input_id} had incoherent outcome {terminal_outcome:?}"
+            )));
+        }
+
+        let Some(state) = self.ledger.get_mut(input_id) else {
+            return Err(RuntimeDriverError::Internal(format!(
+                "machine terminal projection missing ledger row for {input_id}"
+            )));
+        };
+        let now = Utc::now();
+        state.history.push(InputStateHistoryEntry {
+            timestamp: now,
+            from: from_phase,
+            to: phase,
+            reason: Some(reason.into()),
+        });
+        state.terminal_outcome = Some(terminal_outcome);
+        state.updated_at = now;
+        Ok(())
+    }
+
     /// Apply the already-decided "persist and queue" admission plan.
     ///
     /// Mirrors the deleted `RuntimeIngressEffect::PersistAndQueue` +
@@ -997,15 +1059,14 @@ impl EphemeralRuntimeDriver {
                         },
                         "CoalesceInput",
                     )?;
+                    self.sync_terminal_projection_from_machine(
+                        existing_id,
+                        from_phase,
+                        InputLifecycleState::Coalesced,
+                        "Coalesce",
+                    )?;
                     let _ = self.queue.remove(existing_id);
                     let _ = self.steer_queue.remove(existing_id);
-                    if let Some(existing_state) = self.ledger.get_mut(existing_id) {
-                        crate::coalescing::apply_coalescing(
-                            existing_state,
-                            from_phase,
-                            input_id.clone(),
-                        );
-                    }
                 }
                 ExistingQueuedAdmissionAction::Supersede { existing_id } => {
                     let existing_key = Self::dsl_key(existing_id);
@@ -1020,15 +1081,14 @@ impl EphemeralRuntimeDriver {
                         },
                         "SupersedeInput",
                     )?;
+                    self.sync_terminal_projection_from_machine(
+                        existing_id,
+                        from_phase,
+                        InputLifecycleState::Superseded,
+                        "Supersede",
+                    )?;
                     let _ = self.queue.remove(existing_id);
                     let _ = self.steer_queue.remove(existing_id);
-                    if let Some(existing_state) = self.ledger.get_mut(existing_id) {
-                        crate::coalescing::apply_supersession(
-                            existing_state,
-                            from_phase,
-                            input_id.clone(),
-                        );
-                    }
                 }
             }
         }

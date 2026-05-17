@@ -172,6 +172,7 @@ remote_execution:
   default_pool_name: "\${POOL}"
   redis_target: "127.0.0.1:6379"
 
+debug_enable_anonymous_runner_recycling: true
 disable_telemetry: true
 CONFIG
 

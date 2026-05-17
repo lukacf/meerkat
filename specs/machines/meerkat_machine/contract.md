@@ -255,6 +255,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetireRequestedOp`(operation_id: String)
 - `RetireCompletedOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
 - `TerminateOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
+- `RecoverOpRecord`(operation_id: String, status: OperationStatus, kind: OperationKind, peer_ready: Bool, progress_count: u64, terminal_outcome: Option<OperationTerminalOutcomeKind>, terminal_payload: Option<String>, completion_sequence: Option<u64>)
+- `RecoverOpsCompletionCursor`(next_completion_seq: u64)
+- `EvictCompletedOp`(operation_id: String)
+- `CollectCompletedOp`(operation_id: String)
 - `RequestWaitAll`(wait_request_id: WaitRequestId, operation_ids: Set<String>, operation_id_tokens: Set<OperationId>)
 - `SatisfyWaitAll`(wait_request_id: WaitRequestId, operation_id_tokens: Set<OperationId>)
 - `CancelWaitAll`
@@ -4275,6 +4279,186 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
+### `RecoverOpRecordIdle`
+- From: `Idle`
+- On: `RecoverOpRecord`(operation_id, status, kind, peer_ready, progress_count, terminal_outcome, terminal_payload, completion_sequence)
+- Guards:
+  - `not_already_registered`
+  - `recovered_status_terminal`
+  - `terminal_outcome_present`
+  - `terminal_payload_present`
+  - `completion_sequence_present`
+  - `terminal_outcome_matches_status`
+- Emits: `RetainTerminalRecord`
+- To: `Idle`
+
+### `RecoverOpRecordAttached`
+- From: `Attached`
+- On: `RecoverOpRecord`(operation_id, status, kind, peer_ready, progress_count, terminal_outcome, terminal_payload, completion_sequence)
+- Guards:
+  - `not_already_registered`
+  - `recovered_status_terminal`
+  - `terminal_outcome_present`
+  - `terminal_payload_present`
+  - `completion_sequence_present`
+  - `terminal_outcome_matches_status`
+- Emits: `RetainTerminalRecord`
+- To: `Attached`
+
+### `RecoverOpRecordRunning`
+- From: `Running`
+- On: `RecoverOpRecord`(operation_id, status, kind, peer_ready, progress_count, terminal_outcome, terminal_payload, completion_sequence)
+- Guards:
+  - `not_already_registered`
+  - `recovered_status_terminal`
+  - `terminal_outcome_present`
+  - `terminal_payload_present`
+  - `completion_sequence_present`
+  - `terminal_outcome_matches_status`
+- Emits: `RetainTerminalRecord`
+- To: `Running`
+
+### `RecoverOpRecordRetired`
+- From: `Retired`
+- On: `RecoverOpRecord`(operation_id, status, kind, peer_ready, progress_count, terminal_outcome, terminal_payload, completion_sequence)
+- Guards:
+  - `not_already_registered`
+  - `recovered_status_terminal`
+  - `terminal_outcome_present`
+  - `terminal_payload_present`
+  - `completion_sequence_present`
+  - `terminal_outcome_matches_status`
+- Emits: `RetainTerminalRecord`
+- To: `Retired`
+
+### `RecoverOpRecordStopped`
+- From: `Stopped`
+- On: `RecoverOpRecord`(operation_id, status, kind, peer_ready, progress_count, terminal_outcome, terminal_payload, completion_sequence)
+- Guards:
+  - `not_already_registered`
+  - `recovered_status_terminal`
+  - `terminal_outcome_present`
+  - `terminal_payload_present`
+  - `completion_sequence_present`
+  - `terminal_outcome_matches_status`
+- Emits: `RetainTerminalRecord`
+- To: `Stopped`
+
+### `RecoverOpsCompletionCursorIdle`
+- From: `Idle`
+- On: `RecoverOpsCompletionCursor`(next_completion_seq)
+- To: `Idle`
+
+### `RecoverOpsCompletionCursorAttached`
+- From: `Attached`
+- On: `RecoverOpsCompletionCursor`(next_completion_seq)
+- To: `Attached`
+
+### `RecoverOpsCompletionCursorRunning`
+- From: `Running`
+- On: `RecoverOpsCompletionCursor`(next_completion_seq)
+- To: `Running`
+
+### `RecoverOpsCompletionCursorRetired`
+- From: `Retired`
+- On: `RecoverOpsCompletionCursor`(next_completion_seq)
+- To: `Retired`
+
+### `RecoverOpsCompletionCursorStopped`
+- From: `Stopped`
+- On: `RecoverOpsCompletionCursor`(next_completion_seq)
+- To: `Stopped`
+
+### `EvictCompletedOpIdle`
+- From: `Idle`
+- On: `EvictCompletedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `op_terminal`
+- Emits: `EvictCompletedRecord`
+- To: `Idle`
+
+### `EvictCompletedOpAttached`
+- From: `Attached`
+- On: `EvictCompletedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `op_terminal`
+- Emits: `EvictCompletedRecord`
+- To: `Attached`
+
+### `EvictCompletedOpRunning`
+- From: `Running`
+- On: `EvictCompletedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `op_terminal`
+- Emits: `EvictCompletedRecord`
+- To: `Running`
+
+### `EvictCompletedOpRetired`
+- From: `Retired`
+- On: `EvictCompletedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `op_terminal`
+- Emits: `EvictCompletedRecord`
+- To: `Retired`
+
+### `EvictCompletedOpStopped`
+- From: `Stopped`
+- On: `EvictCompletedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `op_terminal`
+- Emits: `EvictCompletedRecord`
+- To: `Stopped`
+
+### `CollectCompletedOpIdle`
+- From: `Idle`
+- On: `CollectCompletedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `op_terminal`
+- Emits: `CollectCompletedResult`
+- To: `Idle`
+
+### `CollectCompletedOpAttached`
+- From: `Attached`
+- On: `CollectCompletedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `op_terminal`
+- Emits: `CollectCompletedResult`
+- To: `Attached`
+
+### `CollectCompletedOpRunning`
+- From: `Running`
+- On: `CollectCompletedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `op_terminal`
+- Emits: `CollectCompletedResult`
+- To: `Running`
+
+### `CollectCompletedOpRetired`
+- From: `Retired`
+- On: `CollectCompletedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `op_terminal`
+- Emits: `CollectCompletedResult`
+- To: `Retired`
+
+### `CollectCompletedOpStopped`
+- From: `Stopped`
+- On: `CollectCompletedOp`(operation_id)
+- Guards:
+  - `op_registered`
+  - `op_terminal`
+- Emits: `CollectCompletedResult`
+- To: `Stopped`
+
 ### `RequestWaitAllIdle`
 - From: `Idle`
 - On: `RequestWaitAll`(wait_request_id, operation_ids, operation_id_tokens)
@@ -5996,7 +6180,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, progress reported op, terminate op, notify op watcher, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
+- `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, progress reported op, terminate op, notify op watcher, recover op record, recover ops completion cursor, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
 - `meerkat/src/meerkat_machine.rs` — MeerkatMachine snapshot/diagnostic facade
 - `meerkat-comms/src/peer_directory_reachability_authority.rs` — peer directory reachability state now owned as a MeerkatMachine-internal region
 
@@ -6008,7 +6192,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `peer_reachability_probe` — resolved peer directory updates and send outcomes mutate Meerkat-owned peer reachability state
 - `session_registration_and_binding` — initialize, recover initializing, register, unregister, reconfigure session identity, prepare bindings, ensure executor, attach session ingress, detach ingress, drain exit, and runtime bound/retired/destroyed notices
 - `input_admission_and_queueing` — ingest and publish event, accept input with or without completion, classify external envelope or plain event, prepare run work, primitive applied conversation or immediate, enter extraction, extraction validation passed, recoverable or fatal failure, budget exhausted, steer accepted, increment attempt count, consume on accept, enqueue classified entry, resolve admission, submit admitted ingress effect, post admission signal, and input or ingress notices
-- `ops_completion_and_waiters` — abort, wait, abort all, request cancellation at boundary, completion produced/resolved, wait all satisfied, collect completed result, submit op event, notify op watcher, reject surface call, retain or evict completed terminal records
+- `ops_completion_and_waiters` — abort, wait, abort all, request cancellation at boundary, completion produced/resolved, wait all satisfied, collect completed result, recover op record, recover ops completion cursor, evict completed op, collect completed op, submit op event, notify op watcher, reject surface call, retain or evict completed terminal records
 - `realtime_connection_projection` — project realtime intent, begin replace detach binding, require reattach, publish signal, reconnect progress, MCP server connect/connected/failed/disconnected/reload, advance session context, interaction stream reserved/attached/completed/expired/closed early, freshness, policy, and binding rotation
 - `product_turn_streaming` — product turn in flight, committed, output started, interrupted, terminal, realtime projection advance/refreshed/reset, client input submitted, mid turn activity, and turn terminated classification
 - `recycle_and_compaction` — recycle from idle or retired, initiate recycle, check compaction, and re-enter ready runtime ownership without preserving stale completed records

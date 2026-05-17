@@ -337,8 +337,6 @@ struct ShellState {
     /// are DSL-owned. This field is pure transport mechanics — the identity
     /// the oneshot sender is tagged with so `Drop` can correlate cancellation.
     wait_request_id: Option<WaitRequestId>,
-    /// Monotonic sequence counter for completion feed entries.
-    next_completion_seq: CompletionSeq,
     /// Shared feed buffer for completion events.
     feed_buffer: Arc<FeedBuffer>,
     /// Persistence channel for durable snapshot writes (set via `set_persistence_channel`).
@@ -386,7 +384,6 @@ impl ShellState {
             max_completed,
             max_concurrent,
             wait_request_id: None,
-            next_completion_seq: 0,
             // Feed buffer is larger than max_completed to absorb bursts.
             // Entries are only evicted by buffer capacity, not by consumer cursor,
             // so the buffer must be large enough that consumers drain before
@@ -590,10 +587,10 @@ impl ShellState {
             .collect()
     }
 
-    /// Assign and return the next completion sequence number.
-    fn next_seq(&mut self) -> CompletionSeq {
-        self.next_completion_seq = self.next_completion_seq.saturating_add(1);
-        self.next_completion_seq
+    /// Read the DSL-minted completion sequence for a terminal operation.
+    fn completion_sequence(&self, id: &OperationId) -> Option<CompletionSeq> {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        self.dsl.0.state.op_completion_seq.get(&id_key).copied()
     }
 
     /// Build a snapshot from DSL state + shell record.
@@ -637,10 +634,10 @@ impl ShellState {
     /// Emit shell-side mechanics for a terminal transition: notify watchers,
     /// push CompletionEntry, retain in FIFO, evict as needed. Called AFTER the
     /// DSL transition has already persisted the terminal status + outcome.
-    fn finalize_terminal(&mut self, id: &OperationId) {
+    fn finalize_terminal(&mut self, id: &OperationId) -> Result<(), OpsLifecycleError> {
         let outcome = match self.terminal_outcome(id) {
             Some(o) => o,
-            None => return,
+            None => return Ok(()),
         };
         let kind = self.kind(id);
 
@@ -651,7 +648,11 @@ impl ShellState {
         }
 
         // Push completion feed entry.
-        let seq = self.next_seq();
+        let seq = self.completion_sequence(id).ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated op terminal transition did not mint completion sequence for {id}"
+            ))
+        })?;
         let display_name = self
             .records
             .get(id)
@@ -675,20 +676,19 @@ impl ShellState {
         self.completed_order.push_back(id.clone());
         while self.completed_order.len() > self.max_completed {
             if let Some(evicted) = self.completed_order.pop_front() {
-                let evicted_key = mm_dsl::OperationId::from_domain(&evicted).0;
-                self.dsl.0.state.op_statuses.remove(&evicted_key);
-                self.dsl.0.state.op_kinds.remove(&evicted_key);
-                self.dsl.0.state.op_peer_ready.remove(&evicted_key);
-                self.dsl.0.state.op_progress_counts.remove(&evicted_key);
-                self.dsl.0.state.op_terminal_outcomes.remove(&evicted_key);
-                self.dsl.0.state.op_terminal_payload.remove(&evicted_key);
-                self.dsl.0.state.op_completion_seq.remove(&evicted_key);
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::EvictCompletedOp {
+                        operation_id: mm_dsl::OperationId::from_domain(&evicted).0,
+                    },
+                    "EvictCompletedOp",
+                )?;
                 self.records.remove(&evicted);
             }
         }
 
         // Satisfy a pending wait request if all its ops are now terminal.
         self.maybe_satisfy_wait();
+        Ok(())
     }
 
     /// Read barrier membership from DSL state (sole owner).
@@ -920,7 +920,7 @@ impl ShellState {
             active_count: self.active_count(),
             wait_request_id: self.wait_request_id.clone(),
             wait_operation_ids: self.wait_operation_ids(),
-            next_completion_seq: self.next_completion_seq,
+            next_completion_seq: self.dsl.0.state.next_completion_seq,
         };
 
         PersistedOpsSnapshot {
@@ -1052,80 +1052,66 @@ impl RuntimeOpsLifecycleRegistry {
     /// survive recovery), creates fresh shell records from specs, and seeds
     /// the feed buffer with persisted completion entries.
     pub fn from_recovered(snapshot: PersistedOpsSnapshot) -> Self {
+        let PersistedOpsSnapshot {
+            authority_state,
+            operation_specs,
+            completion_entries,
+            ..
+        } = snapshot;
         let mut shell = ShellState::new(
-            snapshot.authority_state.max_completed,
-            snapshot.authority_state.max_concurrent,
+            authority_state.max_completed,
+            authority_state.max_concurrent,
         );
+        let completion_sequences: HashMap<OperationId, CompletionSeq> = completion_entries
+            .iter()
+            .map(|entry| (entry.operation_id.clone(), entry.seq))
+            .collect();
 
-        // Only retain terminal operations in the DSL state.
+        // Replay every persisted op through generated recovery authority.
+        // The transition accepts only terminal records with outcome and
+        // completion-sequence witnesses; rejected rows are intentionally not
+        // re-materialized into canonical DSL maps.
         let mut retained_ids: HashSet<OperationId> = HashSet::new();
-        for (op_id, op_state) in snapshot.authority_state.operations {
-            if !op_state.status.is_terminal() {
-                continue;
+        for (op_id, op_state) in authority_state.operations {
+            let (terminal_outcome, terminal_payload) = op_state
+                .terminal_outcome
+                .as_ref()
+                .map(ShellState::split_outcome)
+                .map(|(kind, payload)| (Some(kind), Some(payload)))
+                .unwrap_or((None, None));
+            let recovery = mm_dsl::MeerkatMachineInput::RecoverOpRecord {
+                operation_id: mm_dsl::OperationId::from_domain(&op_id).0,
+                status: mm_dsl::OperationStatus::from(op_state.status),
+                kind: mm_dsl::OperationKind::from(op_state.kind),
+                peer_ready: op_state.peer_ready,
+                progress_count: u64::from(op_state.progress_count),
+                terminal_outcome,
+                terminal_payload,
+                completion_sequence: completion_sequences.get(&op_id).copied(),
+            };
+            if shell.dsl_apply_raw(recovery).is_ok() {
+                retained_ids.insert(op_id);
             }
-            let id_key = mm_dsl::OperationId::from_domain(&op_id).0;
-            shell.dsl.0.state.op_statuses.insert(
-                id_key.clone(),
-                mm_dsl::OperationStatus::from(op_state.status),
-            );
-            shell
-                .dsl
-                .0
-                .state
-                .op_kinds
-                .insert(id_key.clone(), mm_dsl::OperationKind::from(op_state.kind));
-            shell
-                .dsl
-                .0
-                .state
-                .op_peer_ready
-                .insert(id_key.clone(), op_state.peer_ready);
-            shell
-                .dsl
-                .0
-                .state
-                .op_progress_counts
-                .insert(id_key.clone(), op_state.progress_count as u64);
-            if let Some(outcome) = op_state.terminal_outcome.as_ref() {
-                let (kind, payload) = ShellState::split_outcome(outcome);
-                shell
-                    .dsl
-                    .0
-                    .state
-                    .op_terminal_outcomes
-                    .insert(id_key.clone(), kind);
-                shell
-                    .dsl
-                    .0
-                    .state
-                    .op_terminal_payload
-                    .insert(id_key.clone(), payload);
-            }
-            retained_ids.insert(op_id);
         }
-        // active_count is 0 — all retained ops are terminal.
-        shell.dsl.0.state.active_op_count = 0;
+        let _ = shell.dsl_apply_raw(mm_dsl::MeerkatMachineInput::RecoverOpsCompletionCursor {
+            next_completion_seq: authority_state.next_completion_seq,
+        });
 
         // Rebuild completed_order keeping only retained ops.
-        shell.completed_order = snapshot
-            .authority_state
+        shell.completed_order = authority_state
             .completed_order
             .into_iter()
             .filter(|id| retained_ids.contains(id))
             .collect();
 
-        // Re-seed completion sequence counter so new terminals keep
-        // monotonic order relative to persisted entries.
-        shell.next_completion_seq = snapshot.authority_state.next_completion_seq;
-
         // Seed the feed buffer from persisted entries.
-        for entry in &snapshot.completion_entries {
+        for entry in &completion_entries {
             shell.feed_buffer.push(entry.clone());
         }
 
         // Rebuild shell records from specs (fresh timestamps, no watchers)
         // — only for operations still retained in the DSL state.
-        for (op_id, spec) in snapshot.operation_specs {
+        for (op_id, spec) in operation_specs {
             if retained_ids.contains(&op_id) {
                 shell.records.insert(
                     op_id,
@@ -1469,7 +1455,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             return Err(classify_op_rejection(err, id, status, "fail_operation"));
         }
 
-        state.finalize_terminal(id);
+        state.finalize_terminal(id)?;
         state.maybe_persist()?;
         Ok(())
     }
@@ -1565,7 +1551,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             return Err(classify_op_rejection(err, id, status, "complete_operation"));
         }
 
-        state.finalize_terminal(id);
+        state.finalize_terminal(id)?;
         state.maybe_persist()?;
         Ok(())
     }
@@ -1588,7 +1574,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             return Err(classify_op_rejection(err, id, status, "fail_operation"));
         }
 
-        state.finalize_terminal(id);
+        state.finalize_terminal(id)?;
         state.maybe_persist()?;
         Ok(())
     }
@@ -1615,7 +1601,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             return Err(classify_op_rejection(err, id, status, "abort_provisioning"));
         }
 
-        state.finalize_terminal(id);
+        state.finalize_terminal(id)?;
         state.maybe_persist()?;
         Ok(())
     }
@@ -1642,7 +1628,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             return Err(classify_op_rejection(err, id, status, "cancel_operation"));
         }
 
-        state.finalize_terminal(id);
+        state.finalize_terminal(id)?;
         state.maybe_persist()?;
         Ok(())
     }
@@ -1680,7 +1666,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             return Err(classify_op_rejection(err, id, status, "mark_retired"));
         }
 
-        state.finalize_terminal(id);
+        state.finalize_terminal(id)?;
         state.maybe_persist()?;
         Ok(())
     }
@@ -1728,7 +1714,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                 ));
             }
 
-            state.finalize_terminal(op_id);
+            state.finalize_terminal(op_id)?;
         }
 
         if !to_terminate.is_empty() {
@@ -1742,19 +1728,17 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<Vec<(OperationId, OperationTerminalOutcome)>, OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let ids: Vec<OperationId> = state.completed_order.drain(..).collect();
+        let ids: Vec<OperationId> = state.completed_order.iter().cloned().collect();
         let mut collected = Vec::with_capacity(ids.len());
         for id in ids {
             let outcome = state.terminal_outcome(&id);
-            // Remove from DSL state and shell record.
-            let id_key = mm_dsl::OperationId::from_domain(&id).0;
-            state.dsl.0.state.op_statuses.remove(&id_key);
-            state.dsl.0.state.op_kinds.remove(&id_key);
-            state.dsl.0.state.op_peer_ready.remove(&id_key);
-            state.dsl.0.state.op_progress_counts.remove(&id_key);
-            state.dsl.0.state.op_terminal_outcomes.remove(&id_key);
-            state.dsl.0.state.op_terminal_payload.remove(&id_key);
-            state.dsl.0.state.op_completion_seq.remove(&id_key);
+            state.dsl_apply(
+                mm_dsl::MeerkatMachineInput::CollectCompletedOp {
+                    operation_id: mm_dsl::OperationId::from_domain(&id).0,
+                },
+                "CollectCompletedOp",
+            )?;
+            state.completed_order.retain(|queued| queued != &id);
             state.records.remove(&id);
             if let Some(outcome) = outcome {
                 collected.push((id, outcome));
@@ -2219,6 +2203,45 @@ mod tests {
         assert!(registry.snapshot(&ids[2]).is_some());
         assert!(registry.snapshot(&ids[3]).is_some());
         assert!(registry.snapshot(&ids[4]).is_some());
+    }
+
+    #[test]
+    fn recovered_snapshot_retains_only_machine_accepted_terminal_records() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let completed_spec = background_spec("completed");
+        let completed_id = completed_spec.id.clone();
+        registry.register_operation(completed_spec).unwrap();
+        registry.provisioning_succeeded(&completed_id).unwrap();
+        registry
+            .complete_operation(
+                &completed_id,
+                OperationResult {
+                    id: completed_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        let running_spec = background_spec("running");
+        let running_id = running_spec.id.clone();
+        registry.register_operation(running_spec).unwrap();
+        registry.provisioning_succeeded(&running_id).unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state);
+        let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+
+        assert!(recovered.snapshot(&completed_id).is_some());
+        assert!(recovered.snapshot(&running_id).is_none());
+
+        let collected = recovered.collect_completed().unwrap();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].0, completed_id);
     }
 
     #[test]

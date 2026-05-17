@@ -1874,6 +1874,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             RetireRequestedOp { operation_id: String },
             RetireCompletedOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
             TerminateOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
+            RecoverOpRecord {
+                operation_id: String,
+                status: Enum<OperationStatus>,
+                kind: Enum<OperationKind>,
+                peer_ready: bool,
+                progress_count: u64,
+                terminal_outcome: Option<Enum<OperationTerminalOutcomeKind>>,
+                terminal_payload: Option<String>,
+                completion_sequence: Option<u64>,
+            },
+            RecoverOpsCompletionCursor { next_completion_seq: u64 },
+            EvictCompletedOp { operation_id: String },
+            CollectCompletedOp { operation_id: String },
             RequestWaitAll { wait_request_id: WaitRequestId, operation_ids: Set<String>, operation_id_tokens: Set<OperationId> },
             SatisfyWaitAll { wait_request_id: WaitRequestId, operation_id_tokens: Set<OperationId> },
             CancelWaitAll,
@@ -7533,8 +7546,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
-                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
                 self.next_completion_seq += 1;
+                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
@@ -7560,6 +7573,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
+                self.next_completion_seq += 1;
+                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
@@ -7581,6 +7596,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
+                self.next_completion_seq += 1;
+                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
@@ -7603,6 +7620,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
+                self.next_completion_seq += 1;
+                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
@@ -7684,6 +7703,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
+                self.next_completion_seq += 1;
+                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
@@ -7710,10 +7731,134 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
+                self.next_completion_seq += 1;
+                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
             emit NotifyOpWatcher { operation_id: operation_id }
+        }
+
+        // RecoverOpRecord: restore a persisted terminal async operation via
+        // generated authority. Non-terminal operations and terminal rows
+        // missing outcome/sequence witnesses are rejected, so shell recovery
+        // cannot reconstruct canonical op truth by writing maps directly.
+        transition RecoverOpRecord {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecoverOpRecord {
+                operation_id,
+                status,
+                kind,
+                peer_ready,
+                progress_count,
+                terminal_outcome,
+                terminal_payload,
+                completion_sequence
+            }
+            guard "not_already_registered" { !self.op_statuses.contains_key(operation_id) }
+            guard "recovered_status_terminal" {
+                status == OperationStatus::Completed
+                || status == OperationStatus::Failed
+                || status == OperationStatus::Aborted
+                || status == OperationStatus::Cancelled
+                || status == OperationStatus::Retired
+                || status == OperationStatus::Terminated
+            }
+            guard "terminal_outcome_present" { terminal_outcome != None }
+            guard "terminal_payload_present" { terminal_payload != None }
+            guard "completion_sequence_present" { completion_sequence != None }
+            guard "terminal_outcome_matches_status" {
+                (status == OperationStatus::Completed
+                    && terminal_outcome == Some(OperationTerminalOutcomeKind::Completed))
+                || (status == OperationStatus::Failed
+                    && terminal_outcome == Some(OperationTerminalOutcomeKind::Failed))
+                || (status == OperationStatus::Aborted
+                    && terminal_outcome == Some(OperationTerminalOutcomeKind::Aborted))
+                || (status == OperationStatus::Cancelled
+                    && terminal_outcome == Some(OperationTerminalOutcomeKind::Cancelled))
+                || (status == OperationStatus::Retired
+                    && terminal_outcome == Some(OperationTerminalOutcomeKind::Retired))
+                || (status == OperationStatus::Terminated
+                    && terminal_outcome == Some(OperationTerminalOutcomeKind::Terminated))
+            }
+            update {
+                self.op_statuses.insert(operation_id, status);
+                self.op_kinds.insert(operation_id, kind);
+                self.op_peer_ready.insert(operation_id, peer_ready);
+                self.op_progress_counts.insert(operation_id, progress_count);
+                self.op_terminal_outcomes.insert(operation_id, terminal_outcome.get("value"));
+                self.op_terminal_payload.insert(operation_id, terminal_payload.get("value"));
+                self.op_completion_seq.insert(operation_id, completion_sequence.get("value"));
+                if self.next_completion_seq < completion_sequence.get("value") {
+                    self.next_completion_seq = completion_sequence.get("value");
+                }
+            }
+            to Idle
+            emit RetainTerminalRecord { operation_id: operation_id }
+        }
+
+        // RecoverOpsCompletionCursor: restore the persisted completion-feed
+        // cursor through generated authority. Monotonic guard shape prevents
+        // recovery records from being downgraded by a stale cursor witness.
+        transition RecoverOpsCompletionCursor {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecoverOpsCompletionCursor { next_completion_seq }
+            update {
+                if self.next_completion_seq < next_completion_seq {
+                    self.next_completion_seq = next_completion_seq;
+                }
+            }
+            to Idle
+        }
+
+        transition EvictCompletedOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input EvictCompletedOp { operation_id }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "op_terminal" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Completed)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Failed)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Aborted)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Cancelled)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retired)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Terminated)
+            }
+            update {
+                self.op_statuses.remove(operation_id);
+                self.op_kinds.remove(operation_id);
+                self.op_peer_ready.remove(operation_id);
+                self.op_progress_counts.remove(operation_id);
+                self.op_terminal_outcomes.remove(operation_id);
+                self.op_terminal_payload.remove(operation_id);
+                self.op_completion_seq.remove(operation_id);
+            }
+            to Idle
+            emit EvictCompletedRecord { operation_id: operation_id }
+        }
+
+        transition CollectCompletedOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CollectCompletedOp { operation_id }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "op_terminal" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Completed)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Failed)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Aborted)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Cancelled)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retired)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Terminated)
+            }
+            update {
+                self.op_statuses.remove(operation_id);
+                self.op_kinds.remove(operation_id);
+                self.op_peer_ready.remove(operation_id);
+                self.op_progress_counts.remove(operation_id);
+                self.op_terminal_outcomes.remove(operation_id);
+                self.op_terminal_payload.remove(operation_id);
+                self.op_completion_seq.remove(operation_id);
+            }
+            to Idle
+            emit CollectCompletedResult
         }
 
         // RequestWaitAll: activate wait-all barrier with explicit membership.

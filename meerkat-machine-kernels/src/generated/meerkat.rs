@@ -4728,6 +4728,29 @@ pub mod inputs {
         pub payload: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverOpRecord {
+        pub operation_id: String,
+        pub status: OperationStatus,
+        pub kind: OperationKind,
+        pub peer_ready: bool,
+        pub progress_count: u64,
+        pub terminal_outcome: Option<OperationTerminalOutcomeKind>,
+        pub terminal_payload: Option<String>,
+        pub completion_sequence: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverOpsCompletionCursor {
+        pub next_completion_seq: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EvictCompletedOp {
+        pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CollectCompletedOp {
+        pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestWaitAll {
         pub wait_request_id: WaitRequestId,
         pub operation_ids: std::collections::BTreeSet<String>,
@@ -5093,6 +5116,10 @@ pub enum Input {
     RetireRequestedOp(inputs::RetireRequestedOp),
     RetireCompletedOp(inputs::RetireCompletedOp),
     TerminateOp(inputs::TerminateOp),
+    RecoverOpRecord(inputs::RecoverOpRecord),
+    RecoverOpsCompletionCursor(inputs::RecoverOpsCompletionCursor),
+    EvictCompletedOp(inputs::EvictCompletedOp),
+    CollectCompletedOp(inputs::CollectCompletedOp),
     RequestWaitAll(inputs::RequestWaitAll),
     SatisfyWaitAll(inputs::SatisfyWaitAll),
     CancelWaitAll(inputs::CancelWaitAll),
@@ -5266,6 +5293,10 @@ impl Input {
             Self::RetireRequestedOp(_) => InputKind::RetireRequestedOp,
             Self::RetireCompletedOp(_) => InputKind::RetireCompletedOp,
             Self::TerminateOp(_) => InputKind::TerminateOp,
+            Self::RecoverOpRecord(_) => InputKind::RecoverOpRecord,
+            Self::RecoverOpsCompletionCursor(_) => InputKind::RecoverOpsCompletionCursor,
+            Self::EvictCompletedOp(_) => InputKind::EvictCompletedOp,
+            Self::CollectCompletedOp(_) => InputKind::CollectCompletedOp,
             Self::RequestWaitAll(_) => InputKind::RequestWaitAll,
             Self::SatisfyWaitAll(_) => InputKind::SatisfyWaitAll,
             Self::CancelWaitAll(_) => InputKind::CancelWaitAll,
@@ -5440,6 +5471,10 @@ pub enum InputKind {
     RetireRequestedOp,
     RetireCompletedOp,
     TerminateOp,
+    RecoverOpRecord,
+    RecoverOpsCompletionCursor,
+    EvictCompletedOp,
+    CollectCompletedOp,
     RequestWaitAll,
     SatisfyWaitAll,
     CancelWaitAll,
@@ -6453,6 +6488,26 @@ pub enum TransitionId {
     TerminateOpRunning,
     TerminateOpRetired,
     TerminateOpStopped,
+    RecoverOpRecordIdle,
+    RecoverOpRecordAttached,
+    RecoverOpRecordRunning,
+    RecoverOpRecordRetired,
+    RecoverOpRecordStopped,
+    RecoverOpsCompletionCursorIdle,
+    RecoverOpsCompletionCursorAttached,
+    RecoverOpsCompletionCursorRunning,
+    RecoverOpsCompletionCursorRetired,
+    RecoverOpsCompletionCursorStopped,
+    EvictCompletedOpIdle,
+    EvictCompletedOpAttached,
+    EvictCompletedOpRunning,
+    EvictCompletedOpRetired,
+    EvictCompletedOpStopped,
+    CollectCompletedOpIdle,
+    CollectCompletedOpAttached,
+    CollectCompletedOpRunning,
+    CollectCompletedOpRetired,
+    CollectCompletedOpStopped,
     RequestWaitAllIdle,
     RequestWaitAllAttached,
     RequestWaitAllRunning,

@@ -40,7 +40,7 @@ impl IngressView<'_> {
         self.driver.steer_lane()
     }
 
-    pub(crate) fn admission_order(&self) -> &[InputId] {
+    pub(crate) fn admission_order(&self) -> Vec<InputId> {
         self.driver.admission_order()
     }
 
@@ -3242,6 +3242,11 @@ mod recovery_tests {
             driver.queue_lane(),
             vec![first_id.clone(), second_id.clone()],
             "queue projection must follow the machine-owned recovered admission sequence, not store iteration order"
+        );
+        assert_eq!(
+            driver.admission_order(),
+            vec![first_id.clone(), second_id.clone()],
+            "public admission projection must follow the machine-owned recovered admission sequence, not store iteration order"
         );
         assert_eq!(driver.input_admission_sequence(&first_id), Some(10));
         assert_eq!(driver.input_admission_sequence(&second_id), Some(20));

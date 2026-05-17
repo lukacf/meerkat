@@ -783,8 +783,7 @@ impl MeerkatMachine {
 
         let admission_order: Vec<MeerkatAdmittedInputSnapshot> = ingress
             .admission_order()
-            .iter()
-            .cloned()
+            .into_iter()
             .map(|input_id| MeerkatAdmittedInputSnapshot {
                 content_shape: ingress.content_shape(&input_id),
                 request_id: ingress.request_id(&input_id),

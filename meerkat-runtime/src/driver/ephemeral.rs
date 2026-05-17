@@ -509,9 +509,24 @@ impl EphemeralRuntimeDriver {
 
     // ---- Admission metadata accessors (read-only) ----
 
-    /// The admission order (insertion order of persisted-queue admissions).
-    pub fn admission_order(&self) -> &[InputId] {
-        &self.admission_order
+    /// The admission order as minted by the DSL's `input_admission_seq`.
+    pub fn admission_order(&self) -> Vec<InputId> {
+        let mut candidates: Vec<(u64, usize, InputId)> = self.with_dsl_state(|state| {
+            self.admission_order
+                .iter()
+                .enumerate()
+                .map(|(index, id)| {
+                    let seq = state
+                        .input_admission_seq
+                        .get(&Self::dsl_key(id))
+                        .copied()
+                        .unwrap_or(u64::MAX);
+                    (seq, index, id.clone())
+                })
+                .collect()
+        });
+        candidates.sort_by_key(|(seq, index, _)| (*seq, *index));
+        candidates.into_iter().map(|(_, _, id)| id).collect()
     }
 
     /// Policy snapshot captured at admission time for a specific input.

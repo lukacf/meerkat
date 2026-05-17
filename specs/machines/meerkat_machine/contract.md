@@ -89,6 +89,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `input_lane`: `Map<String, InputLane>`
 - `admission_authorized_lanes`: `Map<String, InputLane>`
 - `admission_authorized_plans`: `Map<String, AdmissionPlanKind>`
+- `admission_authorized_existing_actions`: `Map<String, AdmissionExistingQueuedActionKind>`
+- `admission_authorized_existing_targets`: `Map<String, String>`
 - `recovered_admitted_inputs`: `Set<String>`
 - `recovered_admitted_lanes`: `Map<String, InputLane>`
 - `op_statuses`: `Map<String, OperationStatus>`
@@ -191,7 +193,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `AcceptWithoutWake`(input_id: InputId)
-- `ResolveAdmissionPlan`(input_id: String, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, silent_intent_match: Bool, existing_superseded: Bool, runtime_running: Bool, without_wake: Bool)
+- `ResolveAdmissionPlan`(input_id: String, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, silent_intent_match: Bool, existing_superseded_input_id: Option<String>, runtime_running: Bool, without_wake: Bool)
 - `Prepare`(session_id: SessionId, run_id: RunId)
 - `Commit`(input_id: InputId, run_id: RunId)
 - `Fail`(run_id: RunId)
@@ -369,7 +371,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ApplyControlPlaneCommand`
 - `InitiateRecycle`
 - `IngressAccepted`
-- `AdmissionResolved`(input_id: String, policy_version: u64, policy_apply_mode: AdmissionPolicyApplyMode, policy_wake_mode: AdmissionPolicyWakeMode, policy_queue_mode: AdmissionPolicyQueueMode, policy_consume_point: AdmissionPolicyConsumePoint, policy_drain_policy: AdmissionPolicyDrainPolicy, policy_routing_disposition: AdmissionRoutingDisposition, lane: InputLane, plan: AdmissionPlanKind, queue_action: AdmissionQueueActionKind, existing_action: AdmissionExistingQueuedActionKind, runtime_boundary: AdmissionRunApplyBoundary, runtime_execution_kind: AdmissionRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<AdmissionPeerResponseTerminalApplyIntent>, record_transcript: Bool, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
+- `AdmissionResolved`(input_id: String, policy_version: u64, policy_apply_mode: AdmissionPolicyApplyMode, policy_wake_mode: AdmissionPolicyWakeMode, policy_queue_mode: AdmissionPolicyQueueMode, policy_consume_point: AdmissionPolicyConsumePoint, policy_drain_policy: AdmissionPolicyDrainPolicy, policy_routing_disposition: AdmissionRoutingDisposition, lane: InputLane, plan: AdmissionPlanKind, queue_action: AdmissionQueueActionKind, existing_action: AdmissionExistingQueuedActionKind, existing_input_id: Option<String>, requires_active_pre_admission: Bool, runtime_boundary: AdmissionRunApplyBoundary, runtime_execution_kind: AdmissionRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<AdmissionPeerResponseTerminalApplyIntent>, record_transcript: Bool, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `PostAdmissionSignal`(signal: PostAdmissionSignalKind)
 - `ReadyForRun`
 - `InputLifecycleNotice`
@@ -1803,7 +1805,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedTerminalQueueIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `terminal_queue_override`
@@ -1812,7 +1814,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedTerminalQueueAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `terminal_queue_override`
@@ -1821,7 +1823,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedTerminalQueueRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `terminal_queue_override`
@@ -1830,7 +1832,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedTerminalSteerIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `terminal_steer_override`
@@ -1839,7 +1841,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedTerminalSteerAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `terminal_steer_override`
@@ -1848,7 +1850,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedTerminalSteerRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `terminal_steer_override`
@@ -1857,7 +1859,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedQueueIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `queue_override`
@@ -1866,7 +1868,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedQueueAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `queue_override`
@@ -1875,7 +1877,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedQueueRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `queue_override`
@@ -1884,7 +1886,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedSteerIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `steer_override`
@@ -1893,7 +1895,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedSteerAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `steer_override`
@@ -1902,7 +1904,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanRequestedSteerRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `steer_override`
@@ -1911,7 +1913,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultQueueKindIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `default_queue_kind`
@@ -1920,7 +1922,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultQueueKindAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `default_queue_kind`
@@ -1929,7 +1931,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultQueueKindRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `default_queue_kind`
@@ -1938,7 +1940,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `default_peer_message_or_request`
@@ -1947,7 +1949,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `default_peer_message_or_request`
@@ -1956,7 +1958,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `default_peer_message_or_request`
@@ -1965,34 +1967,37 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanPeerResponseProgressIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `peer_response_progress`
+  - `coalesce_target_tracked_if_present`
 - Emits: `AdmissionResolved`
 - To: `Idle`
 
 ### `ResolveAdmissionPlanPeerResponseProgressAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `peer_response_progress`
+  - `coalesce_target_tracked_if_present`
 - Emits: `AdmissionResolved`
 - To: `Attached`
 
 ### `ResolveAdmissionPlanPeerResponseProgressRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `peer_response_progress`
+  - `coalesce_target_tracked_if_present`
 - Emits: `AdmissionResolved`
 - To: `Running`
 
 ### `ResolveAdmissionPlanDefaultPeerResponseTerminalIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `default_peer_response_terminal`
@@ -2001,7 +2006,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultPeerResponseTerminalAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `default_peer_response_terminal`
@@ -2010,7 +2015,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultPeerResponseTerminalRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `default_peer_response_terminal`
@@ -2019,7 +2024,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultContinuationIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `default_continuation`
@@ -2028,7 +2033,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultContinuationAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `default_continuation`
@@ -2037,7 +2042,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanDefaultContinuationRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `default_continuation`
@@ -2046,7 +2051,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanOperationIdle`
 - From: `Idle`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `operation`
@@ -2055,7 +2060,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanOperationAttached`
 - From: `Attached`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `operation`
@@ -2064,7 +2069,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionPlanOperationRunning`
 - From: `Running`
-- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake)
 - Guards:
   - `runtime_running_matches_phase`
   - `operation`
@@ -3953,6 +3958,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SupersedeInput`(input_id, superseded_by)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_supersede_target`
 - Emits: `RecordTerminalOutcome`
 - To: `Idle`
 
@@ -3961,6 +3967,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SupersedeInput`(input_id, superseded_by)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_supersede_target`
 - Emits: `RecordTerminalOutcome`
 - To: `Attached`
 
@@ -3969,6 +3976,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SupersedeInput`(input_id, superseded_by)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_supersede_target`
 - Emits: `RecordTerminalOutcome`
 - To: `Running`
 
@@ -3977,6 +3985,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SupersedeInput`(input_id, superseded_by)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_supersede_target`
 - Emits: `RecordTerminalOutcome`
 - To: `Retired`
 
@@ -3985,6 +3994,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SupersedeInput`(input_id, superseded_by)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_supersede_target`
 - Emits: `RecordTerminalOutcome`
 - To: `Stopped`
 
@@ -3993,6 +4003,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CoalesceInput`(input_id, aggregate_id)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_coalesce_target`
 - Emits: `RecordTerminalOutcome`
 - To: `Idle`
 
@@ -4001,6 +4012,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CoalesceInput`(input_id, aggregate_id)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_coalesce_target`
 - Emits: `RecordTerminalOutcome`
 - To: `Attached`
 
@@ -4009,6 +4021,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CoalesceInput`(input_id, aggregate_id)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_coalesce_target`
 - Emits: `RecordTerminalOutcome`
 - To: `Running`
 
@@ -4017,6 +4030,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CoalesceInput`(input_id, aggregate_id)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_coalesce_target`
 - Emits: `RecordTerminalOutcome`
 - To: `Retired`
 
@@ -4025,6 +4039,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CoalesceInput`(input_id, aggregate_id)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_coalesce_target`
 - Emits: `RecordTerminalOutcome`
 - To: `Stopped`
 

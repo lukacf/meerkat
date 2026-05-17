@@ -59,7 +59,7 @@ pub(crate) struct MachineAdmissionAuthority {
     input_kind: mm_dsl::AdmissionInputKind,
     requested_lane: Option<mm_dsl::InputLane>,
     silent_intent_match: bool,
-    existing_superseded: bool,
+    existing_superseded_input_id: Option<String>,
     runtime_running: bool,
     without_wake: bool,
 }
@@ -71,7 +71,7 @@ impl MachineAdmissionAuthority {
         input_kind: mm_dsl::AdmissionInputKind,
         requested_lane: Option<mm_dsl::InputLane>,
         silent_intent_match: bool,
-        existing_superseded: bool,
+        existing_superseded_input_id: Option<InputId>,
         runtime_running: bool,
         without_wake: bool,
     ) -> Self {
@@ -80,7 +80,7 @@ impl MachineAdmissionAuthority {
             input_kind,
             requested_lane,
             silent_intent_match,
-            existing_superseded,
+            existing_superseded_input_id: existing_superseded_input_id.map(|id| id.to_string()),
             runtime_running,
             without_wake,
         }
@@ -100,7 +100,7 @@ impl MachineAdmissionAuthority {
             input_kind: self.input_kind,
             requested_lane: self.requested_lane,
             silent_intent_match: self.silent_intent_match,
-            existing_superseded: self.existing_superseded,
+            existing_superseded_input_id: self.existing_superseded_input_id.clone(),
             runtime_running: self.runtime_running,
             without_wake: self.without_wake,
         }
@@ -116,6 +116,7 @@ pub struct ResolvedAdmission {
     primitive_projection: crate::ingress_types::RuntimeInputProjection,
     admission_plan: AdmissionPlan,
     coarse_flags: CoarseAdmissionFlags,
+    requires_active_pre_admission: bool,
     authority: MachineAdmissionAuthority,
 }
 
@@ -128,6 +129,7 @@ impl ResolvedAdmission {
         primitive_projection: crate::ingress_types::RuntimeInputProjection,
         admission_plan: AdmissionPlan,
         coarse_flags: CoarseAdmissionFlags,
+        requires_active_pre_admission: bool,
         authority: MachineAdmissionAuthority,
     ) -> Self {
         Self {
@@ -137,6 +139,7 @@ impl ResolvedAdmission {
             primitive_projection,
             admission_plan,
             coarse_flags,
+            requires_active_pre_admission,
             authority,
         }
     }
@@ -146,9 +149,7 @@ impl ResolvedAdmission {
     }
 
     pub(crate) fn requires_active_runtime_pre_admission(&self) -> bool {
-        self.coarse_flags.request_immediate_processing
-            || self.coarse_flags.interrupt_yielding
-            || self.coarse_flags.wake_if_idle
+        self.requires_active_pre_admission
     }
 
     pub(crate) fn authority(&self) -> &MachineAdmissionAuthority {

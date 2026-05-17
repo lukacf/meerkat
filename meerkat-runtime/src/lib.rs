@@ -201,7 +201,7 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
                 .handling_mode()
                 .map(meerkat_machine::dsl::InputLane::from),
             silent_intent_match: false,
-            existing_superseded: false,
+            existing_superseded_input_id: None,
             runtime_running: false,
             without_wake: false,
         },

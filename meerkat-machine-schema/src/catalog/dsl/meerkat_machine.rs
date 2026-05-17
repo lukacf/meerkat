@@ -1461,6 +1461,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             // without generated approval.
             admission_authorized_lanes: Map<String, Enum<InputLane>>,
             admission_authorized_plans: Map<String, Enum<AdmissionPlanKind>>,
+            admission_authorized_existing_actions: Map<String, Enum<AdmissionExistingQueuedActionKind>>,
+            admission_authorized_existing_targets: Map<String, String>,
             // Recovered admission witnesses accepted by MeerkatMachine before
             // shell recovery may re-materialize admission metadata. The lane
             // map records the machine-validated queue/steer witness so
@@ -1717,6 +1719,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_lane = EmptyMap,
             admission_authorized_lanes = EmptyMap,
             admission_authorized_plans = EmptyMap,
+            admission_authorized_existing_actions = EmptyMap,
+            admission_authorized_existing_targets = EmptyMap,
             recovered_admitted_inputs = EmptySet,
             recovered_admitted_lanes = EmptyMap,
             // Ops lifecycle substate
@@ -1887,7 +1891,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 input_kind: Enum<AdmissionInputKind>,
                 requested_lane: Option<Enum<InputLane>>,
                 silent_intent_match: bool,
-                existing_superseded: bool,
+                existing_superseded_input_id: Option<String>,
                 runtime_running: bool,
                 without_wake: bool,
             },
@@ -2296,6 +2300,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 plan: Enum<AdmissionPlanKind>,
                 queue_action: Enum<AdmissionQueueActionKind>,
                 existing_action: Enum<AdmissionExistingQueuedActionKind>,
+                existing_input_id: Option<String>,
+                requires_active_pre_admission: bool,
                 runtime_boundary: Enum<AdmissionRunApplyBoundary>,
                 runtime_execution_kind: Enum<AdmissionRuntimeExecutionKind>,
                 runtime_peer_response_terminal_apply_intent: Option<Enum<AdmissionPeerResponseTerminalApplyIntent>>,
@@ -4024,7 +4030,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // lifecycle transitions require.
         transition ResolveAdmissionPlanRequestedTerminalQueue {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -4037,6 +4043,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
             }
             to Idle
             emit AdmissionResolved {
@@ -4052,6 +4060,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 plan: AdmissionPlanKind::Queued,
                 queue_action: AdmissionQueueActionKind::EnqueueTo,
                 existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false,
                 runtime_boundary: AdmissionRunApplyBoundary::RunStart,
                 runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
                 runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun),
@@ -4064,7 +4074,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanRequestedTerminalSteer {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -4077,6 +4087,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
             }
             to Idle
             emit AdmissionResolved {
@@ -4100,6 +4112,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 plan: AdmissionPlanKind::Queued,
                 queue_action: AdmissionQueueActionKind::EnqueueTo,
                 existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: true,
                 runtime_boundary: AdmissionRunApplyBoundary::RunStart,
                 runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
                 runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun),
@@ -4112,7 +4126,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanRequestedQueue {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -4126,6 +4140,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
             }
             to Idle
             emit AdmissionResolved {
@@ -4149,6 +4165,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 plan: AdmissionPlanKind::Queued,
                 queue_action: AdmissionQueueActionKind::EnqueueTo,
                 existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false
+                    && silent_intent_match == false
+                    && runtime_running == false,
                 runtime_boundary: AdmissionRunApplyBoundary::RunStart,
                 runtime_execution_kind: if input_kind == AdmissionInputKind::Continuation {
                     AdmissionRuntimeExecutionKind::ResumePending
@@ -4167,7 +4187,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanRequestedSteer {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -4181,6 +4201,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
             }
             to Idle
             emit AdmissionResolved {
@@ -4204,6 +4226,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 plan: AdmissionPlanKind::Queued,
                 queue_action: AdmissionQueueActionKind::EnqueueTo,
                 existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: true,
                 runtime_boundary: if silent_intent_match { AdmissionRunApplyBoundary::RunStart } else { AdmissionRunApplyBoundary::RunCheckpoint },
                 runtime_execution_kind: if input_kind == AdmissionInputKind::Continuation {
                     AdmissionRuntimeExecutionKind::ResumePending
@@ -4220,7 +4244,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanDefaultQueueKind {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -4235,6 +4259,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
             }
             to Idle
             emit AdmissionResolved {
@@ -4258,6 +4284,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 plan: AdmissionPlanKind::Queued,
                 queue_action: AdmissionQueueActionKind::EnqueueTo,
                 existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false && runtime_running == false,
                 runtime_boundary: AdmissionRunApplyBoundary::RunStart,
                 runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
                 runtime_peer_response_terminal_apply_intent: None,
@@ -4270,7 +4298,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanDefaultPeerMessageOrRequest {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -4284,6 +4312,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
             }
             to Idle
             emit AdmissionResolved {
@@ -4307,6 +4337,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 plan: AdmissionPlanKind::Queued,
                 queue_action: AdmissionQueueActionKind::EnqueueTo,
                 existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false && silent_intent_match == false,
                 runtime_boundary: AdmissionRunApplyBoundary::RunStart,
                 runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
                 runtime_peer_response_terminal_apply_intent: None,
@@ -4323,7 +4355,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanPeerResponseProgress {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -4332,9 +4364,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 input_kind == AdmissionInputKind::PeerResponseProgress
                 && silent_intent_match == false
             }
+            guard "coalesce_target_tracked_if_present" {
+                existing_superseded_input_id == None
+                || self.input_phases.contains_key(existing_superseded_input_id.get("value"))
+            }
             update {
                 self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                if existing_superseded_input_id != None {
+                    self.admission_authorized_existing_actions.insert(input_id, AdmissionExistingQueuedActionKind::Coalesce);
+                    self.admission_authorized_existing_targets.insert(input_id, existing_superseded_input_id.get("value"));
+                } else {
+                    self.admission_authorized_existing_actions.remove(input_id);
+                    self.admission_authorized_existing_targets.remove(input_id);
+                }
             }
             to Idle
             emit AdmissionResolved {
@@ -4349,7 +4392,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 lane: InputLane::Steer,
                 plan: AdmissionPlanKind::Queued,
                 queue_action: AdmissionQueueActionKind::EnqueueTo,
-                existing_action: if existing_superseded { AdmissionExistingQueuedActionKind::Coalesce } else { AdmissionExistingQueuedActionKind::None },
+                existing_action: if existing_superseded_input_id != None { AdmissionExistingQueuedActionKind::Coalesce } else { AdmissionExistingQueuedActionKind::None },
+                existing_input_id: existing_superseded_input_id,
+                requires_active_pre_admission: false,
                 runtime_boundary: AdmissionRunApplyBoundary::RunCheckpoint,
                 runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
                 runtime_peer_response_terminal_apply_intent: None,
@@ -4362,7 +4407,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanDefaultPeerResponseTerminal {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -4375,6 +4420,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
             }
             to Idle
             emit AdmissionResolved {
@@ -4390,6 +4437,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 plan: AdmissionPlanKind::Queued,
                 queue_action: AdmissionQueueActionKind::EnqueueTo,
                 existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false,
                 runtime_boundary: AdmissionRunApplyBoundary::RunStart,
                 runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
                 runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun),
@@ -4402,7 +4451,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanDefaultContinuation {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -4415,6 +4464,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
             }
             to Idle
             emit AdmissionResolved {
@@ -4438,6 +4489,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 plan: AdmissionPlanKind::Queued,
                 queue_action: AdmissionQueueActionKind::EnqueueTo,
                 existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false,
                 runtime_boundary: AdmissionRunApplyBoundary::RunCheckpoint,
                 runtime_execution_kind: AdmissionRuntimeExecutionKind::ResumePending,
                 runtime_peer_response_terminal_apply_intent: None,
@@ -4450,7 +4503,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanOperation {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -4463,6 +4516,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::ConsumedOnAccept);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
             }
             to Idle
             emit AdmissionResolved {
@@ -4478,6 +4533,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 plan: AdmissionPlanKind::ConsumedOnAccept,
                 queue_action: AdmissionQueueActionKind::None,
                 existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: false,
                 runtime_boundary: AdmissionRunApplyBoundary::RunStart,
                 runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
                 runtime_peer_response_terminal_apply_intent: None,
@@ -8089,6 +8146,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SupersedeInput { input_id, superseded_by }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "live_admission_authorized_supersede_target" {
+                self.admission_authorized_existing_actions.contains_key(superseded_by)
+                && self.admission_authorized_existing_actions.get_cloned(superseded_by).get("value") == AdmissionExistingQueuedActionKind::Supersede
+                && self.admission_authorized_existing_targets.contains_key(superseded_by)
+                && self.admission_authorized_existing_targets.get_cloned(superseded_by).get("value") == input_id
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Superseded);
                 self.input_lane.remove(input_id);
@@ -8097,6 +8160,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_aggregate_id.remove(input_id);
                 self.input_abandon_reason.remove(input_id);
                 self.input_abandon_attempt_count.remove(input_id);
+                self.admission_authorized_existing_actions.remove(superseded_by);
+                self.admission_authorized_existing_targets.remove(superseded_by);
             }
             to Idle
             emit RecordTerminalOutcome
@@ -8108,6 +8173,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input CoalesceInput { input_id, aggregate_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "live_admission_authorized_coalesce_target" {
+                self.admission_authorized_existing_actions.contains_key(aggregate_id)
+                && self.admission_authorized_existing_actions.get_cloned(aggregate_id).get("value") == AdmissionExistingQueuedActionKind::Coalesce
+                && self.admission_authorized_existing_targets.contains_key(aggregate_id)
+                && self.admission_authorized_existing_targets.get_cloned(aggregate_id).get("value") == input_id
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Coalesced);
                 self.input_lane.remove(input_id);
@@ -8116,6 +8187,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_superseded_by.remove(input_id);
                 self.input_abandon_reason.remove(input_id);
                 self.input_abandon_attempt_count.remove(input_id);
+                self.admission_authorized_existing_actions.remove(aggregate_id);
+                self.admission_authorized_existing_targets.remove(aggregate_id);
             }
             to Idle
             emit RecordTerminalOutcome

@@ -4901,6 +4901,9 @@ pub struct State {
     pub input_lane: std::collections::BTreeMap<String, InputLane>,
     pub admission_authorized_lanes: std::collections::BTreeMap<String, InputLane>,
     pub admission_authorized_plans: std::collections::BTreeMap<String, AdmissionPlanKind>,
+    pub admission_authorized_existing_actions:
+        std::collections::BTreeMap<String, AdmissionExistingQueuedActionKind>,
+    pub admission_authorized_existing_targets: std::collections::BTreeMap<String, String>,
     pub recovered_admitted_inputs: std::collections::BTreeSet<String>,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
@@ -5193,7 +5196,7 @@ pub mod inputs {
         pub input_kind: AdmissionInputKind,
         pub requested_lane: Option<InputLane>,
         pub silent_intent_match: bool,
-        pub existing_superseded: bool,
+        pub existing_superseded_input_id: Option<String>,
         pub runtime_running: bool,
         pub without_wake: bool,
     }
@@ -6492,6 +6495,8 @@ pub mod effects {
         pub plan: AdmissionPlanKind,
         pub queue_action: AdmissionQueueActionKind,
         pub existing_action: AdmissionExistingQueuedActionKind,
+        pub existing_input_id: Option<String>,
+        pub requires_active_pre_admission: bool,
         pub runtime_boundary: AdmissionRunApplyBoundary,
         pub runtime_execution_kind: AdmissionRuntimeExecutionKind,
         pub runtime_peer_response_terminal_apply_intent:
@@ -7698,6 +7703,8 @@ pub fn initial_state() -> State {
         input_lane: Default::default(),
         admission_authorized_lanes: Default::default(),
         admission_authorized_plans: Default::default(),
+        admission_authorized_existing_actions: Default::default(),
+        admission_authorized_existing_targets: Default::default(),
         recovered_admitted_inputs: Default::default(),
         recovered_admitted_lanes: Default::default(),
         op_statuses: Default::default(),

@@ -1854,10 +1854,10 @@ impl EphemeralRuntimeDriver {
         queue_action: mm_dsl::AdmissionQueueActionKind,
         lane: mm_dsl::InputLane,
         existing_action: mm_dsl::AdmissionExistingQueuedActionKind,
-        existing_superseded_id: Option<InputId>,
-    ) -> AdmissionPlan {
+        existing_input_id: Option<String>,
+    ) -> Result<AdmissionPlan, RuntimeDriverError> {
         if matches!(plan, mm_dsl::AdmissionPlanKind::ConsumedOnAccept) {
-            return AdmissionPlan::ConsumedOnAccept;
+            return Ok(AdmissionPlan::ConsumedOnAccept);
         }
 
         let target = Self::handling_mode_from_admission_lane(lane);
@@ -1870,28 +1870,53 @@ impl EphemeralRuntimeDriver {
                 AdmissionQueueAction::EnqueueFront { target }
             }
         };
-        let existing_action = match (existing_action, existing_superseded_id) {
+        let existing_action = match (existing_action, existing_input_id) {
+            (mm_dsl::AdmissionExistingQueuedActionKind::None, None) => None,
+            (mm_dsl::AdmissionExistingQueuedActionKind::None, Some(existing_id)) => {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "ResolveAdmissionPlan emitted existing input '{existing_id}' without existing action"
+                )));
+            }
             (mm_dsl::AdmissionExistingQueuedActionKind::Coalesce, Some(existing_id)) => {
+                let existing_id = existing_id
+                    .parse::<uuid::Uuid>()
+                    .map(InputId::from_uuid)
+                    .map_err(|err| {
+                        RuntimeDriverError::Internal(format!(
+                            "ResolveAdmissionPlan emitted invalid coalesce target id: {err}"
+                        ))
+                    })?;
                 Some(ExistingQueuedAdmissionAction::Coalesce { existing_id })
             }
             (mm_dsl::AdmissionExistingQueuedActionKind::Supersede, Some(existing_id)) => {
+                let existing_id = existing_id
+                    .parse::<uuid::Uuid>()
+                    .map(InputId::from_uuid)
+                    .map_err(|err| {
+                        RuntimeDriverError::Internal(format!(
+                            "ResolveAdmissionPlan emitted invalid supersede target id: {err}"
+                        ))
+                    })?;
                 Some(ExistingQueuedAdmissionAction::Supersede { existing_id })
             }
-            _ => None,
+            (action, None) => {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "ResolveAdmissionPlan emitted {action:?} without an existing input target"
+                )));
+            }
         };
 
-        AdmissionPlan::Queued {
+        Ok(AdmissionPlan::Queued {
             persist_and_queue: true,
             queue_action,
             existing_action,
-        }
+        })
     }
 
     fn resolved_admission_from_machine_effects(
         &self,
         input: &Input,
         authority: MachineAdmissionAuthority,
-        existing_superseded_id: Option<InputId>,
         effects: Vec<mm_dsl::MeerkatMachineEffect>,
     ) -> Result<ResolvedAdmission, RuntimeDriverError> {
         let Some(effect) = effects.into_iter().find_map(|effect| match effect {
@@ -1908,6 +1933,8 @@ impl EphemeralRuntimeDriver {
                 plan,
                 queue_action,
                 existing_action,
+                existing_input_id,
+                requires_active_pre_admission,
                 runtime_boundary,
                 runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent,
@@ -1928,6 +1955,8 @@ impl EphemeralRuntimeDriver {
                 plan,
                 queue_action,
                 existing_action,
+                existing_input_id,
+                requires_active_pre_admission,
                 runtime_boundary,
                 runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent,
@@ -1956,6 +1985,8 @@ impl EphemeralRuntimeDriver {
             plan,
             queue_action,
             existing_action,
+            existing_input_id,
+            requires_active_pre_admission,
             runtime_boundary,
             runtime_execution_kind,
             runtime_peer_response_terminal_apply_intent,
@@ -1995,8 +2026,8 @@ impl EphemeralRuntimeDriver {
             queue_action,
             lane,
             existing_action,
-            existing_superseded_id,
-        );
+            existing_input_id,
+        )?;
 
         Ok(ResolvedAdmission::from_machine_resolution(
             policy,
@@ -2009,6 +2040,7 @@ impl EphemeralRuntimeDriver {
                 interrupt_yielding,
                 wake_if_idle,
             },
+            requires_active_pre_admission,
             authority,
         ))
     }
@@ -2024,7 +2056,7 @@ impl EphemeralRuntimeDriver {
             mm_dsl::AdmissionInputKind::from(input.kind()),
             input.handling_mode().map(mm_dsl::InputLane::from),
             crate::silent_intent::matches_silent_intent(&input, &self.silent_comms_intents),
-            existing_superseded_id.is_some(),
+            existing_superseded_id,
             self.runtime_phase_snapshot() == RuntimeState::Running,
             without_wake,
         );
@@ -2032,12 +2064,7 @@ impl EphemeralRuntimeDriver {
             Self::resolve_admission_plan_input(&authority),
             "ResolveAdmissionPlan",
         )?;
-        self.resolved_admission_from_machine_effects(
-            input,
-            authority,
-            existing_superseded_id,
-            effects,
-        )
+        self.resolved_admission_from_machine_effects(input, authority, effects)
     }
 
     pub(crate) fn resolve_admission(
@@ -2141,7 +2168,7 @@ impl EphemeralRuntimeDriver {
             mm_dsl::AdmissionInputKind::from(input.kind()),
             input.handling_mode().map(mm_dsl::InputLane::from),
             crate::silent_intent::matches_silent_intent(&input, &self.silent_comms_intents),
-            existing_superseded_id.is_some(),
+            existing_superseded_id,
             self.runtime_phase_snapshot() == RuntimeState::Running,
             resolved.authority().without_wake(),
         );
@@ -2149,12 +2176,7 @@ impl EphemeralRuntimeDriver {
             Self::resolve_admission_plan_input(&authority),
             "ResolveAdmissionPlan",
         )?;
-        let resolved = self.resolved_admission_from_machine_effects(
-            &input,
-            authority,
-            existing_superseded_id,
-            effects,
-        )?;
+        let resolved = self.resolved_admission_from_machine_effects(&input, authority, effects)?;
         let (policy, handling_mode, runtime_semantics, primitive_projection, admission_plan) =
             resolved.into_parts();
 
@@ -2547,13 +2569,13 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
 #[cfg(test)]
 mod tests {
     use super::EphemeralRuntimeDriver;
-    use crate::identifiers::LogicalRuntimeId;
+    use crate::identifiers::{LogicalRuntimeId, SupersessionKey};
     use crate::input::{
         Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention,
         PeerInput, PromptInput,
     };
     use crate::meerkat_machine::dsl as mm_dsl;
-    use crate::traits::RuntimeDriver;
+    use crate::traits::{RuntimeDriver, RuntimeDriverError};
     use crate::{RuntimeState, WakeMode};
     use chrono::Utc;
     use meerkat_core::lifecycle::{InputId, RunId};
@@ -2584,6 +2606,33 @@ mod tests {
 
     fn prompt_input(text: &str) -> Input {
         Input::Prompt(PromptInput::new(text, None))
+    }
+
+    fn progress_input_with_supersession(label: &str, supersession_key: &str) -> Input {
+        Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "peer-1".into(),
+                    display_identity: None,
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: Some(SupersessionKey::new(supersession_key)),
+                correlation_id: None,
+            },
+            convention: Some(PeerConvention::ResponseProgress {
+                request_id: format!("request-{label}"),
+                phase: crate::input::ResponseProgressPhase::InProgress,
+            }),
+            body: format!("progress {label}"),
+            payload: None,
+            blocks: None,
+            handling_mode: None,
+        })
     }
 
     fn force_control_shadow(
@@ -2716,6 +2765,68 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn coalesce_input_requires_generated_existing_target_authority() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("coalesce-guard"));
+
+        let first = prompt_input("first");
+        let first_id = first.id().clone();
+        driver.accept_input(first).await.unwrap();
+
+        let err = driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::CoalesceInput {
+                    input_id: first_id.to_string(),
+                    aggregate_id: InputId::new().to_string(),
+                },
+                "CoalesceInput",
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(err, RuntimeDriverError::Internal(message) if message.contains("CoalesceInput")),
+            "unauthorized coalesce should fail closed through generated guards"
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_coalesce_target_is_supplied_by_generated_admission_authority() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("coalesce-authority"));
+
+        let first = progress_input_with_supersession("first", "same-window");
+        let first_id = first.id().clone();
+        driver.accept_input(first).await.unwrap();
+
+        let second = progress_input_with_supersession("second", "same-window");
+        let second_id = second.id().clone();
+        driver.accept_input(second).await.unwrap();
+
+        assert_eq!(
+            driver.input_phase(&first_id),
+            Some(crate::input_state::InputLifecycleState::Coalesced)
+        );
+        assert_eq!(
+            driver.input_terminal_outcome(&first_id),
+            Some(crate::input_state::InputTerminalOutcome::Coalesced {
+                aggregate_id: second_id.clone()
+            })
+        );
+        assert!(!driver.has_queued_input(&first_id));
+        assert!(driver.has_queued_input(&second_id));
+        driver.with_dsl_state(|state| {
+            assert!(
+                !state
+                    .admission_authorized_existing_actions
+                    .contains_key(&second_id.to_string())
+            );
+            assert!(
+                !state
+                    .admission_authorized_existing_targets
+                    .contains_key(&second_id.to_string())
+            );
+        });
+    }
+
     #[test]
     fn resolve_admission_uses_generated_machine_phase_not_control_projection() {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("phase-drift"));
@@ -2728,6 +2839,7 @@ mod tests {
 
         let input = peer_message_input();
         let projected = driver.resolve_admission(&input).unwrap();
+        assert!(projected.requires_active_runtime_pre_admission());
         let flags = projected.coarse_flags();
         let (policy, _, _, _, _) = projected.into_parts();
         assert_eq!(policy.wake_mode, WakeMode::WakeIfIdle);

@@ -9,6 +9,8 @@ import type {
   MobLifecycleAction,
   MobMember,
   MobMemberRef,
+  MobWireMembersBatchEdgeInput,
+  MobWireMembersBatchResult,
   ResolvedModelCapabilities,
   MobSpawnResult,
   MobStatus,
@@ -212,6 +214,12 @@ export class Mob {
 
   async wire(member: string, peer: MobPeerTarget): Promise<void> {
     await this.client.wireMobMembers(this.mobId, member, peer);
+  }
+
+  async wireMembersBatch(
+    edges: readonly MobWireMembersBatchEdgeInput[],
+  ): Promise<MobWireMembersBatchResult> {
+    return this.client.mobWireMembersBatch(this.mobId, edges);
   }
 
   async unwire(member: string, peer: MobPeerTarget): Promise<void> {

@@ -4,8 +4,10 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from .generated.types import (
     MobSpawnManyResult,
-    WireBudgetSplitPolicy,
+    MobWireMembersBatchEdge,
+    MobWireMembersBatchResult,
     WireAuthBindingRef,
+    WireBudgetSplitPolicy,
     WireContentInput,
     WireMemberLaunchMode,
     WireMobBackendKind,
@@ -21,6 +23,10 @@ from .types import ResolvedModelCapabilities
 MobLifecycleAction = Literal["stop", "resume", "complete", "reset", "destroy"]
 
 WorkOrigin = Literal["external", "internal"]
+
+MobWireMembersBatchEdgeInput = (
+    tuple[str, str] | list[str] | dict[str, Any] | MobWireMembersBatchEdge
+)
 
 # Opaque server-resolved handle for a mob member. App code treats this as
 # a transparent token — obtained from `ensure_member`/`spawn_helper`/
@@ -348,6 +354,12 @@ class Mob:
 
     async def wire(self, member: str, peer: str | dict[str, Any]) -> None:
         await self._client.wire_mob_members(self.id, member, peer)
+
+    async def wire_members_batch(
+        self,
+        edges: list[MobWireMembersBatchEdgeInput],
+    ) -> MobWireMembersBatchResult:
+        return await self._client.mob_wire_members_batch(self.id, edges)
 
     async def unwire(self, member: str, peer: str | dict[str, Any]) -> None:
         await self._client.unwire_mob_members(self.id, member, peer)

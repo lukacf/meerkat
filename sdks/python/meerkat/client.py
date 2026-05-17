@@ -48,8 +48,10 @@ from .generated.types import (
     MobSpawnManySpawnedResult,
     MobRotateSupervisorResult,
     MobTurnStartParams,
-    WireBudgetSplitPolicy,
+    MobWireMembersBatchEdge,
+    MobWireMembersBatchResult,
     WireAuthBindingRef,
+    WireBudgetSplitPolicy,
     WireContentInput,
     WireMemberLaunchMode,
     WireMobBackendKind,
@@ -70,6 +72,7 @@ from .mob import (
     MobReadyMemberSnapshot,
     MobSpawnResult,
     MobSpawnSpec,
+    MobWireMembersBatchEdgeInput,
     WorkOrigin,
 )
 from .session import DeferredSession, Session, _normalize_skill_ref
@@ -212,6 +215,71 @@ def _wire_value(value: Any) -> Any:
 def _wire_params(value: Any) -> dict[str, Any]:
     converted = _wire_value(value)
     return converted if isinstance(converted, dict) else dict(converted)
+
+
+def _normalize_mob_wire_members_batch_edge(
+    edge: MobWireMembersBatchEdgeInput,
+) -> dict[str, str]:
+    raw = _wire_value(edge)
+    if isinstance(raw, dict):
+        a = raw.get("a")
+        b = raw.get("b")
+    elif isinstance(raw, (list, tuple)) and len(raw) == 2:
+        a, b = raw
+    else:
+        raise MeerkatError(
+            "INVALID_ARGS",
+            "mob/wire_members_batch edges must be (a, b) pairs or {'a', 'b'} objects",
+        )
+    if not isinstance(a, str) or not a or not isinstance(b, str) or not b:
+        raise MeerkatError(
+            "INVALID_ARGS",
+            "mob/wire_members_batch edge endpoints must be non-empty strings",
+        )
+    return {"a": a, "b": b}
+
+
+def _parse_mob_wire_members_batch_edge(raw: Any, context: str) -> MobWireMembersBatchEdge:
+    if not isinstance(raw, dict):
+        raise MeerkatError("INVALID_RESPONSE", f"{context}: edge must be an object")
+    a = raw.get("a")
+    b = raw.get("b")
+    if not isinstance(a, str) or not a or not isinstance(b, str) or not b:
+        raise MeerkatError(
+            "INVALID_RESPONSE",
+            f"{context}: edge endpoints must be non-empty strings",
+        )
+    return MobWireMembersBatchEdge(a=a, b=b)
+
+
+def _parse_mob_wire_members_batch_report(raw: dict[str, Any]) -> MobWireMembersBatchResult:
+    context = "Invalid mob/wire_members_batch response"
+    requested = raw.get("requested")
+    if not isinstance(requested, int) or isinstance(requested, bool) or requested < 0:
+        raise MeerkatError(
+            "INVALID_RESPONSE",
+            f"{context}: requested must be a non-negative integer",
+        )
+    wired_raw = raw.get("wired")
+    already_wired_raw = raw.get("already_wired")
+    if not isinstance(wired_raw, list):
+        raise MeerkatError("INVALID_RESPONSE", f"{context}: wired must be a list")
+    if not isinstance(already_wired_raw, list):
+        raise MeerkatError(
+            "INVALID_RESPONSE",
+            f"{context}: already_wired must be a list",
+        )
+    return MobWireMembersBatchResult(
+        requested=requested,
+        wired=[
+            _parse_mob_wire_members_batch_edge(edge, context)
+            for edge in wired_raw
+        ],
+        already_wired=[
+            _parse_mob_wire_members_batch_edge(edge, context)
+            for edge in already_wired_raw
+        ],
+    )
 
 
 def _skill_keys_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
@@ -2030,6 +2098,20 @@ class MeerkatClient:
             else {"mob_id": mob_id, "member": member, "peer": peer}
         )
         await self._request("mob/wire", payload)
+
+    async def mob_wire_members_batch(
+        self,
+        mob_id: str,
+        edges: list[MobWireMembersBatchEdgeInput],
+    ) -> MobWireMembersBatchResult:
+        payload = {
+            "mob_id": mob_id,
+            "edges": [
+                _normalize_mob_wire_members_batch_edge(edge) for edge in edges
+            ],
+        }
+        result = await self._request("mob/wire_members_batch", payload)
+        return _parse_mob_wire_members_batch_report(result)
 
     async def unwire_mob_members(self, mob_id: str, member: str, peer: str | dict[str, Any]) -> None:
         payload = (

@@ -2090,6 +2090,7 @@ pub fn router(state: AppState) -> Router {
         .route("/mob/{id}/spawn-helper", post(mob_spawn_helper))
         .route("/mob/{id}/fork-helper", post(mob_fork_helper))
         .route("/mob/{id}/wait-kickoff", post(mob_wait_kickoff))
+        .route("/mob/{id}/wire-members-batch", post(mob_wire_members_batch))
         .route(
             "/mob/{id}/members/{agent_identity}/status",
             get(mob_member_status),
@@ -2385,6 +2386,22 @@ struct WaitKickoffRequest {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[cfg(feature = "mob")]
+struct RestMobWireMembersBatchRequest {
+    edges: Vec<meerkat_contracts::MobWireMembersBatchEdge>,
+}
+
+#[cfg(feature = "mob")]
+fn rest_member_wire_edge(
+    edge: meerkat_mob::MemberWireEdge,
+) -> meerkat_contracts::MobWireMembersBatchEdge {
+    meerkat_contracts::MobWireMembersBatchEdge {
+        a: edge.a.to_string(),
+        b: edge.b.to_string(),
+    }
+}
+
 /// POST /mob/{id}/wait-kickoff — wait for autonomous kickoff completion barrier.
 #[cfg(feature = "mob")]
 async fn mob_wait_kickoff(
@@ -2407,6 +2424,48 @@ async fn mob_wait_kickoff(
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     Ok(Json(json!({ "members": members })))
+}
+
+/// POST /mob/{id}/wire-members-batch — wire local member edges through MobHandle.
+#[cfg(feature = "mob")]
+async fn mob_wire_members_batch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<RestMobWireMembersBatchRequest>,
+) -> Result<Json<meerkat_contracts::MobWireMembersBatchResult>, ApiError> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let edges = req
+        .edges
+        .into_iter()
+        .map(|edge| {
+            (
+                meerkat_mob::AgentIdentity::from(edge.a),
+                meerkat_mob::AgentIdentity::from(edge.b),
+            )
+        })
+        .collect::<Vec<_>>();
+    let report = state
+        .mob_state
+        .handle_for(&mob_id)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?
+        .wire_members_batch(edges)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    Ok(Json(meerkat_contracts::MobWireMembersBatchResult {
+        requested: report.requested,
+        wired: report
+            .wired
+            .into_iter()
+            .map(rest_member_wire_edge)
+            .collect(),
+        already_wired: report
+            .already_wired
+            .into_iter()
+            .map(rest_member_wire_edge)
+            .collect(),
+    }))
 }
 
 /// POST /mob/{id}/fork-helper — fork from a member's context, wait, return result.
@@ -11244,6 +11303,122 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0]["agent_identity"], "lead-filter");
         assert_eq!(members[0]["status"], "unknown");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_wire_members_batch_route_returns_batch_report() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let mut definition =
+            meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from("test_mob"));
+        definition.profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig {
+                    comms: true,
+                    ..meerkat_mob::ToolConfig::default()
+                },
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+        );
+        let mob_id = state
+            .mob_state
+            .mob_create_definition(definition)
+            .await
+            .expect("create mob");
+        let handle = state
+            .mob_state
+            .handle_for(&mob_id)
+            .await
+            .expect("mob handle");
+        for identity in ["w-1", "w-2", "w-3"] {
+            handle
+                .spawn_spec(meerkat_mob::SpawnMemberSpec::new("worker", identity))
+                .await
+                .expect("spawn member");
+        }
+
+        let app = router(state);
+        let body = serde_json::json!({
+            "edges": [
+                { "a": "w-1", "b": "w-2" },
+                { "a": "w-2", "b": "w-1" },
+                { "a": "w-1", "b": "w-3" }
+            ]
+        });
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/mob/{mob_id}/wire-members-batch"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "wire members batch route failed: {}",
+            String::from_utf8_lossy(&body_bytes)
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(payload["requested"], 3);
+        assert_eq!(payload["wired"].as_array().expect("wired array").len(), 2);
+        assert!(
+            payload["already_wired"]
+                .as_array()
+                .expect("already_wired array")
+                .is_empty()
+        );
+        assert_eq!(
+            payload["wired"][0],
+            serde_json::json!({"a": "w-1", "b": "w-2"})
+        );
+
+        let repeat = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/mob/{mob_id}/wire-members-batch"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let repeat_response = app.oneshot(repeat).await.unwrap();
+        assert_eq!(repeat_response.status(), StatusCode::OK);
+        let repeat_body = repeat_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let repeat_payload: serde_json::Value = serde_json::from_slice(&repeat_body).unwrap();
+        assert_eq!(repeat_payload["requested"], 3);
+        assert!(
+            repeat_payload["wired"]
+                .as_array()
+                .expect("wired array")
+                .is_empty()
+        );
+        assert_eq!(
+            repeat_payload["already_wired"]
+                .as_array()
+                .expect("already_wired array")
+                .len(),
+            2
+        );
     }
 
     #[cfg(feature = "mob")]

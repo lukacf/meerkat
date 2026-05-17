@@ -492,6 +492,12 @@
       "result_type": "MobWireResult"
     },
     {
+      "description": "Wire multiple local mob member edges",
+      "name": "mob/wire_members_batch",
+      "params_type": "MobWireMembersBatchParams",
+      "result_type": "MobWireMembersBatchResult"
+    },
+    {
       "description": "Unwire a local mob member from a local or external peer",
       "name": "mob/unwire",
       "params_type": "MobUnwireParams",

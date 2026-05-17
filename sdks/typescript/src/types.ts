@@ -417,6 +417,21 @@ export interface MobSpawnResult {
   readonly memberRef: MobMemberRef;
 }
 
+export interface MobWireMembersBatchEdge {
+  readonly a: string;
+  readonly b: string;
+}
+
+export type MobWireMembersBatchEdgeInput =
+  | MobWireMembersBatchEdge
+  | readonly [string, string];
+
+export interface MobWireMembersBatchResult {
+  readonly requested: number;
+  readonly wired: readonly MobWireMembersBatchEdge[];
+  readonly alreadyWired: readonly MobWireMembersBatchEdge[];
+}
+
 export interface MobMember {
   readonly agentIdentity: string;
   readonly memberRef: MobMemberRef;

@@ -985,6 +985,33 @@ pub struct MobWireResult {
     pub wired: bool,
 }
 
+/// One local-member edge in `mob/wire_members_batch`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobWireMembersBatchEdge {
+    pub a: String,
+    pub b: String,
+}
+
+/// Request payload for `mob/wire_members_batch`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobWireMembersBatchParams {
+    pub mob_id: String,
+    pub edges: Vec<MobWireMembersBatchEdge>,
+}
+
+/// Response payload for `mob/wire_members_batch`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobWireMembersBatchResult {
+    pub requested: usize,
+    pub wired: Vec<MobWireMembersBatchEdge>,
+    pub already_wired: Vec<MobWireMembersBatchEdge>,
+}
+
 /// Request payload for `mob/unwire`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -2147,6 +2174,50 @@ mod tests {
         let round_trip: MobLifecycleResult =
             serde_json::from_value(json).expect("deserialize lifecycle result");
         assert_eq!(round_trip.action, WireMobLifecycleAction::Complete);
+    }
+
+    #[test]
+    fn mob_wire_members_batch_contract_is_local_edge_native() {
+        let params: MobWireMembersBatchParams = serde_json::from_value(serde_json::json!({
+            "mob_id": "mob-1",
+            "edges": [
+                { "a": "lead", "b": "worker-b" },
+                { "a": "worker-a", "b": "lead" }
+            ]
+        }))
+        .expect("batch wire params deserialize");
+
+        assert_eq!(params.mob_id, "mob-1");
+        assert_eq!(params.edges.len(), 2);
+        assert_eq!(params.edges[0].a, "lead");
+        assert_eq!(params.edges[0].b, "worker-b");
+
+        let result = MobWireMembersBatchResult {
+            requested: 2,
+            wired: vec![MobWireMembersBatchEdge {
+                a: "lead".into(),
+                b: "worker-a".into(),
+            }],
+            already_wired: vec![MobWireMembersBatchEdge {
+                a: "lead".into(),
+                b: "worker-b".into(),
+            }],
+        };
+        let json = serde_json::to_value(&result).expect("serialize batch wire result");
+        assert_eq!(json["requested"], 2);
+        assert_eq!(json["wired"][0]["a"], "lead");
+        assert_eq!(json["already_wired"][0]["b"], "worker-b");
+
+        let err = serde_json::from_value::<MobWireMembersBatchParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "edges": [{ "member": "lead", "peer": "worker-a" }]
+        }))
+        .expect_err("mixed local/external mob/wire shape must not deserialize");
+        let message = err.to_string();
+        assert!(
+            message.contains("unknown field `member`") || message.contains("missing field `a`"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]

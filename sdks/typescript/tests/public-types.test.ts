@@ -7,6 +7,8 @@ import type {
   MobDefinition,
   MobRotateSupervisorResult,
   MobTurnStartOptions,
+  MobWireMembersBatchEdgeInput,
+  MobWireMembersBatchResult,
   PeerCorrelationId,
   PeerId,
   RunFailedEvent,
@@ -53,6 +55,8 @@ import type {
   MobSpawnSpecParams,
   MobSubmitWorkParams,
   MobTurnStartParams,
+  MobWireMembersBatchParams,
+  MobWireMembersBatchResult as WireMobWireMembersBatchResult,
   WireBudgetSplitPolicy,
   WireAuthBindingRef,
   WireMemberLaunchMode,
@@ -73,6 +77,17 @@ const spawnSpec: SpawnSpec = {
 };
 
 void spawnSpec;
+
+const mobWireMembersBatchEdges: MobWireMembersBatchEdgeInput[] = [
+  ["lead-1", "worker-1"],
+  { a: "lead-1", b: "reviewer-1" },
+];
+
+const mobWireMembersBatchPromise: Promise<MobWireMembersBatchResult> =
+  new MeerkatClient().mobWireMembersBatch("mob-1", mobWireMembersBatchEdges);
+
+void mobWireMembersBatchEdges;
+void mobWireMembersBatchPromise;
 
 const hookDeniedErrorReport: AgentErrorReport = {
   class: "hook",
@@ -501,6 +516,19 @@ void generatedMobSpawnManyResult;
 void generatedMobSpawnManyStatus;
 void generatedMobSpawnManyPayload;
 void generatedMobSpawnManySpawned;
+
+const generatedMobWireMembersBatchParams: MobWireMembersBatchParams = {
+  mob_id: "mob-1",
+  edges: [{ a: "lead-1", b: "worker-1" }],
+};
+const generatedMobWireMembersBatchReport: WireMobWireMembersBatchResult = {
+  requested: 1,
+  wired: [{ a: "lead-1", b: "worker-1" }],
+  already_wired: [],
+};
+
+void generatedMobWireMembersBatchParams;
+void generatedMobWireMembersBatchReport;
 
 const generatedMobTurnStart: MobTurnStartParams = {
   mob_id: "mob-1",

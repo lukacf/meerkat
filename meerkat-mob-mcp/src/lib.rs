@@ -946,6 +946,17 @@ impl MobMcpState {
         self.handle_for(mob_id).await?.wire(local, target).await
     }
 
+    pub async fn mob_wire_members_batch(
+        &self,
+        mob_id: &MobId,
+        edges: Vec<(AgentIdentity, AgentIdentity)>,
+    ) -> Result<meerkat_mob::MobWireMembersBatchReport, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .wire_members_batch(edges)
+            .await
+    }
+
     pub async fn mob_unwire(
         &self,
         mob_id: &MobId,

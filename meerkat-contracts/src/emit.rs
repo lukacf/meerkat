@@ -107,6 +107,9 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireRenderSalience": schema_for!(crate::wire::WireRenderSalience),
         "WireRenderMetadata": schema_for!(crate::wire::WireRenderMetadata),
         "MobWireResult": schema_for!(crate::wire::MobWireResult),
+        "MobWireMembersBatchEdge": schema_for!(crate::wire::MobWireMembersBatchEdge),
+        "MobWireMembersBatchParams": schema_for!(crate::wire::MobWireMembersBatchParams),
+        "MobWireMembersBatchResult": schema_for!(crate::wire::MobWireMembersBatchResult),
         "MobUnwireResult": schema_for!(crate::wire::MobUnwireResult),
         "WireRuntimeState": schema_for!(crate::wire::WireRuntimeState),
         "RuntimeStateResult": schema_for!(crate::wire::RuntimeStateResult),
@@ -971,6 +974,19 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 vec![],
             ),
         );
+        components.insert(
+            "RestMobWireMembersBatchRequest".to_string(),
+            object_schema(
+                vec![(
+                    "edges",
+                    serde_json::json!({
+                        "type": "array",
+                        "items": { "$ref": "#/components/schemas/MobWireMembersBatchEdge" }
+                    }),
+                )],
+                vec!["edges"],
+            ),
+        );
         components
     }
 
@@ -1130,6 +1146,10 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             ("/mob/{id}/wait-kickoff", "post") => {
                 RestOperationContract::with_optional_json_request("RestMobWaitRequest", "JsonValue")
             }
+            ("/mob/{id}/wire-members-batch", "post") => RestOperationContract::with_json_request(
+                "RestMobWireMembersBatchRequest",
+                "MobWireMembersBatchResult",
+            ),
             ("/mob/{id}/members/{agent_identity}/status", "get")
             | (
                 "/mob/{id}/members/{agent_identity}/cancel"
@@ -2001,6 +2021,19 @@ mod tests {
                 .pointer("/requestBody/required")
                 .and_then(serde_json::Value::as_bool),
             Some(false)
+        );
+        let wire_members_batch = &rest_openapi["paths"]["/mob/{id}/wire-members-batch"]["post"];
+        assert_eq!(
+            wire_members_batch
+                .pointer("/requestBody/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/RestMobWireMembersBatchRequest")
+        );
+        assert_eq!(
+            wire_members_batch
+                .pointer("/responses/200/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/MobWireMembersBatchResult")
         );
         assert_eq!(
             wait_kickoff

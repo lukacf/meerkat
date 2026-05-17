@@ -274,6 +274,13 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
+            "/mob/{id}/wire-members-batch",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Wire multiple local mob member edges",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/mob/{id}/members/{agent_identity}/status",
             vec![RestOperationDescriptor::with_description(
                 "get",
@@ -423,6 +430,7 @@ mod tests {
             "/auth/bindings/{binding_id}/status",
             "/auth/bindings/{binding_id}/logout",
             "/mob/{id}/wait-kickoff",
+            "/mob/{id}/wire-members-batch",
             "/mob/{id}/members/{agent_identity}/status",
             "/mob/{id}/members/{agent_identity}/cancel",
             "/mob/{id}/members/{agent_identity}/respawn",

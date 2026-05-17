@@ -1352,6 +1352,10 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             "mob/wire" => handlers::mob::handle_wire(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]
+            "mob/wire_members_batch" => {
+                handlers::mob::handle_wire_members_batch(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/unwire" => handlers::mob::handle_unwire(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]
             "mob/events" => handlers::mob::handle_events(id, params, &self.mob_state).await,
@@ -4336,6 +4340,7 @@ args = [{}]
             assert!(method_names.contains(&"mob/member_status"));
             assert!(method_names.contains(&"mob/member_send"));
             assert!(method_names.contains(&"mob/ingress_interaction"));
+            assert!(method_names.contains(&"mob/wire_members_batch"));
             assert!(!method_names.contains(&"mob/tools"));
             assert!(!method_names.contains(&"mob/call"));
             assert!(method_names.contains(&"mob/stream_open"));
@@ -7356,6 +7361,85 @@ args = [{}]
             error_message(&resp).contains("unknown field `local`"),
             "legacy mob/wire payloads should be rejected after the 0.5 clean cut"
         );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_wire_members_batch_routes_to_mob_handle_report() {
+        let (router, _notif_rx) = test_router().await;
+        let create = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-batch-wire",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .expect("create response");
+        let mob_id = result_value(&create)["mob_id"]
+            .as_str()
+            .expect("mob id")
+            .to_string();
+
+        for identity in ["worker-a", "worker-b"] {
+            let response = router
+                .dispatch(make_request(
+                    "mob/spawn",
+                    serde_json::json!({
+                        "mob_id": mob_id,
+                        "profile": "worker",
+                        "agent_identity": identity,
+                        "runtime_mode": "turn_driven"
+                    }),
+                ))
+                .await
+                .expect("spawn response");
+            assert!(
+                response.error.is_none(),
+                "spawn {identity} failed: {:?}",
+                response.error
+            );
+        }
+
+        let first = router
+            .dispatch(make_request(
+                "mob/wire_members_batch",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "edges": [{ "a": "worker-b", "b": "worker-a" }]
+                }),
+            ))
+            .await
+            .expect("batch wire response");
+        let first = result_value(&first);
+        assert_eq!(first["requested"], 1);
+        assert_eq!(first["wired"][0]["a"], "worker-a");
+        assert_eq!(first["wired"][0]["b"], "worker-b");
+        assert!(first["already_wired"].as_array().is_some_and(Vec::is_empty));
+
+        let second = router
+            .dispatch(make_request(
+                "mob/wire_members_batch",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "edges": [{ "a": "worker-a", "b": "worker-b" }]
+                }),
+            ))
+            .await
+            .expect("batch wire response");
+        let second = result_value(&second);
+        assert_eq!(second["requested"], 1);
+        assert!(second["wired"].as_array().is_some_and(Vec::is_empty));
+        assert_eq!(second["already_wired"][0]["a"], "worker-a");
+        assert_eq!(second["already_wired"][0]["b"], "worker-b");
     }
 
     #[tokio::test]

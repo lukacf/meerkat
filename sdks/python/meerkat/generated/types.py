@@ -467,6 +467,28 @@ class MobWireResult:
 
 
 @dataclass
+class MobWireMembersBatchEdge:
+    """One local-member edge in `mob/wire_members_batch`."""
+    a: str
+    b: str
+
+
+@dataclass
+class MobWireMembersBatchParams:
+    """Request payload for `mob/wire_members_batch`."""
+    edges: list[MobWireMembersBatchEdge]
+    mob_id: str
+
+
+@dataclass
+class MobWireMembersBatchResult:
+    """Response payload for `mob/wire_members_batch`."""
+    already_wired: list[MobWireMembersBatchEdge]
+    requested: int
+    wired: list[MobWireMembersBatchEdge]
+
+
+@dataclass
 class MobUnwireResult:
     """Response payload for `mob/unwire`."""
     unwired: bool

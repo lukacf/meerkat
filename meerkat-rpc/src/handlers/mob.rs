@@ -15,8 +15,9 @@ use meerkat::surface::RequestContext;
 use meerkat_contracts::wire::WireMobProfile;
 use meerkat_contracts::{
     ErrorCode, MobCreateParams, MobCreateResult, MobMemberListEntryWire, MobRotateSupervisorResult,
-    MobSpawnManyResult, MobSpawnManyResultEntry, SupervisorRotationReportWire, WireMemberState,
-    WireMobBackendKind, WireMobMemberStatus, WireMobRuntimeMode,
+    MobSpawnManyResult, MobSpawnManyResultEntry, MobWireMembersBatchEdge,
+    MobWireMembersBatchParams, MobWireMembersBatchResult, SupervisorRotationReportWire,
+    WireMemberState, WireMobBackendKind, WireMobMemberStatus, WireMobRuntimeMode,
 };
 use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
 use meerkat_core::skills::SkillRef;
@@ -717,6 +718,61 @@ pub async fn handle_wire(
         .await
     {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"wired": true})),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+fn member_wire_edge_wire(edge: meerkat_mob::event::MemberWireEdge) -> MobWireMembersBatchEdge {
+    MobWireMembersBatchEdge {
+        a: edge.a.to_string(),
+        b: edge.b.to_string(),
+    }
+}
+
+pub async fn handle_wire_members_batch(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobWireMembersBatchParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let edges = params
+        .edges
+        .into_iter()
+        .map(|edge| {
+            (
+                AgentIdentity::from(edge.a.as_str()),
+                AgentIdentity::from(edge.b.as_str()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let handle = match state.handle_for(&mob_id).await {
+        Ok(handle) => handle,
+        Err(err) => return invalid_params(id, err.to_string()),
+    };
+    match handle.wire_members_batch(edges).await {
+        Ok(report) => RpcResponse::success(
+            id,
+            MobWireMembersBatchResult {
+                requested: report.requested,
+                wired: report
+                    .wired
+                    .into_iter()
+                    .map(member_wire_edge_wire)
+                    .collect(),
+                already_wired: report
+                    .already_wired
+                    .into_iter()
+                    .map(member_wire_edge_wire)
+                    .collect(),
+            },
+        ),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -2488,6 +2544,37 @@ mod tests {
         assert_eq!(
             params.peer,
             meerkat_mob::PeerTarget::Local(AgentIdentity::from("worker-b"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mob_wire_members_batch_params_accept_only_local_edges()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let value = serde_json::json!({
+            "mob_id": "mob-1",
+            "edges": [
+                { "a": "worker-a", "b": "worker-b" },
+                { "a": "worker-c", "b": "worker-a" }
+            ]
+        });
+        let params: MobWireMembersBatchParams = serde_json::from_value(value)?;
+        assert_eq!(params.mob_id, "mob-1");
+        assert_eq!(params.edges.len(), 2);
+        assert_eq!(params.edges[0].a, "worker-a");
+        assert_eq!(params.edges[0].b, "worker-b");
+
+        let external = serde_json::json!({
+            "mob_id": "mob-1",
+            "edges": [
+                { "a": "worker-a", "b": { "external": { "name": "peer" } } }
+            ]
+        });
+        let err = serde_json::from_value::<MobWireMembersBatchParams>(external)
+            .expect_err("batch wiring is local-member only");
+        assert!(
+            err.to_string().contains("invalid type"),
+            "unexpected error: {err}"
         );
         Ok(())
     }

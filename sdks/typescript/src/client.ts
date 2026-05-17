@@ -55,6 +55,7 @@ import {
   type LiveWebrtcAnswerResult,
   type WireLiveAdapterObservation,
   type MobTurnStartParams,
+  type MobWireMembersBatchEdge as WireMobWireMembersBatchEdge,
   type MobRotateSupervisorResult,
   type McpAddParams,
   type McpLiveOpResponse,
@@ -105,6 +106,8 @@ import type {
   MobStatus,
   MobSummary,
   MobTurnStartOptions,
+  MobWireMembersBatchEdgeInput,
+  MobWireMembersBatchResult,
   PeerCorrelationId,
   PeerId,
   PeerResponseTerminalOptions,
@@ -352,6 +355,17 @@ function mobTurnStartPayload(
   setIfDefined(payload, "auth_binding", options?.authBinding);
   setIfDefined(payload, "clear_auth_binding", options?.clearAuthBinding);
   return payload;
+}
+
+function normalizeMobWireMembersBatchEdge(
+  edge: MobWireMembersBatchEdgeInput,
+): WireMobWireMembersBatchEdge {
+  if (!Array.isArray(edge) && typeof edge === "object" && edge !== null) {
+    const objectEdge = edge as { readonly a: string; readonly b: string };
+    return { a: objectEdge.a, b: objectEdge.b };
+  }
+  const [a, b] = edge as readonly [string, string];
+  return { a, b };
 }
 
 export class MeerkatClient {
@@ -1897,6 +1911,17 @@ export class MeerkatClient {
     await this.request("mob/wire", { mob_id: mobId, ...payload });
   }
 
+  async mobWireMembersBatch(
+    mobId: string,
+    edges: readonly MobWireMembersBatchEdgeInput[],
+  ): Promise<MobWireMembersBatchResult> {
+    const result = await this.request("mob/wire_members_batch", {
+      mob_id: mobId,
+      edges: edges.map(normalizeMobWireMembersBatchEdge),
+    });
+    return MeerkatClient.parseMobWireMembersBatchReport(result);
+  }
+
   async unwireMobMembers(mobId: string, member: string, peer: MobPeerTarget): Promise<void> {
     const payload =
       typeof peer === "string"
@@ -3320,6 +3345,40 @@ export class MeerkatClient {
         id: MeerkatClient.requireStringField(key, "id", context),
       },
       displayName: MeerkatClient.parseOptionalString(data.display_name),
+    };
+  }
+
+  private static parseMobWireMembersBatchEdge(
+    raw: unknown,
+    context: string,
+  ): WireMobWireMembersBatchEdge {
+    const data = MeerkatClient.requireRecord(raw, "edge", context);
+    return {
+      a: MeerkatClient.requireStringField(data, "a", context),
+      b: MeerkatClient.requireStringField(data, "b", context),
+    };
+  }
+
+  private static parseMobWireMembersBatchEdges(
+    raw: unknown,
+    context: string,
+  ): WireMobWireMembersBatchEdge[] {
+    return MeerkatClient.requireRecordArray(raw, context).map((edge, index) =>
+      MeerkatClient.parseMobWireMembersBatchEdge(edge, `${context} edge ${index}`),
+    );
+  }
+
+  private static parseMobWireMembersBatchReport(
+    data: Record<string, unknown>,
+  ): MobWireMembersBatchResult {
+    const context = "Invalid mob/wire_members_batch response";
+    return {
+      requested: MeerkatClient.requireNumberField(data, "requested", context),
+      wired: MeerkatClient.parseMobWireMembersBatchEdges(data.wired, `${context} wired`),
+      alreadyWired: MeerkatClient.parseMobWireMembersBatchEdges(
+        data.already_wired,
+        `${context} already_wired`,
+      ),
     };
   }
 

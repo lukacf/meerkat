@@ -13700,6 +13700,115 @@
     "title": "MobWaitMembersResult",
     "type": "object"
   },
+  "MobWireMembersBatchEdge": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One local-member edge in `mob/wire_members_batch`.",
+    "properties": {
+      "a": {
+        "type": "string"
+      },
+      "b": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "a",
+      "b"
+    ],
+    "title": "MobWireMembersBatchEdge",
+    "type": "object"
+  },
+  "MobWireMembersBatchParams": {
+    "$defs": {
+      "MobWireMembersBatchEdge": {
+        "additionalProperties": false,
+        "description": "One local-member edge in `mob/wire_members_batch`.",
+        "properties": {
+          "a": {
+            "type": "string"
+          },
+          "b": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "a",
+          "b"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/wire_members_batch`.",
+    "properties": {
+      "edges": {
+        "items": {
+          "$ref": "#/$defs/MobWireMembersBatchEdge"
+        },
+        "type": "array"
+      },
+      "mob_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "edges"
+    ],
+    "title": "MobWireMembersBatchParams",
+    "type": "object"
+  },
+  "MobWireMembersBatchResult": {
+    "$defs": {
+      "MobWireMembersBatchEdge": {
+        "additionalProperties": false,
+        "description": "One local-member edge in `mob/wire_members_batch`.",
+        "properties": {
+          "a": {
+            "type": "string"
+          },
+          "b": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "a",
+          "b"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/wire_members_batch`.",
+    "properties": {
+      "already_wired": {
+        "items": {
+          "$ref": "#/$defs/MobWireMembersBatchEdge"
+        },
+        "type": "array"
+      },
+      "requested": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "wired": {
+        "items": {
+          "$ref": "#/$defs/MobWireMembersBatchEdge"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "requested",
+      "wired",
+      "already_wired"
+    ],
+    "title": "MobWireMembersBatchResult",
+    "type": "object"
+  },
   "MobWireResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Response payload for `mob/wire`.",

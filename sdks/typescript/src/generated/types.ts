@@ -336,6 +336,22 @@ export interface MobWireResult {
   wired: boolean;
 }
 
+export interface MobWireMembersBatchEdge {
+  a: string;
+  b: string;
+}
+
+export interface MobWireMembersBatchParams {
+  edges: MobWireMembersBatchEdge[];
+  mob_id: string;
+}
+
+export interface MobWireMembersBatchResult {
+  already_wired: MobWireMembersBatchEdge[];
+  requested: number;
+  wired: MobWireMembersBatchEdge[];
+}
+
 export interface MobUnwireResult {
   unwired: boolean;
 }

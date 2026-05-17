@@ -2475,6 +2475,58 @@ describe("Parity wrappers", () => {
     assert.equal(members[0].fenceToken, undefined);
   });
 
+  it("normalizes and parses batched mob member wiring", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return {
+        requested: params.edges.length,
+        wired: [{ a: "lead-1", b: "reviewer-1" }],
+        already_wired: [{ a: "lead-1", b: "writer-1" }],
+      };
+    };
+
+    const result = await client.mobWireMembersBatch("mob-1", [
+      ["lead-1", "reviewer-1"],
+      { a: "lead-1", b: "writer-1" },
+    ]);
+
+    assert.deepEqual(calls, [
+      {
+        method: "mob/wire_members_batch",
+        params: {
+          mob_id: "mob-1",
+          edges: [
+            { a: "lead-1", b: "reviewer-1" },
+            { a: "lead-1", b: "writer-1" },
+          ],
+        },
+      },
+    ]);
+    assert.deepEqual(result, {
+      requested: 2,
+      wired: [{ a: "lead-1", b: "reviewer-1" }],
+      alreadyWired: [{ a: "lead-1", b: "writer-1" }],
+    });
+  });
+
+  it("routes Mob.wireMembersBatch through the parent client", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return { requested: 1, wired: [{ a: "a", b: "b" }], already_wired: [] };
+    };
+    const mob = new Mob(client, "mob-1");
+
+    const result = await mob.wireMembersBatch([["a", "b"]]);
+
+    assert.equal(calls[0].method, "mob/wire_members_batch");
+    assert.deepEqual(calls[0].params, { mob_id: "mob-1", edges: [{ a: "a", b: "b" }] });
+    assert.deepEqual(result.wired, [{ a: "a", b: "b" }]);
+  });
+
   it("uses canonical role_name for helper APIs while accepting profileName alias", async () => {
     const client = new MeerkatClient();
     const calls = [];

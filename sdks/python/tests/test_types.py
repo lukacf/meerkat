@@ -257,6 +257,31 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
     assert result.results[1].result.message == "profile missing"
 
 
+def test_generated_mob_wire_members_batch_preserves_report_types():
+    from meerkat.generated.types import (
+        MobWireMembersBatchEdge as GeneratedMobWireMembersBatchEdge,
+        MobWireMembersBatchParams as GeneratedMobWireMembersBatchParams,
+        MobWireMembersBatchResult as GeneratedMobWireMembersBatchResult,
+    )
+
+    params_hints = get_type_hints(GeneratedMobWireMembersBatchParams)
+    assert get_origin(params_hints["edges"]) is list
+    assert get_args(params_hints["edges"]) == (GeneratedMobWireMembersBatchEdge,)
+
+    report_hints = get_type_hints(GeneratedMobWireMembersBatchResult)
+    assert report_hints["requested"] is int
+    assert get_args(report_hints["wired"]) == (GeneratedMobWireMembersBatchEdge,)
+    assert get_args(report_hints["already_wired"]) == (GeneratedMobWireMembersBatchEdge,)
+
+    report = GeneratedMobWireMembersBatchResult(
+        requested=2,
+        wired=[GeneratedMobWireMembersBatchEdge(a="lead", b="worker")],
+        already_wired=[GeneratedMobWireMembersBatchEdge(a="lead", b="reviewer")],
+    )
+    assert report.wired[0].a == "lead"
+    assert report.already_wired[0].b == "reviewer"
+
+
 @pytest.mark.asyncio
 async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
     from meerkat import MobSpawnManyResult as PublicMobSpawnManyResult
@@ -309,6 +334,91 @@ async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
     assert result.results[0].result.member_ref == _make_member_ref("mob-1", "worker-1")
     assert result.results[1].result.cause == "profile_not_found"
     assert result.results[1].result.message == "profile missing"
+
+
+@pytest.mark.asyncio
+async def test_mob_wire_members_batch_normalizes_payload_and_parses_report():
+    from meerkat.generated.types import MobWireMembersBatchEdge
+
+    client = MeerkatClient()
+    calls = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        return {
+            "requested": 3,
+            "wired": [{"a": "lead", "b": "worker"}],
+            "already_wired": [{"a": "lead", "b": "reviewer"}],
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    report = await client.mob_wire_members_batch(
+        "mob-1",
+        [
+            ("lead", "worker"),
+            ["lead", "reviewer"],
+            MobWireMembersBatchEdge(a="lead", b="critic"),
+        ],
+    )
+
+    assert calls == [
+        (
+            "mob/wire_members_batch",
+            {
+                "mob_id": "mob-1",
+                "edges": [
+                    {"a": "lead", "b": "worker"},
+                    {"a": "lead", "b": "reviewer"},
+                    {"a": "lead", "b": "critic"},
+                ],
+            },
+        )
+    ]
+    assert report.requested == 3
+    assert report.wired == [MobWireMembersBatchEdge(a="lead", b="worker")]
+    assert report.already_wired == [MobWireMembersBatchEdge(a="lead", b="reviewer")]
+
+
+@pytest.mark.asyncio
+async def test_mob_wire_members_batch_convenience_accepts_dict_edges():
+    client = MeerkatClient()
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        assert method == "mob/wire_members_batch"
+        assert params == {
+            "mob_id": "mob-1",
+            "edges": [{"a": "lead", "b": "worker"}],
+        }
+        return {
+            "requested": 1,
+            "wired": [],
+            "already_wired": [{"a": "lead", "b": "worker"}],
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    report = await client.mob("mob-1").wire_members_batch(
+        [{"a": "lead", "b": "worker"}]
+    )
+
+    assert report.requested == 1
+    assert report.wired == []
+    assert report.already_wired[0].a == "lead"
+
+
+@pytest.mark.asyncio
+async def test_mob_wire_members_batch_rejects_malformed_report():
+    client = MeerkatClient()
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        assert method == "mob/wire_members_batch"
+        return {"requested": 1, "wired": [{"a": "lead"}], "already_wired": []}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="edge endpoints"):
+        await client.mob_wire_members_batch("mob-1", [("lead", "worker")])
 
 
 @pytest.mark.asyncio

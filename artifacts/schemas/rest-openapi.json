@@ -2918,6 +2918,53 @@
           }
         ]
       },
+      "MobWireMembersBatchEdge": {
+        "additionalProperties": false,
+        "description": "One local-member edge in `mob/wire_members_batch`.",
+        "properties": {
+          "a": {
+            "type": "string"
+          },
+          "b": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "a",
+          "b"
+        ],
+        "title": "MobWireMembersBatchEdge",
+        "type": "object"
+      },
+      "MobWireMembersBatchResult": {
+        "description": "Response payload for `mob/wire_members_batch`.",
+        "properties": {
+          "already_wired": {
+            "items": {
+              "$ref": "#/components/schemas/MobWireMembersBatchEdge"
+            },
+            "type": "array"
+          },
+          "requested": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "wired": {
+            "items": {
+              "$ref": "#/components/schemas/MobWireMembersBatchEdge"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "requested",
+          "wired",
+          "already_wired"
+        ],
+        "title": "MobWireMembersBatchResult",
+        "type": "object"
+      },
       "ModelsCatalogResponse": {
         "description": "Response for `models/catalog` — the compiled-in model catalog.",
         "properties": {
@@ -3856,6 +3903,20 @@
           }
         },
         "required": [],
+        "type": "object"
+      },
+      "RestMobWireMembersBatchRequest": {
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/MobWireMembersBatchEdge"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "edges"
+        ],
         "type": "object"
       },
       "RestPatchConfigRequest": {
@@ -8999,6 +9060,54 @@
           }
         },
         "summary": "Wait for autonomous kickoff completion"
+      }
+    },
+    "/mob/{id}/wire-members-batch": {
+      "post": {
+        "operationId": "post_mob_id_wire_members_batch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestMobWireMembersBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobWireMembersBatchResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Wire multiple local mob member edges"
       }
     },
     "/models/catalog": {

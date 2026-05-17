@@ -123,6 +123,20 @@ struct MeerkatMobWireInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct MeerkatMobWireMembersBatchInput {
+    mob_id: String,
+    edges: Vec<MeerkatMobWireMembersBatchEdgeInput>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MeerkatMobWireMembersBatchEdgeInput {
+    a: String,
+    b: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct MeerkatMobUnwireInput {
     mob_id: String,
     member: String,
@@ -258,6 +272,7 @@ pub fn public_tool_names() -> &'static [&'static str] {
         "meerkat_mob_retire",
         "meerkat_mob_respawn",
         "meerkat_mob_wire",
+        "meerkat_mob_wire_members_batch",
         "meerkat_mob_unwire",
         "meerkat_mob_member_send",
         "meerkat_mob_append_system_context",
@@ -322,6 +337,11 @@ pub fn public_tools_list() -> Vec<Value> {
             "meerkat_mob_wire",
             "Wire a mob member to a local peer or typed external binding.",
             schema_for!(MeerkatMobWireInput),
+        ),
+        tool(
+            "meerkat_mob_wire_members_batch",
+            "Wire multiple local mob-member pairs in one batch.",
+            schema_for!(MeerkatMobWireMembersBatchInput),
         ),
         tool(
             "meerkat_mob_unwire",
@@ -626,6 +646,25 @@ pub async fn handle_public_tools_call(
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             Ok(json!({ "wired": true }))
+        }
+        "meerkat_mob_wire_members_batch" => {
+            let input: MeerkatMobWireMembersBatchInput = parse_args(arguments)?;
+            let mob_id = parse_mob_id(&input.mob_id)?;
+            let edges = input
+                .edges
+                .into_iter()
+                .map(|edge| {
+                    (
+                        meerkat_mob::AgentIdentity::from(edge.a.as_str()),
+                        meerkat_mob::AgentIdentity::from(edge.b.as_str()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let report = state
+                .mob_wire_members_batch(&mob_id, edges)
+                .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+            Ok(json!(report))
         }
         "meerkat_mob_unwire" => {
             let input: MeerkatMobUnwireInput = parse_args(arguments)?;
@@ -1096,6 +1135,29 @@ mod tests {
     }
 
     #[test]
+    fn public_mcp_wire_members_batch_schema_is_local_member_edges_only() {
+        let tools = public_tools_list();
+        let schema = tools
+            .iter()
+            .find(|tool| tool["name"] == "meerkat_mob_wire_members_batch")
+            .and_then(|tool| tool.get("inputSchema"))
+            .expect("wire_members_batch schema present");
+        let schema_text = serde_json::to_string(schema).expect("schema should encode");
+
+        assert!(schema_text.contains("mob_id"));
+        assert!(schema_text.contains("edges"));
+        assert!(schema_text.contains("\"a\""));
+        assert!(schema_text.contains("\"b\""));
+        assert!(
+            !schema_text.contains("external")
+                && !schema_text.contains("\"peer\"")
+                && !schema_text.contains("\"peer_id\"")
+                && !schema_text.contains("\"pubkey\""),
+            "batch schema must stay local-member only: {schema_text}"
+        );
+    }
+
+    #[test]
     fn public_mcp_spawn_binding_resolves_canonical_external_identity() {
         let binding = runtime_binding_from_wire(external_runtime_binding(ED25519_PUBLIC_KEY_7))
             .expect("canonical runtime binding identity should resolve");
@@ -1472,5 +1534,78 @@ mod tests {
         );
         assert!(row.get("ok").is_none());
         assert!(row.get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn public_mcp_wire_members_batch_returns_batch_report_shape() {
+        let state = MobMcpState::new_in_memory();
+        handle_public_tools_call(
+            &state,
+            "meerkat_mob_create",
+            &json!({
+                "definition": {
+                    "id": "typed-public-wire-members-batch",
+                    "profiles": {
+                        "worker": {
+                            "model": "gpt-5.4",
+                            "tools": {"comms": true}
+                        }
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("create typed public mob");
+
+        for agent_identity in ["w-a", "w-b"] {
+            handle_public_tools_call(
+                &state,
+                "meerkat_mob_spawn",
+                &json!({
+                    "mob_id": "typed-public-wire-members-batch",
+                    "profile": "worker",
+                    "agent_identity": agent_identity,
+                    "runtime_mode": "turn_driven"
+                }),
+            )
+            .await
+            .expect("spawn local member");
+        }
+
+        let result = handle_public_tools_call(
+            &state,
+            "meerkat_mob_wire_members_batch",
+            &json!({
+                "mob_id": "typed-public-wire-members-batch",
+                "edges": [{"a": "w-a", "b": "w-b"}]
+            }),
+        )
+        .await
+        .expect("batch wires local members");
+
+        assert_eq!(result["requested"], 1);
+        assert_eq!(result["wired"], json!([{ "a": "w-a", "b": "w-b" }]));
+        assert_eq!(
+            result["already_wired"]
+                .as_array()
+                .expect("already_wired array")
+                .len(),
+            0
+        );
+
+        let second = handle_public_tools_call(
+            &state,
+            "meerkat_mob_wire_members_batch",
+            &json!({
+                "mob_id": "typed-public-wire-members-batch",
+                "edges": [{"a": "w-b", "b": "w-a"}]
+            }),
+        )
+        .await
+        .expect("batch reports already-wired local edge");
+
+        assert_eq!(second["requested"], 1);
+        assert_eq!(second["wired"].as_array().expect("wired array").len(), 0);
+        assert_eq!(second["already_wired"], json!([{ "a": "w-a", "b": "w-b" }]));
     }
 }

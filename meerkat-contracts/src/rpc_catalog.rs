@@ -612,6 +612,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobWireResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/wire_members_batch",
+                "Wire multiple local mob member edges",
+                "MobWireMembersBatchParams",
+                "MobWireMembersBatchResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/unwire",
                 "Unwire a local mob member from a local or external peer",
                 "MobUnwireParams",
@@ -1295,6 +1301,11 @@ mod tests {
                 Some("MobRespawnResult"),
             ),
             ("mob/wire", Some("MobWireParams"), Some("MobWireResult")),
+            (
+                "mob/wire_members_batch",
+                Some("MobWireMembersBatchParams"),
+                Some("MobWireMembersBatchResult"),
+            ),
             (
                 "mob/unwire",
                 Some("MobUnwireParams"),

@@ -123,7 +123,8 @@ impl PeerIngressOwner {
 /// Typed view of the per-session supervisor-bridge binding (Wave 3 D Row 21).
 ///
 /// Projected from the DSL's tagged-union state
-/// (`supervisor_binding_kind` + `supervisor_bound_{name, peer_id, address, epoch}`).
+/// (`supervisor_binding_kind` +
+/// `supervisor_bound_{name, peer_id, address, signing_public_key, epoch}`).
 /// The `supervisor_binding_consistency` invariant guarantees the companion
 /// fields are populated exactly when the kind is `Bound`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,14 +133,15 @@ pub enum SupervisorBinding {
     /// No supervisor bound. The initial state and the state after a
     /// successful `RevokeSupervisor`.
     Unbound,
-    /// Supervisor authorized. The four companion fields travel together:
-    /// `name` + `peer_id` + `address` derive from the initial bind or the
-    /// latest `AuthorizeSupervisor` rotation; `epoch` monotonically
-    /// increases across rotations.
+    /// Supervisor authorized. The companion fields travel together:
+    /// `name` + `peer_id` + `address` + `signing_public_key` derive from the
+    /// initial bind or the latest `AuthorizeSupervisor` rotation; `epoch`
+    /// monotonically increases across rotations.
     Bound {
         name: String,
         peer_id: String,
         address: String,
+        signing_public_key: String,
         epoch: u64,
     },
 }
@@ -624,16 +626,25 @@ impl MeerkatMachine {
                     authority.state().supervisor_bound_name.clone(),
                     authority.state().supervisor_bound_peer_id.clone(),
                     authority.state().supervisor_bound_address.clone(),
+                    authority
+                        .state()
+                        .supervisor_bound_signing_public_key
+                        .clone(),
                     authority.state().supervisor_bound_epoch,
                 ) {
-                    (Some(name), Some(peer_id), Some(address), Some(epoch)) => {
-                        SupervisorBinding::Bound {
-                            name,
-                            peer_id,
-                            address,
-                            epoch,
-                        }
-                    }
+                    (
+                        Some(name),
+                        Some(peer_id),
+                        Some(address),
+                        Some(signing_public_key),
+                        Some(epoch),
+                    ) => SupervisorBinding::Bound {
+                        name,
+                        peer_id,
+                        address,
+                        signing_public_key,
+                        epoch,
+                    },
                     _ => {
                         tracing::error!(
                             %session_id,
@@ -658,6 +669,7 @@ impl MeerkatMachine {
         name: String,
         peer_id: String,
         address: String,
+        signing_public_key: String,
         epoch: u64,
     ) -> Result<Vec<crate::meerkat_machine::dsl::MeerkatMachineEffect>, SupervisorBindingStageError>
     {
@@ -675,6 +687,7 @@ impl MeerkatMachine {
                 name,
                 peer_id,
                 address,
+                signing_public_key,
                 epoch,
             },
         )
@@ -693,6 +706,7 @@ impl MeerkatMachine {
         name: String,
         peer_id: String,
         address: String,
+        signing_public_key: String,
         epoch: u64,
     ) -> Result<Vec<crate::meerkat_machine::dsl::MeerkatMachineEffect>, SupervisorBindingStageError>
     {
@@ -710,6 +724,7 @@ impl MeerkatMachine {
                 name,
                 peer_id,
                 address,
+                signing_public_key,
                 epoch,
             },
         )

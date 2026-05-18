@@ -1856,7 +1856,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             // task's stack; the companion trust edge was router-owned, so
             // the authorization discriminant had split ownership. Now the
             // DSL owns both the kind and the full canonical binding
-            // (`peer_id` + `name` + `address` + `epoch`); the trust edge
+            // (`peer_id` + `name` + `address` + `signing key` + `epoch`); the trust edge
             // in the router stays in lock-step via shell-side
             // `add_trusted_peer` / `remove_trusted_peer` calls that only
             // run after the DSL mutator accepts the corresponding
@@ -1868,10 +1868,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             supervisor_bound_name: Option<String>,
             supervisor_bound_peer_id: Option<String>,
             supervisor_bound_address: Option<String>,
+            supervisor_bound_signing_public_key: Option<String>,
             supervisor_bound_epoch: Option<u64>,
             supervisor_revoke_pending_name: Option<String>,
             supervisor_revoke_pending_peer_id: Option<String>,
             supervisor_revoke_pending_address: Option<String>,
+            supervisor_revoke_pending_signing_public_key: Option<String>,
             supervisor_revoke_pending_epoch: Option<u64>,
 
             // --- Track-B (R5): peer-projection state ---
@@ -2039,10 +2041,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             supervisor_bound_name = None,
             supervisor_bound_peer_id = None,
             supervisor_bound_address = None,
+            supervisor_bound_signing_public_key = None,
             supervisor_bound_epoch = None,
             supervisor_revoke_pending_name = None,
             supervisor_revoke_pending_peer_id = None,
             supervisor_revoke_pending_address = None,
+            supervisor_revoke_pending_signing_public_key = None,
             supervisor_revoke_pending_epoch = None,
             // Track-B (R5): peer-projection state initialised empty.
             local_endpoint = None,
@@ -2513,12 +2517,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 name: String,
                 peer_id: String,
                 address: String,
+                signing_public_key: String,
                 epoch: u64,
             },
             AuthorizeSupervisor {
                 name: String,
                 peer_id: String,
                 address: String,
+                signing_public_key: String,
                 epoch: u64,
             },
             RevokeSupervisor {
@@ -3058,8 +3064,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // Supervisor-binding tagged-union discipline (Wave 3 D Row 21).
-        // `Unbound` carries no companions; `Bound` carries all four
-        // (`name`, `peer_id`, `address`, `epoch`). A half-populated binding
+        // `Unbound` carries no companions; `Bound` carries all five
+        // (`name`, `peer_id`, `address`, `signing key`, `epoch`). A half-populated binding
         // is structurally unrepresentable — the split-ownership regression
         // class is closed by construction.
         invariant supervisor_binding_consistency {
@@ -3067,11 +3073,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.supervisor_bound_name == None
                 && self.supervisor_bound_peer_id == None
                 && self.supervisor_bound_address == None
+                && self.supervisor_bound_signing_public_key == None
                 && self.supervisor_bound_epoch == None)
             || (self.supervisor_binding_kind == SupervisorBindingKind::Bound
                 && self.supervisor_bound_name != None
                 && self.supervisor_bound_peer_id != None
                 && self.supervisor_bound_address != None
+                && self.supervisor_bound_signing_public_key != None
                 && self.supervisor_bound_epoch != None)
         }
 
@@ -3079,10 +3087,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             (self.supervisor_revoke_pending_name == None
                 && self.supervisor_revoke_pending_peer_id == None
                 && self.supervisor_revoke_pending_address == None
+                && self.supervisor_revoke_pending_signing_public_key == None
                 && self.supervisor_revoke_pending_epoch == None)
             || (self.supervisor_revoke_pending_name != None
                 && self.supervisor_revoke_pending_peer_id != None
                 && self.supervisor_revoke_pending_address != None
+                && self.supervisor_revoke_pending_signing_public_key != None
                 && self.supervisor_revoke_pending_epoch != None)
         }
 
@@ -11203,7 +11213,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // `Bound` and records the canonical identity + epoch.
         transition BindSupervisor {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input BindSupervisor { name, peer_id, address, epoch }
+            on input BindSupervisor { name, peer_id, address, signing_public_key, epoch }
             guard "supervisor_unbound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Unbound
             }
@@ -11212,10 +11222,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_bound_name = Some(name);
                 self.supervisor_bound_peer_id = Some(peer_id);
                 self.supervisor_bound_address = Some(address);
+                self.supervisor_bound_signing_public_key = Some(signing_public_key);
                 self.supervisor_bound_epoch = Some(epoch);
                 self.supervisor_revoke_pending_name = None;
                 self.supervisor_revoke_pending_peer_id = None;
                 self.supervisor_revoke_pending_address = None;
+                self.supervisor_revoke_pending_signing_public_key = None;
                 self.supervisor_revoke_pending_epoch = None;
             }
             to Idle
@@ -11223,7 +11235,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 peer_id: self.supervisor_bound_peer_id.get("value"),
                 name: self.supervisor_bound_name.get("value"),
                 address: self.supervisor_bound_address.get("value"),
-                signing_public_key: None,
+                signing_public_key: Some(self.supervisor_bound_signing_public_key.get("value")),
                 epoch: self.supervisor_bound_epoch.get("value")
             }
         }
@@ -11235,7 +11247,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // supervisor before firing this input.
         transition AuthorizeSupervisor {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input AuthorizeSupervisor { name, peer_id, address, epoch }
+            on input AuthorizeSupervisor { name, peer_id, address, signing_public_key, epoch }
             guard "supervisor_bound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Bound
             }
@@ -11243,10 +11255,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_bound_name = Some(name);
                 self.supervisor_bound_peer_id = Some(peer_id);
                 self.supervisor_bound_address = Some(address);
+                self.supervisor_bound_signing_public_key = Some(signing_public_key);
                 self.supervisor_bound_epoch = Some(epoch);
                 self.supervisor_revoke_pending_name = None;
                 self.supervisor_revoke_pending_peer_id = None;
                 self.supervisor_revoke_pending_address = None;
+                self.supervisor_revoke_pending_signing_public_key = None;
                 self.supervisor_revoke_pending_epoch = None;
             }
             to Idle
@@ -11254,7 +11268,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 peer_id: self.supervisor_bound_peer_id.get("value"),
                 name: self.supervisor_bound_name.get("value"),
                 address: self.supervisor_bound_address.get("value"),
-                signing_public_key: None,
+                signing_public_key: Some(self.supervisor_bound_signing_public_key.get("value")),
                 epoch: self.supervisor_bound_epoch.get("value")
             }
         }
@@ -11279,11 +11293,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_revoke_pending_name = Some(self.supervisor_bound_name.get("value"));
                 self.supervisor_revoke_pending_peer_id = Some(peer_id);
                 self.supervisor_revoke_pending_address = Some(self.supervisor_bound_address.get("value"));
+                self.supervisor_revoke_pending_signing_public_key = Some(self.supervisor_bound_signing_public_key.get("value"));
                 self.supervisor_revoke_pending_epoch = Some(epoch);
                 self.supervisor_binding_kind = SupervisorBindingKind::Unbound;
                 self.supervisor_bound_name = None;
                 self.supervisor_bound_peer_id = None;
                 self.supervisor_bound_address = None;
+                self.supervisor_bound_signing_public_key = None;
                 self.supervisor_bound_epoch = None;
             }
             to Idle
@@ -11345,6 +11361,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_revoke_pending_name = None;
                 self.supervisor_revoke_pending_peer_id = None;
                 self.supervisor_revoke_pending_address = None;
+                self.supervisor_revoke_pending_signing_public_key = None;
                 self.supervisor_revoke_pending_epoch = None;
             }
             to Idle
@@ -11367,10 +11384,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_bound_name = Some(self.supervisor_revoke_pending_name.get("value"));
                 self.supervisor_bound_peer_id = Some(self.supervisor_revoke_pending_peer_id.get("value"));
                 self.supervisor_bound_address = Some(self.supervisor_revoke_pending_address.get("value"));
+                self.supervisor_bound_signing_public_key = Some(self.supervisor_revoke_pending_signing_public_key.get("value"));
                 self.supervisor_bound_epoch = Some(self.supervisor_revoke_pending_epoch.get("value"));
                 self.supervisor_revoke_pending_name = None;
                 self.supervisor_revoke_pending_peer_id = None;
                 self.supervisor_revoke_pending_address = None;
+                self.supervisor_revoke_pending_signing_public_key = None;
                 self.supervisor_revoke_pending_epoch = None;
             }
             to Idle

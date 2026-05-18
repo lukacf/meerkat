@@ -202,6 +202,8 @@ struct MockCommsRuntime {
     default_public_key: String,
     default_public_key_bytes: [u8; 32],
     behavior: std::sync::RwLock<MockCommsBehavior>,
+    private_add_failures_remaining: std::sync::Mutex<usize>,
+    private_ack_rejections_remaining: std::sync::Mutex<usize>,
     remove_failures_remaining: std::sync::Mutex<usize>,
     trusted_peers: RwLock<HashMap<String, TrustedPeerDescriptor>>,
     peer_statuses: RwLock<HashMap<String, (PeerReachability, Option<PeerReachabilityReason>)>>,
@@ -234,6 +236,12 @@ impl MockCommsRuntime {
             default_public_key: public_key.to_pubkey_string(),
             default_public_key_bytes: key_bytes,
             behavior: std::sync::RwLock::new(behavior),
+            private_add_failures_remaining: std::sync::Mutex::new(usize::from(
+                behavior.fail_private_add_after_insert,
+            )),
+            private_ack_rejections_remaining: std::sync::Mutex::new(usize::from(
+                behavior.reject_private_publish_ack_after_insert,
+            )),
             remove_failures_remaining: std::sync::Mutex::new(usize::from(
                 behavior.fail_remove_trust_once,
             )),
@@ -265,6 +273,16 @@ impl MockCommsRuntime {
             .lock()
             .expect("poisoned remove_failures_remaining lock in mock runtime");
         *remaining = usize::from(behavior.fail_remove_trust_once);
+        let mut private_add_remaining = self
+            .private_add_failures_remaining
+            .lock()
+            .expect("poisoned private_add_failures_remaining lock in mock runtime");
+        *private_add_remaining = usize::from(behavior.fail_private_add_after_insert);
+        let mut private_ack_remaining = self
+            .private_ack_rejections_remaining
+            .lock()
+            .expect("poisoned private_ack_rejections_remaining lock in mock runtime");
+        *private_ack_remaining = usize::from(behavior.reject_private_publish_ack_after_insert);
     }
 
     async fn trusted_peer_names(&self) -> Vec<String> {
@@ -367,11 +385,18 @@ impl CoreCommsRuntime for MockCommsRuntime {
 
     async fn add_private_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
         self.add_trusted_peer(peer).await?;
-        let behavior = *self
-            .behavior
-            .read()
-            .expect("poisoned behavior lock in mock runtime");
-        if behavior.reject_private_publish_ack_after_insert
+        let reject_private_publish_ack_after_insert = {
+            let mut remaining = self
+                .private_ack_rejections_remaining
+                .lock()
+                .expect("poisoned private_ack_rejections_remaining lock in mock runtime");
+            let should_reject = *remaining > 0;
+            if should_reject {
+                *remaining -= 1;
+            }
+            should_reject
+        };
+        if reject_private_publish_ack_after_insert
             && let Some(adapter) = self.runtime_adapter.as_ref()
             && let meerkat_runtime::meerkat_machine::SupervisorBinding::Bound { epoch, .. } =
                 adapter.supervisor_binding(&self.session_id).await
@@ -382,12 +407,24 @@ impl CoreCommsRuntime for MockCommsRuntime {
                     "ack-reject-supervisor".to_string(),
                     "ed25519:ack-reject-supervisor".to_string(),
                     "inproc://ack-reject-supervisor".to_string(),
+                    meerkat_runtime::comms_drain::encode_supervisor_signing_public_key([0x42; 32]),
                     epoch + 1,
                 )
                 .await
                 .expect("mock should be able to advance supervisor binding before ack");
         }
-        if behavior.fail_private_add_after_insert {
+        let fail_private_add_after_insert = {
+            let mut remaining = self
+                .private_add_failures_remaining
+                .lock()
+                .expect("poisoned private_add_failures_remaining lock in mock runtime");
+            let should_fail = *remaining > 0;
+            if should_fail {
+                *remaining -= 1;
+            }
+            should_fail
+        };
+        if fail_private_add_after_insert {
             return Err(SendError::Unsupported(
                 "mock add_private_trusted_peer failure after insert".to_string(),
             ));
@@ -8154,8 +8191,8 @@ async fn test_rotate_supervisor_private_trust_partial_publish_cleans_attempted_a
 }
 
 #[tokio::test]
-async fn test_rotate_supervisor_private_trust_partial_publish_cleanup_failure_is_typed_rollback_failure()
- {
+async fn test_rotate_supervisor_private_trust_partial_publish_rollback_restores_original_authority()
+{
     let definition = with_unique_mob_id(
         sample_definition(),
         "rotate-supervisor-private-trust-partial-publish-cleanup-fails",
@@ -8203,7 +8240,6 @@ async fn test_rotate_supervisor_private_trust_partial_publish_cleanup_failure_is
             &comms_name,
             MockCommsBehavior {
                 fail_private_add_after_insert: true,
-                fail_remove_trust_once: true,
                 ..MockCommsBehavior::default()
             },
         )
@@ -8212,7 +8248,7 @@ async fn test_rotate_supervisor_private_trust_partial_publish_cleanup_failure_is
     let error = handle
         .rotate_supervisor()
         .await
-        .expect_err("partial private trust cleanup failure should be typed incomplete");
+        .expect_err("partial private trust publication should be typed incomplete");
     let attempted_public_peer_id = match error {
         MobError::SupervisorRotationIncomplete {
             previous_epoch,
@@ -8228,18 +8264,13 @@ async fn test_rotate_supervisor_private_trust_partial_publish_cleanup_failure_is
             assert_eq!(previous_epoch, original.epoch);
             assert_eq!(attempted_epoch, original.epoch + 1);
             assert_eq!(rotated_peer_count, 0);
-            assert!(!rollback_succeeded);
+            assert!(rollback_succeeded);
             assert!(!pending_authority_recorded);
             assert!(!pending_authority_process_local);
+            assert!(rollback_error.is_none());
             assert!(
-                rollback_error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("supervisor private trust cleanup failed")),
-                "cleanup failure must be represented as rollback failure, got: {rollback_error:?}"
-            );
-            assert!(
-                reason.contains("cleanup failed while removing new supervisor trust"),
-                "cleanup failure should be visible, got: {reason}"
+                reason.contains("supervisor private trust publication failed"),
+                "partial publish failure should be visible, got: {reason}"
             );
             attempted_public_peer_id
         }
@@ -8257,8 +8288,8 @@ async fn test_rotate_supervisor_private_trust_partial_publish_cleanup_failure_is
     let trusted = member_comms.trusted_peers.read().await;
     assert!(trusted.contains_key(&original.public_peer_id));
     assert!(
-        trusted.contains_key(&attempted_public_peer_id),
-        "failed cleanup should be explicit because attempted trust remains installed"
+        !trusted.contains_key(&attempted_public_peer_id),
+        "rollback should remove attempted supervisor trust"
     );
 }
 
@@ -8372,8 +8403,7 @@ async fn test_rotate_supervisor_private_trust_ack_rejection_cleans_attempted_aut
 }
 
 #[tokio::test]
-async fn test_rotate_supervisor_private_trust_ack_rejection_cleanup_failure_is_typed_rollback_failure()
- {
+async fn test_rotate_supervisor_private_trust_ack_rejection_rollback_restores_original_authority() {
     let definition = with_unique_mob_id(
         sample_definition(),
         "rotate-supervisor-private-trust-ack-cleanup-fails",
@@ -8421,7 +8451,6 @@ async fn test_rotate_supervisor_private_trust_ack_rejection_cleanup_failure_is_t
             &comms_name,
             MockCommsBehavior {
                 reject_private_publish_ack_after_insert: true,
-                fail_remove_trust_once: true,
                 ..MockCommsBehavior::default()
             },
         )
@@ -8430,7 +8459,7 @@ async fn test_rotate_supervisor_private_trust_ack_rejection_cleanup_failure_is_t
     let error = handle
         .rotate_supervisor()
         .await
-        .expect_err("private trust ack cleanup failure should be typed incomplete");
+        .expect_err("private trust ack rejection should be typed incomplete");
     let attempted_public_peer_id = match error {
         MobError::SupervisorRotationIncomplete {
             previous_epoch,
@@ -8446,18 +8475,13 @@ async fn test_rotate_supervisor_private_trust_ack_rejection_cleanup_failure_is_t
             assert_eq!(previous_epoch, original.epoch);
             assert_eq!(attempted_epoch, original.epoch + 1);
             assert_eq!(rotated_peer_count, 0);
-            assert!(!rollback_succeeded);
+            assert!(rollback_succeeded);
             assert!(!pending_authority_recorded);
             assert!(!pending_authority_process_local);
+            assert!(rollback_error.is_none());
             assert!(
-                rollback_error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("supervisor private trust cleanup failed")),
-                "cleanup failure must be represented as rollback failure, got: {rollback_error:?}"
-            );
-            assert!(
-                reason.contains("cleanup failed while removing new supervisor trust"),
-                "cleanup failure should be visible, got: {reason}"
+                reason.contains("supervisor private trust publication ack rejected"),
+                "ack rejection should be visible, got: {reason}"
             );
             attempted_public_peer_id
         }
@@ -8475,8 +8499,8 @@ async fn test_rotate_supervisor_private_trust_ack_rejection_cleanup_failure_is_t
     let trusted = member_comms.trusted_peers.read().await;
     assert!(trusted.contains_key(&original.public_peer_id));
     assert!(
-        trusted.contains_key(&attempted_public_peer_id),
-        "failed cleanup should be explicit because attempted trust remains installed"
+        !trusted.contains_key(&attempted_public_peer_id),
+        "rollback should remove attempted supervisor trust"
     );
     drop(trusted);
     match adapter.supervisor_binding(&session_id).await {

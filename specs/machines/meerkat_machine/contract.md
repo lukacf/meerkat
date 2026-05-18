@@ -144,10 +144,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `supervisor_bound_name`: `Option<String>`
 - `supervisor_bound_peer_id`: `Option<String>`
 - `supervisor_bound_address`: `Option<String>`
+- `supervisor_bound_signing_public_key`: `Option<String>`
 - `supervisor_bound_epoch`: `Option<u64>`
 - `supervisor_revoke_pending_name`: `Option<String>`
 - `supervisor_revoke_pending_peer_id`: `Option<String>`
 - `supervisor_revoke_pending_address`: `Option<String>`
+- `supervisor_revoke_pending_signing_public_key`: `Option<String>`
 - `supervisor_revoke_pending_epoch`: `Option<u64>`
 - `local_endpoint`: `Option<PeerEndpoint>`
 - `direct_peer_endpoints`: `Set<PeerEndpoint>`
@@ -331,8 +333,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AttachSessionIngress`(comms_runtime_id: CommsRuntimeId)
 - `AttachMobIngress`(comms_runtime_id: CommsRuntimeId, mob_id: MobId)
 - `DetachIngress`
-- `BindSupervisor`(name: String, peer_id: String, address: String, epoch: u64)
-- `AuthorizeSupervisor`(name: String, peer_id: String, address: String, epoch: u64)
+- `BindSupervisor`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
+- `AuthorizeSupervisor`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
 - `RevokeSupervisor`(peer_id: String, epoch: u64)
 - `SupervisorTrustEdgePublished`(peer_id: String, epoch: u64)
 - `SupervisorTrustEdgePublishFailed`(peer_id: String, epoch: u64, reason: String)
@@ -8516,7 +8518,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BindSupervisorIdle`
 - From: `Idle`
-- On: `BindSupervisor`(name, peer_id, address, epoch)
+- On: `BindSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_unbound`
 - Emits: `PublishSupervisorTrustEdge`
@@ -8524,7 +8526,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BindSupervisorAttached`
 - From: `Attached`
-- On: `BindSupervisor`(name, peer_id, address, epoch)
+- On: `BindSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_unbound`
 - Emits: `PublishSupervisorTrustEdge`
@@ -8532,7 +8534,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BindSupervisorRunning`
 - From: `Running`
-- On: `BindSupervisor`(name, peer_id, address, epoch)
+- On: `BindSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_unbound`
 - Emits: `PublishSupervisorTrustEdge`
@@ -8540,7 +8542,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BindSupervisorRetired`
 - From: `Retired`
-- On: `BindSupervisor`(name, peer_id, address, epoch)
+- On: `BindSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_unbound`
 - Emits: `PublishSupervisorTrustEdge`
@@ -8548,7 +8550,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BindSupervisorStopped`
 - From: `Stopped`
-- On: `BindSupervisor`(name, peer_id, address, epoch)
+- On: `BindSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_unbound`
 - Emits: `PublishSupervisorTrustEdge`
@@ -8556,7 +8558,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeSupervisorIdle`
 - From: `Idle`
-- On: `AuthorizeSupervisor`(name, peer_id, address, epoch)
+- On: `AuthorizeSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_bound`
 - Emits: `PublishSupervisorTrustEdge`
@@ -8564,7 +8566,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeSupervisorAttached`
 - From: `Attached`
-- On: `AuthorizeSupervisor`(name, peer_id, address, epoch)
+- On: `AuthorizeSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_bound`
 - Emits: `PublishSupervisorTrustEdge`
@@ -8572,7 +8574,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeSupervisorRunning`
 - From: `Running`
-- On: `AuthorizeSupervisor`(name, peer_id, address, epoch)
+- On: `AuthorizeSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_bound`
 - Emits: `PublishSupervisorTrustEdge`
@@ -8580,7 +8582,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeSupervisorRetired`
 - From: `Retired`
-- On: `AuthorizeSupervisor`(name, peer_id, address, epoch)
+- On: `AuthorizeSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_bound`
 - Emits: `PublishSupervisorTrustEdge`
@@ -8588,7 +8590,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeSupervisorStopped`
 - From: `Stopped`
-- On: `AuthorizeSupervisor`(name, peer_id, address, epoch)
+- On: `AuthorizeSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_bound`
 - Emits: `PublishSupervisorTrustEdge`

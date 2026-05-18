@@ -752,6 +752,7 @@ struct BoundSupervisorState {
     name: String,
     peer_id: String,
     address: String,
+    signing_public_key: String,
     epoch: u64,
 }
 
@@ -761,6 +762,7 @@ impl BoundSupervisorState {
             name,
             peer_id,
             address,
+            signing_public_key,
             epoch,
         } = binding
         else {
@@ -770,9 +772,178 @@ impl BoundSupervisorState {
             name: name.clone(),
             peer_id: peer_id.clone(),
             address: address.clone(),
+            signing_public_key: signing_public_key.clone(),
             epoch: *epoch,
         })
     }
+}
+
+pub fn encode_supervisor_signing_public_key(pubkey: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in pubkey {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+pub fn decode_supervisor_signing_public_key(encoded: &str) -> Result<[u8; 32], String> {
+    fn hex_nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let bytes = encoded.as_bytes();
+    if bytes.len() != 64 {
+        return Err(format!(
+            "supervisor signing public key must be 64 hex characters, got {}",
+            bytes.len()
+        ));
+    }
+    let mut decoded = [0u8; 32];
+    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+        let high = hex_nibble(chunk[0]).ok_or_else(|| {
+            format!(
+                "invalid supervisor signing public key hex at byte {}",
+                index * 2
+            )
+        })?;
+        let low = hex_nibble(chunk[1]).ok_or_else(|| {
+            format!(
+                "invalid supervisor signing public key hex at byte {}",
+                index * 2 + 1
+            )
+        })?;
+        decoded[index] = (high << 4) | low;
+    }
+    Ok(decoded)
+}
+
+pub fn trusted_peer_descriptor_from_supervisor_publish_obligation(
+    obligation: &crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation,
+) -> Result<TrustedPeerDescriptor, String> {
+    let signing_public_key = obligation.signing_public_key.as_ref().ok_or_else(|| {
+        "generated supervisor trust publish obligation omitted signing public key".to_string()
+    })?;
+    let pubkey = decode_supervisor_signing_public_key(signing_public_key)?;
+    TrustedPeerDescriptor::unsigned_with_pubkey(
+        obligation.name.clone(),
+        obligation.peer_id.clone(),
+        pubkey,
+        obligation.address.clone(),
+    )
+}
+
+fn single_supervisor_publish_obligation(
+    effects: &[crate::meerkat_machine::dsl::MeerkatMachineEffect],
+    context: &str,
+) -> Result<crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation, String> {
+    let obligations = crate::protocol_supervisor_trust_publish::extract_obligations(effects);
+    match obligations.as_slice() {
+        [obligation] => Ok(obligation.clone()),
+        [] => Err(format!("{context}: generated publish effect was absent")),
+        _ => Err(format!(
+            "{context}: generated multiple supervisor trust publish effects"
+        )),
+    }
+}
+
+fn matching_supervisor_revoke_obligation(
+    effects: &[crate::meerkat_machine::dsl::MeerkatMachineEffect],
+    peer_id: &str,
+    epoch: u64,
+    context: &str,
+) -> Result<crate::protocol_supervisor_trust_revoke::SupervisorTrustRevokeObligation, String> {
+    crate::protocol_supervisor_trust_revoke::extract_obligations(effects)
+        .into_iter()
+        .find(|obligation| obligation.peer_id == peer_id && obligation.epoch == epoch)
+        .ok_or_else(|| format!("{context}: generated revoke effect was absent"))
+}
+
+fn validate_supervisor_publish_obligation(
+    obligation: &crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation,
+    expected: &TrustedPeerDescriptor,
+    expected_epoch: u64,
+    context: &str,
+) -> Result<(), String> {
+    let expected_signing_key = encode_supervisor_signing_public_key(expected.pubkey);
+    if obligation.name != expected.name.as_str()
+        || obligation.peer_id != expected.peer_id.as_str()
+        || obligation.address != expected.address.to_string()
+        || obligation.signing_public_key.as_deref() != Some(expected_signing_key.as_str())
+        || obligation.epoch != expected_epoch
+    {
+        return Err(format!(
+            "{context}: generated publish obligation did not match the staged supervisor binding"
+        ));
+    }
+    Ok(())
+}
+
+async fn publish_supervisor_trust_from_generated_obligation(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    obligation: &crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation,
+) -> Result<(), String> {
+    let trusted_peer = trusted_peer_descriptor_from_supervisor_publish_obligation(obligation)?;
+    comms_runtime
+        .add_trusted_peer(trusted_peer)
+        .await
+        .map_err(|error| error.to_string())?;
+    adapter
+        .stage_supervisor_trust_published(session_id, obligation.peer_id.clone(), obligation.epoch)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn bind_and_publish_supervisor_trust(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    supervisor: &TrustedPeerDescriptor,
+    epoch: u64,
+    context: &str,
+) -> Result<(), String> {
+    let effects = adapter
+        .stage_supervisor_bind(
+            session_id,
+            supervisor.name.as_str().to_owned(),
+            supervisor.peer_id.as_str(),
+            supervisor.address.to_string(),
+            encode_supervisor_signing_public_key(supervisor.pubkey),
+            epoch,
+        )
+        .await
+        .map_err(|error| format!("{context}: DSL rejected bind: {error}"))?;
+    let obligation = single_supervisor_publish_obligation(&effects, context)?;
+    validate_supervisor_publish_obligation(&obligation, supervisor, epoch, context)?;
+    publish_supervisor_trust_from_generated_obligation(
+        adapter,
+        session_id,
+        comms_runtime,
+        &obligation,
+    )
+    .await
+    .map_err(|error| format!("{context}: trust publication failed: {error}"))
+}
+
+fn trusted_peer_descriptor_from_bound_supervisor_state(
+    previous: &BoundSupervisorState,
+) -> Result<TrustedPeerDescriptor, String> {
+    let pubkey = decode_supervisor_signing_public_key(&previous.signing_public_key)?;
+    TrustedPeerDescriptor::unsigned_with_pubkey(
+        previous.name.clone(),
+        previous.peer_id.clone(),
+        pubkey,
+        previous.address.clone(),
+    )
 }
 
 async fn rollback_bind_after_trust_publication_failure(
@@ -806,6 +977,7 @@ async fn rollback_authorize_after_trust_publication_failure(
             previous.name.clone(),
             previous.peer_id.clone(),
             previous.address.clone(),
+            previous.signing_public_key.clone(),
             previous.epoch,
         )
         .await
@@ -1215,12 +1387,13 @@ async fn try_handle_supervisor_bridge_command(
             // `validate_bind_request_against_state` already confirmed the
             // binding is `Unbound`, so this stage should never be
             // rejected; if the DSL rejects anyway, treat as internal.
-            if let Err(error) = adapter
+            let bind_effects = match adapter
                 .stage_supervisor_bind(
                     session_id,
                     supervisor_spec.name.as_str().to_owned(),
                     supervisor_spec.peer_id.as_str(),
                     advertised_address.clone(),
+                    encode_supervisor_signing_public_key(supervisor_spec.pubkey),
                     payload.epoch,
                 )
                 // Wave-c C-6r V5: typed `PeerName` / `PeerId` carry the
@@ -1232,25 +1405,97 @@ async fn try_handle_supervisor_bridge_command(
                 // are preserved everywhere above the DSL boundary.
                 .await
             {
+                Ok(effects) => effects,
+                Err(error) => {
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        format!("bind member failed: DSL rejected binding: {error}"),
+                    )
+                    .await;
+                    return true;
+                }
+            };
+            let publish_obligation =
+                match single_supervisor_publish_obligation(&bind_effects, "bind member") {
+                    Ok(obligation) => obligation,
+                    Err(error) => {
+                        let _ = rollback_bind_after_trust_publication_failure(
+                            adapter,
+                            session_id,
+                            &supervisor_spec.peer_id.as_str(),
+                            payload.epoch,
+                        )
+                        .await;
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            error,
+                        )
+                        .await;
+                        return true;
+                    }
+                };
+            if let Err(error) = validate_supervisor_publish_obligation(
+                &publish_obligation,
+                &supervisor_spec,
+                payload.epoch,
+                "bind member",
+            ) {
+                let _ = rollback_bind_after_trust_publication_failure(
+                    adapter,
+                    session_id,
+                    &publish_obligation.peer_id,
+                    publish_obligation.epoch,
+                )
+                .await;
                 send_bridge_failure(
                     comms_runtime,
                     candidate,
                     BridgeRejectionCause::Internal,
-                    format!("bind member failed: DSL rejected binding: {error}"),
+                    error,
                 )
                 .await;
                 return true;
             }
-            if let Err(error) = comms_runtime
-                .add_trusted_peer(supervisor_spec.clone())
-                .await
-            {
-                let peer_id_str = supervisor_spec.peer_id.as_str();
+            let publish_spec = match trusted_peer_descriptor_from_supervisor_publish_obligation(
+                &publish_obligation,
+            ) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    let _ = rollback_bind_after_trust_publication_failure(
+                        adapter,
+                        session_id,
+                        &publish_obligation.peer_id,
+                        publish_obligation.epoch,
+                    )
+                    .await;
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        format!("bind member failed: invalid generated trust payload: {error}"),
+                    )
+                    .await;
+                    return true;
+                }
+            };
+            if let Err(error) = comms_runtime.add_trusted_peer(publish_spec).await {
+                let _ = adapter
+                    .stage_supervisor_trust_publish_failed(
+                        session_id,
+                        publish_obligation.peer_id.clone(),
+                        publish_obligation.epoch,
+                        error.to_string(),
+                    )
+                    .await;
                 let reason = match rollback_bind_after_trust_publication_failure(
                     adapter,
                     session_id,
-                    &peer_id_str,
-                    payload.epoch,
+                    &publish_obligation.peer_id,
+                    publish_obligation.epoch,
                 )
                 .await
                 {
@@ -1270,30 +1515,22 @@ async fn try_handle_supervisor_bridge_command(
                 .await;
                 return true;
             }
-            // Wave-d D-d: close the `supervisor_trust_publish` obligation
-            // on the DSL side with the epoch observed on the producer
-            // effect. The DSL guard enforces `epoch == supervisor_bound_epoch`
-            // so a stale ack for a superseded epoch is rejected without
-            // mutating state. Rejection here is non-fatal: the rollback
-            // path above already returned if trust publication failed,
-            // so a guard failure would indicate the binding has rotated
-            // between the `stage_supervisor_bind` commit and this ack
-            // staging — which means the ack is stale and correctly
-            // dropped without closing the (now-superseded) obligation.
             if let Err(error) = adapter
                 .stage_supervisor_trust_published(
                     session_id,
-                    supervisor_spec.peer_id.as_str(),
-                    payload.epoch,
+                    publish_obligation.peer_id.clone(),
+                    publish_obligation.epoch,
                 )
                 .await
             {
-                tracing::debug!(
-                    %session_id,
-                    epoch = payload.epoch,
-                    %error,
-                    "supervisor_trust_publish ack rejected by DSL (binding rotated?)"
-                );
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::Internal,
+                    format!("bind member failed: generated trust publish ack rejected: {error}"),
+                )
+                .await;
+                return true;
             }
             send_bridge_response(
                 comms_runtime,
@@ -1358,108 +1595,254 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            if let Err(error) = adapter
-                .stage_supervisor_authorize(
-                    session_id,
-                    supervisor_spec.name.as_str().to_owned(),
-                    supervisor_spec.peer_id.as_str(),
-                    supervisor_spec.address.to_string(),
+            let new_peer_id = supervisor_spec.peer_id.as_str();
+            if previous_binding.peer_id == new_peer_id {
+                let authorize_effects = match adapter
+                    .stage_supervisor_authorize(
+                        session_id,
+                        supervisor_spec.name.as_str().to_owned(),
+                        new_peer_id.clone(),
+                        supervisor_spec.address.to_string(),
+                        encode_supervisor_signing_public_key(supervisor_spec.pubkey),
+                        payload.epoch,
+                    )
+                    .await
+                {
+                    Ok(effects) => effects,
+                    Err(error) => {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            format!("authorize supervisor failed: DSL rejected rotation: {error}"),
+                        )
+                        .await;
+                        return true;
+                    }
+                };
+                let publish_obligation = match single_supervisor_publish_obligation(
+                    &authorize_effects,
+                    "authorize supervisor",
+                ) {
+                    Ok(obligation) => obligation,
+                    Err(error) => {
+                        let _ = rollback_authorize_after_trust_publication_failure(
+                            adapter,
+                            session_id,
+                            &previous_binding,
+                        )
+                        .await;
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            error,
+                        )
+                        .await;
+                        return true;
+                    }
+                };
+                if let Err(error) = validate_supervisor_publish_obligation(
+                    &publish_obligation,
+                    &supervisor_spec,
                     payload.epoch,
+                    "authorize supervisor",
                 )
-                .await
-            {
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    format!("authorize supervisor failed: DSL rejected rotation: {error}"),
-                )
-                .await;
-                return true;
-            }
-            if let Err(error) = comms_runtime
-                .add_trusted_peer(supervisor_spec.clone())
-                .await
-            {
-                let reason = match rollback_authorize_after_trust_publication_failure(
+                .and_then(|()| {
+                    trusted_peer_descriptor_from_supervisor_publish_obligation(&publish_obligation)
+                        .map(|_| ())
+                }) {
+                    let _ = rollback_authorize_after_trust_publication_failure(
+                        adapter,
+                        session_id,
+                        &previous_binding,
+                    )
+                    .await;
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        error,
+                    )
+                    .await;
+                    return true;
+                }
+                if let Err(error) = publish_supervisor_trust_from_generated_obligation(
                     adapter,
                     session_id,
-                    &previous_binding,
+                    comms_runtime,
+                    &publish_obligation,
                 )
                 .await
                 {
-                    Ok(()) => format!(
-                        "authorize supervisor failed: trust publication failed after DSL commit: {error}"
-                    ),
-                    Err(rollback_error) => format!(
-                        "authorize supervisor failed: trust publication failed after DSL commit: {error}; rollback failed: {rollback_error}"
-                    ),
-                };
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    reason,
-                )
-                .await;
-                return true;
-            }
-            // Wave-d D-d: close the `supervisor_trust_publish` obligation
-            // for the rotated binding. `AuthorizeSupervisor` above has
-            // already committed the DSL rotation to the new epoch, so
-            // the guard matches `(new_peer_id, new_epoch)` and the ack
-            // closes the obligation for the current binding. A stale
-            // ack (observed from a superseded rotation) would have a
-            // lower epoch and be rejected.
-            if let Err(error) = adapter
-                .stage_supervisor_trust_published(
-                    session_id,
-                    supervisor_spec.peer_id.as_str(),
-                    payload.epoch,
-                )
-                .await
-            {
-                tracing::debug!(
-                    %session_id,
-                    epoch = payload.epoch,
-                    %error,
-                    "supervisor_trust_publish ack rejected by DSL (binding rotated?)"
-                );
-            }
-            if previous_binding.peer_id != payload.supervisor.peer_id
-                && let Err(error) = comms_runtime
-                    .remove_trusted_peer(&previous_binding.peer_id)
+                    let _ = adapter
+                        .stage_supervisor_trust_publish_failed(
+                            session_id,
+                            publish_obligation.peer_id.clone(),
+                            publish_obligation.epoch,
+                            error.clone(),
+                        )
+                        .await;
+                    let rollback = rollback_authorize_after_trust_publication_failure(
+                        adapter,
+                        session_id,
+                        &previous_binding,
+                    )
+                    .await;
+                    let mut reason =
+                        format!("authorize supervisor failed: trust publication failed: {error}");
+                    if let Err(rollback_error) = rollback {
+                        reason.push_str(&format!("; rollback failed: {rollback_error}"));
+                    }
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        reason,
+                    )
+                    .await;
+                    return true;
+                }
+            } else {
+                let revoke_effects = match adapter
+                    .stage_supervisor_revoke(
+                        session_id,
+                        previous_binding.peer_id.clone(),
+                        previous_binding.epoch,
+                    )
                     .await
-            {
-                let rollback_result = rollback_authorize_after_trust_publication_failure(
+                {
+                    Ok(effects) => effects,
+                    Err(error) => {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            format!("authorize supervisor failed: DSL rejected previous supervisor revoke: {error}"),
+                        )
+                        .await;
+                        return true;
+                    }
+                };
+                let revoke_obligation = match matching_supervisor_revoke_obligation(
+                    &revoke_effects,
+                    &previous_binding.peer_id,
+                    previous_binding.epoch,
+                    "authorize supervisor",
+                ) {
+                    Ok(obligation) => obligation,
+                    Err(error) => {
+                        let _ = adapter
+                            .stage_supervisor_trust_revoke_failed(
+                                session_id,
+                                previous_binding.peer_id.clone(),
+                                previous_binding.epoch,
+                                error.clone(),
+                            )
+                            .await;
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            error,
+                        )
+                        .await;
+                        return true;
+                    }
+                };
+                if let Err(error) = comms_runtime
+                    .remove_trusted_peer(&revoke_obligation.peer_id)
+                    .await
+                {
+                    let feedback = adapter
+                        .stage_supervisor_trust_revoke_failed(
+                            session_id,
+                            revoke_obligation.peer_id.clone(),
+                            revoke_obligation.epoch,
+                            error.to_string(),
+                        )
+                        .await;
+                    let mut reason = format!(
+                        "authorize supervisor failed: previous supervisor trust removal failed: {error}"
+                    );
+                    if let Err(feedback_error) = feedback {
+                        reason.push_str(&format!("; revoke feedback failed: {feedback_error}"));
+                    }
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        reason,
+                    )
+                    .await;
+                    return true;
+                }
+                if let Err(error) = adapter
+                    .stage_supervisor_trust_revoked(
+                        session_id,
+                        revoke_obligation.peer_id,
+                        revoke_obligation.epoch,
+                    )
+                    .await
+                {
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        format!("authorize supervisor failed: generated revoke feedback rejected: {error}"),
+                    )
+                    .await;
+                    return true;
+                }
+                if let Err(error) = bind_and_publish_supervisor_trust(
                     adapter,
                     session_id,
-                    &previous_binding,
-                )
-                .await;
-                let supervisor_peer_id_str = supervisor_spec.peer_id.as_str();
-                let cleanup_result = comms_runtime
-                    .remove_trusted_peer(&supervisor_peer_id_str)
-                    .await;
-                let mut reason = format!(
-                    "authorize supervisor failed: previous supervisor trust removal failed after DSL commit: {error}"
-                );
-                if let Err(rollback_error) = rollback_result {
-                    reason.push_str(&format!("; rollback failed: {rollback_error}"));
-                }
-                if let Err(cleanup_error) = cleanup_result {
-                    reason.push_str(&format!(
-                        "; cleanup failed while removing new supervisor trust: {cleanup_error}"
-                    ));
-                }
-                send_bridge_failure(
                     comms_runtime,
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    reason,
+                    &supervisor_spec,
+                    payload.epoch,
+                    "authorize supervisor",
                 )
-                .await;
-                return true;
+                .await
+                {
+                    let _ = rollback_bind_after_trust_publication_failure(
+                        adapter,
+                        session_id,
+                        &new_peer_id,
+                        payload.epoch,
+                    )
+                    .await;
+                    let restore = match trusted_peer_descriptor_from_bound_supervisor_state(
+                        &previous_binding,
+                    ) {
+                        Ok(previous_spec) => {
+                            bind_and_publish_supervisor_trust(
+                                adapter,
+                                session_id,
+                                comms_runtime,
+                                &previous_spec,
+                                previous_binding.epoch,
+                                "authorize supervisor rollback",
+                            )
+                            .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    let mut reason =
+                        format!("authorize supervisor failed: new supervisor bind failed: {error}");
+                    if let Err(restore_error) = restore {
+                        reason.push_str(&format!(
+                            "; previous supervisor restore failed: {restore_error}"
+                        ));
+                    }
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        reason,
+                    )
+                    .await;
+                    return true;
+                }
             }
             send_bridge_response(
                 comms_runtime,
@@ -2039,6 +2422,14 @@ mod tests {
     fn test_pubkey(seed: u8) -> meerkat_comms::PubKey {
         assert_ne!(seed, 0, "test pubkey seed must be non-zero");
         meerkat_comms::PubKey::new([seed; 32])
+    }
+
+    fn test_supervisor_signing_public_key(seed: u8) -> String {
+        encode_supervisor_signing_public_key([seed; 32])
+    }
+
+    fn signing_public_key_for_descriptor(peer: &TrustedPeerDescriptor) -> String {
+        encode_supervisor_signing_public_key(peer.pubkey)
     }
 
     fn bridge_peer_spec_with_seed(name: &str, seed: u8, address: &str) -> BridgePeerSpec {
@@ -3140,6 +3531,7 @@ mod tests {
                 supervisor_spec.name.to_string(),
                 supervisor_spec.peer_id.as_str(),
                 supervisor_spec.address.to_string(),
+                signing_public_key_for_descriptor(&supervisor_spec),
                 1,
             )
             .await
@@ -3936,6 +4328,7 @@ mod tests {
             name: spec.name.to_string(),
             peer_id: spec.peer_id.as_str(),
             address: spec.address.to_string(),
+            signing_public_key: signing_public_key_for_descriptor(&spec),
             epoch: payload.epoch,
         }
     }
@@ -4103,6 +4496,7 @@ mod tests {
                 current_supervisor.name.to_string(),
                 current_supervisor.peer_id.as_str(),
                 current_supervisor.address.to_string(),
+                signing_public_key_for_descriptor(&current_supervisor),
                 1,
             )
             .await
@@ -4176,6 +4570,7 @@ mod tests {
                 current.name.to_string(),
                 current.peer_id.as_str(),
                 current.address.to_string(),
+                signing_public_key_for_descriptor(&current),
                 1,
             )
             .await
@@ -4405,6 +4800,7 @@ mod tests {
                 authorized.name.to_string(),
                 authorized.peer_id.as_str(),
                 authorized.address.to_string(),
+                signing_public_key_for_descriptor(&authorized),
                 11,
             )
             .await
@@ -4477,6 +4873,7 @@ mod tests {
                 authorized.name.to_string(),
                 authorized.peer_id.as_str(),
                 authorized.address.to_string(),
+                signing_public_key_for_descriptor(&authorized),
                 7,
             )
             .await
@@ -4791,6 +5188,7 @@ mod tests {
                 old_supervisor.name.to_string(),
                 old_supervisor.peer_id.as_str(),
                 old_supervisor.address.to_string(),
+                signing_public_key_for_descriptor(&old_supervisor),
                 1,
             )
             .await
@@ -4855,6 +5253,7 @@ mod tests {
                 old_supervisor.name.to_string(),
                 old_supervisor.peer_id.as_str(),
                 old_supervisor.address.to_string(),
+                signing_public_key_for_descriptor(&old_supervisor),
                 1,
             )
             .await
@@ -4917,6 +5316,7 @@ mod tests {
                 spec.name.to_string(),
                 spec.peer_id.as_str(),
                 spec.address.to_string(),
+                signing_public_key_for_descriptor(&spec),
                 payload.epoch,
             )
             .await
@@ -4955,6 +5355,7 @@ mod tests {
                 "super-a".to_string(),
                 "ed25519:super-a".to_string(),
                 "inproc://super-a".to_string(),
+                test_supervisor_signing_public_key(0xaa),
                 1,
             )
             .await
@@ -4968,6 +5369,7 @@ mod tests {
                 "super-b".to_string(),
                 "ed25519:super-b".to_string(),
                 "inproc://super-b".to_string(),
+                test_supervisor_signing_public_key(0xbb),
                 2,
             )
             .await;
@@ -5001,6 +5403,7 @@ mod tests {
                 "super-c".to_string(),
                 "ed25519:super-c".to_string(),
                 "inproc://super-c".to_string(),
+                test_supervisor_signing_public_key(0xcc),
                 2,
             )
             .await
@@ -5049,6 +5452,7 @@ mod tests {
                 "super-a".to_string(),
                 "ed25519:super-a".to_string(),
                 "inproc://super-a".to_string(),
+                test_supervisor_signing_public_key(0xaa),
                 1,
             )
             .await
@@ -5061,6 +5465,7 @@ mod tests {
                 "super-a".to_string(),
                 "ed25519:super-a".to_string(),
                 "inproc://super-a".to_string(),
+                test_supervisor_signing_public_key(0xaa),
                 2,
             )
             .await
@@ -5105,6 +5510,7 @@ mod tests {
                 "super-a".to_string(),
                 "ed25519:super-a".to_string(),
                 "inproc://super-a".to_string(),
+                test_supervisor_signing_public_key(0xaa),
                 1,
             )
             .await
@@ -5117,6 +5523,7 @@ mod tests {
                 "super-a".to_string(),
                 "ed25519:super-a".to_string(),
                 "inproc://super-a".to_string(),
+                test_supervisor_signing_public_key(0xaa),
                 2,
             )
             .await
@@ -5162,6 +5569,7 @@ mod tests {
                 "super-a".to_string(),
                 "ed25519:super-a".to_string(),
                 "inproc://super-a".to_string(),
+                test_supervisor_signing_public_key(0xaa),
                 7,
             )
             .await
@@ -5212,6 +5620,7 @@ mod tests {
                 supervisor.name.to_string(),
                 supervisor.peer_id.as_str(),
                 supervisor.address.to_string(),
+                signing_public_key_for_descriptor(&supervisor),
                 1,
             )
             .await

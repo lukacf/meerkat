@@ -550,6 +550,8 @@ impl MobActor {
             let next_name = spec.name.as_str().to_owned();
             let next_peer_id = spec.peer_id.as_str().to_owned();
             let next_address = spec.address.to_string();
+            let next_signing_public_key =
+                meerkat_runtime::comms_drain::encode_supervisor_signing_public_key(spec.pubkey);
             let next_epoch = authority.epoch;
             let previous = adapter.supervisor_binding(session_id).await;
             let already_bound = matches!(
@@ -558,53 +560,148 @@ impl MobActor {
                     name,
                     peer_id,
                     address,
+                    signing_public_key,
                     epoch,
                 } if name == &next_name
                     && peer_id == &next_peer_id
                     && address == &next_address
+                    && signing_public_key == &next_signing_public_key
                     && *epoch == next_epoch
             );
 
-            let publish_obligation = if already_bound {
-                None
+            let previous_peer_is_different = matches!(
+                &previous,
+                meerkat_runtime::meerkat_machine::SupervisorBinding::Bound { peer_id, .. }
+                    if peer_id != &next_peer_id
+            );
+            if previous_peer_is_different {
+                let (previous_peer_id, previous_epoch) = match &previous {
+                    meerkat_runtime::meerkat_machine::SupervisorBinding::Bound {
+                        peer_id,
+                        epoch,
+                        ..
+                    } => (peer_id.clone(), *epoch),
+                    _ => unreachable!("previous_peer_is_different only matches Bound"),
+                };
+                let revoke_effects = adapter
+                    .stage_supervisor_revoke(session_id, previous_peer_id.clone(), previous_epoch)
+                    .await
+                    .map_err(|error| {
+                        MobError::WiringError(format!(
+                            "previous supervisor private trust revoke rejected for session '{session_id}': {error}"
+                        ))
+                    })?;
+                let revoke_obligation =
+                    meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations(
+                        &revoke_effects,
+                    )
+                    .into_iter()
+                    .find(|obligation| {
+                        obligation.peer_id == previous_peer_id
+                            && obligation.epoch == previous_epoch
+                    })
+                    .ok_or_else(|| {
+                        MobError::WiringError(format!(
+                            "previous supervisor private trust revoke for session '{session_id}' produced no generated revoke obligation"
+                        ))
+                    })?;
+                let previous_removal_key = previous_private_trust_removal_key
+                    .map(str::to_string)
+                    .unwrap_or_else(|| revoke_obligation.peer_id.clone());
+                if let Err(error) = comms
+                    .remove_private_trusted_peer(&previous_removal_key)
+                    .await
+                {
+                    let feedback = adapter
+                        .stage_supervisor_trust_revoke_failed(
+                            session_id,
+                            revoke_obligation.peer_id.clone(),
+                            revoke_obligation.epoch,
+                            error.to_string(),
+                        )
+                        .await;
+                    let mut reason = format!(
+                        "previous supervisor private trust removal failed for session '{session_id}': {error}"
+                    );
+                    if let Err(feedback_error) = feedback {
+                        reason.push_str(&format!("; revoke feedback failed: {feedback_error}"));
+                    }
+                    return Err(MobError::WiringError(reason));
+                }
+                adapter
+                    .stage_supervisor_trust_revoked(
+                        session_id,
+                        revoke_obligation.peer_id,
+                        revoke_obligation.epoch,
+                    )
+                    .await
+                    .map_err(|error| {
+                        MobError::WiringError(format!(
+                            "previous supervisor private trust revoke feedback rejected for session '{session_id}': {error}"
+                        ))
+                    })?;
+            }
+
+            let (publish_obligation, publish_spec) = if already_bound {
+                (None, spec.clone())
             } else {
-                let stage_effects = match &previous {
-                    meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound => {
-                        adapter
-                            .stage_supervisor_bind(
-                                session_id,
-                                next_name.clone(),
-                                next_peer_id.clone(),
-                                next_address.clone(),
-                                next_epoch,
-                            )
-                            .await
-                            .map_err(|error| {
-                                MobError::WiringError(format!(
-                                    "supervisor private trust bind rejected for session '{session_id}': {error}"
-                                ))
-                            })?
-                    }
-                    meerkat_runtime::meerkat_machine::SupervisorBinding::Bound { .. } => {
-                        adapter
-                            .stage_supervisor_authorize(
-                                session_id,
-                                next_name.clone(),
-                                next_peer_id.clone(),
-                                next_address.clone(),
-                                next_epoch,
-                            )
-                            .await
-                            .map_err(|error| {
-                                MobError::WiringError(format!(
-                                    "supervisor private trust rotation rejected for session '{session_id}': {error}"
-                                ))
-                            })?
-                    }
-                    _ => {
-                        return Err(MobError::WiringError(format!(
-                            "supervisor private trust publication for session '{session_id}' saw an unknown supervisor binding variant"
-                        )));
+                let stage_effects = if previous_peer_is_different {
+                    adapter
+                        .stage_supervisor_bind(
+                            session_id,
+                            next_name.clone(),
+                            next_peer_id.clone(),
+                            next_address.clone(),
+                            next_signing_public_key.clone(),
+                            next_epoch,
+                        )
+                        .await
+                        .map_err(|error| {
+                            MobError::WiringError(format!(
+                                "supervisor private trust bind rejected for session '{session_id}': {error}"
+                            ))
+                        })?
+                } else {
+                    match &previous {
+                        meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound => {
+                            adapter
+                                .stage_supervisor_bind(
+                                    session_id,
+                                    next_name.clone(),
+                                    next_peer_id.clone(),
+                                    next_address.clone(),
+                                    next_signing_public_key.clone(),
+                                    next_epoch,
+                                )
+                                .await
+                                .map_err(|error| {
+                                    MobError::WiringError(format!(
+                                        "supervisor private trust bind rejected for session '{session_id}': {error}"
+                                    ))
+                                })?
+                        }
+                        meerkat_runtime::meerkat_machine::SupervisorBinding::Bound { .. } => {
+                            adapter
+                                .stage_supervisor_authorize(
+                                    session_id,
+                                    next_name.clone(),
+                                    next_peer_id.clone(),
+                                    next_address.clone(),
+                                    next_signing_public_key.clone(),
+                                    next_epoch,
+                                )
+                                .await
+                                .map_err(|error| {
+                                    MobError::WiringError(format!(
+                                        "supervisor private trust rotation rejected for session '{session_id}': {error}"
+                                    ))
+                                })?
+                        }
+                        _ => {
+                            return Err(MobError::WiringError(format!(
+                                "supervisor private trust publication for session '{session_id}' saw an unknown supervisor binding variant"
+                            )));
+                        }
                     }
                 };
                 let obligations =
@@ -625,13 +722,24 @@ impl MobActor {
                 if obligation.name != next_name
                     || obligation.peer_id != next_peer_id
                     || obligation.address != next_address
+                    || obligation.signing_public_key.as_deref()
+                        != Some(next_signing_public_key.as_str())
                     || obligation.epoch != next_epoch
                 {
                     return Err(MobError::WiringError(format!(
                         "supervisor private trust publication for session '{session_id}' generated obligation did not match the staged supervisor binding"
                     )));
                 }
-                Some(obligation)
+                let generated_spec =
+                    meerkat_runtime::comms_drain::trusted_peer_descriptor_from_supervisor_publish_obligation(
+                        &obligation,
+                    )
+                    .map_err(|error| {
+                        MobError::WiringError(format!(
+                            "supervisor private trust publication for session '{session_id}' generated invalid trust descriptor: {error}"
+                        ))
+                    })?;
+                (Some(obligation), generated_spec)
             };
             let publish_peer_id = publish_obligation
                 .as_ref()
@@ -641,8 +749,10 @@ impl MobActor {
                 .as_ref()
                 .map(|obligation| obligation.epoch)
                 .unwrap_or(next_epoch);
+            let publish_removal_key = Self::trusted_peer_removal_key(&publish_spec);
+            let rollback_binding = previous.clone();
 
-            if let Err(error) = comms.add_private_trusted_peer(spec.clone()).await {
+            if let Err(error) = comms.add_private_trusted_peer(publish_spec.clone()).await {
                 let _ = adapter
                     .stage_supervisor_trust_publish_failed(
                         session_id,
@@ -655,7 +765,8 @@ impl MobActor {
                     .rollback_supervisor_private_trust_binding(
                         adapter,
                         session_id,
-                        &previous,
+                        comms,
+                        &rollback_binding,
                         &publish_peer_id,
                         publish_epoch,
                     )
@@ -665,7 +776,7 @@ impl MobActor {
                 } else {
                     Some(
                         comms
-                            .remove_private_trusted_peer(&Self::trusted_peer_removal_key(&spec))
+                            .remove_private_trusted_peer(&publish_removal_key)
                             .await,
                     )
                 };
@@ -695,7 +806,8 @@ impl MobActor {
                     .rollback_supervisor_private_trust_binding(
                         adapter,
                         session_id,
-                        &previous,
+                        comms,
+                        &rollback_binding,
                         &publish_peer_id,
                         publish_epoch,
                     )
@@ -705,7 +817,7 @@ impl MobActor {
                 } else {
                     Some(
                         comms
-                            .remove_private_trusted_peer(&Self::trusted_peer_removal_key(&spec))
+                            .remove_private_trusted_peer(&publish_removal_key)
                             .await,
                     )
                 };
@@ -723,49 +835,10 @@ impl MobActor {
                 return Err(MobError::WiringError(reason));
             }
 
-            if let meerkat_runtime::meerkat_machine::SupervisorBinding::Bound {
-                peer_id: previous_peer_id,
-                ..
-            } = &previous
-                && previous_peer_id != &next_peer_id
-            {
-                let previous_removal_key = previous_private_trust_removal_key
-                    .map(str::to_string)
-                    .unwrap_or_else(|| previous_peer_id.clone());
-                if let Err(error) = comms
-                    .remove_private_trusted_peer(&previous_removal_key)
-                    .await
-                {
-                    let rollback = self
-                        .rollback_supervisor_private_trust_binding(
-                            adapter,
-                            session_id,
-                            &previous,
-                            &next_peer_id,
-                            next_epoch,
-                        )
-                        .await;
-                    let next_removal_key = Self::trusted_peer_removal_key(&spec);
-                    let cleanup = comms.remove_private_trusted_peer(&next_removal_key).await;
-                    let mut reason = format!(
-                        "previous supervisor private trust removal failed for session '{session_id}': {error}"
-                    );
-                    if let Err(rollback_error) = rollback {
-                        reason.push_str(&format!("; rollback failed: {rollback_error}"));
-                    }
-                    if let Err(cleanup_error) = cleanup {
-                        reason.push_str(&format!(
-                            "; cleanup failed while removing new supervisor trust: {cleanup_error}"
-                        ));
-                    }
-                    return Err(MobError::WiringError(reason));
-                }
-            }
-
             Ok(SupervisorPrivateTrustInstall {
                 peer_id: next_peer_id,
                 epoch: next_epoch,
-                removal_key: Self::trusted_peer_removal_key(&spec),
+                removal_key: publish_removal_key,
             })
         }
     }
@@ -873,6 +946,7 @@ impl MobActor {
         &self,
         adapter: &Arc<meerkat_runtime::MeerkatMachine>,
         session_id: &SessionId,
+        comms: &Arc<dyn CoreCommsRuntime>,
         previous: &meerkat_runtime::meerkat_machine::SupervisorBinding,
         current_peer_id: &str,
         current_epoch: u64,
@@ -906,18 +980,55 @@ impl MobActor {
                 name,
                 peer_id,
                 address,
+                signing_public_key,
                 epoch,
-            } => adapter
-                .stage_supervisor_authorize(
-                    session_id,
-                    name.clone(),
-                    peer_id.clone(),
-                    address.clone(),
-                    *epoch,
-                )
-                .await
-                .map(|_| ())
-                .map_err(|error| MobError::WiringError(error.to_string())),
+            } => {
+                let effects = adapter
+                    .stage_supervisor_authorize(
+                        session_id,
+                        name.clone(),
+                        peer_id.clone(),
+                        address.clone(),
+                        signing_public_key.clone(),
+                        *epoch,
+                    )
+                    .await
+                    .map_err(|error| MobError::WiringError(error.to_string()))?;
+                let obligation =
+                    meerkat_runtime::protocol_supervisor_trust_publish::extract_obligations(
+                        &effects,
+                    )
+                    .into_iter()
+                    .find(|obligation| {
+                        obligation.peer_id == *peer_id
+                            && obligation.epoch == *epoch
+                            && obligation.signing_public_key.as_deref()
+                                == Some(signing_public_key.as_str())
+                    })
+                    .ok_or_else(|| {
+                        MobError::WiringError(format!(
+                            "supervisor private trust rollback for session '{session_id}' produced no generated publish obligation"
+                        ))
+                    })?;
+                let trusted_peer =
+                    meerkat_runtime::comms_drain::trusted_peer_descriptor_from_supervisor_publish_obligation(
+                        &obligation,
+                    )
+                    .map_err(MobError::WiringError)?;
+                comms
+                    .add_private_trusted_peer(trusted_peer)
+                    .await
+                    .map_err(|error| MobError::WiringError(error.to_string()))?;
+                adapter
+                    .stage_supervisor_trust_published(
+                        session_id,
+                        obligation.peer_id,
+                        obligation.epoch,
+                    )
+                    .await
+                    .map_err(|error| MobError::WiringError(error.to_string()))?;
+                Ok(())
+            }
             _ => Err(MobError::WiringError(
                 "unknown supervisor binding variant during rollback".to_string(),
             )),

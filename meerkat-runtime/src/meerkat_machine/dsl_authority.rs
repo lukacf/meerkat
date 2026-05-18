@@ -283,10 +283,12 @@ pub(crate) fn project_state(
         supervisor_bound_name: None,
         supervisor_bound_peer_id: None,
         supervisor_bound_address: None,
+        supervisor_bound_signing_public_key: None,
         supervisor_bound_epoch: None,
         supervisor_revoke_pending_name: None,
         supervisor_revoke_pending_peer_id: None,
         supervisor_revoke_pending_address: None,
+        supervisor_revoke_pending_signing_public_key: None,
         supervisor_revoke_pending_epoch: None,
         // Track-B (R5): peer-projection state — initialised empty in
         // the authority projection. The real values flow through the

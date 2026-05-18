@@ -6488,10 +6488,12 @@ pub struct State {
     pub supervisor_bound_name: Option<String>,
     pub supervisor_bound_peer_id: Option<String>,
     pub supervisor_bound_address: Option<String>,
+    pub supervisor_bound_signing_public_key: Option<String>,
     pub supervisor_bound_epoch: Option<u64>,
     pub supervisor_revoke_pending_name: Option<String>,
     pub supervisor_revoke_pending_peer_id: Option<String>,
     pub supervisor_revoke_pending_address: Option<String>,
+    pub supervisor_revoke_pending_signing_public_key: Option<String>,
     pub supervisor_revoke_pending_epoch: Option<u64>,
     pub local_endpoint: Option<PeerEndpoint>,
     pub direct_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
@@ -7358,6 +7360,7 @@ pub mod inputs {
         pub name: String,
         pub peer_id: String,
         pub address: String,
+        pub signing_public_key: String,
         pub epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -7365,6 +7368,7 @@ pub mod inputs {
         pub name: String,
         pub peer_id: String,
         pub address: String,
+        pub signing_public_key: String,
         pub epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -9852,10 +9856,12 @@ pub fn initial_state() -> State {
         supervisor_bound_name: None,
         supervisor_bound_peer_id: None,
         supervisor_bound_address: None,
+        supervisor_bound_signing_public_key: None,
         supervisor_bound_epoch: None,
         supervisor_revoke_pending_name: None,
         supervisor_revoke_pending_peer_id: None,
         supervisor_revoke_pending_address: None,
+        supervisor_revoke_pending_signing_public_key: None,
         supervisor_revoke_pending_epoch: None,
         local_endpoint: None,
         direct_peer_endpoints: Default::default(),

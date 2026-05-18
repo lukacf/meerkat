@@ -2477,7 +2477,7 @@ pub(crate) async fn machine_commit_prepared_destroy(
     driver: &mut DriverEntry,
     lifecycle: PreparedDestroyLifecycle,
 ) -> Result<(), RuntimeDriverError> {
-    driver.commit_prepared_destroy_lifecycle(lifecycle).await?;
+    Box::pin(driver.commit_prepared_destroy_lifecycle(lifecycle)).await?;
     driver.sync_control_projection_from_dsl_authority();
     Ok(())
 }

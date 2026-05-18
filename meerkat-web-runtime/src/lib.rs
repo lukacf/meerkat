@@ -2011,54 +2011,75 @@ pub async fn wire_cross_mob(
         .public_key()
         .ok_or_else(|| err_js("no_key", agent_b))?;
 
-    // Build peer specs with full mob/profile/meerkat addressing
+    // Build peer bindings with full mob/profile/meerkat addressing.
     let name_a = format!("{mob_a}/{}/{agent_a}", entry_a.role);
     let name_b = format!("{mob_b}/{}/{agent_b}", entry_b.role);
 
-    let spec_a = build_inproc_trusted_peer(&name_a, &key_a)?;
-    let spec_b = build_inproc_trusted_peer(&name_b, &key_b)?;
+    let binding_a = build_inproc_external_binding(&name_a, &key_a)?;
+    let binding_b = build_inproc_external_binding(&name_b, &key_b)?;
 
-    comms_a
-        .add_trusted_peer(spec_b)
+    mob_state
+        .mob_wire(
+            &MobId::from(mob_a),
+            identity_a.clone(),
+            meerkat_mob::PeerTarget::ExternalBinding(binding_b.clone()),
+        )
         .await
-        .map_err(|e| err_str("wire_error", e))?;
-    comms_b
-        .add_trusted_peer(spec_a)
+        .map_err(err_mob)?;
+    if let Err(error) = mob_state
+        .mob_wire(
+            &MobId::from(mob_b),
+            identity_b,
+            meerkat_mob::PeerTarget::ExternalBinding(binding_a),
+        )
         .await
-        .map_err(|e| err_str("wire_error", e))?;
+    {
+        if let Err(rollback_error) = mob_state
+            .mob_unwire(
+                &MobId::from(mob_a),
+                identity_a,
+                meerkat_mob::PeerTarget::ExternalBinding(binding_b),
+            )
+            .await
+        {
+            tracing::warn!(
+                %rollback_error,
+                "cross-mob wire rollback failed after reciprocal MobMachine wire rejection"
+            );
+        }
+        return Err(err_mob(error));
+    }
 
     Ok(())
 }
 
-/// Build an inproc [`TrustedPeerDescriptor`] for intra-/cross-mob wire in the
-/// embedded wasm runtime.
+/// Build an inproc external binding for cross-mob wire in the embedded wasm
+/// runtime.
 ///
-/// V5 dogma: the core seam is keyed by typed [`PeerId`] (a UUIDv5 derived
-/// from the Ed25519 signing pubkey), not by display name. This helper
-/// parses the `ed25519:<base64>` form returned by
-/// [`CommsRuntime::public_key`] back into typed `PubKey` bytes, derives the
-/// canonical `PeerId` via
-/// [`meerkat_comms::router::peer_id_from_pubkey`] so router and trust-store
-/// lookups round-trip, and stamps the 32-byte pubkey on the descriptor so
-/// receiver-side signature verification continues to work.
-fn build_inproc_trusted_peer(
+/// The mob actor resolves this typed identity into a descriptor immediately
+/// before `MobMachineInput::WireExternalPeer` admits the descriptor-bearing
+/// trust edge.
+fn build_inproc_external_binding(
     name: &str,
-    pubkey_str: &str,
-) -> Result<meerkat_core::comms::TrustedPeerDescriptor, JsValue> {
-    let pubkey = meerkat_comms::identity::PubKey::from_pubkey_string(pubkey_str)
-        .map_err(|e| err_str("wire_error", format!("invalid pubkey `{pubkey_str}`: {e}")))?;
-    let peer_id = meerkat_comms::router::peer_id_from_pubkey(&pubkey);
+    public_key: &str,
+) -> Result<meerkat_mob::ExternalPeerBindingSpec, JsValue> {
     let peer_name = meerkat_core::comms::PeerName::new(name)
         .map_err(|e| err_str("wire_error", format!("invalid peer name `{name}`: {e}")))?;
-    Ok(meerkat_core::comms::TrustedPeerDescriptor {
-        peer_id,
-        name: peer_name,
-        address: meerkat_core::comms::PeerAddress::new(
-            meerkat_core::comms::PeerTransport::Inproc,
-            name,
-        ),
-        pubkey: *pubkey.as_bytes(),
-    })
+    let identity = meerkat_contracts::WireTrustedPeerIdentity::Ed25519PublicKey {
+        public_key: public_key.to_string(),
+    };
+    identity
+        .resolve()
+        .map_err(|e| err_str("wire_error", format!("invalid pubkey `{public_key}`: {e}")))?;
+    let address = meerkat_core::comms::PeerAddress::new(
+        meerkat_core::comms::PeerTransport::Inproc,
+        peer_name.as_str(),
+    );
+    Ok(meerkat_mob::ExternalPeerBindingSpec::new(
+        peer_name.as_str().to_string(),
+        address.to_string(),
+        identity,
+    ))
 }
 
 #[derive(Debug, serde::Deserialize)]

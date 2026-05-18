@@ -529,9 +529,11 @@ impl EphemeralRuntimeDriver {
         input_id: &InputId,
     ) -> Result<bool, RuntimeDriverError> {
         let Some(phase) = self.input_phase(input_id) else {
-            return Ok(true);
+            return Err(RuntimeDriverError::Internal(format!(
+                "missing generated input lifecycle authority for '{input_id}'"
+            )));
         };
-        crate::meerkat_machine::input_phase_terminality_via_authority(
+        crate::meerkat_machine::input_phase_behavioral_terminality_via_authority(
             input_id,
             phase,
             self.input_terminal_outcome(input_id),
@@ -812,9 +814,11 @@ impl EphemeralRuntimeDriver {
         recovered_seed: &InputStateSeed,
         idempotency_key: Option<&IdempotencyKey>,
     ) -> Result<(), RuntimeDriverError> {
-        let terminal =
-            crate::meerkat_machine::input_seed_terminality_via_authority(work_id, recovered_seed)
-                .map_err(RuntimeDriverError::Internal)?;
+        let terminal = crate::meerkat_machine::input_seed_behavioral_terminality_via_authority(
+            work_id,
+            recovered_seed,
+        )
+        .map_err(RuntimeDriverError::Internal)?;
         if !terminal {
             return Err(RuntimeDriverError::Internal(format!(
                 "terminal recovery path received non-terminal input '{work_id}'"
@@ -852,8 +856,11 @@ impl EphemeralRuntimeDriver {
     ) -> Result<(), RuntimeDriverError> {
         let key = Self::dsl_key(work_id);
         let lifecycle_state = recovered_seed.phase;
-        crate::meerkat_machine::input_seed_terminality_via_authority(work_id, recovered_seed)
-            .map_err(RuntimeDriverError::Internal)?;
+        crate::meerkat_machine::input_seed_behavioral_terminality_via_authority(
+            work_id,
+            recovered_seed,
+        )
+        .map_err(RuntimeDriverError::Internal)?;
         let (terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count) =
             match recovered_seed.terminal_outcome.clone() {
                 Some(InputTerminalOutcome::Consumed) => (
@@ -3352,6 +3359,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_input_lifecycle_authority_fails_terminality_closed() {
+        let mut driver =
+            EphemeralRuntimeDriver::new(LogicalRuntimeId::new("missing-input-authority"));
+
+        let input = prompt_input("missing authority");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+        driver
+            .dsl
+            .lock()
+            .state
+            .input_phases
+            .remove(&input_id.to_string());
+
+        let err = driver
+            .input_is_terminal_by_authority(&input_id)
+            .expect_err("missing machine lifecycle authority must fail closed");
+        assert!(
+            matches!(&err, RuntimeDriverError::Internal(message) if message.contains("missing generated input lifecycle authority")),
+            "unexpected terminality error: {err:?}"
+        );
+        assert!(
+            driver.active_input_ids().is_empty(),
+            "active-input projection must not fabricate non-terminal truth without generated authority"
+        );
+    }
+
+    #[tokio::test]
     async fn cancelled_peer_response_terminal_rejects_and_cleans_pending_via_machine() {
         let mut driver =
             EphemeralRuntimeDriver::new(LogicalRuntimeId::new("cancelled-peer-terminal"));
@@ -3456,7 +3491,7 @@ mod tests {
             .recover_terminal_input_lifecycle(&input_id, &seed, None)
             .expect_err("terminal recovery without terminal outcome must fail closed");
         assert!(
-            matches!(&err, RuntimeDriverError::Internal(message) if message.contains("public terminal projection")),
+            matches!(&err, RuntimeDriverError::Internal(message) if message.contains("behavioral input terminality")),
             "unexpected recovery error: {err:?}"
         );
 

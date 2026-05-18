@@ -2058,6 +2058,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 terminal_kind: Option<Enum<InputTerminalKind>>,
                 abandon_reason: Option<Enum<InputAbandonReason>>,
             },
+            ClassifyInputTerminality {
+                input_id: String,
+                phase: Enum<RecoveredInputObservedPhase>,
+                terminal_kind: Option<Enum<InputTerminalKind>>,
+                abandon_reason: Option<Enum<InputAbandonReason>>,
+            },
             Prepare { session_id: SessionId, run_id: RunId },
             Commit { input_id: InputId, run_id: RunId },
             Fail { run_id: RunId },
@@ -2537,6 +2543,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 input_id: String,
                 terminal_outcome: Option<Enum<InputPublicTerminalOutcome>>,
             },
+            InputBehavioralTerminalityResolved { input_id: String, terminal: bool },
             PostAdmissionSignal { signal: Enum<PostAdmissionSignalKind> },
             ReadyForRun,
             InputLifecycleNotice,
@@ -2690,6 +2697,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition RecoveredInputLifecycleNormalized => local,
         disposition InputPublicLifecycleResolved => local,
         disposition InputPublicTerminalOutcomeResolved => local,
+        disposition InputBehavioralTerminalityResolved => local,
         disposition PostAdmissionSignal => local,
         disposition ReadyForRun => local,
         disposition InputLifecycleNotice => external,
@@ -4717,6 +4725,77 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {}
             to Idle
             emit InputPublicTerminalOutcomeResolved { input_id: input_id, terminal_outcome: Some(InputPublicTerminalOutcome::Abandoned) }
+        }
+
+        // ClassifyInputTerminality: generated behavioral terminality
+        // authority for recovery, active-input filtering, and other paths
+        // where terminality changes behavior rather than public result class.
+        transition ClassifyInputTerminalityNonTerminal {
+            per_phase [Idle]
+            on input ClassifyInputTerminality { input_id, phase, terminal_kind, abandon_reason }
+            guard "non_terminal_phase" {
+                phase == RecoveredInputObservedPhase::Accepted
+                || phase == RecoveredInputObservedPhase::Queued
+                || phase == RecoveredInputObservedPhase::Staged
+                || phase == RecoveredInputObservedPhase::Applied
+                || phase == RecoveredInputObservedPhase::AppliedPendingConsumption
+            }
+            guard "terminal_absent" { terminal_kind == None && abandon_reason == None }
+            update {}
+            to Idle
+            emit InputBehavioralTerminalityResolved { input_id: input_id, terminal: false }
+        }
+
+        transition ClassifyInputTerminalityConsumed {
+            per_phase [Idle]
+            on input ClassifyInputTerminality { input_id, phase, terminal_kind, abandon_reason }
+            guard "consumed_phase" { phase == RecoveredInputObservedPhase::Consumed }
+            guard "consumed_terminal" {
+                terminal_kind == Some(InputTerminalKind::Consumed)
+                && abandon_reason == None
+            }
+            update {}
+            to Idle
+            emit InputBehavioralTerminalityResolved { input_id: input_id, terminal: true }
+        }
+
+        transition ClassifyInputTerminalitySuperseded {
+            per_phase [Idle]
+            on input ClassifyInputTerminality { input_id, phase, terminal_kind, abandon_reason }
+            guard "superseded_phase" { phase == RecoveredInputObservedPhase::Superseded }
+            guard "superseded_terminal" {
+                terminal_kind == Some(InputTerminalKind::Superseded)
+                && abandon_reason == None
+            }
+            update {}
+            to Idle
+            emit InputBehavioralTerminalityResolved { input_id: input_id, terminal: true }
+        }
+
+        transition ClassifyInputTerminalityCoalesced {
+            per_phase [Idle]
+            on input ClassifyInputTerminality { input_id, phase, terminal_kind, abandon_reason }
+            guard "coalesced_phase" { phase == RecoveredInputObservedPhase::Coalesced }
+            guard "coalesced_terminal" {
+                terminal_kind == Some(InputTerminalKind::Coalesced)
+                && abandon_reason == None
+            }
+            update {}
+            to Idle
+            emit InputBehavioralTerminalityResolved { input_id: input_id, terminal: true }
+        }
+
+        transition ClassifyInputTerminalityAbandoned {
+            per_phase [Idle]
+            on input ClassifyInputTerminality { input_id, phase, terminal_kind, abandon_reason }
+            guard "abandoned_phase" { phase == RecoveredInputObservedPhase::Abandoned }
+            guard "abandoned_terminal" {
+                terminal_kind == Some(InputTerminalKind::Abandoned)
+                && abandon_reason != None
+            }
+            update {}
+            to Idle
+            emit InputBehavioralTerminalityResolved { input_id: input_id, terminal: true }
         }
 
         // 26d. ResolveAdmissionIdempotency: generated idempotency admission

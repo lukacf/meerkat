@@ -1531,8 +1531,11 @@ pub(crate) fn machine_apply_recovered_input_normalization(
     let mut delta = MachineRecoveryDelta::default();
     let StoredInputState { state, seed } = bundle;
 
-    if crate::meerkat_machine::input_seed_terminality_via_authority(&state.input_id, seed)
-        .map_err(RuntimeDriverError::Internal)?
+    if crate::meerkat_machine::input_seed_behavioral_terminality_via_authority(
+        &state.input_id,
+        seed,
+    )
+    .map_err(RuntimeDriverError::Internal)?
     {
         return Ok(delta);
     }
@@ -1607,7 +1610,7 @@ pub(crate) fn machine_apply_recovered_input_normalization(
 
     let next_phase = lifecycle_from_normalized_phase(normalized_phase);
     let next_terminal = terminal_from_normalized_kind(terminal_kind)?;
-    crate::meerkat_machine::input_phase_terminality_via_authority(
+    crate::meerkat_machine::input_phase_behavioral_terminality_via_authority(
         &state.input_id,
         next_phase,
         next_terminal.clone(),
@@ -1779,7 +1782,7 @@ pub(crate) async fn machine_recover_persistent_driver(
         }
 
         if driver.input_state(&bundle.state.input_id).is_none() {
-            if crate::meerkat_machine::input_seed_terminality_via_authority(
+            if crate::meerkat_machine::input_seed_behavioral_terminality_via_authority(
                 &bundle.state.input_id,
                 &bundle.seed,
             )

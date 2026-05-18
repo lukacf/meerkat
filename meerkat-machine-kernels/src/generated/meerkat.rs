@@ -6095,6 +6095,13 @@ pub mod inputs {
         pub abandon_reason: Option<InputAbandonReason>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyInputTerminality {
+        pub input_id: String,
+        pub phase: RecoveredInputObservedPhase,
+        pub terminal_kind: Option<InputTerminalKind>,
+        pub abandon_reason: Option<InputAbandonReason>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Prepare {
         pub session_id: SessionId,
         pub run_id: RunId,
@@ -6753,6 +6760,7 @@ pub enum Input {
     NormalizeRecoveredInputLifecycle(inputs::NormalizeRecoveredInputLifecycle),
     ResolveInputPublicLifecycle(inputs::ResolveInputPublicLifecycle),
     ResolveInputPublicTerminalOutcome(inputs::ResolveInputPublicTerminalOutcome),
+    ClassifyInputTerminality(inputs::ClassifyInputTerminality),
     Prepare(inputs::Prepare),
     Commit(inputs::Commit),
     Fail(inputs::Fail),
@@ -6946,6 +6954,7 @@ impl Input {
             Self::ResolveInputPublicTerminalOutcome(_) => {
                 InputKind::ResolveInputPublicTerminalOutcome
             }
+            Self::ClassifyInputTerminality(_) => InputKind::ClassifyInputTerminality,
             Self::Prepare(_) => InputKind::Prepare,
             Self::Commit(_) => InputKind::Commit,
             Self::Fail(_) => InputKind::Fail,
@@ -7140,6 +7149,7 @@ pub enum InputKind {
     NormalizeRecoveredInputLifecycle,
     ResolveInputPublicLifecycle,
     ResolveInputPublicTerminalOutcome,
+    ClassifyInputTerminality,
     Prepare,
     Commit,
     Fail,
@@ -7511,6 +7521,11 @@ pub mod effects {
         pub terminal_outcome: Option<InputPublicTerminalOutcome>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InputBehavioralTerminalityResolved {
+        pub input_id: String,
+        pub terminal: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PostAdmissionSignal {
         pub signal: PostAdmissionSignalKind,
     }
@@ -7741,6 +7756,7 @@ pub enum Effect {
     RecoveredInputLifecycleNormalized(effects::RecoveredInputLifecycleNormalized),
     InputPublicLifecycleResolved(effects::InputPublicLifecycleResolved),
     InputPublicTerminalOutcomeResolved(effects::InputPublicTerminalOutcomeResolved),
+    InputBehavioralTerminalityResolved(effects::InputBehavioralTerminalityResolved),
     PostAdmissionSignal(effects::PostAdmissionSignal),
     ReadyForRun(effects::ReadyForRun),
     InputLifecycleNotice(effects::InputLifecycleNotice),
@@ -7824,6 +7840,7 @@ pub enum EffectKind {
     RecoveredInputLifecycleNormalized,
     InputPublicLifecycleResolved,
     InputPublicTerminalOutcomeResolved,
+    InputBehavioralTerminalityResolved,
     PostAdmissionSignal,
     ReadyForRun,
     InputLifecycleNotice,
@@ -8120,6 +8137,11 @@ pub enum TransitionId {
     ResolveInputPublicTerminalOutcomeCoalescedIdle,
     ResolveInputPublicTerminalOutcomeCancelledIdle,
     ResolveInputPublicTerminalOutcomeAbandonedIdle,
+    ClassifyInputTerminalityNonTerminalIdle,
+    ClassifyInputTerminalityConsumedIdle,
+    ClassifyInputTerminalitySupersededIdle,
+    ClassifyInputTerminalityCoalescedIdle,
+    ClassifyInputTerminalityAbandonedIdle,
     ResolveAdmissionIdempotencyNoKeyIdle,
     ResolveAdmissionIdempotencyNoKeyAttached,
     ResolveAdmissionIdempotencyNoKeyRunning,

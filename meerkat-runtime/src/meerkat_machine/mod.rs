@@ -131,27 +131,59 @@ pub fn resolve_input_public_state_projection(
     })
 }
 
-pub(crate) fn input_seed_terminality_via_authority(
+pub(crate) fn input_seed_behavioral_terminality_via_authority(
     input_id: &InputId,
     seed: &InputStateSeed,
 ) -> Result<bool, String> {
-    resolve_input_public_terminal_projection(input_id, seed).map(|terminal| terminal.is_some())
+    classify_input_behavioral_terminality(input_id, seed.phase, seed.terminal_outcome.as_ref())
 }
 
-pub(crate) fn input_phase_terminality_via_authority(
+pub(crate) fn input_phase_behavioral_terminality_via_authority(
     input_id: &InputId,
     phase: InputLifecycleState,
     terminal_outcome: Option<InputTerminalOutcome>,
 ) -> Result<bool, String> {
-    let seed = InputStateSeed {
-        phase,
-        last_run_id: None,
-        last_boundary_sequence: None,
-        admission_sequence: None,
-        terminal_outcome,
-        attempt_count: 0,
-    };
-    input_seed_terminality_via_authority(input_id, &seed)
+    classify_input_behavioral_terminality(input_id, phase, terminal_outcome.as_ref())
+}
+
+fn classify_input_behavioral_terminality(
+    input_id: &InputId,
+    phase: InputLifecycleState,
+    terminal_outcome: Option<&InputTerminalOutcome>,
+) -> Result<bool, String> {
+    let input_key = input_id.to_string();
+    let (terminal_kind, abandon_reason) = input_terminality_parts(terminal_outcome);
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ClassifyInputTerminality {
+            input_id: input_key.clone(),
+            phase: observed_input_phase(phase),
+            terminal_kind,
+            abandon_reason,
+        },
+    )
+    .map_err(|err| {
+        format!("MeerkatMachine rejected behavioral input terminality for '{input_id}': {err}")
+    })?;
+
+    let mut terminality = None;
+    for effect in transition.effects {
+        match effect {
+            dsl::MeerkatMachineEffect::InputBehavioralTerminalityResolved {
+                input_id,
+                terminal,
+            } if input_id == input_key => terminality = Some(terminal),
+            other => {
+                return Err(format!(
+                    "MeerkatMachine emitted unexpected behavioral input terminality effect for '{input_id}': {other:?}"
+                ));
+            }
+        }
+    }
+    terminality.ok_or_else(|| {
+        format!("MeerkatMachine emitted no behavioral input terminality for '{input_id}'")
+    })
 }
 
 fn resolve_input_public_terminal_projection(
@@ -159,7 +191,7 @@ fn resolve_input_public_terminal_projection(
     seed: &InputStateSeed,
 ) -> Result<Option<dsl::InputPublicTerminalOutcome>, String> {
     let input_key = input_id.to_string();
-    let (terminal_kind, abandon_reason) = terminal_projection_parts(seed.terminal_outcome.as_ref());
+    let (terminal_kind, abandon_reason) = input_terminality_parts(seed.terminal_outcome.as_ref());
     let mut authority = projection_authority();
     let transition = dsl::MeerkatMachineMutator::apply(
         &mut authority,
@@ -212,7 +244,7 @@ fn observed_input_phase(phase: InputLifecycleState) -> dsl::RecoveredInputObserv
     }
 }
 
-fn terminal_projection_parts(
+fn input_terminality_parts(
     outcome: Option<&InputTerminalOutcome>,
 ) -> (
     Option<dsl::InputTerminalKind>,

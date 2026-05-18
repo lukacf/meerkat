@@ -844,10 +844,14 @@ impl MeerkatMachine {
 
             for (input_id, _state) in driver.ledger().iter() {
                 snapshot.input_count += 1;
-                let lifecycle = driver
-                    .input_phase(input_id)
-                    .unwrap_or(InputLifecycleState::Accepted);
-                let terminal = crate::meerkat_machine::input_phase_terminality_via_authority(
+                let Some(lifecycle) = driver.input_phase(input_id) else {
+                    tracing::error!(
+                        input_id = %input_id,
+                        "missing generated input lifecycle authority for ledger snapshot"
+                    );
+                    continue;
+                };
+                let terminal = crate::meerkat_machine::input_phase_behavioral_terminality_via_authority(
                     input_id,
                     lifecycle,
                     driver.input_terminal_outcome(input_id),

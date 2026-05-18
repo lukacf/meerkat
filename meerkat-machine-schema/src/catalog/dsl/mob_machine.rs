@@ -480,6 +480,8 @@ macro_rules! mob_catalog_machine_dsl {
             // snapshot.
             WiringGraphChanged { epoch: u64 },
             MemberSessionBindingChanged { epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId> },
+            WiringTrustRepairRequested { edge: WiringEdge },
+            ExternalPeerTrustRepairRequested { edge: ExternalPeerEdge },
             // D-wiring-observability (#27): pair-valued notice emitted from
             // `WireMembers`/`UnwireMembers` alongside `WiringGraphChanged`.
             // Unlike `WiringGraphChanged` (opaque epoch bump), this carries
@@ -517,6 +519,8 @@ macro_rules! mob_catalog_machine_dsl {
         disposition EmitKickoffLifecycleNotice => external,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
+        disposition WiringTrustRepairRequested => local,
+        disposition ExternalPeerTrustRepairRequested => local,
         disposition EmitWiringLifecycleNotice => external,
         disposition EmitExternalPeerWiringLifecycleNotice => external,
 
@@ -1516,6 +1520,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "edge_already_wired" { self.wiring_edges.contains(edge) == true }
             update {}
             to Running
+            emit WiringTrustRepairRequested { edge: edge }
         }
 
         transition RecoverRosterWiringRunning {
@@ -1596,6 +1601,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "external_peer_already_wired" { self.external_peer_edges.contains(edge) == true }
             update {}
             to Running
+            emit ExternalPeerTrustRepairRequested { edge: edge }
         }
 
         transition RecoverExternalPeerWiringRunning {

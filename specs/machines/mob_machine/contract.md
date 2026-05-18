@@ -240,6 +240,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitKickoffLifecycleNotice`(member_id: String, intent: KickoffIntent)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
+- `WiringTrustRepairRequested`(edge: WiringEdge)
+- `ExternalPeerTrustRepairRequested`(edge: ExternalPeerEdge)
 - `EmitWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: WiringEdge)
 - `EmitExternalPeerWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: ExternalPeerEdge)
 
@@ -867,6 +869,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `WireMembers`(edge)
 - Guards:
   - `edge_already_wired`
+- Emits: `WiringTrustRepairRequested`
 - To: `Running`
 
 ### `RecoverRosterWiringRunning`
@@ -925,6 +928,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `WireExternalPeer`(edge)
 - Guards:
   - `external_peer_already_wired`
+- Emits: `ExternalPeerTrustRepairRequested`
 - To: `Running`
 
 ### `RecoverExternalPeerWiringRunning`

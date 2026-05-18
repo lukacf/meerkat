@@ -515,7 +515,21 @@ fn wire_members_idempotently_accepts_duplicate_edge_without_bumping_epoch() {
 
     let transition = MobMachineMutator::apply(&mut authority, wire_input("alpha", "beta"))
         .expect("re-wiring a present edge is an idempotent no-op");
-    assert!(transition.effects.is_empty());
+    assert!(
+        transition.effects.iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::WiringTrustRepairRequested { edge }
+                if edge == &WiringEdge::new(identity("alpha"), identity("beta"))
+        )),
+        "idempotent wire must emit generated repair authority for trust reconciliation",
+    );
+    assert!(
+        !transition
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, MobMachineEffect::WiringGraphChanged { .. })),
+        "idempotent wire must not emit a topology mutation effect",
+    );
     assert_eq!(
         authority.state().topology_epoch,
         1,

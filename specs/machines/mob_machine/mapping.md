@@ -728,6 +728,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `MemberSessionBindingChanged`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
+- `WiringTrustRepairRequested`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ExternalPeerTrustRepairRequested`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `EmitWiringLifecycleNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`

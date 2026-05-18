@@ -2831,6 +2831,14 @@ pub mod effects {
         pub new_session_id: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct WiringTrustRepairRequested {
+        pub edge: WiringEdge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExternalPeerTrustRepairRequested {
+        pub edge: ExternalPeerEdge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EmitWiringLifecycleNotice {
         pub kind: WiringLifecycleKind,
         pub edge: WiringEdge,
@@ -2867,6 +2875,8 @@ pub enum Effect {
     EmitKickoffLifecycleNotice(effects::EmitKickoffLifecycleNotice),
     WiringGraphChanged(effects::WiringGraphChanged),
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
+    WiringTrustRepairRequested(effects::WiringTrustRepairRequested),
+    ExternalPeerTrustRepairRequested(effects::ExternalPeerTrustRepairRequested),
     EmitWiringLifecycleNotice(effects::EmitWiringLifecycleNotice),
     EmitExternalPeerWiringLifecycleNotice(effects::EmitExternalPeerWiringLifecycleNotice),
 }
@@ -2895,6 +2905,8 @@ pub enum EffectKind {
     EmitKickoffLifecycleNotice,
     WiringGraphChanged,
     MemberSessionBindingChanged,
+    WiringTrustRepairRequested,
+    ExternalPeerTrustRepairRequested,
     EmitWiringLifecycleNotice,
     EmitExternalPeerWiringLifecycleNotice,
 }

@@ -124,6 +124,22 @@ struct PreparedDslInput {
     phase_changed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireTrustAuthority {
+    GraphAdded,
+    RepairRequested,
+}
+
+impl WireTrustAuthority {
+    fn dsl_added(self) -> bool {
+        matches!(self, Self::GraphAdded)
+    }
+
+    fn is_repair(self) -> bool {
+        matches!(self, Self::RepairRequested)
+    }
+}
+
 /// Resolve the runtime binding for a spawn request.
 ///
 /// `RuntimeBinding` takes precedence over the legacy `backend` tag. When neither
@@ -1721,6 +1737,58 @@ impl MobActor {
         effects
             .iter()
             .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::WiringGraphChanged { .. }))
+    }
+
+    fn wire_members_authority_from_effects(
+        effects: &[mob_dsl::MobMachineEffect],
+        edge: &mob_dsl::WiringEdge,
+        context: &str,
+    ) -> Result<WireTrustAuthority, MobError> {
+        let graph_changed = Self::effects_include_wiring_graph_change(effects);
+        let repair_requested = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                mob_dsl::MobMachineEffect::WiringTrustRepairRequested {
+                    edge: effect_edge
+                } if effect_edge == edge
+            )
+        });
+        match (graph_changed, repair_requested) {
+            (true, false) => Ok(WireTrustAuthority::GraphAdded),
+            (false, true) => Ok(WireTrustAuthority::RepairRequested),
+            (false, false) => Err(MobError::WiringError(format!(
+                "{context} produced no generated wiring trust authority"
+            ))),
+            (true, true) => Err(MobError::WiringError(format!(
+                "{context} produced conflicting generated wiring trust authority"
+            ))),
+        }
+    }
+
+    fn wire_external_authority_from_effects(
+        effects: &[mob_dsl::MobMachineEffect],
+        edge: &mob_dsl::ExternalPeerEdge,
+        context: &str,
+    ) -> Result<WireTrustAuthority, MobError> {
+        let graph_changed = Self::effects_include_wiring_graph_change(effects);
+        let repair_requested = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                mob_dsl::MobMachineEffect::ExternalPeerTrustRepairRequested {
+                    edge: effect_edge
+                } if effect_edge == edge
+            )
+        });
+        match (graph_changed, repair_requested) {
+            (true, false) => Ok(WireTrustAuthority::GraphAdded),
+            (false, true) => Ok(WireTrustAuthority::RepairRequested),
+            (false, false) => Err(MobError::WiringError(format!(
+                "{context} produced no generated external-peer trust authority"
+            ))),
+            (true, true) => Err(MobError::WiringError(format!(
+                "{context} produced conflicting generated external-peer trust authority"
+            ))),
+        }
     }
 
     fn preview_dsl_input(
@@ -6151,8 +6219,9 @@ impl MobActor {
             )
         };
 
-        // Idempotent short-circuit when DSL AND roster both already
-        // reflect the edge — no trust/notification fan-out needed.
+        // Idempotent repair path when DSL AND roster both already reflect
+        // the edge. The DSL still emits a local repair effect; without that
+        // generated authority, live trust is not reinstalled.
         let dsl_has_edge = self
             .dsl_authority
             .state()
@@ -6168,6 +6237,12 @@ impl MobActor {
         let local_endpoint = self.resolve_wiring_endpoint(&local_entry, "wire").await?;
         let peer_endpoint = self.resolve_wiring_endpoint(&peer_entry, "wire").await?;
         if dsl_has_edge && roster_has_edge {
+            let authority = self.apply_wire_members_idempotent(&edge)?;
+            if !authority.is_repair() {
+                return Err(MobError::WiringError(
+                    "idempotent wire repair did not produce generated repair authority".to_string(),
+                ));
+            }
             match (&local_endpoint, &peer_endpoint) {
                 (
                     WiringEndpoint::Local {
@@ -6263,7 +6338,7 @@ impl MobActor {
             },
         ) = (&local_endpoint, &peer_endpoint)
         {
-            let dsl_added = self.apply_wire_members_idempotent(&edge)?;
+            let dsl_added = self.apply_wire_members_idempotent(&edge)?.dsl_added();
             if let Err(error) = self
                 .wire_peer_only_recipient(
                     local_spec,
@@ -6327,7 +6402,7 @@ impl MobActor {
             },
         ) = (&local_endpoint, &peer_endpoint)
         {
-            let dsl_added = self.apply_wire_members_idempotent(&edge)?;
+            let dsl_added = self.apply_wire_members_idempotent(&edge)?.dsl_added();
             if let Err(error) = local_comms.add_trusted_peer(peer_spec.clone()).await {
                 self.rollback_peer_only_wire(&edge, dsl_added, &[], local_spec, peer_spec)
                     .await;
@@ -6389,7 +6464,7 @@ impl MobActor {
             },
         ) = (&local_endpoint, &peer_endpoint)
         {
-            let dsl_added = self.apply_wire_members_idempotent(&edge)?;
+            let dsl_added = self.apply_wire_members_idempotent(&edge)?.dsl_added();
             if let Err(error) = peer_comms.add_trusted_peer(local_spec.clone()).await {
                 self.rollback_peer_only_wire(&edge, dsl_added, &[], local_spec, peer_spec)
                     .await;
@@ -6456,10 +6531,10 @@ impl MobActor {
             }
         };
 
-        // Submit the DSL input. Already-wired idempotency is a generated
-        // no-op transition; only the typed `WiringGraphChanged` effect means
-        // rollback must undo a machine graph mutation.
-        let dsl_added = self.apply_wire_members_idempotent(&edge)?;
+        // Submit the DSL input. A new edge emits `WiringGraphChanged`; an
+        // existing edge emits generated local repair authority. Only a graph
+        // change means rollback must undo a machine graph mutation.
+        let dsl_added = self.apply_wire_members_idempotent(&edge)?.dsl_added();
 
         let local_peer_id = Self::trusted_peer_removal_key(&local_spec);
         let peer_peer_id = Self::trusted_peer_removal_key(&peer_spec);
@@ -6889,12 +6964,12 @@ impl MobActor {
     fn apply_wire_members_idempotent(
         &mut self,
         edge: &mob_dsl::WiringEdge,
-    ) -> Result<bool, MobError> {
+    ) -> Result<WireTrustAuthority, MobError> {
         let effects = self.apply_dsl_input_collect_effects(
             mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
             "wire_members",
         )?;
-        Ok(Self::effects_include_wiring_graph_change(&effects))
+        Self::wire_members_authority_from_effects(&effects, edge, "wire_members")
     }
 
     async fn rollback_peer_only_wire(
@@ -7445,12 +7520,12 @@ impl MobActor {
     fn apply_wire_external_peer_idempotent(
         &mut self,
         edge: &mob_dsl::ExternalPeerEdge,
-    ) -> Result<bool, MobError> {
+    ) -> Result<WireTrustAuthority, MobError> {
         let effects = self.apply_dsl_input_collect_effects(
             mob_dsl::MobMachineInput::WireExternalPeer { edge: edge.clone() },
             "wire_external_peer",
         )?;
-        Ok(Self::effects_include_wiring_graph_change(&effects))
+        Self::wire_external_authority_from_effects(&effects, edge, "wire_external_peer")
     }
 
     fn apply_unwire_external_peer_idempotent(
@@ -7625,12 +7700,21 @@ impl MobActor {
             ))
         })?;
 
-        let dsl_added = self.apply_wire_external_peer_idempotent(&edge)?;
+        let authority = self.apply_wire_external_peer_idempotent(&edge)?;
 
         if already_wired_with_same_spec {
+            if !authority.is_repair() {
+                if authority.dsl_added() {
+                    self.rollback_external_wire_dsl(&edge, true).await;
+                }
+                return Err(MobError::WiringError(format!(
+                    "idempotent external wire repair for '{local}' did not produce generated repair authority"
+                )));
+            }
             comms.add_trusted_peer(spec.clone()).await?;
             return Ok(());
         }
+        let dsl_added = authority.dsl_added();
 
         // Install trust on the local's session comms runtime.
         if let Err(error) = comms.add_trusted_peer(spec.clone()).await {

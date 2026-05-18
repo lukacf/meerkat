@@ -1088,6 +1088,16 @@ impl MockSessionService {
         }
     }
 
+    async fn force_remove_trust_by_peer_id(&self, session_id: &SessionId, peer_id: &str) {
+        let runtime = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).cloned()
+        };
+        if let Some(runtime) = runtime {
+            let _ = runtime.remove_trusted_peer(peer_id).await;
+        }
+    }
+
     async fn force_add_trust_from_spec(&self, session_id: &SessionId, spec: TrustedPeerDescriptor) {
         let runtime = {
             let sessions = self.sessions.read().await;
@@ -15063,6 +15073,64 @@ async fn test_wire_external_adds_trusted_peer_and_tracks_projection() {
 }
 
 #[tokio::test]
+async fn test_rewire_external_repairs_trust_for_existing_machine_edge() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let sid_l = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    let external = test_trusted_peer_descriptor(
+        "remote-mob/worker/agent-b",
+        "inproc://remote-mob/worker/agent-b",
+    );
+
+    handle
+        .wire(
+            AgentIdentity::from("l-1"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("wire external");
+    service
+        .force_remove_trust_by_peer_id(&sid_l, &external.peer_id.to_string())
+        .await;
+
+    handle
+        .wire(
+            AgentIdentity::from("l-1"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("rewire external should repair trust");
+
+    let trusted = service.trusted_peer_names(&sid_l).await;
+    assert!(
+        trusted.iter().any(|name| name == external.name.as_str()),
+        "rewire external should restore external trust"
+    );
+
+    let events = handle.events().replay_all().await.expect("replay");
+    let external_wired_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::ExternalPeerWired { local, spec }
+                    if local == &AgentIdentity::from("l-1") && spec.name == external.name
+            )
+        })
+        .count();
+    assert_eq!(
+        external_wired_events, 1,
+        "external trust repair for an existing machine edge must not duplicate the wire event"
+    );
+}
+
+#[tokio::test]
 async fn test_respawn_restores_external_wiring_from_roster_spec() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let old_sid = handle
@@ -15814,6 +15882,69 @@ async fn test_wire_is_idempotent_and_emits_single_pair_event() {
     assert_eq!(
         pair_wired_events, 1,
         "idempotent wire must emit one logical MembersWired event for one canonical edge"
+    );
+}
+
+#[tokio::test]
+async fn test_rewire_repairs_local_trust_for_existing_machine_edge() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let sid_l = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_w = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wire(AgentIdentity::from("l-1"), MeerkatId::from("w-1"))
+        .await
+        .expect("initial wire");
+    service.force_remove_trust(&sid_l, &sid_w).await;
+    service.force_remove_trust(&sid_w, &sid_l).await;
+
+    handle
+        .wire(AgentIdentity::from("l-1"), MeerkatId::from("w-1"))
+        .await
+        .expect("rewire should repair both local trust edges");
+
+    let trusted_by_lead = service.trusted_peer_names(&sid_l).await;
+    let trusted_by_worker = service.trusted_peer_names(&sid_w).await;
+    assert!(
+        trusted_by_lead
+            .iter()
+            .any(|name| name.as_str() == test_comms_name("worker", "w-1")),
+        "rewire should restore worker trust on the lead runtime"
+    );
+    assert!(
+        trusted_by_worker
+            .iter()
+            .any(|name| name.as_str() == test_comms_name("lead", "l-1")),
+        "rewire should restore lead trust on the worker runtime"
+    );
+
+    let events = handle.events().replay_all().await.expect("replay");
+    let pair_wired_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::MembersWired { a, b }
+                    if (a == &AgentIdentity::from("l-1") && b == &AgentIdentity::from("w-1"))
+                        || (a == &AgentIdentity::from("w-1") && b == &AgentIdentity::from("l-1"))
+            )
+        })
+        .count();
+    assert_eq!(
+        pair_wired_events, 1,
+        "trust repair for an existing machine edge must not duplicate the logical wire event"
     );
 }
 

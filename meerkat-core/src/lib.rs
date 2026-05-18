@@ -36,7 +36,6 @@ pub mod event_injector;
 pub mod event_tap;
 pub mod gateway;
 pub mod generated;
-pub use generated::peer_ingress_authority::PeerIngressGeneratedAuthority;
 pub mod handles;
 pub mod hooks;
 pub mod image_content;

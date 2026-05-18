@@ -168,6 +168,7 @@ impl CommsManager {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::inbox::{AdmissionOutcome, DropReason};
     use crate::{Envelope, InboxItem, MessageKind, Signature, TrustedPeer};
     use uuid::Uuid;
 
@@ -247,19 +248,23 @@ mod tests {
         };
         envelope.sign(&sender);
 
-        manager
+        let outcome = manager
             .inbox_sender()
-            .send(InboxItem::External { envelope })
-            .into_result()
-            .unwrap();
+            .send(InboxItem::External { envelope });
+        assert_eq!(
+            outcome,
+            AdmissionOutcome::Dropped {
+                reason: DropReason::ClassificationRejected
+            }
+        );
 
         // Give tokio a moment to process
         tokio::task::yield_now().await;
 
-        // Drain messages
+        // Raw CommsManager inboxes are transport-only; without a machine
+        // authority handle they fail closed instead of deriving peer facts.
         let messages = manager.drain_messages();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].from_peer, "sender-agent");
+        assert!(messages.is_empty());
     }
 
     #[test]

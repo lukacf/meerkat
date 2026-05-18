@@ -1032,52 +1032,6 @@ mod tests {
     }
 
     #[test]
-    fn peer_ingress_generated_authority_owns_response_terminal_classification() {
-        let authority = crate::PeerIngressGeneratedAuthority::default();
-
-        assert_eq!(
-            authority.classify_response(ResponseStatus::Accepted).class,
-            PeerInputClass::ResponseProgress
-        );
-        assert_eq!(
-            authority.classify_response(ResponseStatus::Completed).class,
-            PeerInputClass::ResponseTerminal
-        );
-        assert_eq!(
-            authority.classify_response(ResponseStatus::Failed).class,
-            PeerInputClass::ResponseTerminal
-        );
-    }
-
-    #[test]
-    fn peer_ingress_generated_authority_auth_exempts_supervisor_bridge() {
-        let authority = crate::PeerIngressGeneratedAuthority::default();
-        let classification = authority.classify_request_intent(crate::SUPERVISOR_BRIDGE_INTENT);
-
-        assert_eq!(classification.class, PeerInputClass::ActionableRequest);
-        assert_eq!(
-            classification.auth,
-            PeerIngressAuthDecision::Exempt(PeerIngressAuthExemption::SupervisorBridge)
-        );
-    }
-
-    #[test]
-    fn peer_ingress_generated_authority_owns_lifecycle_and_silent_routing() {
-        let authority = crate::PeerIngressGeneratedAuthority::from_silent_intents(["probe.silent"]);
-
-        let lifecycle = authority.classify_request_intent(PeerLifecycleKind::PeerUnwired.as_str());
-        assert_eq!(lifecycle.class, PeerInputClass::PeerLifecycleUnwired);
-        assert_eq!(
-            lifecycle.lifecycle_kind,
-            Some(PeerLifecycleKind::PeerUnwired)
-        );
-
-        let silent = authority.classify_request_intent("probe.silent");
-        assert_eq!(silent.class, PeerInputClass::SilentRequest);
-        assert_eq!(silent.auth, PeerIngressAuthDecision::Required);
-    }
-
-    #[test]
     fn interaction_message_with_blocks_roundtrip() {
         let content = InteractionContent::Message {
             body: "hello".to_string(),

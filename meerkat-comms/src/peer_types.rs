@@ -19,8 +19,8 @@ pub(crate) enum ContentShape {
 ///
 /// Mirrors the shape exposed via `meerkat_core::PeerIngressAuthorityPhase` in
 /// runtime snapshots. The classified queue updates this copy only from
-/// `PeerCommsHandle` receive/dequeue authority effects; standalone runtimes
-/// without a required session handle use the generated core authority.
+/// `PeerCommsHandle` receive/dequeue authority effects; without that machine
+/// handle, classified peer ingress fails closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PeerIngressState {
     /// No items have been received yet.

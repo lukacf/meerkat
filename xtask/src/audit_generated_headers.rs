@@ -216,9 +216,6 @@ pub fn live_emit_paths() -> BTreeSet<PathBuf> {
     set.insert(PathBuf::from(
         "meerkat-core/src/generated/terminal_surface_mapping.rs",
     ));
-    set.insert(PathBuf::from(
-        "meerkat-core/src/generated/peer_ingress_authority.rs",
-    ));
 
     set.insert(PathBuf::from(
         "meerkat-machine-kernels/src/generated/mod.rs",

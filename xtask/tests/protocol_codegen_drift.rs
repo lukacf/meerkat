@@ -152,34 +152,6 @@ fn terminal_surface_mapping_matches_codegen_output() {
     );
 }
 
-/// Drift guard for the standalone generated peer-ingress authority adapter.
-/// This covers the no-session comms authority path that protocol-codegen emits
-/// outside the per-protocol helper loop.
-#[test]
-fn peer_ingress_authority_matches_codegen_output() {
-    use meerkat_machine_schema::{MachineSchema, canonical_machine_schemas};
-
-    let machines: Vec<MachineSchema> = canonical_machine_schemas();
-    let meerkat_machine = machines
-        .iter()
-        .find(|m| m.machine.as_str() == "MeerkatMachine")
-        .expect("MeerkatMachine must be a canonical schema");
-
-    let rendered = xtask::protocol_codegen::render_peer_ingress_authority(meerkat_machine)
-        .expect("render peer_ingress_authority");
-    let rendered = rustfmt(&rendered);
-
-    let committed_path = repo_root().join("meerkat-core/src/generated/peer_ingress_authority.rs");
-    let committed = std::fs::read_to_string(&committed_path)
-        .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
-
-    assert_eq!(
-        normalize(&committed),
-        normalize(&rendered),
-        "peer_ingress_authority.rs diverged from codegen output. If this is intentional, run `cargo xtask protocol-codegen` and commit the result."
-    );
-}
-
 /// Compile canary for generated protocol helper ownership: every helper
 /// emitted by protocol-codegen must land in an owning crate's checked
 /// `src/generated/` module tree, not in an ad-hoc bridge path outside a

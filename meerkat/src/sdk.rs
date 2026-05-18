@@ -764,7 +764,7 @@ mod tests {
             CommsCommand::PeerMessage {
                 blocks: None,
                 to: peer_route(&receiver_name, receiver.public_key()),
-                body: "must not pass sdk compatibility classifier".to_string(),
+                body: "must not pass sdk local ingress classifier".to_string(),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
             },
         )

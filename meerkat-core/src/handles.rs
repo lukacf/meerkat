@@ -896,10 +896,9 @@ pub trait ExternalToolSurfaceHandle: Send + Sync {
 /// signals on the MeerkatMachine DSL. Runtime-backed comms ingress hands
 /// parsed transport facts and queue observations to this handle and receives
 /// the complete typed classification/admission/phase facts back. A rejection
-/// is authoritative and callers fail closed. Standalone comms runtimes may
-/// have no session DSL handle; those use the generated
-/// `PeerIngressGeneratedAuthority` adapter for wire-compatible operation
-/// without a session authority.
+/// is authoritative and callers fail closed. Classified comms ingress without
+/// this session DSL handle fails closed rather than deriving machine facts in
+/// the transport shell.
 pub trait PeerCommsHandle: Send + Sync {
     /// Fire the `ClassifyExternalEnvelope` signal and return machine-owned
     /// admission facts for the parsed envelope.

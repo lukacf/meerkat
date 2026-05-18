@@ -32,7 +32,7 @@ use crate::types::{Envelope, MessageKind};
 /// * `keypair` - Our keypair for signing acks
 /// * `require_peer_auth` - Whether to enforce signature+trusted-peer validation
 /// * `trusted` - Router-owned trust set. `InboxSender` consults this on the
-///   raw fallback path so ingress trust still has a single semantic owner.
+///   classified machine-authority path so ingress trust has a single semantic owner.
 /// * `inbox_sender` - Channel to send validated messages to the inbox
 pub async fn handle_connection<S>(
     stream: S,
@@ -156,6 +156,7 @@ pub enum IoTaskError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::classify::test_support;
     use crate::identity::PubKey;
     use crate::inbox::Inbox;
     use crate::trust::TrustedPeer;
@@ -178,6 +179,16 @@ mod tests {
                 meta: crate::PeerMeta::default(),
             }],
         }))
+    }
+
+    fn classified_inbox_for_trust(
+        trusted: &Arc<RwLock<TrustedPeers>>,
+        require_peer_auth: bool,
+    ) -> (Inbox, InboxSender) {
+        Inbox::new_classified(test_support::classification_context_shared(
+            trusted.clone(),
+            require_peer_auth,
+        ))
     }
 
     fn make_signed_envelope(from_keypair: &Keypair, to: PubKey, kind: MessageKind) -> Envelope {
@@ -274,7 +285,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         // Create envelope with invalid signature
         let envelope = Envelope {
@@ -302,7 +313,7 @@ mod tests {
         assert!(result.is_ok()); // Silent drop, not an error
 
         // No item in inbox
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert!(items.is_empty());
     }
 
@@ -312,7 +323,7 @@ mod tests {
         let receiver_keypair = make_keypair();
         let untrusted_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key()); // Only trust sender_keypair
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         // Create envelope from untrusted peer
         let envelope = make_signed_envelope(
@@ -341,7 +352,7 @@ mod tests {
         ));
 
         // No item in inbox
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert!(items.is_empty());
     }
 
@@ -350,7 +361,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&make_keypair().public_key());
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, false);
 
         let envelope = Envelope {
             id: Uuid::new_v4(),
@@ -383,9 +394,9 @@ mod tests {
             _ => panic!("expected Ack"),
         }
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
-        match &items[0] {
+        match &items[0].item {
             InboxItem::External { envelope } => assert_eq!(envelope.id, expected_id),
             _ => panic!("expected External"),
         }
@@ -397,7 +408,7 @@ mod tests {
         let receiver_keypair = make_keypair();
         let untrusted_keypair = make_keypair();
         let trusted = make_trusted_peers(&untrusted_keypair.public_key()); // not relevant in no-auth mode
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, false);
 
         let envelope = make_signed_envelope(
             &sender_keypair, // not in trusted list
@@ -428,9 +439,9 @@ mod tests {
             _ => panic!("expected Ack"),
         }
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
-        match &items[0] {
+        match &items[0].item {
             InboxItem::External { envelope } => assert_eq!(envelope.id, expected_id),
             _ => panic!("expected External"),
         }
@@ -441,7 +452,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (_inbox, inbox_sender) = Inbox::new();
+        let (_inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -487,7 +498,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -516,9 +527,9 @@ mod tests {
             .unwrap();
 
         // Check inbox
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
-        match &items[0] {
+        match &items[0].item {
             InboxItem::External { envelope } => {
                 assert_eq!(envelope.id, envelope_id);
             }
@@ -531,7 +542,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (_inbox, inbox_sender) = Inbox::new();
+        let (_inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -571,7 +582,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (_inbox, inbox_sender) = Inbox::new();
+        let (_inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -613,7 +624,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (_inbox, inbox_sender) = Inbox::new();
+        let (_inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -654,7 +665,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (_inbox, inbox_sender) = Inbox::new();
+        let (_inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -686,7 +697,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (_inbox, inbox_sender) = Inbox::new();
+        let (_inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -725,7 +736,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         // Create envelope with invalid signature
         let envelope = Envelope {
@@ -757,7 +768,7 @@ mod tests {
         assert!(result.is_err(), "Should not send ack for invalid signature");
 
         // No inbox item
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert!(items.is_empty());
     }
 
@@ -767,7 +778,7 @@ mod tests {
         let receiver_keypair = make_keypair();
         let other_keypair = make_keypair();
         let trusted = make_trusted_peers(&other_keypair.public_key()); // sender NOT trusted
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair, // Not trusted
@@ -799,7 +810,7 @@ mod tests {
         assert!(result.is_err(), "Should not send ack for untrusted sender");
 
         // No inbox item
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert!(items.is_empty());
     }
 
@@ -810,7 +821,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (inbox, inbox_sender) = Inbox::new();
+        let (inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
         drop(inbox);
 
         let envelope = make_signed_envelope(
@@ -856,7 +867,7 @@ mod tests {
         // spawn time, the subsequent add below would not be visible and
         // the envelope would be silently dropped.
         let trusted = Arc::new(RwLock::new(TrustedPeers { peers: vec![] }));
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -894,9 +905,9 @@ mod tests {
             .await
             .unwrap();
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1, "envelope should be admitted via live trust");
-        match &items[0] {
+        match &items[0].item {
             InboxItem::External { envelope } => assert_eq!(envelope.id, envelope_id),
             _ => panic!("expected External"),
         }

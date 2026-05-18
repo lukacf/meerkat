@@ -14,7 +14,7 @@
 use meerkat_core::comms::PeerId;
 use meerkat_core::interaction::{
     InboxInteraction, InteractionContent, InteractionId, PeerIngressConvention, PeerIngressFact,
-    PeerIngressIdentity, PeerInputCandidate, PeerInputClass, ResponseStatus,
+    PeerIngressIdentity, PeerInputCandidate, PeerInputClass, ResponseStatus, TerminalityClass,
 };
 use meerkat_core::lifecycle::RunId;
 use meerkat_runtime::comms_bridge::peer_input_candidate_to_runtime_input;
@@ -192,15 +192,18 @@ fn runtime_input_for_interaction(
             status,
             ..
         } => {
-            let classification =
-                meerkat_core::PeerIngressGeneratedAuthority::default().classify_response(*status);
+            let terminality = meerkat_core::classify_response_terminality(*status);
+            let class = match terminality {
+                TerminalityClass::Progress => PeerInputClass::ResponseProgress,
+                _ => PeerInputClass::ResponseTerminal,
+            };
             (
-                classification.class,
+                class,
                 PeerIngressConvention::Response {
                     in_reply_to: *in_reply_to,
                     status: *status,
                 },
-                classification.response_terminality,
+                Some(terminality),
             )
         }
     };

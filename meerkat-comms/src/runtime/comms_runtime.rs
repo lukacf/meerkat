@@ -1289,8 +1289,6 @@ pub struct CommsRuntime {
     subscriber_registry: crate::event_injector::SubscriberRegistry,
     interaction_stream_registry: InteractionStreamRegistry,
     peer_directory_reachability: Arc<Mutex<PeerDirectoryReachabilityAuthority>>,
-    #[allow(dead_code)] // Kept for runtime inspection symmetry with IngressClassificationContext.
-    ingress_authority: Arc<meerkat_core::PeerIngressGeneratedAuthority>,
     peer_comms_handle: crate::classify::PeerCommsHandleSlot,
     require_peer_comms_machine_authority: Arc<AtomicBool>,
     /// Narrow notify that fires only for actionable peer input (messages/requests).
@@ -1324,16 +1322,6 @@ pub struct CommsRuntime {
 }
 
 impl CommsRuntime {
-    fn ingress_authority_from_silent_intents(
-        silent_intents: &Arc<HashSet<String>>,
-    ) -> Arc<meerkat_core::PeerIngressGeneratedAuthority> {
-        Arc::new(
-            meerkat_core::PeerIngressGeneratedAuthority::from_silent_intents(
-                silent_intents.iter().cloned(),
-            ),
-        )
-    }
-
     fn derive_bridge_bootstrap_token(keypair: &Keypair) -> String {
         let mut digest = Sha256::new();
         digest.update(b"meerkat.supervisor-bridge.bootstrap-token.v1");
@@ -1378,7 +1366,7 @@ impl CommsRuntime {
     #[cfg(not(target_arch = "wasm32"))]
     async fn new_with_silent_intents_and_machine_authority_requirement(
         config: ResolvedCommsConfig,
-        silent_intents: Arc<HashSet<String>>,
+        _silent_intents: Arc<HashSet<String>>,
         require_machine_authority: bool,
     ) -> Result<Self, CommsRuntimeError> {
         // Always load keypair and trusted peers — outbound routing needs them
@@ -1393,7 +1381,6 @@ impl CommsRuntime {
         // Single source of truth for trust state — shared by the Router,
         // IngressClassificationContext, and callers of trusted_peers_shared().
         let trusted_peers = Arc::new(parking_lot::RwLock::new(trusted_peers));
-        let ingress_authority = Self::ingress_authority_from_silent_intents(&silent_intents);
 
         // Build classified inbox using the same trusted_peers Arc
         let peer_comms_handle = Arc::new(parking_lot::RwLock::new(None));
@@ -1402,9 +1389,7 @@ impl CommsRuntime {
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: config.require_peer_auth,
             trusted_peers: trusted_peers.clone(),
-            ingress_authority: ingress_authority.clone(),
             peer_comms_handle: peer_comms_handle.clone(),
-            require_machine_authority: require_peer_comms_machine_authority.clone(),
             inproc_namespace: config.inproc_namespace.clone(),
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
@@ -1440,7 +1425,6 @@ impl CommsRuntime {
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
-            ingress_authority,
             peer_comms_handle,
             require_peer_comms_machine_authority,
             actionable_notify,
@@ -1482,21 +1466,18 @@ impl CommsRuntime {
         name: &str,
         namespace: Option<String>,
         keypair: Keypair,
-        silent_intents: Arc<HashSet<String>>,
+        _silent_intents: Arc<HashSet<String>>,
     ) -> Result<Self, CommsRuntimeError> {
         let public_key = keypair.public_key();
         // Single source of truth — same Arc shared by Router, classification, and callers.
         let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
-        let ingress_authority = Self::ingress_authority_from_silent_intents(&silent_intents);
 
         let peer_comms_handle = Arc::new(parking_lot::RwLock::new(None));
         let require_peer_comms_machine_authority = Arc::new(AtomicBool::new(false));
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: true,
             trusted_peers: trusted_peers.clone(),
-            ingress_authority: ingress_authority.clone(),
             peer_comms_handle: peer_comms_handle.clone(),
-            require_machine_authority: require_peer_comms_machine_authority.clone(),
             inproc_namespace: namespace.clone(),
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
@@ -1556,7 +1537,6 @@ impl CommsRuntime {
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
-            ingress_authority,
             peer_comms_handle,
             require_peer_comms_machine_authority,
             actionable_notify,
@@ -1612,7 +1592,7 @@ impl CommsRuntime {
         namespace: Option<String>,
         identity_root: std::path::PathBuf,
         session_id: &meerkat_core::SessionId,
-        silent_intents: Arc<HashSet<String>>,
+        _silent_intents: Arc<HashSet<String>>,
         session_claim_handle: Arc<dyn SessionClaimHandle>,
     ) -> Result<Self, CommsRuntimeError> {
         let claim = session_claim_handle
@@ -1624,16 +1604,13 @@ impl CommsRuntime {
             .map_err(|e| CommsRuntimeError::IdentityError(e.to_string()))?;
         let public_key = keypair.public_key();
         let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
-        let ingress_authority = Self::ingress_authority_from_silent_intents(&silent_intents);
 
         let peer_comms_handle = Arc::new(parking_lot::RwLock::new(None));
         let require_peer_comms_machine_authority = Arc::new(AtomicBool::new(true));
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: true,
             trusted_peers: trusted_peers.clone(),
-            ingress_authority: ingress_authority.clone(),
             peer_comms_handle: peer_comms_handle.clone(),
-            require_machine_authority: require_peer_comms_machine_authority.clone(),
             inproc_namespace: namespace.clone(),
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
@@ -1684,7 +1661,6 @@ impl CommsRuntime {
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
-            ingress_authority,
             peer_comms_handle,
             require_peer_comms_machine_authority,
             actionable_notify,
@@ -1726,9 +1702,7 @@ impl CommsRuntime {
     /// MeerkatMachine `ClassifyExternalEnvelope` / `ClassifyPlainEvent`
     /// signal. A DSL rejection fails closed before the comms shell computes
     /// auth exemptions, silent routing, lifecycle subjects, or rendered text.
-    /// Standalone comms runtimes may leave this unset only while
-    /// `require_peer_comms_machine_authority` is false; session-backed
-    /// runtimes fail closed until this handle is installed.
+    /// Classified ingress fails closed until this handle is installed.
     pub fn install_peer_comms_handle(
         &self,
         handle: Arc<dyn meerkat_core::handles::PeerCommsHandle>,
@@ -1736,9 +1710,9 @@ impl CommsRuntime {
         *self.peer_comms_handle.write() = Some(handle);
     }
 
-    /// Require runtime-backed peer ingress to use the installed machine
-    /// authority. When enabled, a missing `PeerCommsHandle` fails closed
-    /// instead of using the standalone generated authority.
+    /// Mark this runtime as requiring peer-comms machine authority.
+    /// Missing `PeerCommsHandle` already fails closed for classified ingress;
+    /// this flag remains as an observable session-mode marker for callers.
     pub fn require_peer_comms_machine_authority(&self) {
         self.require_peer_comms_machine_authority
             .store(true, Ordering::SeqCst);
@@ -2956,6 +2930,7 @@ async fn spawn_plain_uds_listener(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::classify::test_support;
     use crate::event_injector::CommsEventInjector;
     use crate::identity::Signature;
     use crate::types::{Envelope, InboxItem, MessageKind, Status};
@@ -2983,6 +2958,23 @@ mod tests {
             address: parse_peer_address(address).expect("valid peer address"),
             pubkey: *pubkey.as_bytes(),
         }
+    }
+
+    fn install_test_peer_comms_handle(runtime: &CommsRuntime) {
+        runtime.install_peer_comms_handle(test_support::AcceptingPeerCommsHandle::new()
+            as Arc<dyn meerkat_core::handles::PeerCommsHandle>);
+    }
+
+    fn inproc_only_with_test_peer_authority(name: &str) -> CommsRuntime {
+        let runtime = CommsRuntime::inproc_only(name).unwrap();
+        install_test_peer_comms_handle(&runtime);
+        runtime
+    }
+
+    async fn new_with_test_peer_authority(config: ResolvedCommsConfig) -> CommsRuntime {
+        let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
+        runtime
     }
 
     fn peer_route(name: &str, pubkey: PubKey) -> PeerRoute {
@@ -3517,6 +3509,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("variants", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
 
         let sender = Keypair::generate();
         CoreCommsRuntime::add_trusted_peer(
@@ -3619,6 +3612,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("lifecycle-no-response-cache", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
 
         let sender = Keypair::generate();
         CoreCommsRuntime::add_trusted_peer(
@@ -3668,6 +3662,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("multimodal-body-projection", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
 
         let sender = Keypair::generate();
         CoreCommsRuntime::add_trusted_peer(
@@ -3727,6 +3722,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("subscription", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
 
         let injector = CommsEventInjector::new(
             runtime.router.inbox_sender().clone(),
@@ -3758,7 +3754,7 @@ mod tests {
         let peer_name = format!("corr-peer-{suffix}");
         let runtime_name = format!("corr-runtime-{suffix}");
 
-        let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
+        let peer = inproc_only_with_test_peer_authority(&peer_name);
         let runtime = Arc::new(CommsRuntime::inproc_only(&runtime_name).unwrap());
         install_test_peer_request_response_authority(&runtime);
         {
@@ -4225,7 +4221,7 @@ mod tests {
         let receiver_name = format!("life-receiver-{suffix}");
 
         let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
-        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let receiver = inproc_only_with_test_peer_authority(&receiver_name);
 
         CoreCommsRuntime::add_trusted_peer(
             &sender,
@@ -4289,6 +4285,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("subscription-blocks", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
 
         let injector = CommsEventInjector::new(
             runtime.router.inbox_sender().clone(),
@@ -4333,7 +4330,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_bridge_red_ok_send_and_stream_reserves_one_interaction_channel() {
         let suffix = Uuid::new_v4().simple().to_string();
-        let runtime = CommsRuntime::inproc_only(&format!("phase1-bridge-{suffix}")).unwrap();
+        let runtime = inproc_only_with_test_peer_authority(&format!("phase1-bridge-{suffix}"));
 
         let cmd = CommsCommand::Input {
             blocks: None,
@@ -4374,9 +4371,9 @@ mod tests {
     #[tokio::test]
     async fn local_input_stream_remains_transport_only_with_machine_stream_authority() {
         let suffix = Uuid::new_v4().simple().to_string();
-        let runtime = Arc::new(
-            CommsRuntime::inproc_only(&format!("local-transport-authority-{suffix}")).unwrap(),
-        );
+        let runtime = Arc::new(inproc_only_with_test_peer_authority(&format!(
+            "local-transport-authority-{suffix}"
+        )));
         let stream_handle = Arc::new(TestInteractionStreamHandle::default());
         runtime.install_interaction_stream_handle(stream_handle.clone());
 
@@ -4422,7 +4419,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_bridge_red_ok_completed_interaction_terminates_reserved_stream() {
         let suffix = Uuid::new_v4().simple().to_string();
-        let runtime = CommsRuntime::inproc_only(&format!("phase1-complete-{suffix}")).unwrap();
+        let runtime = inproc_only_with_test_peer_authority(&format!("phase1-complete-{suffix}"));
 
         let receipt = CoreCommsRuntime::send(
             &runtime,
@@ -4463,6 +4460,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("plain-id", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
 
         let interaction_id = Uuid::new_v4();
         runtime
@@ -4489,6 +4487,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("plain-hints", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
         let render_metadata = meerkat_core::types::RenderMetadata {
             class: meerkat_core::types::RenderClass::ExternalEvent,
             salience: meerkat_core::types::RenderSalience::Urgent,
@@ -4523,6 +4522,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("plain-generated-id", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
 
         runtime
             .router
@@ -4564,6 +4564,7 @@ mod tests {
         let mut config = test_runtime_config("peer-snapshot", &tmp);
         config.require_peer_auth = false;
         let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
 
         let sender = Keypair::generate();
         let envelope = signed_envelope(
@@ -4629,6 +4630,7 @@ mod tests {
         let mut config = test_runtime_config("peer-runtime-snapshot", &tmp);
         config.require_peer_auth = false;
         let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
 
         let peer_key = Keypair::generate();
         let trusted_peer = trusted_descriptor("ally", peer_key.public_key(), "inproc://ally");
@@ -4719,6 +4721,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("peer-runtime-dropped", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
 
         let sender = Keypair::generate();
         let envelope = signed_envelope(
@@ -4765,6 +4768,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("peer-authority-sync", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
 
         let sender = Keypair::generate();
         let pubkey_for_authority_check = sender.public_key();
@@ -4908,6 +4912,7 @@ mod tests {
         let mut config = test_runtime_config("peer-authority-auth-open", &tmp);
         config.require_peer_auth = false;
         let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
 
         let sender = Keypair::generate();
         let envelope = signed_envelope(
@@ -4966,7 +4971,7 @@ mod tests {
     #[tokio::test]
     async fn test_core_send_input_no_reservation() {
         let suffix = Uuid::new_v4().simple().to_string();
-        let runtime = CommsRuntime::inproc_only(&format!("input-nores-{suffix}")).unwrap();
+        let runtime = inproc_only_with_test_peer_authority(&format!("input-nores-{suffix}"));
 
         let cmd = CommsCommand::Input {
             blocks: None,
@@ -5000,7 +5005,7 @@ mod tests {
     #[tokio::test]
     async fn test_core_send_input_reserves_stream() {
         let suffix = Uuid::new_v4().simple().to_string();
-        let runtime = CommsRuntime::inproc_only(&format!("input-res-{suffix}")).unwrap();
+        let runtime = inproc_only_with_test_peer_authority(&format!("input-res-{suffix}"));
 
         let cmd = CommsCommand::Input {
             blocks: None,
@@ -5039,7 +5044,7 @@ mod tests {
     #[tokio::test]
     async fn test_core_stream_attachment_duplicate_attach_fails() {
         let suffix = Uuid::new_v4().simple().to_string();
-        let runtime = CommsRuntime::inproc_only(&format!("dup-attach-{suffix}")).unwrap();
+        let runtime = inproc_only_with_test_peer_authority(&format!("dup-attach-{suffix}"));
 
         let cmd = CommsCommand::Input {
             blocks: None,
@@ -5078,7 +5083,7 @@ mod tests {
     #[tokio::test]
     async fn test_core_stream_not_reserved_before_send() {
         let suffix = Uuid::new_v4().simple().to_string();
-        let runtime = CommsRuntime::inproc_only(&format!("pre-send-{suffix}")).unwrap();
+        let runtime = inproc_only_with_test_peer_authority(&format!("pre-send-{suffix}"));
         let random = InteractionId(Uuid::new_v4());
 
         let missing = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(random));
@@ -5111,7 +5116,7 @@ mod tests {
     #[tokio::test]
     async fn test_core_send_and_stream_input_returns_stream_and_receipt() {
         let suffix = Uuid::new_v4().simple().to_string();
-        let runtime = CommsRuntime::inproc_only(&format!("sas-{suffix}")).unwrap();
+        let runtime = inproc_only_with_test_peer_authority(&format!("sas-{suffix}"));
 
         let cmd = CommsCommand::Input {
             blocks: None,
@@ -5168,7 +5173,7 @@ mod tests {
         let sender_name = format!("sender-{suffix}");
         let receiver_name = format!("receiver-{suffix}");
         let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
-        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let receiver = inproc_only_with_test_peer_authority(&receiver_name);
 
         CoreCommsRuntime::add_trusted_peer(
             &sender,
@@ -5222,7 +5227,7 @@ mod tests {
         let sender_name = format!("sender-blob-{suffix}");
         let receiver_name = format!("receiver-blob-{suffix}");
         let mut sender = CommsRuntime::inproc_only(&sender_name).unwrap();
-        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let receiver = inproc_only_with_test_peer_authority(&receiver_name);
         let blob_store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
         let blob_ref = blob_store
             .put_image("image/png", "aGVsbG8=")
@@ -5290,7 +5295,7 @@ mod tests {
         let sender_name = format!("sender-request-blob-{suffix}");
         let receiver_name = format!("receiver-request-blob-{suffix}");
         let mut sender_runtime = CommsRuntime::inproc_only(&sender_name).unwrap();
-        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let receiver = inproc_only_with_test_peer_authority(&receiver_name);
         let blob_store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
         let blob_ref = blob_store
             .put_image("image/png", "aGVsbG8=")
@@ -5362,7 +5367,7 @@ mod tests {
         let sender_name = format!("sender-response-blob-{suffix}");
         let receiver_name = format!("receiver-response-blob-{suffix}");
         let mut sender_runtime = CommsRuntime::inproc_only(&sender_name).unwrap();
-        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let receiver = inproc_only_with_test_peer_authority(&receiver_name);
         let blob_store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
         let blob_ref = blob_store
             .put_image("image/png", "aGVsbG8=")
@@ -5508,7 +5513,7 @@ mod tests {
         };
 
         let sender = CommsRuntime::new(sender_config).await.unwrap();
-        let receiver = CommsRuntime::new(receiver_config).await.unwrap();
+        let receiver = new_with_test_peer_authority(receiver_config).await;
         let sender_pubkey = sender.public_key();
         let receiver_pubkey = receiver.public_key();
 
@@ -5546,7 +5551,7 @@ mod tests {
         let sender_name = format!("trust-sender-{suffix}");
         let receiver_name = format!("trust-receiver-{suffix}");
         let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
-        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let receiver = inproc_only_with_test_peer_authority(&receiver_name);
 
         let peer_spec = trusted_descriptor(
             &receiver_name,
@@ -6114,7 +6119,7 @@ mod tests {
         let sender_name = format!("reach-sender-{suffix}");
         let receiver_name = format!("reach-receiver-{suffix}");
         let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
-        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let receiver = inproc_only_with_test_peer_authority(&receiver_name);
 
         CoreCommsRuntime::add_trusted_peer(
             &sender,
@@ -6223,7 +6228,7 @@ mod tests {
         let sender_name = format!("admit-sender-{suffix}");
         let receiver_name = format!("admit-receiver-{suffix}");
         let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
-        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let receiver = inproc_only_with_test_peer_authority(&receiver_name);
 
         // Sender trusts receiver; receiver does NOT trust sender. Receiver
         // has `require_peer_auth: true` by default, so our envelope lands
@@ -6423,7 +6428,7 @@ mod tests {
     #[tokio::test]
     async fn test_m4_duplicate_close_is_safe() {
         let suffix = Uuid::new_v4().simple().to_string();
-        let runtime = CommsRuntime::inproc_only(&format!("dup-close-{suffix}")).unwrap();
+        let runtime = inproc_only_with_test_peer_authority(&format!("dup-close-{suffix}"));
         let session_id = meerkat_core::SessionId::new();
 
         let cmd = CommsCommand::Input {
@@ -6453,7 +6458,7 @@ mod tests {
     #[tokio::test]
     async fn test_m4_mark_interaction_complete_cleans_up() {
         let suffix = Uuid::new_v4().simple().to_string();
-        let runtime = CommsRuntime::inproc_only(&format!("complete-{suffix}")).unwrap();
+        let runtime = inproc_only_with_test_peer_authority(&format!("complete-{suffix}"));
         let session_id = meerkat_core::SessionId::new();
 
         let cmd = CommsCommand::Input {
@@ -6526,7 +6531,7 @@ mod tests {
         let peer_name = format!("m5-peer-{suffix}");
         let runtime_name = format!("m5-runtime-{suffix}");
 
-        let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
+        let peer = inproc_only_with_test_peer_authority(&peer_name);
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
         {
             let mut trusted = runtime.trusted_peers.write();
@@ -6578,7 +6583,7 @@ mod tests {
     #[tokio::test]
     async fn test_m5_send_and_stream_input_none_is_not_streamable() {
         let suffix = Uuid::new_v4().simple().to_string();
-        let runtime = CommsRuntime::inproc_only(&format!("m5-none-{suffix}")).unwrap();
+        let runtime = inproc_only_with_test_peer_authority(&format!("m5-none-{suffix}"));
         let session_id = meerkat_core::SessionId::new();
 
         let cmd = CommsCommand::Input {
@@ -6613,7 +6618,7 @@ mod tests {
     #[tokio::test]
     async fn test_m4_attach_after_completed_returns_not_reserved() {
         let suffix = Uuid::new_v4().simple().to_string();
-        let runtime = CommsRuntime::inproc_only(&format!("post-comp-{suffix}")).unwrap();
+        let runtime = inproc_only_with_test_peer_authority(&format!("post-comp-{suffix}"));
         let session_id = meerkat_core::SessionId::new();
 
         let cmd = CommsCommand::Input {

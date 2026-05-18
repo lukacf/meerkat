@@ -38,7 +38,9 @@ use crate::driver::ephemeral::EphemeralRuntimeDriver;
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::Input;
-use crate::input_state::InputLifecycleState;
+use crate::input_state::{
+    InputAbandonReason, InputLifecycleState, InputStateSeed, InputTerminalOutcome,
+};
 use crate::meerkat_machine_types::{
     HydratedSessionLlmState, MeerkatAdmittedInputSnapshot, MeerkatBindingSnapshot,
     MeerkatCompletionWaiterSnapshot, MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot,
@@ -71,6 +73,151 @@ pub enum RuntimeBindingsError {
     /// Machine-owned binding preparation failed before bindings were published.
     #[error("failed to prepare runtime bindings for session {0}: {1}")]
     PrepareFailed(SessionId, String),
+}
+
+/// Generated public projection for an input-state seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputPublicStateProjection {
+    pub lifecycle_state: dsl::InputPublicLifecycleState,
+    pub terminal_outcome: Option<dsl::InputPublicTerminalOutcome>,
+}
+
+/// Resolve the public lifecycle class for a machine-derived input phase
+/// through generated MeerkatMachine authority.
+pub fn resolve_input_public_lifecycle_projection(
+    input_id: &InputId,
+    phase: InputLifecycleState,
+) -> Result<dsl::InputPublicLifecycleState, String> {
+    let input_key = input_id.to_string();
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ResolveInputPublicLifecycle {
+            input_id: input_key.clone(),
+            phase: observed_input_phase(phase),
+        },
+    )
+    .map_err(|err| {
+        format!("MeerkatMachine rejected public lifecycle projection for '{input_id}': {err}")
+    })?;
+
+    transition
+        .effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::InputPublicLifecycleResolved { input_id, phase }
+                if input_id == input_key =>
+            {
+                Some(phase)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!("MeerkatMachine emitted no public lifecycle projection for '{input_id}'")
+        })
+}
+
+/// Resolve public lifecycle and terminal result classes for a machine-derived
+/// input-state seed through generated MeerkatMachine authority.
+pub fn resolve_input_public_state_projection(
+    input_id: &InputId,
+    seed: &InputStateSeed,
+) -> Result<InputPublicStateProjection, String> {
+    let lifecycle_state = resolve_input_public_lifecycle_projection(input_id, seed.phase)?;
+    let terminal_outcome = resolve_input_public_terminal_projection(input_id, seed)?;
+    Ok(InputPublicStateProjection {
+        lifecycle_state,
+        terminal_outcome,
+    })
+}
+
+fn resolve_input_public_terminal_projection(
+    input_id: &InputId,
+    seed: &InputStateSeed,
+) -> Result<Option<dsl::InputPublicTerminalOutcome>, String> {
+    let input_key = input_id.to_string();
+    let (terminal_kind, abandon_reason) = terminal_projection_parts(seed.terminal_outcome.as_ref());
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ResolveInputPublicTerminalOutcome {
+            input_id: input_key.clone(),
+            phase: observed_input_phase(seed.phase),
+            terminal_kind,
+            abandon_reason,
+        },
+    )
+    .map_err(|err| {
+        format!("MeerkatMachine rejected public terminal projection for '{input_id}': {err}")
+    })?;
+
+    transition
+        .effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::InputPublicTerminalOutcomeResolved {
+                input_id,
+                terminal_outcome,
+            } if input_id == input_key => Some(terminal_outcome),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!("MeerkatMachine emitted no public terminal projection for '{input_id}'")
+        })
+}
+
+fn projection_authority() -> dsl::MeerkatMachineAuthority {
+    dsl::MeerkatMachineAuthority::from_state(dsl::MeerkatMachineState {
+        lifecycle_phase: dsl::MeerkatPhase::Idle,
+        ..dsl::MeerkatMachineState::default()
+    })
+}
+
+fn observed_input_phase(phase: InputLifecycleState) -> dsl::RecoveredInputObservedPhase {
+    match phase {
+        InputLifecycleState::Accepted => dsl::RecoveredInputObservedPhase::Accepted,
+        InputLifecycleState::Queued => dsl::RecoveredInputObservedPhase::Queued,
+        InputLifecycleState::Staged => dsl::RecoveredInputObservedPhase::Staged,
+        InputLifecycleState::Applied => dsl::RecoveredInputObservedPhase::Applied,
+        InputLifecycleState::AppliedPendingConsumption => {
+            dsl::RecoveredInputObservedPhase::AppliedPendingConsumption
+        }
+        InputLifecycleState::Consumed => dsl::RecoveredInputObservedPhase::Consumed,
+        InputLifecycleState::Superseded => dsl::RecoveredInputObservedPhase::Superseded,
+        InputLifecycleState::Coalesced => dsl::RecoveredInputObservedPhase::Coalesced,
+        InputLifecycleState::Abandoned => dsl::RecoveredInputObservedPhase::Abandoned,
+    }
+}
+
+fn terminal_projection_parts(
+    outcome: Option<&InputTerminalOutcome>,
+) -> (
+    Option<dsl::InputTerminalKind>,
+    Option<dsl::InputAbandonReason>,
+) {
+    match outcome {
+        None => (None, None),
+        Some(InputTerminalOutcome::Consumed) => (Some(dsl::InputTerminalKind::Consumed), None),
+        Some(InputTerminalOutcome::Superseded { .. }) => {
+            (Some(dsl::InputTerminalKind::Superseded), None)
+        }
+        Some(InputTerminalOutcome::Coalesced { .. }) => {
+            (Some(dsl::InputTerminalKind::Coalesced), None)
+        }
+        Some(InputTerminalOutcome::Abandoned { reason }) => (
+            Some(dsl::InputTerminalKind::Abandoned),
+            Some(match reason {
+                InputAbandonReason::Retired => dsl::InputAbandonReason::Retired,
+                InputAbandonReason::Reset => dsl::InputAbandonReason::Reset,
+                InputAbandonReason::Stopped => dsl::InputAbandonReason::Stopped,
+                InputAbandonReason::Destroyed => dsl::InputAbandonReason::Destroyed,
+                InputAbandonReason::Cancelled => dsl::InputAbandonReason::Cancelled,
+                InputAbandonReason::MaxAttemptsExhausted { .. } => {
+                    dsl::InputAbandonReason::MaxAttemptsExhausted
+                }
+            }),
+        ),
+    }
 }
 
 #[derive(Debug, Default)]

@@ -199,6 +199,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
 - `RegisterAcceptedIdempotency`(input_id: String, idempotency_key: String)
 - `NormalizeRecoveredInputLifecycle`(input_id: String, phase: RecoveredInputObservedPhase, consume_on_accept: Bool, applied_boundary_committed: Option<Bool>)
+- `ResolveInputPublicLifecycle`(input_id: String, phase: RecoveredInputObservedPhase)
+- `ResolveInputPublicTerminalOutcome`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `Prepare`(session_id: SessionId, run_id: RunId)
 - `Commit`(input_id: InputId, run_id: RunId)
 - `Fail`(run_id: RunId)
@@ -382,6 +384,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdmissionValidationResolved`(input_id: String, result: AdmissionValidationResultKind, reject_reason: Option<AdmissionRejectReasonKind>)
 - `AdmissionIdempotencyResolved`(input_id: String, result: AdmissionIdempotencyResultKind, existing_input_id: Option<String>)
 - `RecoveredInputLifecycleNormalized`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, recovered: Bool, abandoned: Bool, requeued: Bool, history_reason: Option<RecoveredInputNormalizationReasonKind>)
+- `InputPublicLifecycleResolved`(input_id: String, phase: InputPublicLifecycleState)
+- `InputPublicTerminalOutcomeResolved`(input_id: String, terminal_outcome: Option<InputPublicTerminalOutcome>)
 - `PostAdmissionSignal`(signal: PostAdmissionSignalKind)
 - `ReadyForRun`
 - `InputLifecycleNotice`
@@ -2294,6 +2298,132 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Stopped`
+
+### `ResolveInputPublicLifecycleAcceptedIdle`
+- From: `Idle`
+- On: `ResolveInputPublicLifecycle`(input_id, phase)
+- Guards:
+  - `accepted_phase`
+- Emits: `InputPublicLifecycleResolved`
+- To: `Idle`
+
+### `ResolveInputPublicLifecycleQueuedIdle`
+- From: `Idle`
+- On: `ResolveInputPublicLifecycle`(input_id, phase)
+- Guards:
+  - `queued_phase`
+- Emits: `InputPublicLifecycleResolved`
+- To: `Idle`
+
+### `ResolveInputPublicLifecycleStagedIdle`
+- From: `Idle`
+- On: `ResolveInputPublicLifecycle`(input_id, phase)
+- Guards:
+  - `staged_phase`
+- Emits: `InputPublicLifecycleResolved`
+- To: `Idle`
+
+### `ResolveInputPublicLifecycleAppliedIdle`
+- From: `Idle`
+- On: `ResolveInputPublicLifecycle`(input_id, phase)
+- Guards:
+  - `applied_phase`
+- Emits: `InputPublicLifecycleResolved`
+- To: `Idle`
+
+### `ResolveInputPublicLifecycleAppliedPendingConsumptionIdle`
+- From: `Idle`
+- On: `ResolveInputPublicLifecycle`(input_id, phase)
+- Guards:
+  - `applied_pending_consumption_phase`
+- Emits: `InputPublicLifecycleResolved`
+- To: `Idle`
+
+### `ResolveInputPublicLifecycleConsumedIdle`
+- From: `Idle`
+- On: `ResolveInputPublicLifecycle`(input_id, phase)
+- Guards:
+  - `consumed_phase`
+- Emits: `InputPublicLifecycleResolved`
+- To: `Idle`
+
+### `ResolveInputPublicLifecycleSupersededIdle`
+- From: `Idle`
+- On: `ResolveInputPublicLifecycle`(input_id, phase)
+- Guards:
+  - `superseded_phase`
+- Emits: `InputPublicLifecycleResolved`
+- To: `Idle`
+
+### `ResolveInputPublicLifecycleCoalescedIdle`
+- From: `Idle`
+- On: `ResolveInputPublicLifecycle`(input_id, phase)
+- Guards:
+  - `coalesced_phase`
+- Emits: `InputPublicLifecycleResolved`
+- To: `Idle`
+
+### `ResolveInputPublicLifecycleAbandonedIdle`
+- From: `Idle`
+- On: `ResolveInputPublicLifecycle`(input_id, phase)
+- Guards:
+  - `abandoned_phase`
+- Emits: `InputPublicLifecycleResolved`
+- To: `Idle`
+
+### `ResolveInputPublicTerminalOutcomeNonTerminalIdle`
+- From: `Idle`
+- On: `ResolveInputPublicTerminalOutcome`(input_id, phase, terminal_kind, abandon_reason)
+- Guards:
+  - `non_terminal_phase`
+  - `terminal_absent`
+- Emits: `InputPublicTerminalOutcomeResolved`
+- To: `Idle`
+
+### `ResolveInputPublicTerminalOutcomeConsumedIdle`
+- From: `Idle`
+- On: `ResolveInputPublicTerminalOutcome`(input_id, phase, terminal_kind, abandon_reason)
+- Guards:
+  - `consumed_phase`
+  - `consumed_terminal`
+- Emits: `InputPublicTerminalOutcomeResolved`
+- To: `Idle`
+
+### `ResolveInputPublicTerminalOutcomeSupersededIdle`
+- From: `Idle`
+- On: `ResolveInputPublicTerminalOutcome`(input_id, phase, terminal_kind, abandon_reason)
+- Guards:
+  - `superseded_phase`
+  - `superseded_terminal`
+- Emits: `InputPublicTerminalOutcomeResolved`
+- To: `Idle`
+
+### `ResolveInputPublicTerminalOutcomeCoalescedIdle`
+- From: `Idle`
+- On: `ResolveInputPublicTerminalOutcome`(input_id, phase, terminal_kind, abandon_reason)
+- Guards:
+  - `coalesced_phase`
+  - `coalesced_terminal`
+- Emits: `InputPublicTerminalOutcomeResolved`
+- To: `Idle`
+
+### `ResolveInputPublicTerminalOutcomeCancelledIdle`
+- From: `Idle`
+- On: `ResolveInputPublicTerminalOutcome`(input_id, phase, terminal_kind, abandon_reason)
+- Guards:
+  - `abandoned_phase`
+  - `cancelled_terminal`
+- Emits: `InputPublicTerminalOutcomeResolved`
+- To: `Idle`
+
+### `ResolveInputPublicTerminalOutcomeAbandonedIdle`
+- From: `Idle`
+- On: `ResolveInputPublicTerminalOutcome`(input_id, phase, terminal_kind, abandon_reason)
+- Guards:
+  - `abandoned_phase`
+  - `abandoned_terminal`
+- Emits: `InputPublicTerminalOutcomeResolved`
+- To: `Idle`
 
 ### `ResolveAdmissionIdempotencyNoKeyIdle`
 - From: `Idle`

@@ -411,6 +411,30 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Consumed", "Superseded", "Coalesced", "Abandoned"],
             ),
             NamedTypeBinding::string_enum(
+                "InputPublicLifecycleState",
+                &[
+                    "Accepted",
+                    "Queued",
+                    "Staged",
+                    "Applied",
+                    "AppliedPendingConsumption",
+                    "Consumed",
+                    "Superseded",
+                    "Coalesced",
+                    "Abandoned",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "InputPublicTerminalOutcome",
+                &[
+                    "Completed",
+                    "Abandoned",
+                    "Superseded",
+                    "Coalesced",
+                    "Cancelled",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "InteractionStreamState",
                 &[
                     "Reserved",

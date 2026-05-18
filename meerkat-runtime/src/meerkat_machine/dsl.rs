@@ -1137,6 +1137,62 @@ impl InputTerminalKind {
     }
 }
 
+/// Public lifecycle class emitted by generated authority before runtime
+/// surfaces project input state onto their transport enums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputPublicLifecycleState {
+    #[default]
+    Accepted,
+    Queued,
+    Staged,
+    Applied,
+    AppliedPendingConsumption,
+    Consumed,
+    Superseded,
+    Coalesced,
+    Abandoned,
+}
+
+impl InputPublicLifecycleState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::Queued => "Queued",
+            Self::Staged => "Staged",
+            Self::Applied => "Applied",
+            Self::AppliedPendingConsumption => "AppliedPendingConsumption",
+            Self::Consumed => "Consumed",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Abandoned => "Abandoned",
+        }
+    }
+}
+
+/// Public terminal result class emitted by generated authority before runtime
+/// surfaces project input state onto their transport enums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputPublicTerminalOutcome {
+    #[default]
+    Completed,
+    Abandoned,
+    Superseded,
+    Coalesced,
+    Cancelled,
+}
+
+impl InputPublicTerminalOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::Abandoned => "Abandoned",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+
 /// Typed pending external-surface op. Closed set of literals previously
 /// assigned to `surface_pending_op`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

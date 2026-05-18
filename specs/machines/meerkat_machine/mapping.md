@@ -721,6 +721,51 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `NormalizeRecoveredInputQueuedStopped`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+- `ResolveInputPublicLifecycleAcceptedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveInputPublicLifecycleQueuedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveInputPublicLifecycleStagedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveInputPublicLifecycleAppliedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveInputPublicLifecycleAppliedPendingConsumptionIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveInputPublicLifecycleConsumedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveInputPublicLifecycleSupersededIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveInputPublicLifecycleCoalescedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveInputPublicLifecycleAbandonedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveInputPublicTerminalOutcomeNonTerminalIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `bind-run-boundary-terminal`, `ops_completion_and_waiters`, `product_turn_streaming`
+- `ResolveInputPublicTerminalOutcomeConsumedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+- `ResolveInputPublicTerminalOutcomeSupersededIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+- `ResolveInputPublicTerminalOutcomeCoalescedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+- `ResolveInputPublicTerminalOutcomeCancelledIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+- `ResolveInputPublicTerminalOutcomeAbandonedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
 - `ResolveAdmissionIdempotencyNoKeyIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -2685,6 +2730,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoveredInputLifecycleNormalized`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+- `InputPublicLifecycleResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `InputPublicTerminalOutcomeResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `ops_completion_and_waiters`, `product_turn_streaming`
 - `PostAdmissionSignal`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`

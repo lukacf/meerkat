@@ -575,6 +575,34 @@ pub enum InputTerminalKind {
     Abandoned,
 }
 
+/// Public lifecycle class emitted by generated authority before runtime
+/// surfaces project input state onto their transport enums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputPublicLifecycleState {
+    #[default]
+    Accepted,
+    Queued,
+    Staged,
+    Applied,
+    AppliedPendingConsumption,
+    Consumed,
+    Superseded,
+    Coalesced,
+    Abandoned,
+}
+
+/// Public terminal result class emitted by generated authority before runtime
+/// surfaces project input state onto their transport enums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputPublicTerminalOutcome {
+    #[default]
+    Completed,
+    Abandoned,
+    Superseded,
+    Coalesced,
+    Cancelled,
+}
+
 /// Typed pending external-surface op. Closed set of literals previously
 /// assigned to `surface_pending_op`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -2010,6 +2038,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 consume_on_accept: bool,
                 applied_boundary_committed: Option<bool>,
             },
+            ResolveInputPublicLifecycle {
+                input_id: String,
+                phase: Enum<RecoveredInputObservedPhase>,
+            },
+            ResolveInputPublicTerminalOutcome {
+                input_id: String,
+                phase: Enum<RecoveredInputObservedPhase>,
+                terminal_kind: Option<Enum<InputTerminalKind>>,
+                abandon_reason: Option<Enum<InputAbandonReason>>,
+            },
             Prepare { session_id: SessionId, run_id: RunId },
             Commit { input_id: InputId, run_id: RunId },
             Fail { run_id: RunId },
@@ -2469,6 +2507,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requeued: bool,
                 history_reason: Option<Enum<RecoveredInputNormalizationReasonKind>>,
             },
+            InputPublicLifecycleResolved {
+                input_id: String,
+                phase: Enum<InputPublicLifecycleState>,
+            },
+            InputPublicTerminalOutcomeResolved {
+                input_id: String,
+                terminal_outcome: Option<Enum<InputPublicTerminalOutcome>>,
+            },
             PostAdmissionSignal { signal: Enum<PostAdmissionSignalKind> },
             ReadyForRun,
             InputLifecycleNotice,
@@ -2617,6 +2663,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition AdmissionValidationResolved => local,
         disposition AdmissionIdempotencyResolved => local,
         disposition RecoveredInputLifecycleNormalized => local,
+        disposition InputPublicLifecycleResolved => local,
+        disposition InputPublicTerminalOutcomeResolved => local,
         disposition PostAdmissionSignal => local,
         disposition ReadyForRun => local,
         disposition InputLifecycleNotice => external,
@@ -4468,7 +4516,176 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // 26c. ResolveAdmissionIdempotency: generated idempotency admission
+        // 26c. ResolveInputPublicLifecycle /
+        // ResolveInputPublicTerminalOutcome: generated public projection
+        // authority for RPC/SDK-facing input lifecycle/result classes.
+        // Surfaces pass only the machine-derived seed facts; the generated
+        // transitions own the public class, including the
+        // cancelled-vs-abandoned terminal distinction.
+        transition ResolveInputPublicLifecycleAccepted {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "accepted_phase" { phase == RecoveredInputObservedPhase::Accepted }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Accepted }
+        }
+
+        transition ResolveInputPublicLifecycleQueued {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "queued_phase" { phase == RecoveredInputObservedPhase::Queued }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Queued }
+        }
+
+        transition ResolveInputPublicLifecycleStaged {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "staged_phase" { phase == RecoveredInputObservedPhase::Staged }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Staged }
+        }
+
+        transition ResolveInputPublicLifecycleApplied {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "applied_phase" { phase == RecoveredInputObservedPhase::Applied }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Applied }
+        }
+
+        transition ResolveInputPublicLifecycleAppliedPendingConsumption {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "applied_pending_consumption_phase" { phase == RecoveredInputObservedPhase::AppliedPendingConsumption }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::AppliedPendingConsumption }
+        }
+
+        transition ResolveInputPublicLifecycleConsumed {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "consumed_phase" { phase == RecoveredInputObservedPhase::Consumed }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Consumed }
+        }
+
+        transition ResolveInputPublicLifecycleSuperseded {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "superseded_phase" { phase == RecoveredInputObservedPhase::Superseded }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Superseded }
+        }
+
+        transition ResolveInputPublicLifecycleCoalesced {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "coalesced_phase" { phase == RecoveredInputObservedPhase::Coalesced }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Coalesced }
+        }
+
+        transition ResolveInputPublicLifecycleAbandoned {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "abandoned_phase" { phase == RecoveredInputObservedPhase::Abandoned }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Abandoned }
+        }
+
+        transition ResolveInputPublicTerminalOutcomeNonTerminal {
+            per_phase [Idle]
+            on input ResolveInputPublicTerminalOutcome { input_id, phase, terminal_kind, abandon_reason }
+            guard "non_terminal_phase" {
+                phase == RecoveredInputObservedPhase::Accepted
+                || phase == RecoveredInputObservedPhase::Queued
+                || phase == RecoveredInputObservedPhase::Staged
+                || phase == RecoveredInputObservedPhase::Applied
+                || phase == RecoveredInputObservedPhase::AppliedPendingConsumption
+            }
+            guard "terminal_absent" { terminal_kind == None && abandon_reason == None }
+            update {}
+            to Idle
+            emit InputPublicTerminalOutcomeResolved { input_id: input_id, terminal_outcome: None }
+        }
+
+        transition ResolveInputPublicTerminalOutcomeConsumed {
+            per_phase [Idle]
+            on input ResolveInputPublicTerminalOutcome { input_id, phase, terminal_kind, abandon_reason }
+            guard "consumed_phase" { phase == RecoveredInputObservedPhase::Consumed }
+            guard "consumed_terminal" {
+                terminal_kind == Some(InputTerminalKind::Consumed)
+                && abandon_reason == None
+            }
+            update {}
+            to Idle
+            emit InputPublicTerminalOutcomeResolved { input_id: input_id, terminal_outcome: Some(InputPublicTerminalOutcome::Completed) }
+        }
+
+        transition ResolveInputPublicTerminalOutcomeSuperseded {
+            per_phase [Idle]
+            on input ResolveInputPublicTerminalOutcome { input_id, phase, terminal_kind, abandon_reason }
+            guard "superseded_phase" { phase == RecoveredInputObservedPhase::Superseded }
+            guard "superseded_terminal" {
+                terminal_kind == Some(InputTerminalKind::Superseded)
+                && abandon_reason == None
+            }
+            update {}
+            to Idle
+            emit InputPublicTerminalOutcomeResolved { input_id: input_id, terminal_outcome: Some(InputPublicTerminalOutcome::Superseded) }
+        }
+
+        transition ResolveInputPublicTerminalOutcomeCoalesced {
+            per_phase [Idle]
+            on input ResolveInputPublicTerminalOutcome { input_id, phase, terminal_kind, abandon_reason }
+            guard "coalesced_phase" { phase == RecoveredInputObservedPhase::Coalesced }
+            guard "coalesced_terminal" {
+                terminal_kind == Some(InputTerminalKind::Coalesced)
+                && abandon_reason == None
+            }
+            update {}
+            to Idle
+            emit InputPublicTerminalOutcomeResolved { input_id: input_id, terminal_outcome: Some(InputPublicTerminalOutcome::Coalesced) }
+        }
+
+        transition ResolveInputPublicTerminalOutcomeCancelled {
+            per_phase [Idle]
+            on input ResolveInputPublicTerminalOutcome { input_id, phase, terminal_kind, abandon_reason }
+            guard "abandoned_phase" { phase == RecoveredInputObservedPhase::Abandoned }
+            guard "cancelled_terminal" {
+                terminal_kind == Some(InputTerminalKind::Abandoned)
+                && abandon_reason == Some(InputAbandonReason::Cancelled)
+            }
+            update {}
+            to Idle
+            emit InputPublicTerminalOutcomeResolved { input_id: input_id, terminal_outcome: Some(InputPublicTerminalOutcome::Cancelled) }
+        }
+
+        transition ResolveInputPublicTerminalOutcomeAbandoned {
+            per_phase [Idle]
+            on input ResolveInputPublicTerminalOutcome { input_id, phase, terminal_kind, abandon_reason }
+            guard "abandoned_phase" { phase == RecoveredInputObservedPhase::Abandoned }
+            guard "abandoned_terminal" {
+                terminal_kind == Some(InputTerminalKind::Abandoned)
+                && abandon_reason != None
+                && abandon_reason != Some(InputAbandonReason::Cancelled)
+            }
+            update {}
+            to Idle
+            emit InputPublicTerminalOutcomeResolved { input_id: input_id, terminal_outcome: Some(InputPublicTerminalOutcome::Abandoned) }
+        }
+
+        // 26d. ResolveAdmissionIdempotency: generated idempotency admission
         // authority. The shell provides only the parsed key, if any; the
         // machine owns the key-to-input map and therefore owns whether an
         // input is newly admitted or publicly classified as deduplicated.

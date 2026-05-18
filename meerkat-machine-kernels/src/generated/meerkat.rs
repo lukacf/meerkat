@@ -1799,6 +1799,148 @@ impl std::fmt::Display for InputPhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum InputPublicLifecycleState {
+    #[default]
+    #[serde(rename = "Accepted")]
+    Accepted,
+    #[serde(rename = "Queued")]
+    Queued,
+    #[serde(rename = "Staged")]
+    Staged,
+    #[serde(rename = "Applied")]
+    Applied,
+    #[serde(rename = "AppliedPendingConsumption")]
+    AppliedPendingConsumption,
+    #[serde(rename = "Consumed")]
+    Consumed,
+    #[serde(rename = "Superseded")]
+    Superseded,
+    #[serde(rename = "Coalesced")]
+    Coalesced,
+    #[serde(rename = "Abandoned")]
+    Abandoned,
+}
+impl InputPublicLifecycleState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::Queued => "Queued",
+            Self::Staged => "Staged",
+            Self::Applied => "Applied",
+            Self::AppliedPendingConsumption => "AppliedPendingConsumption",
+            Self::Consumed => "Consumed",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Abandoned => "Abandoned",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InputPublicLifecycleState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accepted" => Ok(Self::Accepted),
+            "Queued" => Ok(Self::Queued),
+            "Staged" => Ok(Self::Staged),
+            "Applied" => Ok(Self::Applied),
+            "AppliedPendingConsumption" => Ok(Self::AppliedPendingConsumption),
+            "Consumed" => Ok(Self::Consumed),
+            "Superseded" => Ok(Self::Superseded),
+            "Coalesced" => Ok(Self::Coalesced),
+            "Abandoned" => Ok(Self::Abandoned),
+            other => Err(format!("invalid InputPublicLifecycleState value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InputPublicLifecycleState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InputPublicLifecycleState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InputPublicTerminalOutcome {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Abandoned")]
+    Abandoned,
+    #[serde(rename = "Superseded")]
+    Superseded,
+    #[serde(rename = "Coalesced")]
+    Coalesced,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+}
+impl InputPublicTerminalOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::Abandoned => "Abandoned",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InputPublicTerminalOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "Abandoned" => Ok(Self::Abandoned),
+            "Superseded" => Ok(Self::Superseded),
+            "Coalesced" => Ok(Self::Coalesced),
+            "Cancelled" => Ok(Self::Cancelled),
+            other => Err(format!(
+                "invalid InputPublicTerminalOutcome value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InputPublicTerminalOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InputPublicTerminalOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum InputTerminalKind {
     #[default]
     #[serde(rename = "Consumed")]
@@ -5880,6 +6022,18 @@ pub mod inputs {
         pub applied_boundary_committed: Option<bool>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveInputPublicLifecycle {
+        pub input_id: String,
+        pub phase: RecoveredInputObservedPhase,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveInputPublicTerminalOutcome {
+        pub input_id: String,
+        pub phase: RecoveredInputObservedPhase,
+        pub terminal_kind: Option<InputTerminalKind>,
+        pub abandon_reason: Option<InputAbandonReason>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Prepare {
         pub session_id: SessionId,
         pub run_id: RunId,
@@ -6519,6 +6673,8 @@ pub enum Input {
     ResolveAdmissionIdempotency(inputs::ResolveAdmissionIdempotency),
     RegisterAcceptedIdempotency(inputs::RegisterAcceptedIdempotency),
     NormalizeRecoveredInputLifecycle(inputs::NormalizeRecoveredInputLifecycle),
+    ResolveInputPublicLifecycle(inputs::ResolveInputPublicLifecycle),
+    ResolveInputPublicTerminalOutcome(inputs::ResolveInputPublicTerminalOutcome),
     Prepare(inputs::Prepare),
     Commit(inputs::Commit),
     Fail(inputs::Fail),
@@ -6704,6 +6860,10 @@ impl Input {
             Self::RegisterAcceptedIdempotency(_) => InputKind::RegisterAcceptedIdempotency,
             Self::NormalizeRecoveredInputLifecycle(_) => {
                 InputKind::NormalizeRecoveredInputLifecycle
+            }
+            Self::ResolveInputPublicLifecycle(_) => InputKind::ResolveInputPublicLifecycle,
+            Self::ResolveInputPublicTerminalOutcome(_) => {
+                InputKind::ResolveInputPublicTerminalOutcome
             }
             Self::Prepare(_) => InputKind::Prepare,
             Self::Commit(_) => InputKind::Commit,
@@ -6892,6 +7052,8 @@ pub enum InputKind {
     ResolveAdmissionIdempotency,
     RegisterAcceptedIdempotency,
     NormalizeRecoveredInputLifecycle,
+    ResolveInputPublicLifecycle,
+    ResolveInputPublicTerminalOutcome,
     Prepare,
     Commit,
     Fail,
@@ -7250,6 +7412,16 @@ pub mod effects {
         pub history_reason: Option<RecoveredInputNormalizationReasonKind>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InputPublicLifecycleResolved {
+        pub input_id: String,
+        pub phase: InputPublicLifecycleState,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InputPublicTerminalOutcomeResolved {
+        pub input_id: String,
+        pub terminal_outcome: Option<InputPublicTerminalOutcome>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PostAdmissionSignal {
         pub signal: PostAdmissionSignalKind,
     }
@@ -7466,6 +7638,8 @@ pub enum Effect {
     AdmissionValidationResolved(effects::AdmissionValidationResolved),
     AdmissionIdempotencyResolved(effects::AdmissionIdempotencyResolved),
     RecoveredInputLifecycleNormalized(effects::RecoveredInputLifecycleNormalized),
+    InputPublicLifecycleResolved(effects::InputPublicLifecycleResolved),
+    InputPublicTerminalOutcomeResolved(effects::InputPublicTerminalOutcomeResolved),
     PostAdmissionSignal(effects::PostAdmissionSignal),
     ReadyForRun(effects::ReadyForRun),
     InputLifecycleNotice(effects::InputLifecycleNotice),
@@ -7544,6 +7718,8 @@ pub enum EffectKind {
     AdmissionValidationResolved,
     AdmissionIdempotencyResolved,
     RecoveredInputLifecycleNormalized,
+    InputPublicLifecycleResolved,
+    InputPublicTerminalOutcomeResolved,
     PostAdmissionSignal,
     ReadyForRun,
     InputLifecycleNotice,
@@ -7822,6 +7998,21 @@ pub enum TransitionId {
     NormalizeRecoveredInputQueuedRunning,
     NormalizeRecoveredInputQueuedRetired,
     NormalizeRecoveredInputQueuedStopped,
+    ResolveInputPublicLifecycleAcceptedIdle,
+    ResolveInputPublicLifecycleQueuedIdle,
+    ResolveInputPublicLifecycleStagedIdle,
+    ResolveInputPublicLifecycleAppliedIdle,
+    ResolveInputPublicLifecycleAppliedPendingConsumptionIdle,
+    ResolveInputPublicLifecycleConsumedIdle,
+    ResolveInputPublicLifecycleSupersededIdle,
+    ResolveInputPublicLifecycleCoalescedIdle,
+    ResolveInputPublicLifecycleAbandonedIdle,
+    ResolveInputPublicTerminalOutcomeNonTerminalIdle,
+    ResolveInputPublicTerminalOutcomeConsumedIdle,
+    ResolveInputPublicTerminalOutcomeSupersededIdle,
+    ResolveInputPublicTerminalOutcomeCoalescedIdle,
+    ResolveInputPublicTerminalOutcomeCancelledIdle,
+    ResolveInputPublicTerminalOutcomeAbandonedIdle,
     ResolveAdmissionIdempotencyNoKeyIdle,
     ResolveAdmissionIdempotencyNoKeyAttached,
     ResolveAdmissionIdempotencyNoKeyRunning,

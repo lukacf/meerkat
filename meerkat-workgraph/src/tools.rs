@@ -16,6 +16,7 @@ use crate::{
 pub const INVALID_ARGUMENTS: &str = "invalid_arguments";
 pub const NOT_FOUND: &str = "not_found";
 pub const CAPABILITY_UNAVAILABLE: &str = "capability_unavailable";
+const INTERNAL_ERROR: &str = "internal_error";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkGraphToolError {
@@ -311,11 +312,18 @@ fn parse<T: DeserializeOwned>(arguments: &Value) -> Result<T, WorkGraphToolError
 
 fn map_error(error: WorkGraphError) -> WorkGraphToolError {
     let message = error.to_string();
-    let code = match WorkGraphMachine::public_error_class(&error) {
-        Ok(public_class) => workgraph_tool_code(public_class),
-        Err(_) => "store_error",
+    let public_class = match WorkGraphMachine::public_error_class(&error) {
+        Ok(public_class) => public_class,
+        Err(classification_error) => {
+            return WorkGraphToolError::new(
+                INTERNAL_ERROR,
+                format!(
+                    "generated WorkGraph error classification failed: {classification_error}; original error: {message}"
+                ),
+            );
+        }
     };
-    WorkGraphToolError::new(code, message)
+    WorkGraphToolError::new(workgraph_tool_code(public_class), message)
 }
 
 fn workgraph_tool_code(public_class: WorkGraphPublicErrorClass) -> &'static str {

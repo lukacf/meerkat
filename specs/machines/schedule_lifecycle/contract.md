@@ -21,6 +21,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Create`(trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, overlap_policy: OverlapPolicy, missing_target_policy: MissingTargetPolicy)
 - `Revise`(trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, overlap_policy: OverlapPolicy, missing_target_policy: MissingTargetPolicy)
 - `RecordPlanningWindow`(planning_cursor_utc_ms: u64, next_occurrence_ordinal: u64)
+- `SyncTargetSnapshot`(target_binding_key: String)
 - `Pause`(at_utc_ms: u64)
 - `Resume`(at_utc_ms: u64)
 - `Delete`(at_utc_ms: u64)
@@ -64,6 +65,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `planning_window_advances_ordinal`
 - Emits: `EmitScheduleNotice`, `PlanningWindowRecorded`
 - To: `Active`
+
+### `SyncTargetSnapshotActive`
+- From: `Active`
+- On: `SyncTargetSnapshot`(target_binding_key)
+- To: `Active`
+
+### `SyncTargetSnapshotPaused`
+- From: `Paused`
+- On: `SyncTargetSnapshot`(target_binding_key)
+- To: `Paused`
 
 ### `PauseActiveOrPaused`
 - From: `Active`, `Paused`
@@ -111,8 +122,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-schedule/src/lifecycle.rs` — Schedule::apply domain-facing lifecycle transition seam over create, revise, planning window, pause, resume, delete, supersede pending occurrences, revision, and planning cursor rules
+- `meerkat-schedule/src/lifecycle.rs` — Schedule::apply domain-facing lifecycle transition seam over create, revise, planning window, pause, resume, delete, supersede pending occurrences, sync target snapshot for active or paused materialized session bindings, revision, and planning cursor rules
 
 ### Scenarios
 - `schedule_pause_resume_delete` — schedule transitions through create, pause, resume, and delete while advancing revision
-- `schedule_revision_and_planning` — active or paused schedules revise, record planning windows, confirm superseded occurrences, supersede pending occurrences, maintain positive revision, and require occurrence progress for planning cursor
+- `schedule_revision_and_planning` — active or paused schedules revise, record planning windows, sync target snapshots for materialized session bindings, confirm superseded occurrences, supersede pending occurrences, maintain positive revision, and require occurrence progress for planning cursor

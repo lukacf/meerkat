@@ -27,6 +27,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `superseded_by_revision`: `Option<u64>`
 
 ## Inputs
+- `PlanOccurrence`(occurrence_id: OccurrenceId, schedule_id: ScheduleId, schedule_revision: u64, occurrence_ordinal: u64, target_binding_key: String, due_at_utc_ms: u64)
+- `SyncTargetSnapshot`(target_binding_key: String)
 - `Claim`(owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken)
 - `DispatchStarted`(correlation_id: Option<String>, at_utc_ms: u64)
 - `AwaitCompletion`(at_utc_ms: u64)
@@ -60,6 +62,23 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `delivery_failed_records_failure_class`
 
 ## Transitions
+### `PlanOccurrenceFromPending`
+- From: `Pending`
+- On: `PlanOccurrence`(occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, target_binding_key, due_at_utc_ms)
+- Guards:
+  - ``
+- To: `Pending`
+
+### `SyncTargetSnapshotPending`
+- From: `Pending`
+- On: `SyncTargetSnapshot`(target_binding_key)
+- To: `Pending`
+
+### `SyncTargetSnapshotClaimed`
+- From: `Claimed`
+- On: `SyncTargetSnapshot`(target_binding_key)
+- To: `Claimed`
+
 ### `ClaimPending`
 - From: `Pending`
 - On: `Claim`(owner_id, at_utc_ms, lease_expires_at_utc_ms, claim_token)
@@ -128,10 +147,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-schedule/src/lifecycle.rs` — Occurrence::apply domain-facing lifecycle transition seam over claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
+- `meerkat-schedule/src/lifecycle.rs` — Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
 
 ### Scenarios
 - `occurrence_start_complete_fail` — occurrence transitions through pending, running, and terminal lifecycle states
-- `occurrence_claim_dispatch_completion` — claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, and record claimed/dispatch/awaiting/completed effects
+- `occurrence_claim_dispatch_completion` — plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, and record claimed/dispatch/awaiting/completed effects
 - `occurrence_terminal_classification` — skip/skipped, misfire/misfired, supersede/superseded, delivery failed, occurrences superseded, records revision and explicit failure class for terminal occurrence outcomes
 - `occurrence_lease_recovery` — lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery

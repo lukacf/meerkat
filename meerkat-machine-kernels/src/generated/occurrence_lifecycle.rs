@@ -327,6 +327,19 @@ pub mod inputs {
     #[allow(unused_imports)]
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PlanOccurrence {
+        pub occurrence_id: OccurrenceId,
+        pub schedule_id: ScheduleId,
+        pub schedule_revision: u64,
+        pub occurrence_ordinal: u64,
+        pub target_binding_key: String,
+        pub due_at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SyncTargetSnapshot {
+        pub target_binding_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Claim {
         pub owner_id: String,
         pub at_utc_ms: u64,
@@ -379,6 +392,8 @@ pub mod inputs {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Input {
+    PlanOccurrence(inputs::PlanOccurrence),
+    SyncTargetSnapshot(inputs::SyncTargetSnapshot),
     Claim(inputs::Claim),
     DispatchStarted(inputs::DispatchStarted),
     AwaitCompletion(inputs::AwaitCompletion),
@@ -392,6 +407,8 @@ pub enum Input {
 impl Input {
     pub fn kind(&self) -> InputKind {
         match self {
+            Self::PlanOccurrence(_) => InputKind::PlanOccurrence,
+            Self::SyncTargetSnapshot(_) => InputKind::SyncTargetSnapshot,
             Self::Claim(_) => InputKind::Claim,
             Self::DispatchStarted(_) => InputKind::DispatchStarted,
             Self::AwaitCompletion(_) => InputKind::AwaitCompletion,
@@ -406,6 +423,8 @@ impl Input {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InputKind {
+    PlanOccurrence,
+    SyncTargetSnapshot,
     Claim,
     DispatchStarted,
     AwaitCompletion,
@@ -475,6 +494,9 @@ pub enum EffectKind {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
+    PlanOccurrenceFromPending,
+    SyncTargetSnapshotPending,
+    SyncTargetSnapshotClaimed,
     ClaimPending,
     DispatchStartedFromClaimed,
     AwaitCompletionFromDispatching,

@@ -63,6 +63,15 @@ machine! {
         }
 
         input OccurrenceLifecycleInput {
+            PlanOccurrence {
+                occurrence_id: OccurrenceId,
+                schedule_id: ScheduleId,
+                schedule_revision: u64,
+                occurrence_ordinal: u64,
+                target_binding_key: String,
+                due_at_utc_ms: u64,
+            },
+            SyncTargetSnapshot { target_binding_key: String },
             Claim { owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken },
             DispatchStarted { correlation_id: Option<String>, at_utc_ms: u64 },
             AwaitCompletion { at_utc_ms: u64 },
@@ -119,6 +128,79 @@ machine! {
         disposition OccurrencesSuperseded => routed [ScheduleLifecycleMachine],
         disposition DeliveryFailed => external,
         disposition LeaseExpired => external,
+
+        // --- Plan occurrence ---
+        //
+        // Occurrence creation is a semantic fact: id, schedule revision,
+        // ordinal, due time, and target binding determine later dispatch
+        // behavior. The shell may allocate opaque ids and carry full target
+        // snapshots, but the machine owns accepting the planned occurrence
+        // facts before the domain row is materialized.
+
+        transition PlanOccurrenceFromPending {
+            on input PlanOccurrence {
+                occurrence_id,
+                schedule_id,
+                schedule_revision,
+                occurrence_ordinal,
+                target_binding_key,
+                due_at_utc_ms
+            }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.attempt_count == 0
+                && self.claimed_by == None
+                && self.claim_token == None
+                && self.delivery_correlation_id == None
+                && self.completed_at_utc_ms == None
+                && self.superseded_by_revision == None
+            }
+            update {
+                self.occurrence_id = occurrence_id;
+                self.schedule_id = schedule_id;
+                self.schedule_revision = schedule_revision;
+                self.occurrence_ordinal = occurrence_ordinal;
+                self.target_binding_key = target_binding_key;
+                self.due_at_utc_ms = due_at_utc_ms;
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claimed_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+                self.last_receipt = None;
+                self.failure_class = None;
+                self.failure_detail = None;
+                self.dispatched_at_utc_ms = None;
+                self.completed_at_utc_ms = None;
+                self.attempt_count = 0;
+                self.superseded_by_revision = None;
+            }
+            to Pending
+        }
+
+        // --- Target snapshot sync ---
+        //
+        // Materialized session binding changes the dispatch target. Keep that
+        // target-binding fact behind generated occurrence authority; the shell
+        // writes the full target snapshot only after this input is accepted.
+
+        transition SyncTargetSnapshotPending {
+            on input SyncTargetSnapshot { target_binding_key }
+            guard { self.lifecycle_phase == Phase::Pending }
+            update {
+                self.target_binding_key = target_binding_key;
+            }
+            to Pending
+        }
+
+        transition SyncTargetSnapshotClaimed {
+            on input SyncTargetSnapshot { target_binding_key }
+            guard { self.lifecycle_phase == Phase::Claimed }
+            update {
+                self.target_binding_key = target_binding_key;
+            }
+            to Claimed
+        }
 
         // --- Claim ---
 

@@ -8,7 +8,8 @@ use crate::machines::occurrence_lifecycle as occ_dsl;
 use crate::machines::schedule_lifecycle as sched_dsl;
 use crate::types::{
     CreateScheduleRequest, DeliveryReceipt, Occurrence, OccurrenceFailureClass, OccurrenceOrdinal,
-    OccurrencePhase, Schedule, SchedulePhase, ScheduleRevision, TriggerSpec, UpdateScheduleRequest,
+    OccurrencePhase, Schedule, ScheduleId, SchedulePhase, ScheduleRevision, TargetBinding,
+    TriggerSpec, UpdateScheduleRequest,
 };
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -24,6 +25,9 @@ pub enum ScheduleLifecycleInput {
     RecordPlanningWindow {
         planning_cursor_utc: DateTime<Utc>,
         next_occurrence_ordinal: OccurrenceOrdinal,
+    },
+    SyncTargetSnapshot {
+        target: TargetBinding,
     },
     Pause {
         at_utc: DateTime<Utc>,
@@ -76,6 +80,13 @@ pub enum ScheduleLifecycleError {
     Deleted,
     #[error("schedule revision mismatch: expected {expected}, found {actual}")]
     RevisionMismatch { expected: u64, actual: u64 },
+    #[error(
+        "ScheduleLifecycleMachine target key `{machine_key}` did not match target snapshot key `{snapshot_key}`"
+    )]
+    TargetBindingKeyMismatch {
+        machine_key: String,
+        snapshot_key: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +95,17 @@ pub enum ScheduleLifecycleError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OccurrenceLifecycleInput {
+    PlanOccurrence {
+        occurrence_id: crate::types::OccurrenceId,
+        schedule_id: ScheduleId,
+        schedule_revision: ScheduleRevision,
+        occurrence_ordinal: OccurrenceOrdinal,
+        target_snapshot: TargetBinding,
+        due_at_utc: DateTime<Utc>,
+    },
+    SyncTargetSnapshot {
+        target_snapshot: TargetBinding,
+    },
     Claim {
         owner_id: String,
         at_utc: DateTime<Utc>,
@@ -169,8 +191,23 @@ pub enum OccurrenceLifecycleError {
     NotLiveForTerminal,
     #[error("occurrence must hold an active lease before it can expire")]
     NotLeaseHolding,
+    #[error("generated occurrence authority rejected planned occurrence facts")]
+    PlanRejected,
+    #[error("generated occurrence authority rejected target snapshot sync")]
+    TargetSyncRejected,
     #[error("OccurrenceLifecycleMachine emitted invalid occurrence id `{id}`: {source}")]
     InvalidOccurrenceId { id: String, source: uuid::Error },
+    #[error("OccurrenceLifecycleMachine emitted invalid schedule id `{id}`: {source}")]
+    InvalidScheduleId { id: String, source: uuid::Error },
+    #[error("OccurrenceLifecycleMachine emitted invalid due timestamp millis `{millis}`")]
+    InvalidDueAtUtcMillis { millis: u64 },
+    #[error(
+        "OccurrenceLifecycleMachine target key `{machine_key}` did not match target snapshot key `{snapshot_key}`"
+    )]
+    TargetBindingKeyMismatch {
+        machine_key: String,
+        snapshot_key: String,
+    },
 }
 
 // ===========================================================================
@@ -178,6 +215,27 @@ pub enum OccurrenceLifecycleError {
 // ===========================================================================
 
 impl Occurrence {
+    pub fn planned_from_schedule(
+        schedule: &Schedule,
+        occurrence_ordinal: OccurrenceOrdinal,
+        due_at_utc: DateTime<Utc>,
+    ) -> Result<Self, OccurrenceLifecycleError> {
+        let target_snapshot = schedule.target.clone();
+        let input = OccurrenceLifecycleInput::PlanOccurrence {
+            occurrence_id: crate::types::OccurrenceId::new(),
+            schedule_id: schedule.schedule_id.clone(),
+            schedule_revision: schedule.revision,
+            occurrence_ordinal,
+            target_snapshot: target_snapshot.clone(),
+            due_at_utc,
+        };
+        let dsl_input = convert_occurrence_input(&input);
+        let mut dsl_auth = occ_dsl::OccurrenceLifecycleMachineAuthority::new();
+        occ_dsl::OccurrenceLifecycleMachineMutator::apply(&mut dsl_auth, dsl_input)
+            .map_err(|e| map_occurrence_error(e, &input))?;
+        occurrence_from_planned_state(dsl_auth.state(), schedule, target_snapshot, Utc::now())
+    }
+
     /// Apply a lifecycle input to this occurrence, projecting through the DSL
     /// kernel and writing the resulting machine-owned state back into `self`.
     ///
@@ -203,7 +261,7 @@ impl Occurrence {
                 .map_err(|e| map_occurrence_error(e, &input))?;
 
         // 4. Write DSL state → occurrence
-        write_back_occurrence(dsl_auth.state(), &mut self, &input);
+        write_back_occurrence(dsl_auth.state(), &mut self, &input)?;
 
         // 5. Map effects
         let effects = transition
@@ -259,9 +317,95 @@ fn project_occurrence(occ: &Occurrence) -> occ_dsl::OccurrenceLifecycleMachineSt
     }
 }
 
+fn occurrence_phase_from_dsl(phase: occ_dsl::OccurrenceLifecycleState) -> OccurrencePhase {
+    match phase {
+        occ_dsl::OccurrenceLifecycleState::Pending => OccurrencePhase::Pending,
+        occ_dsl::OccurrenceLifecycleState::Claimed => OccurrencePhase::Claimed,
+        occ_dsl::OccurrenceLifecycleState::Dispatching => OccurrencePhase::Dispatching,
+        occ_dsl::OccurrenceLifecycleState::AwaitingCompletion => {
+            OccurrencePhase::AwaitingCompletion
+        }
+        occ_dsl::OccurrenceLifecycleState::Completed => OccurrencePhase::Completed,
+        occ_dsl::OccurrenceLifecycleState::Skipped => OccurrencePhase::Skipped,
+        occ_dsl::OccurrenceLifecycleState::Misfired => OccurrencePhase::Misfired,
+        occ_dsl::OccurrenceLifecycleState::Superseded => OccurrencePhase::Superseded,
+        occ_dsl::OccurrenceLifecycleState::DeliveryFailed => OccurrencePhase::DeliveryFailed,
+    }
+}
+
+fn occurrence_from_planned_state(
+    dsl: &occ_dsl::OccurrenceLifecycleMachineState,
+    schedule: &Schedule,
+    target_snapshot: TargetBinding,
+    created_at_utc: DateTime<Utc>,
+) -> Result<Occurrence, OccurrenceLifecycleError> {
+    let snapshot_key = target_snapshot.stable_key();
+    if dsl.target_binding_key != snapshot_key {
+        return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
+            machine_key: dsl.target_binding_key.clone(),
+            snapshot_key,
+        });
+    }
+
+    Ok(Occurrence {
+        occurrence_id: occurrence_id_from_dsl(&dsl.occurrence_id)?,
+        schedule_id: schedule_id_from_dsl(&dsl.schedule_id)?,
+        schedule_revision: ScheduleRevision(dsl.schedule_revision),
+        occurrence_ordinal: OccurrenceOrdinal(dsl.occurrence_ordinal),
+        phase: occurrence_phase_from_dsl(dsl.lifecycle_phase),
+        due_at_utc: millis_to_datetime(dsl.due_at_utc_ms).ok_or(
+            OccurrenceLifecycleError::InvalidDueAtUtcMillis {
+                millis: dsl.due_at_utc_ms,
+            },
+        )?,
+        trigger_snapshot: schedule.trigger.clone(),
+        target_snapshot,
+        misfire_policy: schedule.misfire_policy.clone(),
+        overlap_policy: schedule.overlap_policy.clone(),
+        missing_target_policy: schedule.missing_target_policy.clone(),
+        claimed_by: dsl.claimed_by.clone(),
+        lease_expires_at_utc: dsl.lease_expires_at_utc_ms.and_then(millis_to_datetime),
+        claim_token: dsl
+            .claim_token
+            .as_ref()
+            .and_then(|t| Uuid::parse_str(&t.0).ok()),
+        delivery_correlation_id: dsl.delivery_correlation_id.clone(),
+        last_receipt: None,
+        failure_class: dsl.failure_class.map(from_dsl_failure_class),
+        runtime_outcome: None,
+        failure_detail: dsl.failure_detail.clone(),
+        attempt_count: u32::try_from(dsl.attempt_count).unwrap_or(u32::MAX),
+        created_at_utc,
+        claimed_at_utc: dsl.claimed_at_utc_ms.and_then(millis_to_datetime),
+        dispatched_at_utc: dsl.dispatched_at_utc_ms.and_then(millis_to_datetime),
+        completed_at_utc: dsl.completed_at_utc_ms.and_then(millis_to_datetime),
+        superseded_by_revision: dsl.superseded_by_revision.map(ScheduleRevision),
+    })
+}
+
 /// Convert domain input to DSL input.
 fn convert_occurrence_input(input: &OccurrenceLifecycleInput) -> occ_dsl::OccurrenceLifecycleInput {
     match input {
+        OccurrenceLifecycleInput::PlanOccurrence {
+            occurrence_id,
+            schedule_id,
+            schedule_revision,
+            occurrence_ordinal,
+            target_snapshot,
+            due_at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::PlanOccurrence {
+            occurrence_id: occ_dsl::OccurrenceId(occurrence_id.0.to_string()),
+            schedule_id: occ_dsl::ScheduleId(schedule_id.0.to_string()),
+            schedule_revision: schedule_revision.0,
+            occurrence_ordinal: occurrence_ordinal.0,
+            target_binding_key: target_snapshot.stable_key(),
+            due_at_utc_ms: datetime_to_millis(*due_at_utc),
+        },
+        OccurrenceLifecycleInput::SyncTargetSnapshot { target_snapshot } => {
+            occ_dsl::OccurrenceLifecycleInput::SyncTargetSnapshot {
+                target_binding_key: target_snapshot.stable_key(),
+            }
+        }
         OccurrenceLifecycleInput::Claim {
             owner_id,
             at_utc,
@@ -341,28 +485,27 @@ fn convert_occurrence_input(input: &OccurrenceLifecycleInput) -> occ_dsl::Occurr
 
 /// Write DSL state back into the domain occurrence.
 ///
-/// The DSL state is the authority for machine-owned fields (phase, claimed_by,
-/// timestamps, etc). Non-machine fields (trigger_snapshot, target_snapshot,
-/// policies, created_at_utc) are left untouched since the DSL does not track them.
+/// The DSL state is the authority for machine-owned fields (phase, target
+/// binding key, claimed_by, timestamps, etc). Non-machine fields
+/// (trigger_snapshot, policies, created_at_utc) are left untouched since the
+/// DSL does not track them.
 fn write_back_occurrence(
     dsl: &occ_dsl::OccurrenceLifecycleMachineState,
     occ: &mut Occurrence,
     input: &OccurrenceLifecycleInput,
-) {
+) -> Result<(), OccurrenceLifecycleError> {
+    occ.occurrence_id = occurrence_id_from_dsl(&dsl.occurrence_id)?;
+    occ.schedule_id = schedule_id_from_dsl(&dsl.schedule_id)?;
+    occ.schedule_revision = ScheduleRevision(dsl.schedule_revision);
+    occ.occurrence_ordinal = OccurrenceOrdinal(dsl.occurrence_ordinal);
+    occ.due_at_utc = millis_to_datetime(dsl.due_at_utc_ms).ok_or(
+        OccurrenceLifecycleError::InvalidDueAtUtcMillis {
+            millis: dsl.due_at_utc_ms,
+        },
+    )?;
+
     // Phase
-    occ.phase = match dsl.lifecycle_phase {
-        occ_dsl::OccurrenceLifecycleState::Pending => OccurrencePhase::Pending,
-        occ_dsl::OccurrenceLifecycleState::Claimed => OccurrencePhase::Claimed,
-        occ_dsl::OccurrenceLifecycleState::Dispatching => OccurrencePhase::Dispatching,
-        occ_dsl::OccurrenceLifecycleState::AwaitingCompletion => {
-            OccurrencePhase::AwaitingCompletion
-        }
-        occ_dsl::OccurrenceLifecycleState::Completed => OccurrencePhase::Completed,
-        occ_dsl::OccurrenceLifecycleState::Skipped => OccurrencePhase::Skipped,
-        occ_dsl::OccurrenceLifecycleState::Misfired => OccurrencePhase::Misfired,
-        occ_dsl::OccurrenceLifecycleState::Superseded => OccurrencePhase::Superseded,
-        occ_dsl::OccurrenceLifecycleState::DeliveryFailed => OccurrencePhase::DeliveryFailed,
-    };
+    occ.phase = occurrence_phase_from_dsl(dsl.lifecycle_phase);
 
     // Scalar fields
     occ.claimed_by = dsl.claimed_by.clone();
@@ -387,6 +530,23 @@ fn write_back_occurrence(
 
     // Superseded revision (DSL u64 → ScheduleRevision)
     occ.superseded_by_revision = dsl.superseded_by_revision.map(ScheduleRevision);
+
+    match input {
+        OccurrenceLifecycleInput::PlanOccurrence {
+            target_snapshot, ..
+        }
+        | OccurrenceLifecycleInput::SyncTargetSnapshot { target_snapshot } => {
+            let snapshot_key = target_snapshot.stable_key();
+            if dsl.target_binding_key != snapshot_key {
+                return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
+                    machine_key: dsl.target_binding_key.clone(),
+                    snapshot_key,
+                });
+            }
+            occ.target_snapshot = target_snapshot.clone();
+        }
+        _ => {}
+    }
 
     // DeliveryReceipt: the DSL stores it as serialized JSON. We recover the
     // real receipt from the original input when the DSL assigned it (Complete,
@@ -414,12 +574,14 @@ fn write_back_occurrence(
             // DSL clears last_receipt to None
             None
         }
+        OccurrenceLifecycleInput::PlanOccurrence { .. } => None,
         _ => {
             // Other transitions don't touch last_receipt in the DSL,
             // so preserve the original domain value.
             occ.last_receipt.take()
         }
     };
+    Ok(())
 }
 
 /// Map DSL error to the appropriate domain error variant.
@@ -430,6 +592,10 @@ fn map_occurrence_error(
     // The DSL returns NoMatchingTransition { phase, trigger }. We reconstruct
     // the specific error variant based on which input was attempted.
     match input {
+        OccurrenceLifecycleInput::PlanOccurrence { .. } => OccurrenceLifecycleError::PlanRejected,
+        OccurrenceLifecycleInput::SyncTargetSnapshot { .. } => {
+            OccurrenceLifecycleError::TargetSyncRejected
+        }
         OccurrenceLifecycleInput::Claim { .. } => OccurrenceLifecycleError::NotPendingForClaim,
         OccurrenceLifecycleInput::DispatchStarted { .. } => OccurrenceLifecycleError::NotClaimed,
         OccurrenceLifecycleInput::AwaitCompletion { .. } => {
@@ -542,6 +708,30 @@ impl Schedule {
                     &transition,
                     Some((planning_cursor_utc, next_occurrence_ordinal)),
                 );
+                Ok(ScheduleLifecycleMutator {
+                    schedule,
+                    effects,
+                    revision_bumped: false,
+                })
+            }
+
+            ScheduleLifecycleInput::SyncTargetSnapshot { target } => {
+                let mut schedule = schedule.ok_or(ScheduleLifecycleError::MissingSchedule)?;
+                let target_binding_key = target.stable_key();
+                let dsl_input = sched_dsl::ScheduleLifecycleInput::SyncTargetSnapshot {
+                    target_binding_key: target_binding_key.clone(),
+                };
+                let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
+                if dsl_state.target_binding_key != target_binding_key {
+                    return Err(ScheduleLifecycleError::TargetBindingKeyMismatch {
+                        machine_key: dsl_state.target_binding_key.clone(),
+                        snapshot_key: target_binding_key,
+                    });
+                }
+                write_back_schedule(&dsl_state, &mut schedule);
+                schedule.target = target;
+                schedule.touch();
+                let effects = map_schedule_effects(&transition, None);
                 Ok(ScheduleLifecycleMutator {
                     schedule,
                     effects,
@@ -884,6 +1074,13 @@ fn occurrence_id_from_dsl(
     })
 }
 
+fn schedule_id_from_dsl(id: &occ_dsl::ScheduleId) -> Result<ScheduleId, OccurrenceLifecycleError> {
+    ScheduleId::parse(&id.0).map_err(|source| OccurrenceLifecycleError::InvalidScheduleId {
+        id: id.0.clone(),
+        source,
+    })
+}
+
 fn to_dsl_misfire_policy(policy: &crate::types::MisfirePolicy) -> sched_dsl::MisfirePolicy {
     match policy {
         crate::types::MisfirePolicy::Skip => sched_dsl::MisfirePolicy::Skip,
@@ -929,6 +1126,7 @@ mod tests {
             crate::OccurrenceOrdinal(0),
             Utc::now(),
         )
+        .expect("sample occurrence planning should pass generated authority")
     }
 
     fn sample_schedule() -> Schedule {

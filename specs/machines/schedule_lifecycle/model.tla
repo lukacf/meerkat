@@ -94,6 +94,22 @@ RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurrence_ordin
     /\ UNCHANGED << revision, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, superseded_ack_ids >>
 
 
+SyncTargetSnapshotActive(arg_target_binding_key) ==
+    /\ phase = "Active"
+    /\ phase' = "Active"
+    /\ model_step_count' = model_step_count + 1
+    /\ target_binding_key' = arg_target_binding_key
+    /\ UNCHANGED << revision, trigger_key, misfire_policy, overlap_policy, missing_target_policy, planning_cursor_utc_ms, next_occurrence_ordinal, superseded_ack_ids >>
+
+
+SyncTargetSnapshotPaused(arg_target_binding_key) ==
+    /\ phase = "Paused"
+    /\ phase' = "Paused"
+    /\ model_step_count' = model_step_count + 1
+    /\ target_binding_key' = arg_target_binding_key
+    /\ UNCHANGED << revision, trigger_key, misfire_policy, overlap_policy, missing_target_policy, planning_cursor_utc_ms, next_occurrence_ordinal, superseded_ack_ids >>
+
+
 PauseActiveOrPaused(at_utc_ms) ==
     /\ phase = "Active" \/ phase = "Paused"
     /\ phase' = "Paused"
@@ -162,6 +178,8 @@ Next ==
     \/ \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : ReviseActive(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)
     \/ \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : RevisePaused(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)
     \/ \E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal)
+    \/ \E arg_target_binding_key \in StringValues : SyncTargetSnapshotActive(arg_target_binding_key)
+    \/ \E arg_target_binding_key \in StringValues : SyncTargetSnapshotPaused(arg_target_binding_key)
     \/ \E at_utc_ms \in 0..2 : PauseActiveOrPaused(at_utc_ms)
     \/ \E at_utc_ms \in 0..2 : ResumeActiveOrPaused(at_utc_ms)
     \/ \E at_utc_ms \in 0..2 : DeleteActive(at_utc_ms)

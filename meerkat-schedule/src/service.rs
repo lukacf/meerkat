@@ -223,7 +223,12 @@ impl ScheduleService {
         if occurrence.target_snapshot == current.target {
             return Ok(occurrence);
         }
-        occurrence.target_snapshot = current.target.clone();
+        occurrence = occurrence
+            .apply(crate::OccurrenceLifecycleInput::SyncTargetSnapshot {
+                target_snapshot: current.target.clone(),
+            })
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
+            .into_occurrence();
         self.store.put_occurrence(occurrence.clone()).await?;
         Ok(occurrence)
     }
@@ -240,9 +245,17 @@ impl ScheduleService {
             return Ok(());
         }
 
-        let schedule_changed = schedule.target.bind_materialized_session(session_id);
+        let mut updated_schedule_target = schedule.target.clone();
+        let schedule_changed = updated_schedule_target.bind_materialized_session(session_id);
         if schedule_changed {
-            schedule.touch();
+            schedule = Schedule::apply(
+                Some(schedule),
+                ScheduleLifecycleInput::SyncTargetSnapshot {
+                    target: updated_schedule_target,
+                },
+            )
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
+            .into_schedule();
             self.store.put_schedule(schedule).await?;
         }
 
@@ -257,14 +270,18 @@ impl ScheduleService {
             .await?;
 
         let mut updated_pending = Vec::new();
-        for mut pending_occurrence in pending {
+        for pending_occurrence in pending {
             if pending_occurrence.schedule_revision != occurrence.schedule_revision {
                 continue;
             }
-            if pending_occurrence
-                .target_snapshot
-                .bind_materialized_session(session_id)
-            {
+            let mut updated_target = pending_occurrence.target_snapshot.clone();
+            if updated_target.bind_materialized_session(session_id) {
+                let pending_occurrence = pending_occurrence
+                    .apply(crate::OccurrenceLifecycleInput::SyncTargetSnapshot {
+                        target_snapshot: updated_target,
+                    })
+                    .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
+                    .into_occurrence();
                 updated_pending.push(pending_occurrence);
             }
         }
@@ -335,16 +352,15 @@ impl ScheduleService {
         )?;
 
         let mut planned = Vec::new();
+        let mut next_occurrence_ordinal = schedule.next_occurrence_ordinal;
         for due_at_utc in due_times {
             if existing_due.contains(&due_at_utc) {
                 continue;
             }
-            let occurrence = Occurrence::planned_from_schedule(
-                schedule,
-                schedule.next_occurrence_ordinal,
-                due_at_utc,
-            );
-            schedule.next_occurrence_ordinal = schedule.next_occurrence_ordinal.next();
+            let occurrence =
+                Occurrence::planned_from_schedule(schedule, next_occurrence_ordinal, due_at_utc)
+                    .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+            next_occurrence_ordinal = next_occurrence_ordinal.next();
             planned.push(occurrence);
             if planned.len() >= remaining {
                 break;
@@ -360,7 +376,7 @@ impl ScheduleService {
                 Some(schedule.clone()),
                 ScheduleLifecycleInput::RecordPlanningWindow {
                     planning_cursor_utc,
-                    next_occurrence_ordinal: schedule.next_occurrence_ordinal,
+                    next_occurrence_ordinal,
                 },
             )
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;

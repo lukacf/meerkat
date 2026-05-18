@@ -8,11 +8,11 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ScheduleLifecycleMachine`
 
 ### Code Anchors
-- `schedule_lifecycle`: `meerkat-schedule/src/lifecycle.rs` — Schedule::apply domain-facing lifecycle transition seam over create, revise, planning window, pause, resume, delete, supersede pending occurrences, revision, and planning cursor rules
+- `schedule_lifecycle`: `meerkat-schedule/src/lifecycle.rs` — Schedule::apply domain-facing lifecycle transition seam over create, revise, planning window, pause, resume, delete, supersede pending occurrences, sync target snapshot for active or paused materialized session bindings, revision, and planning cursor rules
 
 ### Scenarios
 - `schedule_pause_resume_delete` — schedule transitions through create, pause, resume, and delete while advancing revision
-- `schedule_revision_and_planning` — active or paused schedules revise, record planning windows, confirm superseded occurrences, supersede pending occurrences, maintain positive revision, and require occurrence progress for planning cursor
+- `schedule_revision_and_planning` — active or paused schedules revise, record planning windows, sync target snapshots for materialized session bindings, confirm superseded occurrences, supersede pending occurrences, maintain positive revision, and require occurrence progress for planning cursor
 
 ### Transitions
 - `CreateSchedule`
@@ -25,6 +25,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `schedule_lifecycle`
   - scenarios: `schedule_revision_and_planning`
 - `RecordPlanningWindowActive`
+  - anchors: `schedule_lifecycle`
+  - scenarios: `schedule_revision_and_planning`
+- `SyncTargetSnapshotActive`
+  - anchors: `schedule_lifecycle`
+  - scenarios: `schedule_revision_and_planning`
+- `SyncTargetSnapshotPaused`
   - anchors: `schedule_lifecycle`
   - scenarios: `schedule_revision_and_planning`
 - `PauseActiveOrPaused`

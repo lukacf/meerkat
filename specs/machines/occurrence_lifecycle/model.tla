@@ -59,6 +59,47 @@ TerminalStutter ==
     /\ phase = "Completed" \/ phase = "Skipped" \/ phase = "Misfired" \/ phase = "Superseded" \/ phase = "DeliveryFailed"
     /\ UNCHANGED vars
 
+PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revision, arg_occurrence_ordinal, arg_target_binding_key, arg_due_at_utc_ms) ==
+    /\ phase = "Pending"
+    /\ ((attempt_count = 0) /\ (claimed_by = None) /\ (claim_token = None) /\ (delivery_correlation_id = None) /\ (completed_at_utc_ms = None) /\ (superseded_by_revision = None))
+    /\ phase' = "Pending"
+    /\ model_step_count' = model_step_count + 1
+    /\ occurrence_id' = arg_occurrence_id
+    /\ schedule_id' = arg_schedule_id
+    /\ schedule_revision' = arg_schedule_revision
+    /\ occurrence_ordinal' = arg_occurrence_ordinal
+    /\ target_binding_key' = arg_target_binding_key
+    /\ due_at_utc_ms' = arg_due_at_utc_ms
+    /\ claimed_by' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ claimed_at_utc_ms' = None
+    /\ claim_token' = None
+    /\ delivery_correlation_id' = None
+    /\ last_receipt' = None
+    /\ failure_class' = None
+    /\ failure_detail' = None
+    /\ dispatched_at_utc_ms' = None
+    /\ completed_at_utc_ms' = None
+    /\ attempt_count' = 0
+    /\ superseded_by_revision' = None
+
+
+SyncTargetSnapshotPending(arg_target_binding_key) ==
+    /\ phase = "Pending"
+    /\ phase' = "Pending"
+    /\ model_step_count' = model_step_count + 1
+    /\ target_binding_key' = arg_target_binding_key
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, due_at_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
+SyncTargetSnapshotClaimed(arg_target_binding_key) ==
+    /\ phase = "Claimed"
+    /\ phase' = "Claimed"
+    /\ model_step_count' = model_step_count + 1
+    /\ target_binding_key' = arg_target_binding_key
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, due_at_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
 ClaimPending(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token) ==
     /\ phase = "Pending"
     /\ phase' = "Claimed"
@@ -191,6 +232,9 @@ LeaseExpiredFromAwaitingCompletion(at_utc_ms) ==
 
 
 Next ==
+    \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_schedule_id \in ScheduleIdValues : \E arg_schedule_revision \in 0..2 : \E arg_occurrence_ordinal \in 0..2 : \E arg_target_binding_key \in StringValues : \E arg_due_at_utc_ms \in 0..2 : PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revision, arg_occurrence_ordinal, arg_target_binding_key, arg_due_at_utc_ms)
+    \/ \E arg_target_binding_key \in StringValues : SyncTargetSnapshotPending(arg_target_binding_key)
+    \/ \E arg_target_binding_key \in StringValues : SyncTargetSnapshotClaimed(arg_target_binding_key)
     \/ \E owner_id \in StringValues : \E at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : ClaimPending(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token)
     \/ \E correlation_id \in OptionStringValues : \E at_utc_ms \in 0..2 : DispatchStartedFromClaimed(correlation_id, at_utc_ms)
     \/ \E at_utc_ms \in 0..2 : AwaitCompletionFromDispatching(at_utc_ms)

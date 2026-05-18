@@ -1051,40 +1051,6 @@ pub struct Occurrence {
 }
 
 impl Occurrence {
-    pub fn planned_from_schedule(
-        schedule: &Schedule,
-        occurrence_ordinal: OccurrenceOrdinal,
-        due_at_utc: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            occurrence_id: OccurrenceId::new(),
-            schedule_id: schedule.schedule_id.clone(),
-            schedule_revision: schedule.revision,
-            occurrence_ordinal,
-            phase: OccurrencePhase::Pending,
-            due_at_utc,
-            trigger_snapshot: schedule.trigger.clone(),
-            target_snapshot: schedule.target.clone(),
-            misfire_policy: schedule.misfire_policy.clone(),
-            overlap_policy: schedule.overlap_policy.clone(),
-            missing_target_policy: schedule.missing_target_policy.clone(),
-            claimed_by: None,
-            lease_expires_at_utc: None,
-            claim_token: None,
-            delivery_correlation_id: None,
-            last_receipt: None,
-            failure_class: None,
-            runtime_outcome: None,
-            failure_detail: None,
-            attempt_count: 0,
-            created_at_utc: Utc::now(),
-            claimed_at_utc: None,
-            dispatched_at_utc: None,
-            completed_at_utc: None,
-            superseded_by_revision: None,
-        }
-    }
-
     pub fn is_claimable_at(&self, now_utc: DateTime<Utc>) -> bool {
         self.due_at_utc <= now_utc
             && (self.phase == OccurrencePhase::Pending || self.is_reclaimable_at(now_utc))

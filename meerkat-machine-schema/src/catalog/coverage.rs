@@ -177,7 +177,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[anchor(
                 "schedule_lifecycle",
                 "meerkat-schedule/src/lifecycle.rs",
-                "Schedule::apply domain-facing lifecycle transition seam over create, revise, planning window, pause, resume, delete, supersede pending occurrences, revision, and planning cursor rules",
+                "Schedule::apply domain-facing lifecycle transition seam over create, revise, planning window, pause, resume, delete, supersede pending occurrences, sync target snapshot for active or paused materialized session bindings, revision, and planning cursor rules",
             )],
             &[
                 scenario(
@@ -186,7 +186,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "schedule_revision_and_planning",
-                    "active or paused schedules revise, record planning windows, confirm superseded occurrences, supersede pending occurrences, maintain positive revision, and require occurrence progress for planning cursor",
+                    "active or paused schedules revise, record planning windows, sync target snapshots for materialized session bindings, confirm superseded occurrences, supersede pending occurrences, maintain positive revision, and require occurrence progress for planning cursor",
                 ),
             ],
         ),
@@ -195,7 +195,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[anchor(
                 "occurrence_lifecycle",
                 "meerkat-schedule/src/lifecycle.rs",
-                "Occurrence::apply domain-facing lifecycle transition seam over claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification",
+                "Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification",
             )],
             &[
                 scenario(
@@ -204,7 +204,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "occurrence_claim_dispatch_completion",
-                    "claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, and record claimed/dispatch/awaiting/completed effects",
+                    "plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, and record claimed/dispatch/awaiting/completed effects",
                 ),
                 scenario(
                     "occurrence_terminal_classification",

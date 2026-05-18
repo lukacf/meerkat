@@ -301,6 +301,10 @@ pub mod inputs {
         pub next_occurrence_ordinal: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SyncTargetSnapshot {
+        pub target_binding_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Pause {
         pub at_utc_ms: u64,
     }
@@ -324,6 +328,7 @@ pub enum Input {
     Create(inputs::Create),
     Revise(inputs::Revise),
     RecordPlanningWindow(inputs::RecordPlanningWindow),
+    SyncTargetSnapshot(inputs::SyncTargetSnapshot),
     Pause(inputs::Pause),
     Resume(inputs::Resume),
     Delete(inputs::Delete),
@@ -335,6 +340,7 @@ impl Input {
             Self::Create(_) => InputKind::Create,
             Self::Revise(_) => InputKind::Revise,
             Self::RecordPlanningWindow(_) => InputKind::RecordPlanningWindow,
+            Self::SyncTargetSnapshot(_) => InputKind::SyncTargetSnapshot,
             Self::Pause(_) => InputKind::Pause,
             Self::Resume(_) => InputKind::Resume,
             Self::Delete(_) => InputKind::Delete,
@@ -347,6 +353,7 @@ pub enum InputKind {
     Create,
     Revise,
     RecordPlanningWindow,
+    SyncTargetSnapshot,
     Pause,
     Resume,
     Delete,
@@ -392,6 +399,8 @@ pub enum TransitionId {
     ReviseActive,
     RevisePaused,
     RecordPlanningWindowActive,
+    SyncTargetSnapshotActive,
+    SyncTargetSnapshotPaused,
     PauseActiveOrPaused,
     ResumeActiveOrPaused,
     DeleteActive,

@@ -62,6 +62,7 @@ machine! {
                 planning_cursor_utc_ms: u64,
                 next_occurrence_ordinal: u64,
             },
+            SyncTargetSnapshot { target_binding_key: String },
             Pause { at_utc_ms: u64 },
             Resume { at_utc_ms: u64 },
             Delete { at_utc_ms: u64 },
@@ -166,6 +167,31 @@ machine! {
         // `RecordPlanningWindow` as an invalid transition; this closes the
         // race where a driver tick could race with `Pause` and silently
         // advance the planning cursor against a paused schedule.
+
+        // --- Target snapshot sync ---
+        //
+        // Materialized on-demand sessions update the schedule target binding
+        // without revising schedule authoring intent. The generated authority
+        // owns that target binding key before the shell persists the full
+        // target snapshot.
+
+        transition SyncTargetSnapshotActive {
+            on input SyncTargetSnapshot { target_binding_key }
+            guard { self.lifecycle_phase == Phase::Active }
+            update {
+                self.target_binding_key = target_binding_key;
+            }
+            to Active
+        }
+
+        transition SyncTargetSnapshotPaused {
+            on input SyncTargetSnapshot { target_binding_key }
+            guard { self.lifecycle_phase == Phase::Paused }
+            update {
+                self.target_binding_key = target_binding_key;
+            }
+            to Paused
+        }
 
         // --- Pause / Resume (from Active or Paused) ---
 

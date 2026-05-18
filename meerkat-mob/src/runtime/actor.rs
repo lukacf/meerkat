@@ -291,6 +291,7 @@ pub(super) struct PendingSpawn {
     /// Effective profile override from `SpawnTooling::Profile` resolution.
     /// Persisted in the roster so respawn/restore can use it.
     pub(super) effective_profile_override: Option<crate::profile::Profile>,
+    pub(super) continuity_intent: super::handle::SpawnContinuityIntent,
     pub(super) progress: Arc<std::sync::Mutex<PendingSpawnProgress>>,
     pub(super) reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
 }
@@ -419,6 +420,7 @@ pub(super) struct MobActor {
     /// authority inside the actor.
     pub(super) phase_watch_tx: tokio::sync::watch::Sender<MobState>,
     pub(super) default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+    pub(super) spawn_member_customizer: Option<Arc<dyn super::SpawnMemberCustomizer>>,
     pub(super) realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
     /// Typed composition binding for the `meerkat_mob_seam` composition
     /// (wave-c C-6p). Every routed effect emitted by the mob DSL travels
@@ -3139,12 +3141,14 @@ impl MobActor {
             match cmd {
                 MobCommand::Spawn {
                     spec,
+                    spawn_source,
                     owner_bridge_session_id,
                     ops_registry,
                     reply_tx,
                 } => {
                     Box::pin(self.enqueue_spawn(
                         *spec,
+                        spawn_source,
                         owner_bridge_session_id,
                         ops_registry,
                         reply_tx,
@@ -4033,16 +4037,44 @@ impl MobActor {
         canceled
     }
 
+    fn customize_spawn_spec(
+        &self,
+        spawn_source: super::handle::SpawnSource,
+        spawner: Option<&(AgentIdentity, AgentRuntimeId)>,
+        spec: &mut super::handle::SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        if let Some(customizer) = self.spawn_member_customizer.as_ref() {
+            let ctx = super::handle::SpawnCustomizationContext {
+                mob_id: self.definition.id.clone(),
+                spawn_source,
+                spawner_identity: spawner.map(|(identity, _)| identity.clone()),
+                spawner_runtime_id: spawner.map(|(_, runtime_id)| runtime_id.clone()),
+                requested_profile: spec.role_name.clone(),
+            };
+            customizer.customize_spawn(&ctx, spec)?;
+        }
+        Ok(())
+    }
+
     /// P1-T04: spawn() creates a real session.
     ///
     /// Provisioning runs in parallel tasks; final actor commit stays serialized.
     async fn enqueue_spawn(
         &mut self,
-        spec: super::handle::SpawnMemberSpec,
+        mut spec: super::handle::SpawnMemberSpec,
+        spawn_source: super::handle::SpawnSource,
         owner_bridge_session_id: Option<SessionId>,
         ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
         reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
     ) {
+        let spawner = match owner_bridge_session_id.as_ref() {
+            Some(owner_session_id) => self.spawner_for_bridge_session(owner_session_id).await,
+            None => None,
+        };
+        if let Err(error) = self.customize_spawn_spec(spawn_source, spawner.as_ref(), &mut spec) {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
         let super::handle::SpawnMemberSpec {
             role_name: profile_name,
             identity,
@@ -4063,6 +4095,9 @@ impl MobActor {
             model_override,
             provider_params_override,
             auth_binding,
+            external_tools: per_spawn_external_tools,
+            system_prompt_override,
+            continuity_intent,
         } = spec;
         let agent_identity = MeerkatId::from(identity.as_str());
         if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
@@ -4207,6 +4242,7 @@ impl MobActor {
                         owner_bridge_session_id.clone(),
                         auto_wire_parent,
                         effective_profile_override.clone(),
+                        continuity_intent.clone(),
                     ));
                 }
 
@@ -4222,7 +4258,8 @@ impl MobActor {
                             ))
                         })?;
 
-                    let external_tools = self.external_tools_for_profile(&profile)?;
+                    let external_tools =
+                        self.external_tools_for_profile(&profile, per_spawn_external_tools.clone())?;
                     let mut config = build::build_resumed_agent_config(
                         build::BuildResumedAgentConfigParams {
                             base: build::BuildAgentConfigParams {
@@ -4238,6 +4275,7 @@ impl MobActor {
                                 shell_env,
                                 mob_tool_authority_context: None,
                                 inherited_tool_filter: inherited_tool_filter.clone(),
+                                system_prompt_override: system_prompt_override.clone(),
                             },
                             expected_session_id: &resume_id,
                             resumed_session: stored_session,
@@ -4286,6 +4324,7 @@ impl MobActor {
                         owner_bridge_session_id.clone(),
                         auto_wire_parent,
                         effective_profile_override.clone(),
+                        continuity_intent.clone(),
                     ));
                 }
 
@@ -4357,7 +4396,8 @@ impl MobActor {
                 None
             };
 
-            let external_tools = self.external_tools_for_profile(&profile)?;
+            let external_tools =
+                self.external_tools_for_profile(&profile, per_spawn_external_tools.clone())?;
             let mut config = build::build_agent_config(build::BuildAgentConfigParams {
                 mob_id: &self.definition.id,
                 profile_name: &profile_name,
@@ -4371,6 +4411,7 @@ impl MobActor {
                 shell_env,
                 mob_tool_authority_context: None,
                 inherited_tool_filter,
+                system_prompt_override,
             })
             .await?;
             config.keep_alive =
@@ -4428,6 +4469,7 @@ impl MobActor {
                 owner_bridge_session_id.clone(),
                 auto_wire_parent,
                 effective_profile_override,
+                continuity_intent,
             ))
         }
         .await;
@@ -4445,6 +4487,7 @@ impl MobActor {
             spawn_owner_bridge_session_id,
             auto_wire_parent,
             effective_profile_override,
+            continuity_intent,
         ) = match prepare_result {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -4515,6 +4558,7 @@ impl MobActor {
                     auto_wire_parent,
                     None,
                     effective_profile_override,
+                    continuity_intent,
                 )
                 .await
                 .map(|outcome| outcome.receipt);
@@ -4567,6 +4611,7 @@ impl MobActor {
             auto_wire_parent,
             restore_wiring: None,
             effective_profile_override,
+            continuity_intent,
             progress: pending_progress.clone(),
             reply_tx,
         };
@@ -4717,6 +4762,7 @@ impl MobActor {
                 auto_wire_parent,
                 restore_wiring,
                 effective_profile_override,
+                continuity_intent,
                 progress: _,
                 reply_tx,
             } = pending;
@@ -4752,6 +4798,7 @@ impl MobActor {
                             auto_wire_parent,
                             restore_wiring,
                             effective_profile_override,
+                            continuity_intent,
                         )
                         .await
                         .map(|outcome| outcome.receipt)
@@ -4776,8 +4823,51 @@ impl MobActor {
         &mut self,
         agent_identity: &MeerkatId,
         spawn_spec: super::spawn_policy::SpawnSpec,
+        work_ref: &WorkRef,
+        origin: WorkOrigin,
     ) -> Result<super::handle::MemberSpawnReceipt, MobError> {
         self.ensure_pending_spawn_alignment("spawn_from_policy_inline preflight")?;
+
+        let requested_identity = AgentIdentity::from(agent_identity.as_str());
+        let mut member_spec =
+            super::handle::SpawnMemberSpec::new(spawn_spec.profile, requested_identity.clone());
+        member_spec.runtime_mode = spawn_spec.runtime_mode;
+        self.customize_spawn_spec(
+            super::handle::SpawnSource::PolicySpawn,
+            None,
+            &mut member_spec,
+        )?;
+        if member_spec.identity != requested_identity {
+            return Err(MobError::Internal(format!(
+                "spawn customizer cannot change policy auto-spawn identity from '{requested_identity}' to '{}'",
+                member_spec.identity
+            )));
+        }
+
+        let super::handle::SpawnMemberSpec {
+            role_name: profile_name,
+            identity: _,
+            initial_message,
+            runtime_mode,
+            backend,
+            binding,
+            context,
+            labels,
+            launch_mode: _,
+            tool_access_policy: _tool_access_policy,
+            budget_split_policy: _budget_split_policy,
+            auto_wire_parent: _,
+            additional_instructions,
+            shell_env,
+            inherited_tool_filter,
+            override_profile,
+            model_override,
+            provider_params_override,
+            auth_binding,
+            external_tools: per_spawn_external_tools,
+            system_prompt_override,
+            continuity_intent,
+        } = member_spec;
 
         if agent_identity
             .as_str()
@@ -4805,14 +4895,39 @@ impl MobActor {
             }
         }
 
-        let profile_name = spawn_spec.profile;
-        let profile = self
-            .definition
-            .resolve_profile(&profile_name, self.realm_profile_store.as_ref())
-            .await?;
-        let runtime_mode = spawn_spec.runtime_mode.unwrap_or(profile.runtime_mode);
-        let external_tools = self.external_tools_for_profile(&profile)?;
-        let labels = std::collections::BTreeMap::new();
+        let mut profile = if let Some(p) = override_profile.clone() {
+            p
+        } else {
+            self.definition
+                .resolve_profile(&profile_name, self.realm_profile_store.as_ref())
+                .await?
+        };
+        if inherited_tool_filter.is_some() && override_profile.is_none() {
+            build::open_profile_tool_categories_for_inherited_filter(&mut profile);
+        }
+        if let Some(model) = model_override {
+            profile.model = model;
+        }
+        if provider_params_override.is_some() {
+            profile.provider_params = provider_params_override;
+        }
+        self.preview_policy_spawn_submit_work_admission(
+            &requested_identity,
+            profile.external_addressable,
+            work_ref,
+            origin,
+        )?;
+        let runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
+        let selected_binding = resolve_binding(
+            binding,
+            backend,
+            profile.backend,
+            self.definition.backend.default,
+            agent_identity,
+        )?;
+        let runtime_mode = normalize_runtime_mode_for_binding(runtime_mode, &selected_binding);
+        let external_tools = self.external_tools_for_profile(&profile, per_spawn_external_tools)?;
+        let labels = labels.unwrap_or_default();
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
             profile_name: &profile_name,
@@ -4820,28 +4935,28 @@ impl MobActor {
             profile: &profile,
             definition: &self.definition,
             external_tools,
-            context: None,
+            context,
             labels: Some(labels.clone()),
-            additional_instructions: None,
-            shell_env: None,
+            additional_instructions,
+            shell_env,
             mob_tool_authority_context: None,
-            inherited_tool_filter: None,
+            inherited_tool_filter,
+            system_prompt_override,
         })
         .await?;
         config.keep_alive = runtime_mode == crate::MobRuntimeMode::AutonomousHost;
         if let Some(ref client) = self.default_llm_client {
             config.llm_client_override = Some(client.clone());
         }
+        if let Some(ref cref) = auth_binding {
+            config.auth_binding = Some(cref.clone());
+        }
 
-        let prompt = ContentInput::from(self.fallback_spawn_prompt(&profile_name, agent_identity));
+        let prompt = initial_message.clone().unwrap_or_else(|| {
+            ContentInput::from(self.fallback_spawn_prompt(&profile_name, agent_identity))
+        });
+        let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
         let req = build::to_create_session_request(&config, prompt.clone());
-        let selected_binding = resolve_binding(
-            None,
-            None,
-            profile.backend,
-            self.definition.backend.default,
-            agent_identity,
-        )?;
         let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, agent_identity);
         let mut provision_request = ProvisionMemberRequest {
             create_session: req,
@@ -4862,13 +4977,14 @@ impl MobActor {
             agent_identity: agent_identity.clone(),
             admitted_bridge_session_id,
             prompt: prompt.clone(),
-            initial_turn_prompt: None,
+            initial_turn_prompt: initial_turn_prompt.clone(),
             runtime_mode,
             labels: labels.clone(),
             owner_bridge_session_id: None,
             auto_wire_parent: false,
             restore_wiring: None,
-            effective_profile_override: None,
+            effective_profile_override: override_profile.clone(),
+            continuity_intent: continuity_intent.clone(),
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
             reply_tx: pending_reply_tx,
         };
@@ -4934,14 +5050,15 @@ impl MobActor {
                 fence,
                 runtime_mode,
                 prompt,
-                None,
+                initial_turn_prompt,
                 labels,
                 provision,
                 spawn_receipt.operation_id,
                 None,
                 false,
                 None,
-                None, // policy spawns use definition profiles, no override
+                override_profile, // policy spawns usually use definition profiles; customizers may supply an override
+                continuity_intent,
             )
             .await
             .map(|outcome| outcome.receipt)
@@ -4988,6 +5105,7 @@ impl MobActor {
         auto_wire_parent: bool,
         restore_wiring: Option<RestoreWiringPlan>,
         effective_profile_override: Option<crate::profile::Profile>,
+        continuity_intent: super::handle::SpawnContinuityIntent,
     ) -> Result<FinalizeSpawnOutcome, MobError> {
         let identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
         let agent_runtime_id = crate::ids::AgentRuntimeId::new(identity.clone(), generation);
@@ -5146,6 +5264,7 @@ impl MobActor {
                     )));
                     event.runtime_mode = runtime_mode;
                     event.labels = labels.clone();
+                    event.continuity_intent = continuity_intent.clone();
                     event
                 }),
             })
@@ -5587,6 +5706,20 @@ impl MobActor {
                     && entry.member_ref.bridge_session_id() == Some(owner_bridge_session_id)
             })
             .map(|entry| entry.agent_identity.clone())
+    }
+
+    async fn spawner_for_bridge_session(
+        &self,
+        owner_bridge_session_id: &SessionId,
+    ) -> Option<(AgentIdentity, AgentRuntimeId)> {
+        let roster = self.roster.read().await;
+        roster
+            .list()
+            .find(|entry| {
+                entry.state == crate::roster::MemberState::Active
+                    && entry.member_ref.bridge_session_id() == Some(owner_bridge_session_id)
+            })
+            .map(|entry| (entry.agent_identity.clone(), entry.agent_runtime_id.clone()))
     }
 
     /// P1-T05: force-cancel a member's in-flight turn cooperatively.
@@ -7915,6 +8048,65 @@ impl MobActor {
             }
         };
 
+        let original_identity = AgentIdentity::from(agent_identity.as_str());
+        let mut replacement_spec = super::handle::SpawnMemberSpec::new(
+            snapshot.profile_name.clone(),
+            original_identity.clone(),
+        );
+        replacement_spec.initial_message = initial_message;
+        replacement_spec.runtime_mode = Some(snapshot.runtime_mode);
+        replacement_spec.binding = Some(snapshot.binding.clone());
+        replacement_spec.labels = Some(snapshot.labels.clone());
+        replacement_spec.override_profile = snapshot.effective_profile_override.clone();
+        self.customize_spawn_spec(
+            super::handle::SpawnSource::Respawn,
+            None,
+            &mut replacement_spec,
+        )
+        .map_err(MobRespawnError::from)?;
+        if replacement_spec.identity != original_identity {
+            return Err(MobRespawnError::from(MobError::Internal(format!(
+                "spawn customizer cannot change respawn identity from '{original_identity}' to '{}'",
+                replacement_spec.identity
+            ))));
+        }
+        if replacement_spec.role_name != snapshot.profile_name {
+            return Err(MobRespawnError::from(MobError::Internal(format!(
+                "spawn customizer cannot change respawn profile for '{original_identity}' from '{}' to '{}'",
+                snapshot.profile_name, replacement_spec.role_name
+            ))));
+        }
+        if replacement_spec.binding.as_ref() != Some(&snapshot.binding) {
+            return Err(MobRespawnError::from(MobError::Internal(format!(
+                "spawn customizer cannot change respawn runtime binding for '{original_identity}'"
+            ))));
+        }
+        let super::handle::SpawnMemberSpec {
+            role_name: _,
+            identity: _,
+            initial_message: replacement_initial_message,
+            runtime_mode: _,
+            backend: _,
+            binding: _,
+            context: replacement_context,
+            labels: replacement_labels,
+            launch_mode: _,
+            tool_access_policy: _tool_access_policy,
+            budget_split_policy: _budget_split_policy,
+            auto_wire_parent: _,
+            additional_instructions: replacement_additional_instructions,
+            shell_env: replacement_shell_env,
+            inherited_tool_filter: replacement_inherited_tool_filter,
+            override_profile: replacement_profile_override,
+            model_override: replacement_model_override,
+            provider_params_override: replacement_provider_params_override,
+            auth_binding: replacement_auth_binding,
+            external_tools: replacement_external_tools,
+            system_prompt_override: replacement_system_prompt_override,
+            continuity_intent: replacement_continuity_intent,
+        } = replacement_spec;
+        let replacement_labels = replacement_labels.unwrap_or_default();
+
         self.preview_dsl_input(
             mob_dsl::MobMachineInput::Respawn {
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&snapshot.old_runtime_id),
@@ -8003,7 +8195,7 @@ impl MobActor {
         }
 
         // 3. Rebuild the replacement spawn preserving identity, profile, labels, mode, and peer intent.
-        let (prompt, initial_turn_prompt) = match initial_message {
+        let (prompt, initial_turn_prompt) = match replacement_initial_message {
             Some(message) => {
                 let prompt = message;
                 (prompt.clone(), Some(prompt))
@@ -8016,14 +8208,24 @@ impl MobActor {
             ),
         };
         // Prefer roster's effective_profile_override on respawn for lifecycle safety.
-        let profile = if let Some(p) = snapshot.effective_profile_override.clone() {
+        let mut profile = if let Some(p) = replacement_profile_override.clone() {
             p
         } else {
             self.definition
                 .resolve_profile(&snapshot.profile_name, self.realm_profile_store.as_ref())
                 .await?
         };
-        let external_tools = self.external_tools_for_profile(&profile)?;
+        if replacement_inherited_tool_filter.is_some() && replacement_profile_override.is_none() {
+            build::open_profile_tool_categories_for_inherited_filter(&mut profile);
+        }
+        if let Some(model) = replacement_model_override {
+            profile.model = model;
+        }
+        if replacement_provider_params_override.is_some() {
+            profile.provider_params = replacement_provider_params_override;
+        }
+        let external_tools =
+            self.external_tools_for_profile(&profile, replacement_external_tools)?;
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
             profile_name: &snapshot.profile_name,
@@ -8031,17 +8233,21 @@ impl MobActor {
             profile: &profile,
             definition: &self.definition,
             external_tools,
-            context: None,
-            labels: Some(snapshot.labels.clone()),
-            additional_instructions: None,
-            shell_env: None,
+            context: replacement_context,
+            labels: Some(replacement_labels.clone()),
+            additional_instructions: replacement_additional_instructions,
+            shell_env: replacement_shell_env,
             mob_tool_authority_context: None,
-            inherited_tool_filter: None,
+            inherited_tool_filter: replacement_inherited_tool_filter,
+            system_prompt_override: replacement_system_prompt_override,
         })
         .await?;
         config.keep_alive = snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
         if let Some(ref client) = self.default_llm_client {
             config.llm_client_override = Some(client.clone());
+        }
+        if let Some(ref cref) = replacement_auth_binding {
+            config.auth_binding = Some(cref.clone());
         }
         let req = build::to_create_session_request(&config, prompt.clone());
         let peer_name = format!(
@@ -8073,13 +8279,14 @@ impl MobActor {
             prompt: prompt.clone(),
             initial_turn_prompt: initial_turn_prompt.clone(),
             runtime_mode: snapshot.runtime_mode,
-            labels: snapshot.labels.clone(),
+            labels: replacement_labels.clone(),
             owner_bridge_session_id: None,
             auto_wire_parent: false,
             restore_wiring: (!snapshot.restore_wiring.local_peers.is_empty()
                 || !snapshot.restore_wiring.external_peers.is_empty())
             .then_some(snapshot.restore_wiring.clone()),
-            effective_profile_override: snapshot.effective_profile_override.clone(),
+            effective_profile_override: replacement_profile_override.clone(),
+            continuity_intent: replacement_continuity_intent.clone(),
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
             reply_tx: respawn_inline_reply_tx,
         };
@@ -8183,7 +8390,7 @@ impl MobActor {
                     snapshot.runtime_mode,
                     prompt,
                     initial_turn_prompt,
-                    snapshot.labels.clone(),
+                    replacement_labels,
                     provision,
                     spawn_receipt.operation_id,
                     None,
@@ -8191,7 +8398,8 @@ impl MobActor {
                     (!snapshot.restore_wiring.local_peers.is_empty()
                         || !snapshot.restore_wiring.external_peers.is_empty())
                     .then_some(snapshot.restore_wiring.clone()),
-                    snapshot.effective_profile_override.clone(),
+                    replacement_profile_override,
+                    replacement_continuity_intent,
                 )
                 .await
                 .map_err(|error| MobRespawnError::SpawnAfterRetire {
@@ -10441,23 +10649,8 @@ impl MobActor {
                 }
                 let identity = AgentIdentity::from(agent_identity.as_str());
                 if let Some(spec) = self.spawn_policy.resolve(&identity).await {
-                    let profile = self
-                        .definition
-                        .resolve_profile(&spec.profile, self.realm_profile_store.as_ref())
+                    Box::pin(self.spawn_from_policy_inline(&identity, spec, &work_ref, origin))
                         .await?;
-                    self.preview_policy_spawn_submit_work_admission(
-                        &identity,
-                        profile.external_addressable,
-                        &work_ref,
-                        origin,
-                    )?;
-                    Box::pin(self.spawn_from_policy_inline(&identity, spec))
-                        .await
-                        .map_err(|error| {
-                            MobError::Internal(format!(
-                                "auto-spawn failed for '{identity}': {error}"
-                            ))
-                        })?;
                     let spawned_entry = {
                         let roster = self.roster.read().await;
                         roster.get(&identity).cloned()
@@ -11938,6 +12131,7 @@ impl MobActor {
     fn external_tools_for_profile(
         &self,
         profile: &crate::profile::Profile,
+        per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     ) -> Result<Option<Arc<dyn AgentToolDispatcher>>, MobError> {
         let default_tools = self
             .default_external_tools_provider
@@ -11948,6 +12142,7 @@ impl MobActor {
             &self.tool_bundles,
             self.mob_handle_for_tools(),
             default_tools,
+            per_spawn_external_tools,
             None,
         )
     }

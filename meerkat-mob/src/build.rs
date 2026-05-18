@@ -92,6 +92,8 @@ pub struct BuildAgentConfigParams<'a> {
     /// When set, stored in canonical session tool-visibility state so the
     /// runtime-backed core build restores it through the machine owner.
     pub inherited_tool_filter: Option<WitnessedToolFilter>,
+    /// Typed per-spawn system prompt replacement.
+    pub system_prompt_override: Option<crate::runtime::SpawnSystemPromptOverride>,
 }
 
 pub struct BuildResumedAgentConfigParams<'a> {
@@ -125,6 +127,7 @@ pub async fn build_agent_config(
         shell_env,
         mob_tool_authority_context,
         inherited_tool_filter,
+        system_prompt_override,
     } = params;
 
     if !profile.tools.comms {
@@ -161,8 +164,14 @@ pub async fn build_agent_config(
     config.comms_name = Some(comms_name);
     config.peer_meta = Some(peer_meta);
     config.realm_id = Some(realm_id.to_string());
-    if !system_prompt.is_empty() {
-        config.system_prompt = Some(system_prompt);
+    match system_prompt_override {
+        Some(crate::runtime::SpawnSystemPromptOverride::Replace(prompt)) => {
+            config.system_prompt = Some(prompt);
+        }
+        None if !system_prompt.is_empty() => {
+            config.system_prompt = Some(system_prompt);
+        }
+        None => {}
     }
 
     // Mob comms instructions are delivered as an embedded skill via
@@ -611,6 +620,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -637,6 +647,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -667,6 +678,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -703,6 +715,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -735,6 +748,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -784,6 +798,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -849,6 +864,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: Some(inherited_authority),
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -901,6 +917,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: Some(inherited_authority.clone()),
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -953,6 +970,7 @@ mod tests {
                 ),
                 Default::default(),
             )),
+            system_prompt_override: None,
         })
         .await
         .expect_err("name-only inherited filter should fail closed");
@@ -982,6 +1000,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: injected_authority(),
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1028,6 +1047,7 @@ mod tests {
                 shell_env: None,
                 mob_tool_authority_context: None,
                 inherited_tool_filter: None,
+                system_prompt_override: None,
             },
             expected_session_id: &session_id,
             resumed_session,
@@ -1074,6 +1094,7 @@ mod tests {
                 shell_env: None,
                 mob_tool_authority_context: None,
                 inherited_tool_filter: None,
+                system_prompt_override: None,
             },
             expected_session_id: &session_id,
             resumed_session,
@@ -1158,6 +1179,7 @@ mod tests {
                 shell_env: None,
                 mob_tool_authority_context: None,
                 inherited_tool_filter: Some(inherited_authority.clone()),
+                system_prompt_override: None,
             },
             expected_session_id: &session_id,
             resumed_session,
@@ -1238,6 +1260,7 @@ mod tests {
                     ),
                     &["parent_shell"],
                 )),
+                system_prompt_override: None,
             },
             expected_session_id: &session_id,
             resumed_session,
@@ -1282,6 +1305,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await;
         assert!(
@@ -1309,6 +1333,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1321,6 +1346,45 @@ mod tests {
         // Mob comms instructions are delivered via preload_skills (embedded
         // skill), not baked into system_prompt — verified in the separate
         // test_build_agent_config_preloads_mob_communication_skill test.
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_system_prompt_replace_keeps_mob_skill_preload() {
+        let def = sample_definition();
+        let lead = def.profiles[&ProfileName::from("lead")]
+            .as_inline()
+            .unwrap();
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            agent_identity: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            inherited_tool_filter: None,
+            system_prompt_override: Some(crate::SpawnSystemPromptOverride::Replace(
+                "OB3 replacement prompt".to_string(),
+            )),
+        })
+        .await
+        .expect("build_agent_config");
+
+        assert_eq!(
+            config.system_prompt.as_deref(),
+            Some("OB3 replacement prompt"),
+            "typed Replace must bypass profile prompt assembly"
+        );
+        assert!(
+            config.preload_skills.as_ref().is_some_and(|skills| skills
+                .iter()
+                .any(|skill| skill.to_string().contains("mob-communication"))),
+            "prompt replacement must not remove required mob runtime skill wiring"
+        );
     }
 
     #[tokio::test]
@@ -1342,6 +1406,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1377,6 +1442,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1412,6 +1478,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1438,6 +1505,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1464,6 +1532,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1511,6 +1580,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1565,6 +1635,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config should resolve path skill");
@@ -1613,6 +1684,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect_err("missing path skill should fail");
@@ -1646,6 +1718,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1676,6 +1749,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1714,6 +1788,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1763,6 +1838,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");

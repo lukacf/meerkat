@@ -518,6 +518,9 @@ pub struct MemberSpawnedEvent {
     /// Application-defined labels for this member.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    /// Typed continuity evidence emitted at spawn finalization.
+    #[serde(default, skip_serializing_if = "crate::event::is_ephemeral_continuity")]
+    pub continuity_intent: crate::runtime::SpawnContinuityIntent,
     /// Bridge-internal member reference needed for event replay.
     /// Not part of the public identity-native contract.
     #[serde(skip, default)]
@@ -540,6 +543,7 @@ impl MemberSpawnedEvent {
             role,
             runtime_mode: MobRuntimeMode::AutonomousHost,
             labels: BTreeMap::new(),
+            continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
             bridge_member_ref: None,
         }
     }
@@ -553,6 +557,10 @@ impl MemberSpawnedEvent {
     pub(crate) fn bridge_member_ref(&self) -> Option<&MemberRef> {
         self.bridge_member_ref.as_ref()
     }
+}
+
+fn is_ephemeral_continuity(intent: &crate::runtime::SpawnContinuityIntent) -> bool {
+    matches!(intent, crate::runtime::SpawnContinuityIntent::Ephemeral)
 }
 
 #[cfg(any(not(target_arch = "wasm32"), test))]

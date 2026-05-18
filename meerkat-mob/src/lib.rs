@@ -128,8 +128,9 @@ pub use runtime::{
     MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig, MobHandle,
     MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
     MobSessionService, MobState, MobUnreachablePeer, MobWireMembersBatchReport, PeerMessageReceipt,
-    PeerTarget, PreviousMemberCleanupReport, SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSpec,
-    SupervisorRotationReport, WorkDeliveryReceipt,
+    PeerTarget, PreviousMemberCleanupReport, SpawnContinuityIntent, SpawnCustomizationContext,
+    SpawnMemberCustomizer, SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec,
+    SpawnSystemPromptOverride, SupervisorRotationReport, WorkDeliveryReceipt,
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};

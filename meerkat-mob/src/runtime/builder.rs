@@ -23,6 +23,7 @@ pub struct MobBuilder {
     tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
     default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+    spawn_member_customizer: Option<Arc<dyn super::SpawnMemberCustomizer>>,
     /// Optional realtime session factory injected for mob-provisioned
     /// members that open a realtime channel (W2-E / issue #264).
     ///
@@ -101,10 +102,9 @@ fn canonical_runtime_adapter_for_session_service(
 /// `identity_to_runtime`. It also rehydrates machine-owned local and external
 /// wiring edges from the event-projected roster so respawn/reconcile restore
 /// logic can read topology from MobMachine instead of using roster fields as
-/// authority. `external_addressable` is resolved from the definition's inline
-/// profile (realm-profile overrides are resolved asynchronously elsewhere;
-/// callers that need realm overrides can re-feed spawn events through the live
-/// pipeline).
+/// authority. `external_addressable` is resolved from the reconstructed
+/// effective profile override when present, then from the definition's inline
+/// profile.
 fn seed_mob_authority_sync_from_roster(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     roster: &Roster,
@@ -112,17 +112,17 @@ fn seed_mob_authority_sync_from_roster(
 ) {
     use crate::machines::mob_machine as mob_dsl;
     for entry in roster.list_all() {
-        // Use the inline profile where available. Realm-profile overrides
-        // are not observed here (the realm store is async-only); resumes
-        // that depend on a realm override for addressability would need to
-        // also emit a spawn event through the normal async pipeline, which
-        // `handle_submit_work` would then see once the entry re-enters the
-        // DSL via that path.
-        let external_addressable = definition
-            .profiles
-            .get(&entry.role)
-            .and_then(|binding| binding.as_inline())
+        let external_addressable = entry
+            .effective_profile_override
+            .as_ref()
             .map(|profile| profile.external_addressable)
+            .or_else(|| {
+                definition
+                    .profiles
+                    .get(&entry.role)
+                    .and_then(|binding| binding.as_inline())
+                    .map(|profile| profile.external_addressable)
+            })
             .unwrap_or(false);
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
         let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
@@ -498,6 +498,7 @@ impl MobBuilder {
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
             default_external_tools_provider: None,
+            spawn_member_customizer: None,
             realtime_session_factory: None,
         }
     }
@@ -542,6 +543,7 @@ impl MobBuilder {
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
             default_external_tools_provider: None,
+            spawn_member_customizer: None,
             realtime_session_factory: None,
         }
     }
@@ -615,6 +617,15 @@ impl MobBuilder {
         self
     }
 
+    /// Register a pre-build customizer for every mob member spawn.
+    pub fn with_spawn_member_customizer(
+        mut self,
+        customizer: Arc<dyn super::SpawnMemberCustomizer>,
+    ) -> Self {
+        self.spawn_member_customizer = Some(customizer);
+        self
+    }
+
     /// Inject a [`meerkat_client::RealtimeSessionFactory`] for mob-provisioned
     /// members that open a realtime channel (W2-E / issue #264).
     ///
@@ -645,6 +656,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            spawn_member_customizer,
             realtime_session_factory,
         } = self;
         #[cfg(not(feature = "runtime-adapter"))]
@@ -752,6 +764,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            spawn_member_customizer,
             storage.realm_profiles.clone(),
             realtime_session_factory,
         ))
@@ -776,6 +789,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            spawn_member_customizer,
             realtime_session_factory,
         } = self;
         #[cfg(not(feature = "runtime-adapter"))]
@@ -992,6 +1006,7 @@ impl MobBuilder {
                 &tool_bundles,
                 &preview_handle,
                 &default_external_tools_provider,
+                &spawn_member_customizer,
                 storage.realm_profiles.clone(),
             )
             .await?;
@@ -1030,6 +1045,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            spawn_member_customizer,
             storage.realm_profiles.clone(),
             realtime_session_factory,
         ))
@@ -1123,6 +1139,7 @@ impl MobBuilder {
         tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         tool_handle: &MobHandle,
         default_external_tools_provider: &Option<crate::ExternalToolsProvider>,
+        spawn_member_customizer: &Option<Arc<dyn super::SpawnMemberCustomizer>>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
     ) -> Result<(), MobError> {
         let provisioner = MultiBackendProvisioner::new(
@@ -1184,6 +1201,42 @@ impl MobBuilder {
                 );
             };
 
+            let mut restore_spec =
+                super::SpawnMemberSpec::new(entry.role.clone(), entry.agent_identity.clone());
+            restore_spec.runtime_mode = Some(entry.runtime_mode);
+            restore_spec.labels = Some(entry.labels.clone());
+            restore_spec.override_profile = entry.effective_profile_override.clone();
+            if let Some(customizer) = spawn_member_customizer.as_ref() {
+                let ctx = super::SpawnCustomizationContext {
+                    mob_id: definition.id.clone(),
+                    spawn_source: super::SpawnSource::Resume,
+                    spawner_identity: None,
+                    spawner_runtime_id: None,
+                    requested_profile: restore_spec.role_name.clone(),
+                };
+                customizer.customize_spawn(&ctx, &mut restore_spec)?;
+            }
+            if restore_spec.identity != entry.agent_identity {
+                return Err(MobError::Internal(format!(
+                    "spawn customizer cannot change resume restore identity from '{}' to '{}'",
+                    entry.agent_identity, restore_spec.identity
+                )));
+            }
+            if restore_spec.role_name != entry.role {
+                return Err(MobError::Internal(format!(
+                    "spawn customizer cannot change resume restore profile for '{}' from '{}' to '{}'",
+                    entry.agent_identity, entry.role, restore_spec.role_name
+                )));
+            }
+            let restore_profile_override = restore_spec.override_profile.clone();
+            let restore_labels = restore_spec
+                .labels
+                .clone()
+                .unwrap_or_else(|| entry.labels.clone());
+            if let Some(roster_entry) = roster.get_by_identity_mut(&entry.agent_identity) {
+                roster_entry.effective_profile_override = restore_profile_override.clone();
+            }
+
             if matches!(entry.member_ref, MemberRef::Session { .. })
                 && session_service.supports_persistent_sessions()
             {
@@ -1197,14 +1250,25 @@ impl MobBuilder {
                     .await;
                     continue;
                 };
-                // Prefer roster's effective_profile_override on restore for lifecycle safety.
-                let profile = if let Some(ref p) = entry.effective_profile_override {
+                // Prefer customizer/roster effective_profile_override on restore for lifecycle safety.
+                let mut profile = if let Some(ref p) = restore_profile_override {
                     p.clone()
                 } else {
                     definition
                         .resolve_profile(&entry.role, realm_profile_store.as_ref())
                         .await?
                 };
+                if restore_spec.inherited_tool_filter.is_some()
+                    && restore_profile_override.is_none()
+                {
+                    build::open_profile_tool_categories_for_inherited_filter(&mut profile);
+                }
+                if let Some(model) = restore_spec.model_override.clone() {
+                    profile.model = model;
+                }
+                if restore_spec.provider_params_override.is_some() {
+                    profile.provider_params = restore_spec.provider_params_override.clone();
+                }
                 let profile = &profile;
                 let default_ext = default_external_tools_provider.as_ref().and_then(|p| p());
                 let resumed_config =
@@ -1220,14 +1284,16 @@ impl MobBuilder {
                                 tool_bundles,
                                 tool_handle.clone(),
                                 default_ext,
+                                restore_spec.external_tools.clone(),
                                 None,
                             )?,
-                            context: None,
-                            labels: Some(entry.labels.clone()),
-                            additional_instructions: None,
-                            shell_env: None,
+                            context: restore_spec.context.clone(),
+                            labels: Some(restore_labels.clone()),
+                            additional_instructions: restore_spec.additional_instructions.clone(),
+                            shell_env: restore_spec.shell_env.clone(),
                             mob_tool_authority_context: None,
-                            inherited_tool_filter: None,
+                            inherited_tool_filter: restore_spec.inherited_tool_filter.clone(),
+                            system_prompt_override: restore_spec.system_prompt_override.clone(),
                         },
                         expected_session_id: &bridge_session_id,
                         resumed_session: stored_session,
@@ -1242,6 +1308,9 @@ impl MobBuilder {
                 };
                 resumed_config.keep_alive =
                     entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+                if let Some(ref auth_binding) = restore_spec.auth_binding {
+                    resumed_config.auth_binding = Some(auth_binding.clone());
+                }
                 let reconcile_client: Arc<dyn LlmClient> = default_llm_client
                     .clone()
                     .unwrap_or_else(|| Arc::new(meerkat_client::TestClient::default()));
@@ -1251,9 +1320,29 @@ impl MobBuilder {
                     entry.agent_identity, entry.role, definition.id
                 );
                 let req = build::to_create_session_request(&resumed_config, prompt.into());
-                match session_service.create_session(req).await {
-                    Ok(created) => {
-                        let created_bridge_session_id = created.session_id;
+                let peer_name =
+                    format!("{}/{}/{}", definition.id, entry.role, entry.agent_identity);
+                match provisioner
+                    .provision_member(super::provisioner::ProvisionMemberRequest {
+                        create_session: req,
+                        binding: crate::RuntimeBinding::Session,
+                        peer_name,
+                        owner_bridge_session_id: None,
+                        ops_registry: None,
+                    })
+                    .await
+                {
+                    Ok(receipt) => {
+                        let created_bridge_session_id = receipt
+                            .member_ref
+                            .bridge_session_id()
+                            .cloned()
+                            .ok_or_else(|| {
+                                MobError::Internal(format!(
+                                    "resume reconciliation provisioned non-session member for '{}'",
+                                    entry.agent_identity
+                                ))
+                            })?;
                         let _ = roster.set_bridge_session_id(
                             &entry.agent_identity,
                             created_bridge_session_id.clone(),
@@ -1274,9 +1363,22 @@ impl MobBuilder {
                 continue;
                 // Ephemeral services can still fall back to fresh-create.
             }
-            let profile = definition
-                .resolve_profile(&entry.role, realm_profile_store.as_ref())
-                .await?;
+            let mut profile = if let Some(ref p) = restore_profile_override {
+                p.clone()
+            } else {
+                definition
+                    .resolve_profile(&entry.role, realm_profile_store.as_ref())
+                    .await?
+            };
+            if restore_spec.inherited_tool_filter.is_some() && restore_profile_override.is_none() {
+                build::open_profile_tool_categories_for_inherited_filter(&mut profile);
+            }
+            if let Some(model) = restore_spec.model_override.clone() {
+                profile.model = model;
+            }
+            if restore_spec.provider_params_override.is_some() {
+                profile.provider_params = restore_spec.provider_params_override.clone();
+            }
             let default_ext_fresh = default_external_tools_provider.as_ref().and_then(|p| p());
             let mut config = build::build_agent_config(build::BuildAgentConfigParams {
                 mob_id: &definition.id,
@@ -1289,17 +1391,22 @@ impl MobBuilder {
                     tool_bundles,
                     tool_handle.clone(),
                     default_ext_fresh,
+                    restore_spec.external_tools.clone(),
                     None,
                 )?,
-                context: None,
-                labels: None,
-                additional_instructions: None,
-                shell_env: None,
+                context: restore_spec.context.clone(),
+                labels: Some(restore_labels.clone()),
+                additional_instructions: restore_spec.additional_instructions.clone(),
+                shell_env: restore_spec.shell_env.clone(),
                 mob_tool_authority_context: None,
-                inherited_tool_filter: None,
+                inherited_tool_filter: restore_spec.inherited_tool_filter.clone(),
+                system_prompt_override: restore_spec.system_prompt_override.clone(),
             })
             .await?;
             config.keep_alive = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+            if let Some(ref auth_binding) = restore_spec.auth_binding {
+                config.auth_binding = Some(auth_binding.clone());
+            }
             // Resume reconciliation needs live comms runtimes, but this path is
             // infrastructure restoration and should not consume provider quota.
             // If no explicit override is configured, use the local test client
@@ -1313,8 +1420,26 @@ impl MobBuilder {
                 entry.agent_identity, entry.role, definition.id
             );
             let req = build::to_create_session_request(&config, prompt.into());
-            let created = session_service.create_session(req).await?;
-            let created_bridge_session_id = created.session_id;
+            let peer_name = format!("{}/{}/{}", definition.id, entry.role, entry.agent_identity);
+            let receipt = provisioner
+                .provision_member(super::provisioner::ProvisionMemberRequest {
+                    create_session: req,
+                    binding: crate::RuntimeBinding::Session,
+                    peer_name,
+                    owner_bridge_session_id: None,
+                    ops_registry: None,
+                })
+                .await?;
+            let created_bridge_session_id = receipt
+                .member_ref
+                .bridge_session_id()
+                .cloned()
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "resume reconciliation provisioned non-session member for '{}'",
+                        entry.agent_identity
+                    ))
+                })?;
             let _ = roster
                 .set_bridge_session_id(&entry.agent_identity, created_bridge_session_id.clone());
             tool_handle
@@ -1603,6 +1728,7 @@ impl MobBuilder {
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+        spawn_member_customizer: Option<Arc<dyn super::SpawnMemberCustomizer>>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
     ) -> MobHandle {
@@ -1641,6 +1767,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            spawn_member_customizer,
             realm_profile_store,
             realtime_session_factory,
         )
@@ -1658,6 +1785,7 @@ impl MobBuilder {
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+        spawn_member_customizer: Option<Arc<dyn super::SpawnMemberCustomizer>>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
     ) -> MobHandle {
@@ -1794,6 +1922,7 @@ impl MobBuilder {
             machine_state_watch_tx,
             phase_watch_tx: phase_watch_tx_actor,
             default_external_tools_provider,
+            spawn_member_customizer,
             realm_profile_store,
             composition_binding,
             pending_routed_effects: Vec::new(),

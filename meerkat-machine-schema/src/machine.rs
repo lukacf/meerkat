@@ -872,6 +872,10 @@ pub enum Expr {
     },
     SeqElements(Box<Expr>),
     Len(Box<Expr>),
+    Count {
+        collection: Box<Expr>,
+        value: Box<Expr>,
+    },
     Head(Box<Expr>),
     MapKeys(Box<Expr>),
     MapGet {
@@ -1043,6 +1047,26 @@ impl Expr {
                 )?;
             }
             Self::Contains { collection, value } => {
+                collection.validate(
+                    phase_names,
+                    field_names,
+                    input_variants,
+                    signal_variants,
+                    effect_variants,
+                    helper_names,
+                    bindings,
+                )?;
+                value.validate(
+                    phase_names,
+                    field_names,
+                    input_variants,
+                    signal_variants,
+                    effect_variants,
+                    helper_names,
+                    bindings,
+                )?;
+            }
+            Self::Count { collection, value } => {
                 collection.validate(
                     phase_names,
                     field_names,
@@ -1568,6 +1592,10 @@ fn validate_string_enum_named_variants_expr(
             validate_string_enum_named_variants_expr(schema, right)?;
         }
         Expr::Contains { collection, value } => {
+            validate_string_enum_named_variants_expr(schema, collection)?;
+            validate_string_enum_named_variants_expr(schema, value)?;
+        }
+        Expr::Count { collection, value } => {
             validate_string_enum_named_variants_expr(schema, collection)?;
             validate_string_enum_named_variants_expr(schema, value)?;
         }

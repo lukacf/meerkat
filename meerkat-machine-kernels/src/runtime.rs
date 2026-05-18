@@ -1104,6 +1104,30 @@ impl GeneratedMachineKernel {
                 };
                 Ok(KernelValue::U64(len as u64))
             }
+            Expr::Count { collection, value } => {
+                let collection = self.eval_expr(state, bindings, collection, transition_name)?;
+                let value = self.eval_expr(state, bindings, value, transition_name)?;
+                let count = match collection {
+                    KernelValue::Seq(items) => items.iter().filter(|item| *item == &value).count(),
+                    KernelValue::Set(items) => usize::from(items.contains(&value)),
+                    KernelValue::String(items) => match value {
+                        KernelValue::String(needle) => items.matches(&needle).count(),
+                        _ => 0,
+                    },
+                    KernelValue::Map(_)
+                    | KernelValue::NamedVariant { .. }
+                    | KernelValue::Named { .. }
+                    | KernelValue::Bool(_)
+                    | KernelValue::U64(_)
+                    | KernelValue::None => {
+                        return Err(self.eval_error(
+                            transition_name,
+                            "Count expects seq, set, or string".to_string(),
+                        ));
+                    }
+                };
+                Ok(KernelValue::U64(count as u64))
+            }
             Expr::Head(inner) => {
                 let inner = self.eval_expr(state, bindings, inner, transition_name)?;
                 let seq = inner

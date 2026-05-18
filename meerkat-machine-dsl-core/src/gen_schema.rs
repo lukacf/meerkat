@@ -396,6 +396,14 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
             let inner_e = gen_schema_expr(inner);
             quote! { Expr::Len(Box::new(#inner_e)) }
         }
+        ExprDef::Count { collection, value } => {
+            let collection_e = gen_schema_expr(collection);
+            let value_e = gen_schema_expr(value);
+            quote! { Expr::Count {
+                collection: Box::new(#collection_e),
+                value: Box::new(#value_e),
+            } }
+        }
         ExprDef::MapGet { map, key } => {
             let map_e = gen_schema_expr(map);
             let key_e = gen_schema_expr(key);
@@ -1010,6 +1018,7 @@ fn references_phase_field(expr: &ExprDef, phase_field_name: &str) -> bool {
                 || references_phase_field(r, phase_field_name)
         }
         ExprDef::Contains { collection, value }
+        | ExprDef::Count { collection, value }
         | ExprDef::MapContainsKey {
             map: collection,
             key: value,

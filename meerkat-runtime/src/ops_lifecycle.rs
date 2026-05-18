@@ -5,17 +5,16 @@
 //! `op_peer_ready`, `op_progress_counts`, `active_op_count`, `wait_active`,
 //! `wait_operation_ids`). This shell layer owns pure mechanics: watcher
 //! channels, timestamps, peer handles, snapshot assembly, FIFO eviction
-//! bookkeeping, the completion feed buffer, and concurrency-limit / duplicate
-//! / peer-expectation admission checks run BEFORE the DSL apply.
+//! bookkeeping, the completion feed buffer, and typed delivery of generated
+//! admission/rejection feedback.
 //!
 //! Per-transition legality ("is `CompleteOp` legal on a `Provisioning` op?")
 //! is NOT owned by the shell — it lives in the DSL's `from_status_valid`
 //! guards on each op-lifecycle transition. The shell's only job on a
-//! `GuardRejected` rejection is to surface the pre-read status back to the
-//! caller as [`OpsLifecycleError::InvalidTransition`]; see
-//! [`classify_op_rejection`].
+//! `GuardRejected` rejection is to ask the generated rejection resolver for
+//! the public result class.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -414,10 +413,9 @@ impl ShellState {
     /// Apply a DSL input, returning the raw kernel-level rejection so callers
     /// can distinguish `GuardRejected` (a legitimate legality violation, e.g.,
     /// `complete_operation` on a `Provisioning` op) from
-    /// `NoMatchingTransition` (a shell/DSL desync). Every op-lifecycle entry
-    /// point (complete/fail/abort/cancel/start/retire/terminate/progress)
-    /// uses this form and synthesises [`OpsLifecycleError::InvalidTransition`]
-    /// on `GuardRejected`.
+    /// `NoMatchingTransition` (a shell/DSL desync). Op-lifecycle entry points
+    /// feed guard rejections into generated rejection feedback before surfacing
+    /// public result classes.
     fn dsl_apply_raw(
         &mut self,
         input: mm_dsl::MeerkatMachineInput,
@@ -879,8 +877,10 @@ impl ShellState {
         &mut self,
         wait_request_id: &WaitRequestId,
         operation_ids: &[OperationId],
-        dsl_ids: &std::collections::BTreeSet<String>,
-        dsl_id_tokens: &std::collections::BTreeSet<mm_dsl::OperationId>,
+        dsl_ids: &BTreeSet<String>,
+        dsl_id_tokens: &BTreeSet<mm_dsl::OperationId>,
+        operation_token_by_id: &BTreeMap<String, mm_dsl::OperationId>,
+        operation_id_by_token: &BTreeMap<mm_dsl::OperationId, String>,
     ) -> Result<(), OpsLifecycleError> {
         let duplicate = Self::duplicate_wait_operation_id(operation_ids)
             .map(|operation_id| mm_dsl::OperationId::from_domain(&operation_id).0);
@@ -898,6 +898,8 @@ impl ShellState {
                 operation_id_sequence: dsl_id_sequence,
                 operation_ids: dsl_ids.clone(),
                 operation_id_tokens: dsl_id_tokens.clone(),
+                operation_token_by_id: operation_token_by_id.clone(),
+                operation_id_by_token: operation_id_by_token.clone(),
                 duplicate_operation_id: duplicate,
                 not_found_operation_id: not_found,
             },
@@ -946,15 +948,26 @@ impl ShellState {
         wait_request_id: &WaitRequestId,
         operation_ids: &[OperationId],
     ) -> Result<WaitAllAuthorityPlan, OpsLifecycleError> {
-        let dsl_ids: std::collections::BTreeSet<String> = operation_ids
-            .iter()
-            .map(|id| mm_dsl::OperationId::from_domain(id).0)
-            .collect();
-        let dsl_id_tokens: std::collections::BTreeSet<mm_dsl::OperationId> = operation_ids
-            .iter()
-            .map(mm_dsl::OperationId::from_domain)
-            .collect();
-        self.resolve_wait_all_admission(wait_request_id, operation_ids, &dsl_ids, &dsl_id_tokens)?;
+        let mut dsl_ids = BTreeSet::new();
+        let mut dsl_id_tokens = BTreeSet::new();
+        let mut operation_token_by_id = BTreeMap::new();
+        let mut operation_id_by_token = BTreeMap::new();
+        for id in operation_ids {
+            let token = mm_dsl::OperationId::from_domain(id);
+            let raw_id = token.0.clone();
+            dsl_ids.insert(raw_id.clone());
+            dsl_id_tokens.insert(token.clone());
+            operation_token_by_id.insert(raw_id.clone(), token.clone());
+            operation_id_by_token.insert(token, raw_id);
+        }
+        self.resolve_wait_all_admission(
+            wait_request_id,
+            operation_ids,
+            &dsl_ids,
+            &dsl_id_tokens,
+            &operation_token_by_id,
+            &operation_id_by_token,
+        )?;
         self.dsl_apply(
             mm_dsl::MeerkatMachineInput::RequestWaitAll {
                 wait_request_id: mm_dsl::WaitRequestId::from_domain(wait_request_id),
@@ -964,6 +977,8 @@ impl ShellState {
                     .collect(),
                 operation_ids: dsl_ids,
                 operation_id_tokens: dsl_id_tokens,
+                operation_token_by_id,
+                operation_id_by_token,
             },
             "RequestWaitAll",
         )?;
@@ -1598,85 +1613,207 @@ impl Drop for WaitAllFuture<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// Shell → DSL error classification
+// Generated op lifecycle result-class feedback
 // ---------------------------------------------------------------------------
-//
-// Transition legality (which "from" statuses each op-lifecycle transition is
-// legal from) is owned by the MeerkatMachine DSL's `from_status_valid` guards.
-// The shell's only job when a DSL transition is rejected is to surface the
-// pre-read status back to the caller as [`OpsLifecycleError::InvalidTransition`].
-//
-// Each op-lifecycle entry point follows the same shape:
-//   1. Pre-read `status(id)` under the write lock. `None` → `NotFound`.
-//   2. Fire the DSL input via `dsl_apply_raw`.
-//   3. On `GuardRejected`, synthesise `InvalidTransition { status, action }`.
-//   4. On `NoMatchingTransition`, surface as `Internal` (genuine desync).
-//
-// The `action` label is a short, human-readable name of the shell entry point
-// — matches the names formerly passed to the deleted `require_status`.
 
-/// Classify a kernel rejection from an op-lifecycle DSL apply.
-///
-/// `GuardRejected` → `InvalidTransition { id, status, action }`. The pre-read
-/// `status` and the DSL's guard observation come from the same canonical map
-/// under a single write lock, so they cannot diverge.
-/// `NoMatchingTransition` → `Internal` (genuine shell/DSL desync).
-fn classify_op_rejection(
+fn op_lifecycle_action_label(action: mm_dsl::OpLifecycleActionKind) -> &'static str {
+    match action {
+        mm_dsl::OpLifecycleActionKind::Start => "provisioning_succeeded",
+        mm_dsl::OpLifecycleActionKind::Fail => "fail_operation",
+        mm_dsl::OpLifecycleActionKind::PeerReady => "peer_ready",
+        mm_dsl::OpLifecycleActionKind::ProgressReported => "report_progress",
+        mm_dsl::OpLifecycleActionKind::Complete => "complete_operation",
+        mm_dsl::OpLifecycleActionKind::Abort => "abort_provisioning",
+        mm_dsl::OpLifecycleActionKind::Cancel => "cancel_operation",
+        mm_dsl::OpLifecycleActionKind::RetireRequested => "request_retire",
+        mm_dsl::OpLifecycleActionKind::RetireCompleted => "mark_retired",
+        mm_dsl::OpLifecycleActionKind::Terminate => "terminate_owner",
+    }
+}
+
+fn op_lifecycle_rejection_error_from_effects(
+    id: &OperationId,
+    requested_action: mm_dsl::OpLifecycleActionKind,
+    effects: &[mm_dsl::MeerkatMachineEffect],
+) -> Result<OpsLifecycleError, OpsLifecycleError> {
+    let expected_id = mm_dsl::OperationId::from_domain(id).0;
+    let mut rejection = None;
+    for effect in effects {
+        let mm_dsl::MeerkatMachineEffect::OpLifecycleTransitionRejected {
+            operation_id,
+            action,
+            reason,
+            status,
+        } = effect
+        else {
+            continue;
+        };
+        if rejection.is_some() {
+            return Err(OpsLifecycleError::Internal(
+                "generated op lifecycle authority emitted multiple rejection results".into(),
+            ));
+        }
+        if operation_id != &expected_id || *action != requested_action {
+            return Err(OpsLifecycleError::Internal(format!(
+                "generated op lifecycle authority resolved {operation_id}/{action:?} while shell requested {expected_id}/{requested_action:?}"
+            )));
+        }
+        let error = match reason {
+            mm_dsl::OpLifecycleRejectReasonKind::OperationNotFound => {
+                if status.is_some() {
+                    return Err(OpsLifecycleError::Internal(
+                        "generated op lifecycle authority emitted not-found with status".into(),
+                    ));
+                }
+                OpsLifecycleError::NotFound(id.clone())
+            }
+            mm_dsl::OpLifecycleRejectReasonKind::InvalidTransition => {
+                let status = status.ok_or_else(|| {
+                    OpsLifecycleError::Internal(
+                        "generated op lifecycle authority emitted invalid-transition without status"
+                            .into(),
+                    )
+                })?;
+                OpsLifecycleError::InvalidTransition {
+                    id: id.clone(),
+                    status: OperationStatus::from(status),
+                    action: op_lifecycle_action_label(requested_action),
+                }
+            }
+            mm_dsl::OpLifecycleRejectReasonKind::PeerNotExpected => {
+                if status.is_none() {
+                    return Err(OpsLifecycleError::Internal(
+                        "generated op lifecycle authority emitted peer-not-expected without status"
+                            .into(),
+                    ));
+                }
+                OpsLifecycleError::PeerNotExpected(id.clone())
+            }
+            mm_dsl::OpLifecycleRejectReasonKind::AlreadyPeerReady => {
+                if status.is_none() {
+                    return Err(OpsLifecycleError::Internal(
+                        "generated op lifecycle authority emitted already-peer-ready without status"
+                            .into(),
+                    ));
+                }
+                OpsLifecycleError::AlreadyPeerReady(id.clone())
+            }
+        };
+        rejection = Some(error);
+    }
+    rejection.ok_or_else(|| {
+        OpsLifecycleError::Internal(
+            "generated op lifecycle authority emitted no rejection result".into(),
+        )
+    })
+}
+
+fn classify_generated_op_rejection(
+    state: &mut ShellState,
     err: mm_dsl::MeerkatMachineTransitionError,
     id: &OperationId,
-    status: OperationStatus,
-    action: &'static str,
+    action: mm_dsl::OpLifecycleActionKind,
 ) -> OpsLifecycleError {
     match err {
         mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. } => {
-            OpsLifecycleError::InvalidTransition {
-                id: id.clone(),
-                status,
-                action,
+            match state.dsl_apply_with_effects(
+                mm_dsl::MeerkatMachineInput::ResolveOpLifecycleTransitionRejection {
+                    operation_id: mm_dsl::OperationId::from_domain(id).0,
+                    action,
+                },
+                "ResolveOpLifecycleTransitionRejection",
+            ) {
+                Ok(effects) => op_lifecycle_rejection_error_from_effects(id, action, &effects)
+                    .unwrap_or_else(|err| err),
+                Err(err) => err,
             }
         }
         other => OpsLifecycleError::Internal(format!(
-            "DSL rejected ops transition ({action}): {other:?}"
+            "DSL rejected ops transition ({}): {other:?}",
+            op_lifecycle_action_label(action)
         )),
     }
 }
 
-/// Classify a `PeerReadyOp` DSL rejection back into the public error surface.
-///
-/// `PeerReadyOp`'s DSL guards layer three distinct rejections onto a single
-/// `GuardRejected` variant. The shell distinguishes them by re-reading the
-/// canonical DSL state under the same write lock that observed the guard
-/// failure — so the classification cannot race with a concurrent mutation.
-///
-/// Priority mirrors the declared guard order in the DSL transition:
-/// 1. `kind_is_mob_member_child` → `PeerNotExpected`
-/// 2. `not_already_peer_ready`   → `AlreadyPeerReady`
-/// 3. `from_status_valid`        → `InvalidTransition`
-fn classify_peer_ready_rejection(
-    state: &ShellState,
-    err: mm_dsl::MeerkatMachineTransitionError,
+fn apply_op_transition(
+    state: &mut ShellState,
     id: &OperationId,
-    status: OperationStatus,
-) -> OpsLifecycleError {
-    match err {
-        mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. } => {
-            let kind = state.kind(id);
-            if kind != Some(OperationKind::MobMemberChild) {
-                return OpsLifecycleError::PeerNotExpected(id.clone());
-            }
-            if state.peer_ready(id).unwrap_or(false) {
-                return OpsLifecycleError::AlreadyPeerReady(id.clone());
-            }
-            OpsLifecycleError::InvalidTransition {
-                id: id.clone(),
-                status,
-                action: "peer_ready",
-            }
+    input: mm_dsl::MeerkatMachineInput,
+    action: mm_dsl::OpLifecycleActionKind,
+) -> Result<(), OpsLifecycleError> {
+    state
+        .dsl_apply_raw(input)
+        .map_err(|err| classify_generated_op_rejection(state, err, id, action))
+}
+
+fn op_registration_error_from_effects(
+    id: &OperationId,
+    effects: &[mm_dsl::MeerkatMachineEffect],
+) -> Result<Option<OpsLifecycleError>, OpsLifecycleError> {
+    let expected_id = mm_dsl::OperationId::from_domain(id).0;
+    let mut admission = None;
+    for effect in effects {
+        let mm_dsl::MeerkatMachineEffect::OpRegistrationAdmissionResolved {
+            operation_id,
+            result,
+            reject_reason,
+            max_concurrent_limit,
+            active_op_count,
+        } = effect
+        else {
+            continue;
+        };
+        if admission.is_some() {
+            return Err(OpsLifecycleError::Internal(
+                "generated op registration authority emitted multiple admission results".into(),
+            ));
         }
-        other => OpsLifecycleError::Internal(format!(
-            "DSL rejected ops transition (peer_ready): {other:?}"
-        )),
+        if operation_id != &expected_id {
+            return Err(OpsLifecycleError::Internal(format!(
+                "generated op registration authority resolved {operation_id} while shell requested {expected_id}"
+            )));
+        }
+        admission = Some(match result {
+            mm_dsl::OpRegistrationAdmissionResultKind::Accept => {
+                if reject_reason.is_some() {
+                    return Err(OpsLifecycleError::Internal(
+                        "generated op registration authority accepted with rejection reason".into(),
+                    ));
+                }
+                None
+            }
+            mm_dsl::OpRegistrationAdmissionResultKind::Reject => {
+                let reason = reject_reason.ok_or_else(|| {
+                    OpsLifecycleError::Internal(
+                        "generated op registration authority rejected without reason".into(),
+                    )
+                })?;
+                let error = match reason {
+                    mm_dsl::OpRegistrationRejectReasonKind::AlreadyRegistered => {
+                        OpsLifecycleError::AlreadyRegistered(id.clone())
+                    }
+                    mm_dsl::OpRegistrationRejectReasonKind::MaxConcurrentExceeded => {
+                        let limit = max_concurrent_limit.ok_or_else(|| {
+                            OpsLifecycleError::Internal(
+                                "generated op registration authority rejected capacity without limit"
+                                    .into(),
+                            )
+                        })?;
+                        OpsLifecycleError::MaxConcurrentExceeded {
+                            limit: limit as usize,
+                            active: *active_op_count as usize,
+                        }
+                    }
+                };
+                Some(error)
+            }
+        });
     }
+    admission.ok_or_else(|| {
+        OpsLifecycleError::Internal(
+            "generated op registration authority emitted no admission result".into(),
+        )
+    })
 }
 
 impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
@@ -1684,29 +1821,19 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
         let operation_id = spec.id.clone();
         let kind = spec.kind;
+        let max_concurrent = state.max_concurrent.map(|limit| limit as u64);
 
-        // Pre-check: duplicate.
-        if state.contains(&operation_id) {
-            return Err(OpsLifecycleError::AlreadyRegistered(operation_id));
-        }
-        // Pre-check: concurrency limit.
-        if let Some(limit) = state.max_concurrent
-            && state.active_count() >= limit
-        {
-            return Err(OpsLifecycleError::MaxConcurrentExceeded {
-                limit,
-                active: state.active_count(),
-            });
-        }
-
-        // DSL apply.
-        state.dsl_apply(
+        let effects = state.dsl_apply_with_effects(
             mm_dsl::MeerkatMachineInput::RegisterOp {
                 operation_id: mm_dsl::OperationId::from_domain(&operation_id).0,
                 kind: mm_dsl::OperationKind::from_domain(&kind),
+                max_concurrent,
             },
             "RegisterOp",
         )?;
+        if let Some(error) = op_registration_error_from_effects(&operation_id, &effects)? {
+            return Err(error);
+        }
 
         // Insert shell record.
         state.records.insert(operation_id, ShellRecord::new(spec));
@@ -1716,20 +1843,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn provisioning_succeeded(&self, id: &OperationId) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::StartOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-        }) {
-            return Err(classify_op_rejection(
-                err,
-                id,
-                status,
-                "provisioning_succeeded",
-            ));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::StartOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            mm_dsl::OpLifecycleActionKind::Start,
+        )?;
 
         // Shell concern: record the started timestamp.
         if let Some(shell) = state.records.get_mut(id) {
@@ -1745,20 +1866,19 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::FailOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_kind,
-            payload: outcome_payload,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "fail_operation"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::FailOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: outcome_kind,
+                payload: outcome_payload,
+            },
+            mm_dsl::OpLifecycleActionKind::Fail,
+        )?;
 
         state.finalize_terminal(id)?;
         state.maybe_persist()?;
@@ -1772,19 +1892,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
-        // The kind / not-already-peer-ready / status decisions all live in
-        // the DSL's `PeerReadyOp` guards. The shell fires unconditionally
-        // and classifies a guard rejection by re-reading the state under
-        // the same write lock (so no race with the DSL's guard evaluation).
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::PeerReadyOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-        }) {
-            return Err(classify_peer_ready_rejection(&state, err, id, status));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::PeerReadyOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            mm_dsl::OpLifecycleActionKind::PeerReady,
+        )?;
 
         // Shell concern: store the peer handle.
         if let Some(shell) = state.records.get_mut(id) {
@@ -1822,15 +1937,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::ProgressReportedOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "report_progress"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::ProgressReportedOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            mm_dsl::OpLifecycleActionKind::ProgressReported,
+        )?;
         Ok(())
     }
 
@@ -1841,20 +1955,19 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
         let terminal_outcome = OperationTerminalOutcome::Completed(result);
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::CompleteOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_kind,
-            payload: outcome_payload,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "complete_operation"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::CompleteOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: outcome_kind,
+                payload: outcome_payload,
+            },
+            mm_dsl::OpLifecycleActionKind::Complete,
+        )?;
 
         state.finalize_terminal(id)?;
         state.maybe_persist()?;
@@ -1864,20 +1977,19 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn fail_operation(&self, id: &OperationId, error: String) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::FailOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_kind,
-            payload: outcome_payload,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "fail_operation"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::FailOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: outcome_kind,
+                payload: outcome_payload,
+            },
+            mm_dsl::OpLifecycleActionKind::Fail,
+        )?;
 
         state.finalize_terminal(id)?;
         state.maybe_persist()?;
@@ -1891,20 +2003,19 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
         let terminal_outcome = OperationTerminalOutcome::Aborted { reason };
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::AbortOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_kind,
-            payload: outcome_payload,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "abort_provisioning"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::AbortOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: outcome_kind,
+                payload: outcome_payload,
+            },
+            mm_dsl::OpLifecycleActionKind::Abort,
+        )?;
 
         state.finalize_terminal(id)?;
         state.maybe_persist()?;
@@ -1918,20 +2029,19 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
         let terminal_outcome = OperationTerminalOutcome::Cancelled { reason };
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::CancelOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_kind,
-            payload: outcome_payload,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "cancel_operation"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::CancelOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: outcome_kind,
+                payload: outcome_payload,
+            },
+            mm_dsl::OpLifecycleActionKind::Cancel,
+        )?;
 
         state.finalize_terminal(id)?;
         state.maybe_persist()?;
@@ -1941,35 +2051,33 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn request_retire(&self, id: &OperationId) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::RetireRequestedOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "request_retire"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::RetireRequestedOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            mm_dsl::OpLifecycleActionKind::RetireRequested,
+        )?;
         Ok(())
     }
 
     fn mark_retired(&self, id: &OperationId) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
         let terminal_outcome = OperationTerminalOutcome::Retired;
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::RetireCompletedOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_kind,
-            payload: outcome_payload,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "mark_retired"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::RetireCompletedOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: outcome_kind,
+                payload: outcome_payload,
+            },
+            mm_dsl::OpLifecycleActionKind::RetireCompleted,
+        )?;
 
         state.finalize_terminal(id)?;
         state.maybe_persist()?;
@@ -2000,24 +2108,22 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
         let to_terminate = state.owner_termination_targets();
 
-        for (op_id, status) in &to_terminate {
+        for (op_id, _status) in &to_terminate {
             let terminal_outcome = OperationTerminalOutcome::Terminated {
                 reason: reason.clone(),
             };
             let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-            if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::TerminateOp {
-                operation_id: mm_dsl::OperationId::from_domain(op_id).0,
-                outcome: outcome_kind,
-                payload: outcome_payload,
-            }) {
-                return Err(classify_op_rejection(
-                    err,
-                    op_id,
-                    *status,
-                    "terminate_owner",
-                ));
-            }
+            apply_op_transition(
+                &mut state,
+                op_id,
+                mm_dsl::MeerkatMachineInput::TerminateOp {
+                    operation_id: mm_dsl::OperationId::from_domain(op_id).0,
+                    outcome: outcome_kind,
+                    payload: outcome_payload,
+                },
+                mm_dsl::OpLifecycleActionKind::Terminate,
+            )?;
 
             state.finalize_terminal(op_id)?;
         }
@@ -2199,6 +2305,49 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(OpsLifecycleError::PeerNotExpected(_))));
+    }
+
+    #[test]
+    fn duplicate_registration_rejection_is_generated() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("duplicate");
+        let op_id = spec.id.clone();
+
+        registry.register_operation(spec.clone()).unwrap();
+        let result = registry.register_operation(spec);
+
+        assert!(matches!(
+            result,
+            Err(OpsLifecycleError::AlreadyRegistered(id)) if id == op_id
+        ));
+    }
+
+    #[test]
+    fn invalid_transition_rejection_is_generated() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("invalid-transition");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+
+        let result = registry.complete_operation(
+            &op_id,
+            OperationResult {
+                id: op_id.clone(),
+                content: "too-early".into(),
+                is_error: false,
+                duration_ms: 1,
+                tokens_used: 0,
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(OpsLifecycleError::InvalidTransition {
+                id,
+                status: OperationStatus::Provisioning,
+                action: "complete_operation",
+            }) if id == op_id
+        ));
     }
 
     #[tokio::test]

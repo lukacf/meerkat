@@ -271,6 +271,10 @@ pub enum ExprDef {
         key: Box<ExprDef>,
     },
     Len(Box<ExprDef>),
+    Count {
+        collection: Box<ExprDef>,
+        value: Box<ExprDef>,
+    },
     MapGet {
         map: Box<ExprDef>,
         key: Box<ExprDef>,

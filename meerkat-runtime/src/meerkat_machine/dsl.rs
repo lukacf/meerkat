@@ -1893,6 +1893,44 @@ pub enum OperationTerminalOutcomeKind {
     Terminated,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpRegistrationAdmissionResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpRegistrationRejectReasonKind {
+    #[default]
+    AlreadyRegistered,
+    MaxConcurrentExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpLifecycleActionKind {
+    #[default]
+    Start,
+    Fail,
+    PeerReady,
+    ProgressReported,
+    Complete,
+    Abort,
+    Cancel,
+    RetireRequested,
+    RetireCompleted,
+    Terminate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpLifecycleRejectReasonKind {
+    #[default]
+    OperationNotFound,
+    InvalidTransition,
+    PeerNotExpected,
+    AlreadyPeerReady,
+}
+
 /// Typed input-abandonment reason. Closed mirror of the discriminant set of
 /// [`crate::input_state::InputAbandonReason`] — replaces the former
 /// `format!("{reason:?}")` Debug round-trip in the DSL's

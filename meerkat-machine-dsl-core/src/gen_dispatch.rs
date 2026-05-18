@@ -415,6 +415,11 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
             let e = gen_expr(inner, prefix);
             quote! { #e.len() }
         }
+        ExprDef::Count { collection, value } => {
+            let collection = gen_expr(collection, prefix);
+            let value = gen_expr(value, prefix);
+            quote! { #collection.iter().filter(|candidate| *candidate == &#value).count() as u64 }
+        }
         ExprDef::MapGet { map, key } => {
             let m = gen_expr(map, prefix);
             let k = gen_expr(key, prefix);

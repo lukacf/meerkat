@@ -2077,6 +2077,252 @@ impl std::fmt::Display for MobId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OpLifecycleActionKind {
+    #[default]
+    #[serde(rename = "Start")]
+    Start,
+    #[serde(rename = "Fail")]
+    Fail,
+    #[serde(rename = "PeerReady")]
+    PeerReady,
+    #[serde(rename = "ProgressReported")]
+    ProgressReported,
+    #[serde(rename = "Complete")]
+    Complete,
+    #[serde(rename = "Abort")]
+    Abort,
+    #[serde(rename = "Cancel")]
+    Cancel,
+    #[serde(rename = "RetireRequested")]
+    RetireRequested,
+    #[serde(rename = "RetireCompleted")]
+    RetireCompleted,
+    #[serde(rename = "Terminate")]
+    Terminate,
+}
+impl OpLifecycleActionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Start => "Start",
+            Self::Fail => "Fail",
+            Self::PeerReady => "PeerReady",
+            Self::ProgressReported => "ProgressReported",
+            Self::Complete => "Complete",
+            Self::Abort => "Abort",
+            Self::Cancel => "Cancel",
+            Self::RetireRequested => "RetireRequested",
+            Self::RetireCompleted => "RetireCompleted",
+            Self::Terminate => "Terminate",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OpLifecycleActionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Start" => Ok(Self::Start),
+            "Fail" => Ok(Self::Fail),
+            "PeerReady" => Ok(Self::PeerReady),
+            "ProgressReported" => Ok(Self::ProgressReported),
+            "Complete" => Ok(Self::Complete),
+            "Abort" => Ok(Self::Abort),
+            "Cancel" => Ok(Self::Cancel),
+            "RetireRequested" => Ok(Self::RetireRequested),
+            "RetireCompleted" => Ok(Self::RetireCompleted),
+            "Terminate" => Ok(Self::Terminate),
+            other => Err(format!("invalid OpLifecycleActionKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OpLifecycleActionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OpLifecycleActionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OpLifecycleRejectReasonKind {
+    #[default]
+    #[serde(rename = "OperationNotFound")]
+    OperationNotFound,
+    #[serde(rename = "InvalidTransition")]
+    InvalidTransition,
+    #[serde(rename = "PeerNotExpected")]
+    PeerNotExpected,
+    #[serde(rename = "AlreadyPeerReady")]
+    AlreadyPeerReady,
+}
+impl OpLifecycleRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OperationNotFound => "OperationNotFound",
+            Self::InvalidTransition => "InvalidTransition",
+            Self::PeerNotExpected => "PeerNotExpected",
+            Self::AlreadyPeerReady => "AlreadyPeerReady",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OpLifecycleRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "OperationNotFound" => Ok(Self::OperationNotFound),
+            "InvalidTransition" => Ok(Self::InvalidTransition),
+            "PeerNotExpected" => Ok(Self::PeerNotExpected),
+            "AlreadyPeerReady" => Ok(Self::AlreadyPeerReady),
+            other => Err(format!(
+                "invalid OpLifecycleRejectReasonKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OpLifecycleRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OpLifecycleRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OpRegistrationAdmissionResultKind {
+    #[default]
+    #[serde(rename = "Accept")]
+    Accept,
+    #[serde(rename = "Reject")]
+    Reject,
+}
+impl OpRegistrationAdmissionResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accept => "Accept",
+            Self::Reject => "Reject",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OpRegistrationAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accept" => Ok(Self::Accept),
+            "Reject" => Ok(Self::Reject),
+            other => Err(format!(
+                "invalid OpRegistrationAdmissionResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OpRegistrationAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OpRegistrationAdmissionResultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OpRegistrationRejectReasonKind {
+    #[default]
+    #[serde(rename = "AlreadyRegistered")]
+    AlreadyRegistered,
+    #[serde(rename = "MaxConcurrentExceeded")]
+    MaxConcurrentExceeded,
+}
+impl OpRegistrationRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AlreadyRegistered => "AlreadyRegistered",
+            Self::MaxConcurrentExceeded => "MaxConcurrentExceeded",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OpRegistrationRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AlreadyRegistered" => Ok(Self::AlreadyRegistered),
+            "MaxConcurrentExceeded" => Ok(Self::MaxConcurrentExceeded),
+            other => Err(format!(
+                "invalid OpRegistrationRejectReasonKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OpRegistrationRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OpRegistrationRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -5872,6 +6118,7 @@ pub mod inputs {
     pub struct RegisterOp {
         pub operation_id: String,
         pub kind: OperationKind,
+        pub max_concurrent: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StartOp {
@@ -5926,6 +6173,11 @@ pub mod inputs {
         pub payload: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveOpLifecycleTransitionRejection {
+        pub operation_id: String,
+        pub action: OpLifecycleActionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverOpRecord {
         pub operation_id: String,
         pub status: OperationStatus,
@@ -5954,6 +6206,8 @@ pub mod inputs {
         pub operation_id_sequence: Vec<String>,
         pub operation_ids: std::collections::BTreeSet<String>,
         pub operation_id_tokens: std::collections::BTreeSet<OperationId>,
+        pub operation_token_by_id: std::collections::BTreeMap<String, OperationId>,
+        pub operation_id_by_token: std::collections::BTreeMap<OperationId, String>,
         pub duplicate_operation_id: Option<String>,
         pub not_found_operation_id: Option<String>,
     }
@@ -5963,6 +6217,8 @@ pub mod inputs {
         pub operation_id_sequence: Vec<String>,
         pub operation_ids: std::collections::BTreeSet<String>,
         pub operation_id_tokens: std::collections::BTreeSet<OperationId>,
+        pub operation_token_by_id: std::collections::BTreeMap<String, OperationId>,
+        pub operation_id_by_token: std::collections::BTreeMap<OperationId, String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SatisfyWaitAll {
@@ -6329,6 +6585,7 @@ pub enum Input {
     RetireRequestedOp(inputs::RetireRequestedOp),
     RetireCompletedOp(inputs::RetireCompletedOp),
     TerminateOp(inputs::TerminateOp),
+    ResolveOpLifecycleTransitionRejection(inputs::ResolveOpLifecycleTransitionRejection),
     RecoverOpRecord(inputs::RecoverOpRecord),
     RecoverOpsCompletionCursor(inputs::RecoverOpsCompletionCursor),
     EvictCompletedOp(inputs::EvictCompletedOp),
@@ -6514,6 +6771,9 @@ impl Input {
             Self::RetireRequestedOp(_) => InputKind::RetireRequestedOp,
             Self::RetireCompletedOp(_) => InputKind::RetireCompletedOp,
             Self::TerminateOp(_) => InputKind::TerminateOp,
+            Self::ResolveOpLifecycleTransitionRejection(_) => {
+                InputKind::ResolveOpLifecycleTransitionRejection
+            }
             Self::RecoverOpRecord(_) => InputKind::RecoverOpRecord,
             Self::RecoverOpsCompletionCursor(_) => InputKind::RecoverOpsCompletionCursor,
             Self::EvictCompletedOp(_) => InputKind::EvictCompletedOp,
@@ -6698,6 +6958,7 @@ pub enum InputKind {
     RetireRequestedOp,
     RetireCompletedOp,
     TerminateOp,
+    ResolveOpLifecycleTransitionRejection,
     RecoverOpRecord,
     RecoverOpsCompletionCursor,
     EvictCompletedOp,
@@ -7037,6 +7298,21 @@ pub mod effects {
         pub kind: OperationKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OpRegistrationAdmissionResolved {
+        pub operation_id: String,
+        pub result: OpRegistrationAdmissionResultKind,
+        pub reject_reason: Option<OpRegistrationRejectReasonKind>,
+        pub max_concurrent_limit: Option<u64>,
+        pub active_op_count: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OpLifecycleTransitionRejected {
+        pub operation_id: String,
+        pub action: OpLifecycleActionKind,
+        pub reason: OpLifecycleRejectReasonKind,
+        pub status: Option<OperationStatus>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WaitAllAdmissionResolved {
         pub wait_request_id: WaitRequestId,
         pub result: WaitAllAdmissionResultKind,
@@ -7206,6 +7482,8 @@ pub enum Effect {
     RetainTerminalRecord(effects::RetainTerminalRecord),
     EvictCompletedRecord(effects::EvictCompletedRecord),
     CompletionProduced(effects::CompletionProduced),
+    OpRegistrationAdmissionResolved(effects::OpRegistrationAdmissionResolved),
+    OpLifecycleTransitionRejected(effects::OpLifecycleTransitionRejected),
     WaitAllAdmissionResolved(effects::WaitAllAdmissionResolved),
     WaitAllSatisfied(effects::WaitAllSatisfied),
     CollectCompletedResult(effects::CollectCompletedResult),
@@ -7282,6 +7560,8 @@ pub enum EffectKind {
     RetainTerminalRecord,
     EvictCompletedRecord,
     CompletionProduced,
+    OpRegistrationAdmissionResolved,
+    OpLifecycleTransitionRejected,
     WaitAllAdmissionResolved,
     WaitAllSatisfied,
     CollectCompletedResult,
@@ -7823,11 +8103,41 @@ pub enum TransitionId {
     AbandonInputRunning,
     AbandonInputRetired,
     AbandonInputStopped,
-    RegisterOpIdle,
-    RegisterOpAttached,
-    RegisterOpRunning,
-    RegisterOpRetired,
-    RegisterOpStopped,
+    RegisterOpAlreadyRegisteredRejectedIdle,
+    RegisterOpAlreadyRegisteredRejectedAttached,
+    RegisterOpAlreadyRegisteredRejectedRunning,
+    RegisterOpAlreadyRegisteredRejectedRetired,
+    RegisterOpAlreadyRegisteredRejectedStopped,
+    RegisterOpMaxConcurrentRejectedIdle,
+    RegisterOpMaxConcurrentRejectedAttached,
+    RegisterOpMaxConcurrentRejectedRunning,
+    RegisterOpMaxConcurrentRejectedRetired,
+    RegisterOpMaxConcurrentRejectedStopped,
+    RegisterOpAcceptedIdle,
+    RegisterOpAcceptedAttached,
+    RegisterOpAcceptedRunning,
+    RegisterOpAcceptedRetired,
+    RegisterOpAcceptedStopped,
+    ResolveOpLifecycleTransitionNotFoundRejectedIdle,
+    ResolveOpLifecycleTransitionNotFoundRejectedAttached,
+    ResolveOpLifecycleTransitionNotFoundRejectedRunning,
+    ResolveOpLifecycleTransitionNotFoundRejectedRetired,
+    ResolveOpLifecycleTransitionNotFoundRejectedStopped,
+    ResolveOpLifecycleTransitionPeerNotExpectedRejectedIdle,
+    ResolveOpLifecycleTransitionPeerNotExpectedRejectedAttached,
+    ResolveOpLifecycleTransitionPeerNotExpectedRejectedRunning,
+    ResolveOpLifecycleTransitionPeerNotExpectedRejectedRetired,
+    ResolveOpLifecycleTransitionPeerNotExpectedRejectedStopped,
+    ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedIdle,
+    ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedAttached,
+    ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedRunning,
+    ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedRetired,
+    ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedStopped,
+    ResolveOpLifecycleTransitionInvalidRejectedIdle,
+    ResolveOpLifecycleTransitionInvalidRejectedAttached,
+    ResolveOpLifecycleTransitionInvalidRejectedRunning,
+    ResolveOpLifecycleTransitionInvalidRejectedRetired,
+    ResolveOpLifecycleTransitionInvalidRejectedStopped,
     StartOpIdle,
     StartOpAttached,
     StartOpRunning,

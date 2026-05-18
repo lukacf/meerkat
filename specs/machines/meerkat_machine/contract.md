@@ -254,7 +254,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CoalesceInput`(input_id: String, aggregate_id: String)
 - `AbandonInput`(input_id: String, reason: InputAbandonReason, attempt_count: u64)
 - `RecordBoundarySeq`(input_id: String, seq: u64)
-- `RegisterOp`(operation_id: String, kind: OperationKind)
+- `RegisterOp`(operation_id: String, kind: OperationKind, max_concurrent: Option<u64>)
 - `StartOp`(operation_id: String)
 - `CompleteOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
 - `FailOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
@@ -265,12 +265,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetireRequestedOp`(operation_id: String)
 - `RetireCompletedOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
 - `TerminateOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
+- `ResolveOpLifecycleTransitionRejection`(operation_id: String, action: OpLifecycleActionKind)
 - `RecoverOpRecord`(operation_id: String, status: OperationStatus, kind: OperationKind, peer_ready: Bool, progress_count: u64, terminal_outcome: Option<OperationTerminalOutcomeKind>, terminal_payload: Option<String>, completion_sequence: Option<u64>)
 - `RecoverOpsCompletionCursor`(next_completion_seq: u64)
 - `EvictCompletedOp`(operation_id: String)
 - `CollectCompletedOp`(operation_id: String)
-- `ResolveWaitAllAdmission`(wait_request_id: WaitRequestId, operation_id_sequence: Seq<String>, operation_ids: Set<String>, operation_id_tokens: Set<OperationId>, duplicate_operation_id: Option<String>, not_found_operation_id: Option<String>)
-- `RequestWaitAll`(wait_request_id: WaitRequestId, operation_id_sequence: Seq<String>, operation_ids: Set<String>, operation_id_tokens: Set<OperationId>)
+- `ResolveWaitAllAdmission`(wait_request_id: WaitRequestId, operation_id_sequence: Seq<String>, operation_ids: Set<String>, operation_id_tokens: Set<OperationId>, operation_token_by_id: Map<String, OperationId>, operation_id_by_token: Map<OperationId, String>, duplicate_operation_id: Option<String>, not_found_operation_id: Option<String>)
+- `RequestWaitAll`(wait_request_id: WaitRequestId, operation_id_sequence: Seq<String>, operation_ids: Set<String>, operation_id_tokens: Set<OperationId>, operation_token_by_id: Map<String, OperationId>, operation_id_by_token: Map<OperationId, String>)
 - `SatisfyWaitAll`(wait_request_id: WaitRequestId, operation_id_tokens: Set<OperationId>)
 - `CancelWaitAll`
 - `SpawnDrain`(mode: DrainMode)
@@ -397,6 +398,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetainTerminalRecord`(operation_id: String)
 - `EvictCompletedRecord`(operation_id: String)
 - `CompletionProduced`(seq: u64, operation_id: OperationId, kind: OperationKind)
+- `OpRegistrationAdmissionResolved`(operation_id: String, result: OpRegistrationAdmissionResultKind, reject_reason: Option<OpRegistrationRejectReasonKind>, max_concurrent_limit: Option<u64>, active_op_count: u64)
+- `OpLifecycleTransitionRejected`(operation_id: String, action: OpLifecycleActionKind, reason: OpLifecycleRejectReasonKind, status: Option<OperationStatus>)
 - `WaitAllAdmissionResolved`(wait_request_id: WaitRequestId, result: WaitAllAdmissionResultKind, reject_reason: Option<WaitAllRejectReasonKind>, rejected_operation_id: Option<String>)
 - `WaitAllSatisfied`(wait_request_id: WaitRequestId, operation_ids: Set<OperationId>)
 - `CollectCompletedResult`
@@ -424,6 +427,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Helpers
 - `deferred_authority_has_identity`(witness: ToolVisibilityWitness) -> `Bool`
+- `op_lifecycle_action_status_valid`(action: OpLifecycleActionKind, status: OperationStatus) -> `Bool`
+- `wait_operation_token_witness_valid`(operation_ids: Set<String>, operation_id_tokens: Set<OperationId>, operation_token_by_id: Map<String, OperationId>, operation_id_by_token: Map<OperationId, String>) -> `Bool`
 - `deferred_authorities_have_identity`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>) -> `Bool`
 
 ## Invariants
@@ -4698,44 +4703,334 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RecordTerminalOutcome`
 - To: `Stopped`
 
-### `RegisterOpIdle`
+### `RegisterOpAlreadyRegisteredRejectedIdle`
 - From: `Idle`
-- On: `RegisterOp`(operation_id, kind)
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
 - Guards:
-  - `not_already_registered`
-- Emits: `SubmitOpEvent`
+  - `already_registered`
+- Emits: `OpRegistrationAdmissionResolved`
 - To: `Idle`
 
-### `RegisterOpAttached`
+### `RegisterOpAlreadyRegisteredRejectedAttached`
 - From: `Attached`
-- On: `RegisterOp`(operation_id, kind)
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
 - Guards:
-  - `not_already_registered`
-- Emits: `SubmitOpEvent`
+  - `already_registered`
+- Emits: `OpRegistrationAdmissionResolved`
 - To: `Attached`
 
-### `RegisterOpRunning`
+### `RegisterOpAlreadyRegisteredRejectedRunning`
 - From: `Running`
-- On: `RegisterOp`(operation_id, kind)
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
 - Guards:
-  - `not_already_registered`
-- Emits: `SubmitOpEvent`
+  - `already_registered`
+- Emits: `OpRegistrationAdmissionResolved`
 - To: `Running`
 
-### `RegisterOpRetired`
+### `RegisterOpAlreadyRegisteredRejectedRetired`
 - From: `Retired`
-- On: `RegisterOp`(operation_id, kind)
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
 - Guards:
-  - `not_already_registered`
-- Emits: `SubmitOpEvent`
+  - `already_registered`
+- Emits: `OpRegistrationAdmissionResolved`
 - To: `Retired`
 
-### `RegisterOpStopped`
+### `RegisterOpAlreadyRegisteredRejectedStopped`
 - From: `Stopped`
-- On: `RegisterOp`(operation_id, kind)
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
+- Guards:
+  - `already_registered`
+- Emits: `OpRegistrationAdmissionResolved`
+- To: `Stopped`
+
+### `RegisterOpMaxConcurrentRejectedIdle`
+- From: `Idle`
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
 - Guards:
   - `not_already_registered`
-- Emits: `SubmitOpEvent`
+  - `max_concurrent_present`
+  - `max_concurrent_exceeded`
+- Emits: `OpRegistrationAdmissionResolved`
+- To: `Idle`
+
+### `RegisterOpMaxConcurrentRejectedAttached`
+- From: `Attached`
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
+- Guards:
+  - `not_already_registered`
+  - `max_concurrent_present`
+  - `max_concurrent_exceeded`
+- Emits: `OpRegistrationAdmissionResolved`
+- To: `Attached`
+
+### `RegisterOpMaxConcurrentRejectedRunning`
+- From: `Running`
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
+- Guards:
+  - `not_already_registered`
+  - `max_concurrent_present`
+  - `max_concurrent_exceeded`
+- Emits: `OpRegistrationAdmissionResolved`
+- To: `Running`
+
+### `RegisterOpMaxConcurrentRejectedRetired`
+- From: `Retired`
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
+- Guards:
+  - `not_already_registered`
+  - `max_concurrent_present`
+  - `max_concurrent_exceeded`
+- Emits: `OpRegistrationAdmissionResolved`
+- To: `Retired`
+
+### `RegisterOpMaxConcurrentRejectedStopped`
+- From: `Stopped`
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
+- Guards:
+  - `not_already_registered`
+  - `max_concurrent_present`
+  - `max_concurrent_exceeded`
+- Emits: `OpRegistrationAdmissionResolved`
+- To: `Stopped`
+
+### `RegisterOpAcceptedIdle`
+- From: `Idle`
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
+- Guards:
+  - `not_already_registered`
+  - `capacity_available`
+- Emits: `OpRegistrationAdmissionResolved`, `SubmitOpEvent`
+- To: `Idle`
+
+### `RegisterOpAcceptedAttached`
+- From: `Attached`
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
+- Guards:
+  - `not_already_registered`
+  - `capacity_available`
+- Emits: `OpRegistrationAdmissionResolved`, `SubmitOpEvent`
+- To: `Attached`
+
+### `RegisterOpAcceptedRunning`
+- From: `Running`
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
+- Guards:
+  - `not_already_registered`
+  - `capacity_available`
+- Emits: `OpRegistrationAdmissionResolved`, `SubmitOpEvent`
+- To: `Running`
+
+### `RegisterOpAcceptedRetired`
+- From: `Retired`
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
+- Guards:
+  - `not_already_registered`
+  - `capacity_available`
+- Emits: `OpRegistrationAdmissionResolved`, `SubmitOpEvent`
+- To: `Retired`
+
+### `RegisterOpAcceptedStopped`
+- From: `Stopped`
+- On: `RegisterOp`(operation_id, kind, max_concurrent)
+- Guards:
+  - `not_already_registered`
+  - `capacity_available`
+- Emits: `OpRegistrationAdmissionResolved`, `SubmitOpEvent`
+- To: `Stopped`
+
+### `ResolveOpLifecycleTransitionNotFoundRejectedIdle`
+- From: `Idle`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_not_registered`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Idle`
+
+### `ResolveOpLifecycleTransitionNotFoundRejectedAttached`
+- From: `Attached`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_not_registered`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Attached`
+
+### `ResolveOpLifecycleTransitionNotFoundRejectedRunning`
+- From: `Running`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_not_registered`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Running`
+
+### `ResolveOpLifecycleTransitionNotFoundRejectedRetired`
+- From: `Retired`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_not_registered`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Retired`
+
+### `ResolveOpLifecycleTransitionNotFoundRejectedStopped`
+- From: `Stopped`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_not_registered`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Stopped`
+
+### `ResolveOpLifecycleTransitionPeerNotExpectedRejectedIdle`
+- From: `Idle`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `action_peer_ready`
+  - `kind_not_mob_member_child`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Idle`
+
+### `ResolveOpLifecycleTransitionPeerNotExpectedRejectedAttached`
+- From: `Attached`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `action_peer_ready`
+  - `kind_not_mob_member_child`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Attached`
+
+### `ResolveOpLifecycleTransitionPeerNotExpectedRejectedRunning`
+- From: `Running`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `action_peer_ready`
+  - `kind_not_mob_member_child`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Running`
+
+### `ResolveOpLifecycleTransitionPeerNotExpectedRejectedRetired`
+- From: `Retired`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `action_peer_ready`
+  - `kind_not_mob_member_child`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Retired`
+
+### `ResolveOpLifecycleTransitionPeerNotExpectedRejectedStopped`
+- From: `Stopped`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `action_peer_ready`
+  - `kind_not_mob_member_child`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Stopped`
+
+### `ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedIdle`
+- From: `Idle`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `action_peer_ready`
+  - `kind_is_mob_member_child`
+  - `already_peer_ready`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Idle`
+
+### `ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedAttached`
+- From: `Attached`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `action_peer_ready`
+  - `kind_is_mob_member_child`
+  - `already_peer_ready`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Attached`
+
+### `ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedRunning`
+- From: `Running`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `action_peer_ready`
+  - `kind_is_mob_member_child`
+  - `already_peer_ready`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Running`
+
+### `ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedRetired`
+- From: `Retired`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `action_peer_ready`
+  - `kind_is_mob_member_child`
+  - `already_peer_ready`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Retired`
+
+### `ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedStopped`
+- From: `Stopped`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `action_peer_ready`
+  - `kind_is_mob_member_child`
+  - `already_peer_ready`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Stopped`
+
+### `ResolveOpLifecycleTransitionInvalidRejectedIdle`
+- From: `Idle`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `peer_ready_special_rejections_absent`
+  - `from_status_invalid`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Idle`
+
+### `ResolveOpLifecycleTransitionInvalidRejectedAttached`
+- From: `Attached`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `peer_ready_special_rejections_absent`
+  - `from_status_invalid`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Attached`
+
+### `ResolveOpLifecycleTransitionInvalidRejectedRunning`
+- From: `Running`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `peer_ready_special_rejections_absent`
+  - `from_status_invalid`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Running`
+
+### `ResolveOpLifecycleTransitionInvalidRejectedRetired`
+- From: `Retired`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `peer_ready_special_rejections_absent`
+  - `from_status_invalid`
+- Emits: `OpLifecycleTransitionRejected`
+- To: `Retired`
+
+### `ResolveOpLifecycleTransitionInvalidRejectedStopped`
+- From: `Stopped`
+- On: `ResolveOpLifecycleTransitionRejection`(operation_id, action)
+- Guards:
+  - `op_registered`
+  - `peer_ready_special_rejections_absent`
+  - `from_status_invalid`
+- Emits: `OpLifecycleTransitionRejected`
 - To: `Stopped`
 
 ### `StartOpIdle`
@@ -5380,57 +5675,62 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveWaitAllAdmissionDuplicateRejectedIdle`
 - From: `Idle`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `duplicate_observed`
   - `duplicate_witness_present`
   - `duplicate_witness_requested`
+  - `duplicate_witness_repeated`
 - Emits: `WaitAllAdmissionResolved`
 - To: `Idle`
 
 ### `ResolveWaitAllAdmissionDuplicateRejectedAttached`
 - From: `Attached`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `duplicate_observed`
   - `duplicate_witness_present`
   - `duplicate_witness_requested`
+  - `duplicate_witness_repeated`
 - Emits: `WaitAllAdmissionResolved`
 - To: `Attached`
 
 ### `ResolveWaitAllAdmissionDuplicateRejectedRunning`
 - From: `Running`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `duplicate_observed`
   - `duplicate_witness_present`
   - `duplicate_witness_requested`
+  - `duplicate_witness_repeated`
 - Emits: `WaitAllAdmissionResolved`
 - To: `Running`
 
 ### `ResolveWaitAllAdmissionDuplicateRejectedRetired`
 - From: `Retired`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `duplicate_observed`
   - `duplicate_witness_present`
   - `duplicate_witness_requested`
+  - `duplicate_witness_repeated`
 - Emits: `WaitAllAdmissionResolved`
 - To: `Retired`
 
 ### `ResolveWaitAllAdmissionDuplicateRejectedStopped`
 - From: `Stopped`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `duplicate_observed`
   - `duplicate_witness_present`
   - `duplicate_witness_requested`
+  - `duplicate_witness_repeated`
 - Emits: `WaitAllAdmissionResolved`
 - To: `Stopped`
 
 ### `ResolveWaitAllAdmissionActiveRejectedIdle`
 - From: `Idle`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_already_active`
@@ -5439,7 +5739,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveWaitAllAdmissionActiveRejectedAttached`
 - From: `Attached`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_already_active`
@@ -5448,7 +5748,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveWaitAllAdmissionActiveRejectedRunning`
 - From: `Running`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_already_active`
@@ -5457,7 +5757,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveWaitAllAdmissionActiveRejectedRetired`
 - From: `Retired`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_already_active`
@@ -5466,7 +5766,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveWaitAllAdmissionActiveRejectedStopped`
 - From: `Stopped`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_already_active`
@@ -5475,7 +5775,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveWaitAllAdmissionNotFoundRejectedIdle`
 - From: `Idle`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
@@ -5488,7 +5788,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveWaitAllAdmissionNotFoundRejectedAttached`
 - From: `Attached`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
@@ -5501,7 +5801,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveWaitAllAdmissionNotFoundRejectedRunning`
 - From: `Running`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
@@ -5514,7 +5814,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveWaitAllAdmissionNotFoundRejectedRetired`
 - From: `Retired`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
@@ -5527,7 +5827,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveWaitAllAdmissionNotFoundRejectedStopped`
 - From: `Stopped`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
@@ -5540,97 +5840,107 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveWaitAllAdmissionAcceptedIdle`
 - From: `Idle`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
   - `operations_tracked`
+  - `operation_token_witness_valid`
 - Emits: `WaitAllAdmissionResolved`
 - To: `Idle`
 
 ### `ResolveWaitAllAdmissionAcceptedAttached`
 - From: `Attached`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
   - `operations_tracked`
+  - `operation_token_witness_valid`
 - Emits: `WaitAllAdmissionResolved`
 - To: `Attached`
 
 ### `ResolveWaitAllAdmissionAcceptedRunning`
 - From: `Running`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
   - `operations_tracked`
+  - `operation_token_witness_valid`
 - Emits: `WaitAllAdmissionResolved`
 - To: `Running`
 
 ### `ResolveWaitAllAdmissionAcceptedRetired`
 - From: `Retired`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
   - `operations_tracked`
+  - `operation_token_witness_valid`
 - Emits: `WaitAllAdmissionResolved`
 - To: `Retired`
 
 ### `ResolveWaitAllAdmissionAcceptedStopped`
 - From: `Stopped`
-- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token, duplicate_operation_id, not_found_operation_id)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
   - `operations_tracked`
+  - `operation_token_witness_valid`
 - Emits: `WaitAllAdmissionResolved`
 - To: `Stopped`
 
 ### `RequestWaitAllIdle`
 - From: `Idle`
-- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens)
+- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
   - `operations_tracked`
+  - `operation_token_witness_valid`
 - To: `Idle`
 
 ### `RequestWaitAllAttached`
 - From: `Attached`
-- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens)
+- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
   - `operations_tracked`
+  - `operation_token_witness_valid`
 - To: `Attached`
 
 ### `RequestWaitAllRunning`
 - From: `Running`
-- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens)
+- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
   - `operations_tracked`
+  - `operation_token_witness_valid`
 - To: `Running`
 
 ### `RequestWaitAllRetired`
 - From: `Retired`
-- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens)
+- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
   - `operations_tracked`
+  - `operation_token_witness_valid`
 - To: `Retired`
 
 ### `RequestWaitAllStopped`
 - From: `Stopped`
-- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens)
+- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, operation_token_by_id, operation_id_by_token)
 - Guards:
   - `no_duplicate_observed`
   - `wait_inactive`
   - `operations_tracked`
+  - `operation_token_witness_valid`
 - To: `Stopped`
 
 ### `SatisfyWaitAllIdle`
@@ -7329,7 +7639,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, progress reported op, terminate op, notify op watcher, recover op record, recover ops completion cursor, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
+- `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, recover ops completion cursor, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
 - `meerkat/src/meerkat_machine.rs` — MeerkatMachine snapshot/diagnostic facade
 - `meerkat-comms/src/peer_directory_reachability_authority.rs` — peer directory reachability state now owned as a MeerkatMachine-internal region
 
@@ -7341,7 +7651,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `peer_reachability_probe` — resolved peer directory updates and send outcomes mutate Meerkat-owned peer reachability state
 - `session_registration_and_binding` — initialize, recover initializing, register, unregister, reconfigure session identity, prepare bindings, ensure executor, attach session ingress, detach ingress, drain exit, and runtime bound/retired/destroyed notices
 - `input_admission_and_queueing` — ingest and publish event, accept input with or without completion, classify external envelope or plain event, prepare run work, primitive applied conversation or immediate, enter extraction, extraction validation passed, recoverable or fatal failure, budget exhausted, steer accepted, increment attempt count, consume on accept, enqueue classified entry, resolve admission, submit admitted ingress effect, post admission signal, and input or ingress notices
-- `ops_completion_and_waiters` — abort, wait, abort all, request cancellation at boundary, completion produced/resolved, wait all satisfied, collect completed result, recover op record, recover ops completion cursor, evict completed op, collect completed op, submit op event, notify op watcher, reject surface call, retain or evict completed terminal records
+- `ops_completion_and_waiters` — abort, wait, abort all, request cancellation at boundary, completion produced/resolved, wait all satisfied, collect completed result, recover op record, recover ops completion cursor, evict completed op, collect completed op, submit op event, resolve op lifecycle transition rejected feedback, notify op watcher, reject surface call, retain or evict completed terminal records
 - `realtime_connection_projection` — project realtime intent, begin replace detach binding, require reattach, publish signal, reconnect progress, MCP server connect/connected/failed/disconnected/reload, advance session context, interaction stream reserved/attached/completed/expired/closed early, freshness, policy, and binding rotation
 - `product_turn_streaming` — product turn in flight, committed, output started, interrupted, terminal, realtime projection advance/refreshed/reset, client input submitted, mid turn activity, and turn terminated classification
 - `recycle_and_compaction` — recycle from idle or retired, initiate recycle, check compaction, and re-enter ready runtime ownership without preserving stale completed records

@@ -702,6 +702,15 @@ fn parse_postfix_expr(input: ParseStream) -> Result<ExprDef> {
                 let _ = &paren;
                 expr = ExprDef::Len(Box::new(expr));
             }
+            "count" => {
+                let paren;
+                syn::parenthesized!(paren in input);
+                let value = parse_expr(&paren)?;
+                expr = ExprDef::Count {
+                    collection: Box::new(expr),
+                    value: Box::new(value),
+                };
+            }
             "keys" => {
                 let paren;
                 syn::parenthesized!(paren in input);

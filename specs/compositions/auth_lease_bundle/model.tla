@@ -19,6 +19,7 @@ MapDecrement(map, key, amount) == [x \in DOMAIN map \cup {key} |-> IF x = key TH
 MapRemove(map, key) == [x \in DOMAIN map \ {key} |-> map[x]]
 StartsWith(seq, prefix) == /\ Len(prefix) <= Len(seq) /\ SubSeq(seq, 1, Len(prefix)) = prefix
 SeqElements(seq) == {seq[i] : i \in 1..Len(seq)}
+Count(seq, value) == Cardinality({i \in DOMAIN seq : seq[i] = value})
 RECURSIVE SeqRemove(_, _)
 SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THEN Tail(seq) ELSE <<Head(seq)>> \o SeqRemove(Tail(seq), value)
 RECURSIVE SeqRemoveAll(_, _)

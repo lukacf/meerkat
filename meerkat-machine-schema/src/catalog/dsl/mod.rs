@@ -316,6 +316,38 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 "AdmissionIdempotencyResultKind",
                 &["Accept", "Deduplicated"],
             ),
+            NamedTypeBinding::string_enum(
+                "OpRegistrationAdmissionResultKind",
+                &["Accept", "Reject"],
+            ),
+            NamedTypeBinding::string_enum(
+                "OpRegistrationRejectReasonKind",
+                &["AlreadyRegistered", "MaxConcurrentExceeded"],
+            ),
+            NamedTypeBinding::string_enum(
+                "OpLifecycleActionKind",
+                &[
+                    "Start",
+                    "Fail",
+                    "PeerReady",
+                    "ProgressReported",
+                    "Complete",
+                    "Abort",
+                    "Cancel",
+                    "RetireRequested",
+                    "RetireCompleted",
+                    "Terminate",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "OpLifecycleRejectReasonKind",
+                &[
+                    "OperationNotFound",
+                    "InvalidTransition",
+                    "PeerNotExpected",
+                    "AlreadyPeerReady",
+                ],
+            ),
             NamedTypeBinding::string_enum("WaitAllAdmissionResultKind", &["Accept", "Reject"]),
             NamedTypeBinding::string_enum(
                 "WaitAllRejectReasonKind",

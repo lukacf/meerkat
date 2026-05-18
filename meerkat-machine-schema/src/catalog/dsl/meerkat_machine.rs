@@ -885,6 +885,44 @@ pub enum OperationTerminalOutcomeKind {
     Terminated,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpRegistrationAdmissionResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpRegistrationRejectReasonKind {
+    #[default]
+    AlreadyRegistered,
+    MaxConcurrentExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpLifecycleActionKind {
+    #[default]
+    Start,
+    Fail,
+    PeerReady,
+    ProgressReported,
+    Complete,
+    Abort,
+    Cancel,
+    RetireRequested,
+    RetireCompleted,
+    Terminate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpLifecycleRejectReasonKind {
+    #[default]
+    OperationNotFound,
+    InvalidTransition,
+    PeerNotExpected,
+    AlreadyPeerReady,
+}
+
 /// Typed input-abandonment reason. Closed mirror of the discriminant set of
 /// [`crate::input_state::InputAbandonReason`] — replaces the former
 /// `format!("{reason:?}")` Debug round-trip in the DSL's
@@ -2080,7 +2118,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             // `OperationTerminalOutcome` encoded as JSON by the shell. The
             // DSL does not parse the payload; it only tracks the closed-set
             // discriminant so guards can reason about it.
-            RegisterOp { operation_id: String, kind: Enum<OperationKind> },
+            RegisterOp {
+                operation_id: String,
+                kind: Enum<OperationKind>,
+                max_concurrent: Option<u64>,
+            },
             StartOp { operation_id: String },
             CompleteOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
             FailOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
@@ -2091,6 +2133,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             RetireRequestedOp { operation_id: String },
             RetireCompletedOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
             TerminateOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
+            ResolveOpLifecycleTransitionRejection {
+                operation_id: String,
+                action: Enum<OpLifecycleActionKind>,
+            },
             RecoverOpRecord {
                 operation_id: String,
                 status: Enum<OperationStatus>,
@@ -2109,6 +2155,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id_sequence: Seq<String>,
                 operation_ids: Set<String>,
                 operation_id_tokens: Set<OperationId>,
+                operation_token_by_id: Map<String, OperationId>,
+                operation_id_by_token: Map<OperationId, String>,
                 duplicate_operation_id: Option<String>,
                 not_found_operation_id: Option<String>,
             },
@@ -2117,6 +2165,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id_sequence: Seq<String>,
                 operation_ids: Set<String>,
                 operation_id_tokens: Set<OperationId>,
+                operation_token_by_id: Map<String, OperationId>,
+                operation_id_by_token: Map<OperationId, String>,
             },
             SatisfyWaitAll { wait_request_id: WaitRequestId, operation_id_tokens: Set<OperationId> },
             CancelWaitAll,
@@ -2435,6 +2485,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             RetainTerminalRecord { operation_id: String },
             EvictCompletedRecord { operation_id: String },
             CompletionProduced { seq: u64, operation_id: OperationId, kind: OperationKind },
+            OpRegistrationAdmissionResolved {
+                operation_id: String,
+                result: Enum<OpRegistrationAdmissionResultKind>,
+                reject_reason: Option<Enum<OpRegistrationRejectReasonKind>>,
+                max_concurrent_limit: Option<u64>,
+                active_op_count: u64,
+            },
+            OpLifecycleTransitionRejected {
+                operation_id: String,
+                action: Enum<OpLifecycleActionKind>,
+                reason: Enum<OpLifecycleRejectReasonKind>,
+                status: Option<Enum<OperationStatus>>,
+            },
             WaitAllAdmissionResolved {
                 wait_request_id: WaitRequestId,
                 result: Enum<WaitAllAdmissionResultKind>,
@@ -2570,6 +2633,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition RetainTerminalRecord => local,
         disposition EvictCompletedRecord => local,
         disposition CompletionProduced => local,
+        disposition OpRegistrationAdmissionResolved => local,
+        disposition OpLifecycleTransitionRejected => local,
         disposition WaitAllAdmissionResolved => local,
         disposition WaitAllSatisfied => external handoff ops_barrier_satisfaction,
         disposition CollectCompletedResult => local,
@@ -2601,6 +2666,61 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         helper deferred_authority_has_identity(witness: ToolVisibilityWitness) -> bool {
             witness.len() > 0
+        }
+
+        helper op_lifecycle_action_status_valid(
+            action: OpLifecycleActionKind,
+            status: OperationStatus
+        ) -> bool {
+            (action == OpLifecycleActionKind::Start
+                && status == OperationStatus::Provisioning)
+            || (action == OpLifecycleActionKind::Fail
+                && (status == OperationStatus::Provisioning
+                    || status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+            || (action == OpLifecycleActionKind::PeerReady
+                && (status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+            || (action == OpLifecycleActionKind::ProgressReported
+                && (status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+            || (action == OpLifecycleActionKind::Complete
+                && (status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+            || (action == OpLifecycleActionKind::Abort
+                && status == OperationStatus::Provisioning)
+            || (action == OpLifecycleActionKind::Cancel
+                && (status == OperationStatus::Provisioning
+                    || status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+            || (action == OpLifecycleActionKind::RetireRequested
+                && status == OperationStatus::Running)
+            || (action == OpLifecycleActionKind::RetireCompleted
+                && (status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+            || (action == OpLifecycleActionKind::Terminate
+                && (status == OperationStatus::Provisioning
+                    || status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+        }
+
+        helper wait_operation_token_witness_valid(
+            operation_ids: Set<String>,
+            operation_id_tokens: Set<OperationId>,
+            operation_token_by_id: Map<String, OperationId>,
+            operation_id_by_token: Map<OperationId, String>
+        ) -> bool {
+            operation_ids.len() == operation_id_tokens.len()
+            && operation_token_by_id.keys() == operation_ids
+            && operation_id_by_token.keys() == operation_id_tokens
+            && for_all(operation_id in operation_ids,
+                operation_id_by_token.get_cloned(
+                    operation_token_by_id.get_cloned(operation_id).get("value")
+                ).get("value") == operation_id)
+            && for_all(operation_id_token in operation_id_tokens,
+                operation_token_by_id.get_cloned(
+                    operation_id_by_token.get_cloned(operation_id_token).get("value")
+                ).get("value") == operation_id_token)
         }
 
         helper deferred_authorities_have_identity(
@@ -8651,11 +8771,49 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Absorbed substate transitions — Ops Lifecycle
         // =====================================================================
 
-        // RegisterOp: register a new operation as Provisioning
-        transition RegisterOp {
+        // RegisterOp: generated registration admission/result authority plus
+        // success mutation. Duplicate and capacity rejection are no-op
+        // transitions that emit typed feedback instead of relying on shell
+        // prechecks or guard-error classification.
+        transition RegisterOpAlreadyRegisteredRejected {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RegisterOp { operation_id, kind }
+            on input RegisterOp { operation_id, kind, max_concurrent }
+            guard "already_registered" { self.op_statuses.contains_key(operation_id) }
+            update {}
+            to Idle
+            emit OpRegistrationAdmissionResolved {
+                operation_id: operation_id,
+                result: OpRegistrationAdmissionResultKind::Reject,
+                reject_reason: Some(OpRegistrationRejectReasonKind::AlreadyRegistered),
+                max_concurrent_limit: max_concurrent,
+                active_op_count: self.active_op_count
+            }
+        }
+
+        transition RegisterOpMaxConcurrentRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RegisterOp { operation_id, kind, max_concurrent }
             guard "not_already_registered" { !self.op_statuses.contains_key(operation_id) }
+            guard "max_concurrent_present" { max_concurrent != None }
+            guard "max_concurrent_exceeded" { self.active_op_count >= max_concurrent.get("value") }
+            update {}
+            to Idle
+            emit OpRegistrationAdmissionResolved {
+                operation_id: operation_id,
+                result: OpRegistrationAdmissionResultKind::Reject,
+                reject_reason: Some(OpRegistrationRejectReasonKind::MaxConcurrentExceeded),
+                max_concurrent_limit: max_concurrent,
+                active_op_count: self.active_op_count
+            }
+        }
+
+        transition RegisterOpAccepted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RegisterOp { operation_id, kind, max_concurrent }
+            guard "not_already_registered" { !self.op_statuses.contains_key(operation_id) }
+            guard "capacity_available" {
+                max_concurrent == None || self.active_op_count < max_concurrent.get("value")
+            }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Provisioning);
                 self.op_kinds.insert(operation_id, kind);
@@ -8664,7 +8822,94 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_op_count += 1;
             }
             to Idle
+            emit OpRegistrationAdmissionResolved {
+                operation_id: operation_id,
+                result: OpRegistrationAdmissionResultKind::Accept,
+                reject_reason: None,
+                max_concurrent_limit: max_concurrent,
+                active_op_count: self.active_op_count
+            }
             emit SubmitOpEvent { operation_id: operation_id }
+        }
+
+        // ResolveOpLifecycleTransitionRejection: generated typed feedback for
+        // expected public rejection classes after a mutating op transition's
+        // generated guards reject.
+        transition ResolveOpLifecycleTransitionNotFoundRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveOpLifecycleTransitionRejection { operation_id, action }
+            guard "op_not_registered" { !self.op_statuses.contains_key(operation_id) }
+            update {}
+            to Idle
+            emit OpLifecycleTransitionRejected {
+                operation_id: operation_id,
+                action: action,
+                reason: OpLifecycleRejectReasonKind::OperationNotFound,
+                status: None
+            }
+        }
+
+        transition ResolveOpLifecycleTransitionPeerNotExpectedRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveOpLifecycleTransitionRejection { operation_id, action }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "action_peer_ready" { action == OpLifecycleActionKind::PeerReady }
+            guard "kind_not_mob_member_child" {
+                self.op_kinds.get_copied(operation_id) != Some(OperationKind::MobMemberChild)
+            }
+            update {}
+            to Idle
+            emit OpLifecycleTransitionRejected {
+                operation_id: operation_id,
+                action: action,
+                reason: OpLifecycleRejectReasonKind::PeerNotExpected,
+                status: Some(self.op_statuses.get_copied(operation_id).get("value"))
+            }
+        }
+
+        transition ResolveOpLifecycleTransitionAlreadyPeerReadyRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveOpLifecycleTransitionRejection { operation_id, action }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "action_peer_ready" { action == OpLifecycleActionKind::PeerReady }
+            guard "kind_is_mob_member_child" {
+                self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild)
+            }
+            guard "already_peer_ready" {
+                self.op_peer_ready.get_copied(operation_id) == Some(true)
+            }
+            update {}
+            to Idle
+            emit OpLifecycleTransitionRejected {
+                operation_id: operation_id,
+                action: action,
+                reason: OpLifecycleRejectReasonKind::AlreadyPeerReady,
+                status: Some(self.op_statuses.get_copied(operation_id).get("value"))
+            }
+        }
+
+        transition ResolveOpLifecycleTransitionInvalidRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveOpLifecycleTransitionRejection { operation_id, action }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "peer_ready_special_rejections_absent" {
+                action != OpLifecycleActionKind::PeerReady
+                || (self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild)
+                    && self.op_peer_ready.get_copied(operation_id) != Some(true))
+            }
+            guard "from_status_invalid" {
+                !op_lifecycle_action_status_valid(
+                    action,
+                    self.op_statuses.get_copied(operation_id).get("value"))
+            }
+            update {}
+            to Idle
+            emit OpLifecycleTransitionRejected {
+                operation_id: operation_id,
+                action: action,
+                reason: OpLifecycleRejectReasonKind::InvalidTransition,
+                status: Some(self.op_statuses.get_copied(operation_id).get("value"))
+            }
         }
 
         // StartOp: Provisioning -> Running.
@@ -8782,11 +9027,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         //
         // The "only MobMemberChild ops expose a peer handoff" and
         // "only once per op" decisions live in the DSL as guards, not in
-        // the shell. The shell classifies a guard rejection on
-        // `kind_is_mob_member_child` back into
-        // `OpsLifecycleError::PeerNotExpected`, and a rejection on
-        // `not_already_peer_ready` into `OpsLifecycleError::AlreadyPeerReady`
-        // via `classify_peer_ready_rejection`.
+        // the shell. Guard rejection result classes are emitted by
+        // `ResolveOpLifecycleTransitionRejection`.
         transition PeerReadyOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerReadyOp { operation_id }
@@ -8865,8 +9107,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Shell loops across non-terminal ops (mechanical cursor) and issues
         // one TerminateOp per op; the session lock provides cascade atomicity.
         // The "is this op terminal-able?" decision lives in the DSL guard —
-        // terminal-state TerminateOp is a guard rejection, surfaced to the
-        // caller via `classify_op_rejection` as `InvalidTransition`.
+        // terminal-state TerminateOp is a guard rejection resolved by
+        // generated `ResolveOpLifecycleTransitionRejection` feedback.
         transition TerminateOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input TerminateOp { operation_id, outcome, payload }
@@ -9022,12 +9264,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id_sequence,
                 operation_ids,
                 operation_id_tokens,
+                operation_token_by_id,
+                operation_id_by_token,
                 duplicate_operation_id,
                 not_found_operation_id
             }
             guard "duplicate_observed" { operation_id_sequence.len() > operation_ids.len() }
             guard "duplicate_witness_present" { duplicate_operation_id != None }
             guard "duplicate_witness_requested" { operation_id_sequence.contains(duplicate_operation_id.get("value")) }
+            guard "duplicate_witness_repeated" {
+                operation_id_sequence.count(duplicate_operation_id.get("value")) > 1
+            }
             update {}
             to Idle
             emit WaitAllAdmissionResolved {
@@ -9045,6 +9292,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id_sequence,
                 operation_ids,
                 operation_id_tokens,
+                operation_token_by_id,
+                operation_id_by_token,
                 duplicate_operation_id,
                 not_found_operation_id
             }
@@ -9067,6 +9316,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id_sequence,
                 operation_ids,
                 operation_id_tokens,
+                operation_token_by_id,
+                operation_id_by_token,
                 duplicate_operation_id,
                 not_found_operation_id
             }
@@ -9096,6 +9347,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id_sequence,
                 operation_ids,
                 operation_id_tokens,
+                operation_token_by_id,
+                operation_id_by_token,
                 duplicate_operation_id,
                 not_found_operation_id
             }
@@ -9104,6 +9357,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "operations_tracked" {
                 for_all(operation_id in operation_ids,
                     self.op_statuses.contains_key(operation_id))
+            }
+            guard "operation_token_witness_valid" {
+                wait_operation_token_witness_valid(
+                    operation_ids,
+                    operation_id_tokens,
+                    operation_token_by_id,
+                    operation_id_by_token)
             }
             update {}
             to Idle
@@ -9118,15 +9378,30 @@ macro_rules! meerkat_catalog_machine_dsl {
         // RequestWaitAll: activate wait-all barrier with explicit membership.
         // `wait_request_id`, `wait_operation_ids`, and the typed
         // `wait_operation_id_tokens` handoff payload are DSL-owned; shell must
-        // not mirror them as canonical truth.
+        // not mirror them as canonical truth. The token/key bijection is
+        // generated-validated before either representation is stored.
         transition RequestWaitAll {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RequestWaitAll { wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens }
+            on input RequestWaitAll {
+                wait_request_id,
+                operation_id_sequence,
+                operation_ids,
+                operation_id_tokens,
+                operation_token_by_id,
+                operation_id_by_token
+            }
             guard "no_duplicate_observed" { operation_id_sequence.len() == operation_ids.len() }
             guard "wait_inactive" { self.wait_active == false }
             guard "operations_tracked" {
                 for_all(operation_id in operation_ids,
                     self.op_statuses.contains_key(operation_id))
+            }
+            guard "operation_token_witness_valid" {
+                wait_operation_token_witness_valid(
+                    operation_ids,
+                    operation_id_tokens,
+                    operation_token_by_id,
+                    operation_id_by_token)
             }
             update {
                 self.wait_active = true;

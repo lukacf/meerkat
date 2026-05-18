@@ -1164,6 +1164,9 @@ fn render_expr(expr: &Expr) -> String {
         }
         Expr::SeqElements(inner) => format!("SeqElements({})", render_expr(inner)),
         Expr::Len(inner) => format!("Len({})", render_expr(inner)),
+        Expr::Count { collection, value } => {
+            format!("Count({}, {})", render_expr(collection), render_expr(value))
+        }
         Expr::Head(inner) => format!("Head({})", render_expr(inner)),
         Expr::MapKeys(inner) => format!("DOMAIN {}", render_expr(inner)),
         Expr::MapGet { map, key } => format!("{}[{}]", render_expr(map), render_expr(key)),

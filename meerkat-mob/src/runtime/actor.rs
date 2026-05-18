@@ -776,6 +776,84 @@ impl MobActor {
         comms: &Arc<dyn CoreCommsRuntime>,
         install: &SupervisorPrivateTrustInstall,
     ) {
+        #[cfg(feature = "runtime-adapter")]
+        if let Some(adapter) = self.runtime_adapter.as_ref() {
+            let effects = match adapter
+                .stage_supervisor_revoke(session_id, install.peer_id.clone(), install.epoch)
+                .await
+            {
+                Ok(effects) => effects,
+                Err(error) => {
+                    tracing::warn!(
+                        %session_id,
+                        peer_id = %install.peer_id,
+                        epoch = install.epoch,
+                        %error,
+                        "failed to stage supervisor private trust cleanup"
+                    );
+                    return;
+                }
+            };
+            let obligations =
+                meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations(&effects);
+            let Some(obligation) = obligations.into_iter().find(|obligation| {
+                obligation.peer_id == install.peer_id && obligation.epoch == install.epoch
+            }) else {
+                let reason =
+                    "generated supervisor private trust cleanup effect was absent".to_string();
+                let _ = adapter
+                    .stage_supervisor_trust_revoke_failed(
+                        session_id,
+                        install.peer_id.clone(),
+                        install.epoch,
+                        reason.clone(),
+                    )
+                    .await;
+                tracing::warn!(
+                    %session_id,
+                    peer_id = %install.peer_id,
+                    epoch = install.epoch,
+                    reason,
+                    "failed to stage supervisor private trust cleanup"
+                );
+                return;
+            };
+            if let Err(error) = comms
+                .remove_private_trusted_peer(&install.removal_key)
+                .await
+            {
+                let _ = adapter
+                    .stage_supervisor_trust_revoke_failed(
+                        session_id,
+                        obligation.peer_id,
+                        obligation.epoch,
+                        error.to_string(),
+                    )
+                    .await;
+                tracing::warn!(
+                    %session_id,
+                    peer_id = %install.peer_id,
+                    epoch = install.epoch,
+                    %error,
+                    "failed to clean up supervisor private trust"
+                );
+                return;
+            }
+            if let Err(error) = adapter
+                .stage_supervisor_trust_revoked(session_id, obligation.peer_id, obligation.epoch)
+                .await
+            {
+                tracing::warn!(
+                    %session_id,
+                    peer_id = %install.peer_id,
+                    epoch = install.epoch,
+                    %error,
+                    "failed to acknowledge supervisor private trust cleanup"
+                );
+            }
+            return;
+        }
+
         if let Err(error) = comms
             .remove_private_trusted_peer(&install.removal_key)
             .await
@@ -787,15 +865,6 @@ impl MobActor {
                 %error,
                 "failed to clean up supervisor private trust"
             );
-        }
-        #[cfg(feature = "runtime-adapter")]
-        if let Some(adapter) = self.runtime_adapter.as_ref() {
-            let _ = adapter
-                .stage_supervisor_trust_revoked(session_id, install.peer_id.clone(), install.epoch)
-                .await;
-            let _ = adapter
-                .stage_supervisor_revoke(session_id, install.peer_id.clone(), install.epoch)
-                .await;
         }
     }
 
@@ -809,10 +878,30 @@ impl MobActor {
         current_epoch: u64,
     ) -> Result<(), MobError> {
         match previous {
-            meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound => adapter
-                .stage_supervisor_revoke(session_id, current_peer_id.to_string(), current_epoch)
-                .await
-                .map_err(|error| MobError::WiringError(error.to_string())),
+            meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound => {
+                let effects = adapter
+                    .stage_supervisor_revoke(session_id, current_peer_id.to_string(), current_epoch)
+                    .await
+                    .map_err(|error| MobError::WiringError(error.to_string()))?;
+                if let Some(obligation) =
+                    meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations(&effects)
+                        .into_iter()
+                        .find(|obligation| {
+                            obligation.peer_id == current_peer_id
+                                && obligation.epoch == current_epoch
+                        })
+                {
+                    adapter
+                        .stage_supervisor_trust_revoked(
+                            session_id,
+                            obligation.peer_id,
+                            obligation.epoch,
+                        )
+                        .await
+                        .map_err(|error| MobError::WiringError(error.to_string()))?;
+                }
+                Ok(())
+            }
             meerkat_runtime::meerkat_machine::SupervisorBinding::Bound {
                 name,
                 peer_id,

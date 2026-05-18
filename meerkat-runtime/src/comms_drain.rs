@@ -781,9 +781,18 @@ async fn rollback_bind_after_trust_publication_failure(
     peer_id: &str,
     epoch: u64,
 ) -> Result<(), SupervisorBindingStageError> {
-    adapter
+    let effects = adapter
         .stage_supervisor_revoke(session_id, peer_id.to_string(), epoch)
-        .await
+        .await?;
+    if let Some(obligation) = crate::protocol_supervisor_trust_revoke::extract_obligations(&effects)
+        .into_iter()
+        .find(|obligation| obligation.peer_id == peer_id && obligation.epoch == epoch)
+    {
+        adapter
+            .stage_supervisor_trust_revoked(session_id, obligation.peer_id, obligation.epoch)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn rollback_authorize_after_trust_publication_failure(
@@ -1471,48 +1480,101 @@ async fn try_handle_supervisor_bridge_command(
                     }
                 };
             let supervisor_peer_id = authorized_supervisor.peer_id.as_str();
-            if let Err(error) = comms_runtime.remove_trusted_peer(&supervisor_peer_id).await {
+            let revoke_effects = match adapter
+                .stage_supervisor_revoke(session_id, supervisor_peer_id.clone(), payload.epoch)
+                .await
+            {
+                Ok(effects) => effects,
+                Err(error) => {
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        format!("revoke supervisor failed: DSL rejected revoke: {error}"),
+                    )
+                    .await;
+                    return true;
+                }
+            };
+            let revoke_obligations =
+                crate::protocol_supervisor_trust_revoke::extract_obligations(&revoke_effects);
+            let Some(revoke_obligation) = revoke_obligations.into_iter().find(|obligation| {
+                obligation.peer_id == supervisor_peer_id && obligation.epoch == payload.epoch
+            }) else {
+                let reason =
+                    "revoke supervisor failed: generated revoke effect was absent".to_string();
+                if let Err(error) = adapter
+                    .stage_supervisor_trust_revoke_failed(
+                        session_id,
+                        supervisor_peer_id.clone(),
+                        payload.epoch,
+                        reason.clone(),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %session_id,
+                        epoch = payload.epoch,
+                        %error,
+                        "failed to restore supervisor binding after missing revoke effect"
+                    );
+                }
                 send_bridge_failure(
                     comms_runtime,
                     candidate,
                     BridgeRejectionCause::Internal,
-                    format!("revoke supervisor failed: {error}"),
+                    reason,
+                )
+                .await;
+                return true;
+            };
+            if let Err(error) = comms_runtime
+                .remove_trusted_peer(&revoke_obligation.peer_id)
+                .await
+            {
+                let feedback_result = adapter
+                    .stage_supervisor_trust_revoke_failed(
+                        session_id,
+                        revoke_obligation.peer_id.clone(),
+                        revoke_obligation.epoch,
+                        error.to_string(),
+                    )
+                    .await;
+                let mut reason = format!(
+                    "revoke supervisor failed: trust removal rejected after DSL commit: {error}"
+                );
+                if let Err(feedback_error) = feedback_result {
+                    reason.push_str(&format!("; feedback failed: {feedback_error}"));
+                }
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::Internal,
+                    reason,
                 )
                 .await;
                 return true;
             }
             // Wave-d D-d: close the `supervisor_trust_revoke` obligation
-            // with the epoch observed on the producer effect. Staged
-            // before the `RevokeSupervisor` transition flips the binding
-            // to `Unbound` — the DSL guard matches against the still-
-            // `Bound` binding. A stale revoke ack (epoch mismatch) would
-            // be rejected here, leaving the obligation open and the
-            // subsequent `stage_supervisor_revoke` below also rejecting
-            // (its guards are identical modulo the unbound-transition).
+            // with the epoch observed on the generated producer effect.
+            // `RevokeSupervisor` first records the pending trust revoke,
+            // then the shell mechanically removes live trust, then this
+            // typed feedback clears the pending obligation.
             if let Err(error) = adapter
                 .stage_supervisor_trust_revoked(
                     session_id,
-                    supervisor_peer_id.clone(),
-                    payload.epoch,
+                    revoke_obligation.peer_id,
+                    revoke_obligation.epoch,
                 )
-                .await
-            {
-                tracing::debug!(
-                    %session_id,
-                    epoch = payload.epoch,
-                    %error,
-                    "supervisor_trust_revoke ack rejected by DSL (binding rotated?)"
-                );
-            }
-            if let Err(error) = adapter
-                .stage_supervisor_revoke(session_id, supervisor_peer_id, payload.epoch)
                 .await
             {
                 send_bridge_failure(
                     comms_runtime,
                     candidate,
                     BridgeRejectionCause::Internal,
-                    format!("revoke supervisor failed: DSL rejected revoke: {error}"),
+                    format!(
+                        "revoke supervisor failed: DSL rejected trust revoke feedback: {error}"
+                    ),
                 )
                 .await;
                 return true;
@@ -5060,7 +5122,15 @@ mod tests {
             .await
             .expect("rotation to epoch 2");
 
-        // Stale revoke ack for epoch 1 — DSL-rejected.
+        // Revoke at epoch 2 records a generated pending trust-revoke
+        // obligation before the shell removes live trust.
+        adapter
+            .stage_supervisor_revoke(&session_id, "ed25519:super-a".to_string(), 2)
+            .await
+            .expect("matching revoke must stage pending trust revoke");
+
+        // Stale revoke ack for epoch 1 — DSL-rejected against the
+        // pending generated revoke obligation.
         let stale = adapter
             .stage_supervisor_trust_revoked(&session_id, "ed25519:super-a".to_string(), 1)
             .await;
@@ -5069,10 +5139,8 @@ mod tests {
             "stale-epoch revoke ack must be DSL-rejected, got: {stale:?}"
         );
         match adapter.supervisor_binding(&session_id).await {
-            SupervisorBinding::Bound { epoch, .. } => {
-                assert_eq!(epoch, 2, "binding must still be at epoch 2");
-            }
-            SupervisorBinding::Unbound => panic!("stale revoke ack must not unbind"),
+            SupervisorBinding::Unbound => {}
+            SupervisorBinding::Bound { .. } => panic!("revoke input must unbind before feedback"),
         }
 
         // Matching-epoch revoke ack accepted.

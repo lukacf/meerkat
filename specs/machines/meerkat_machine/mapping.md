@@ -3242,6 +3242,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `supervisor_binding_consistency`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `realtime_connection_projection`, `live_topology_and_supervision`
+- `supervisor_revoke_pending_consistency`
+  - anchors: `meerkat_machine`
+  - scenarios: `live_topology_and_supervision`
 
 
 <!-- GENERATED_COVERAGE_END -->

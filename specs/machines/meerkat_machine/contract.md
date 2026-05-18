@@ -145,6 +145,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `supervisor_bound_peer_id`: `Option<String>`
 - `supervisor_bound_address`: `Option<String>`
 - `supervisor_bound_epoch`: `Option<u64>`
+- `supervisor_revoke_pending_name`: `Option<String>`
+- `supervisor_revoke_pending_peer_id`: `Option<String>`
+- `supervisor_revoke_pending_address`: `Option<String>`
+- `supervisor_revoke_pending_epoch`: `Option<u64>`
 - `local_endpoint`: `Option<PeerEndpoint>`
 - `direct_peer_endpoints`: `Set<PeerEndpoint>`
 - `mob_overlay_peer_endpoints`: `Set<PeerEndpoint>`
@@ -463,6 +467,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `staged_reload_surfaces_are_active`
 - `peer_ingress_owner_consistency`
 - `supervisor_binding_consistency`
+- `supervisor_revoke_pending_consistency`
 
 ## Transitions
 ### `Initialize`
@@ -8733,90 +8738,90 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
 - Guards:
-  - `supervisor_bound`
-  - `peer_id_matches_current`
-  - `epoch_matches_current`
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
 - To: `Idle`
 
 ### `SupervisorTrustEdgeRevokedAttached`
 - From: `Attached`
 - On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
 - Guards:
-  - `supervisor_bound`
-  - `peer_id_matches_current`
-  - `epoch_matches_current`
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
 - To: `Attached`
 
 ### `SupervisorTrustEdgeRevokedRunning`
 - From: `Running`
 - On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
 - Guards:
-  - `supervisor_bound`
-  - `peer_id_matches_current`
-  - `epoch_matches_current`
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
 - To: `Running`
 
 ### `SupervisorTrustEdgeRevokedRetired`
 - From: `Retired`
 - On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
 - Guards:
-  - `supervisor_bound`
-  - `peer_id_matches_current`
-  - `epoch_matches_current`
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
 - To: `Retired`
 
 ### `SupervisorTrustEdgeRevokedStopped`
 - From: `Stopped`
 - On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
 - Guards:
-  - `supervisor_bound`
-  - `peer_id_matches_current`
-  - `epoch_matches_current`
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
 - To: `Stopped`
 
 ### `SupervisorTrustEdgeRevokeFailedIdle`
 - From: `Idle`
 - On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
 - Guards:
-  - `supervisor_bound`
-  - `peer_id_matches_current`
-  - `epoch_matches_current`
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
 - To: `Idle`
 
 ### `SupervisorTrustEdgeRevokeFailedAttached`
 - From: `Attached`
 - On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
 - Guards:
-  - `supervisor_bound`
-  - `peer_id_matches_current`
-  - `epoch_matches_current`
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
 - To: `Attached`
 
 ### `SupervisorTrustEdgeRevokeFailedRunning`
 - From: `Running`
 - On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
 - Guards:
-  - `supervisor_bound`
-  - `peer_id_matches_current`
-  - `epoch_matches_current`
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
 - To: `Running`
 
 ### `SupervisorTrustEdgeRevokeFailedRetired`
 - From: `Retired`
 - On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
 - Guards:
-  - `supervisor_bound`
-  - `peer_id_matches_current`
-  - `epoch_matches_current`
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
 - To: `Retired`
 
 ### `SupervisorTrustEdgeRevokeFailedStopped`
 - From: `Stopped`
 - On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
 - Guards:
-  - `supervisor_bound`
-  - `peer_id_matches_current`
-  - `epoch_matches_current`
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
 - To: `Stopped`
 
 ### `PublishLocalEndpointIdle`

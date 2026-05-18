@@ -727,7 +727,8 @@ impl MeerkatMachine {
         session_id: &SessionId,
         peer_id: String,
         epoch: u64,
-    ) -> Result<(), SupervisorBindingStageError> {
+    ) -> Result<Vec<crate::meerkat_machine::dsl::MeerkatMachineEffect>, SupervisorBindingStageError>
+    {
         let mut sessions = self.sessions.write().await;
         let entry = sessions
             .get_mut(session_id)
@@ -736,12 +737,12 @@ impl MeerkatMachine {
             .dsl_authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
             &mut *authority,
             crate::meerkat_machine::dsl::MeerkatMachineInput::RevokeSupervisor { peer_id, epoch },
         )
         .map_err(SupervisorBindingStageError::Dsl)?;
-        Ok(())
+        Ok(transition.effects)
     }
 
     /// Stage a DSL `SupervisorTrustEdgePublished` feedback input (C-F2 /

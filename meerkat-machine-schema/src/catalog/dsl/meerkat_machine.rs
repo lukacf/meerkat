@@ -1869,6 +1869,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             supervisor_bound_peer_id: Option<String>,
             supervisor_bound_address: Option<String>,
             supervisor_bound_epoch: Option<u64>,
+            supervisor_revoke_pending_name: Option<String>,
+            supervisor_revoke_pending_peer_id: Option<String>,
+            supervisor_revoke_pending_address: Option<String>,
+            supervisor_revoke_pending_epoch: Option<u64>,
 
             // --- Track-B (R5): peer-projection state ---
             //
@@ -2036,6 +2040,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             supervisor_bound_peer_id = None,
             supervisor_bound_address = None,
             supervisor_bound_epoch = None,
+            supervisor_revoke_pending_name = None,
+            supervisor_revoke_pending_peer_id = None,
+            supervisor_revoke_pending_address = None,
+            supervisor_revoke_pending_epoch = None,
             // Track-B (R5): peer-projection state initialised empty.
             local_endpoint = None,
             direct_peer_endpoints = EmptySet,
@@ -2528,11 +2536,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             // `BindSupervisor` / `AuthorizeSupervisor` / `RevokeSupervisor`
             // DSL commit, then stages one of these four inputs carrying
             // the `epoch` observed on the producer effect. The
-            // transitions guard on `peer_id` and `epoch` matching the
-            // current `supervisor_bound_*` binding, so a stale ack for
-            // epoch `N - 1` arriving after the binding has rotated to
-            // epoch `N` is rejected by the DSL without clearing the
-            // outstanding obligation.
+            // publish feedback guards on the current `supervisor_bound_*`
+            // binding. Revoke feedback guards on the pending revoke
+            // obligation recorded by `RevokeSupervisor`, so live trust
+            // removal happens only after the generated revoke effect and
+            // failure feedback can restore the binding.
             SupervisorTrustEdgePublished {
                 peer_id: String,
                 epoch: u64,
@@ -3065,6 +3073,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.supervisor_bound_peer_id != None
                 && self.supervisor_bound_address != None
                 && self.supervisor_bound_epoch != None)
+        }
+
+        invariant supervisor_revoke_pending_consistency {
+            (self.supervisor_revoke_pending_name == None
+                && self.supervisor_revoke_pending_peer_id == None
+                && self.supervisor_revoke_pending_address == None
+                && self.supervisor_revoke_pending_epoch == None)
+            || (self.supervisor_revoke_pending_name != None
+                && self.supervisor_revoke_pending_peer_id != None
+                && self.supervisor_revoke_pending_address != None
+                && self.supervisor_revoke_pending_epoch != None)
         }
 
 
@@ -11194,6 +11213,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_bound_peer_id = Some(peer_id);
                 self.supervisor_bound_address = Some(address);
                 self.supervisor_bound_epoch = Some(epoch);
+                self.supervisor_revoke_pending_name = None;
+                self.supervisor_revoke_pending_peer_id = None;
+                self.supervisor_revoke_pending_address = None;
+                self.supervisor_revoke_pending_epoch = None;
             }
             to Idle
             emit PublishSupervisorTrustEdge {
@@ -11221,6 +11244,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_bound_peer_id = Some(peer_id);
                 self.supervisor_bound_address = Some(address);
                 self.supervisor_bound_epoch = Some(epoch);
+                self.supervisor_revoke_pending_name = None;
+                self.supervisor_revoke_pending_peer_id = None;
+                self.supervisor_revoke_pending_address = None;
+                self.supervisor_revoke_pending_epoch = None;
             }
             to Idle
             emit PublishSupervisorTrustEdge {
@@ -11249,6 +11276,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_bound_epoch == Some(epoch)
             }
             update {
+                self.supervisor_revoke_pending_name = Some(self.supervisor_bound_name.get("value"));
+                self.supervisor_revoke_pending_peer_id = Some(peer_id);
+                self.supervisor_revoke_pending_address = Some(self.supervisor_bound_address.get("value"));
+                self.supervisor_revoke_pending_epoch = Some(epoch);
                 self.supervisor_binding_kind = SupervisorBindingKind::Unbound;
                 self.supervisor_bound_name = None;
                 self.supervisor_bound_peer_id = None;
@@ -11301,32 +11332,47 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition SupervisorTrustEdgeRevoked {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SupervisorTrustEdgeRevoked { peer_id, epoch }
-            guard "supervisor_bound" {
-                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            guard "supervisor_unbound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Unbound
             }
-            guard "peer_id_matches_current" {
-                self.supervisor_bound_peer_id == Some(peer_id)
+            guard "peer_id_matches_pending_revoke" {
+                self.supervisor_revoke_pending_peer_id == Some(peer_id)
             }
-            guard "epoch_matches_current" {
-                self.supervisor_bound_epoch == Some(epoch)
+            guard "epoch_matches_pending_revoke" {
+                self.supervisor_revoke_pending_epoch == Some(epoch)
             }
-            update {}
+            update {
+                self.supervisor_revoke_pending_name = None;
+                self.supervisor_revoke_pending_peer_id = None;
+                self.supervisor_revoke_pending_address = None;
+                self.supervisor_revoke_pending_epoch = None;
+            }
             to Idle
         }
 
         transition SupervisorTrustEdgeRevokeFailed {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SupervisorTrustEdgeRevokeFailed { peer_id, epoch, reason }
-            guard "supervisor_bound" {
-                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            guard "supervisor_unbound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Unbound
             }
-            guard "peer_id_matches_current" {
-                self.supervisor_bound_peer_id == Some(peer_id)
+            guard "peer_id_matches_pending_revoke" {
+                self.supervisor_revoke_pending_peer_id == Some(peer_id)
             }
-            guard "epoch_matches_current" {
-                self.supervisor_bound_epoch == Some(epoch)
+            guard "epoch_matches_pending_revoke" {
+                self.supervisor_revoke_pending_epoch == Some(epoch)
             }
-            update {}
+            update {
+                self.supervisor_binding_kind = SupervisorBindingKind::Bound;
+                self.supervisor_bound_name = Some(self.supervisor_revoke_pending_name.get("value"));
+                self.supervisor_bound_peer_id = Some(self.supervisor_revoke_pending_peer_id.get("value"));
+                self.supervisor_bound_address = Some(self.supervisor_revoke_pending_address.get("value"));
+                self.supervisor_bound_epoch = Some(self.supervisor_revoke_pending_epoch.get("value"));
+                self.supervisor_revoke_pending_name = None;
+                self.supervisor_revoke_pending_peer_id = None;
+                self.supervisor_revoke_pending_address = None;
+                self.supervisor_revoke_pending_epoch = None;
+            }
             to Idle
         }
 

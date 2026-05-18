@@ -295,10 +295,8 @@ impl WorkGraphMachine {
         Ok((item, event))
     }
 
-    pub fn is_ready(item: &WorkItem, now: DateTime<Utc>) -> bool {
-        let Ok(now_utc_ms) = datetime_to_millis(now, "now") else {
-            return false;
-        };
+    pub fn is_ready(item: &WorkItem, now: DateTime<Utc>) -> Result<bool, WorkGraphError> {
+        let now_utc_ms = datetime_to_millis(now, "now")?;
         let owner_key = wg_dsl::WorkOwnerKey {
             kind: wg_dsl::WorkOwnerKind::Label,
             id: "__ready_probe__".to_string(),
@@ -313,7 +311,11 @@ impl WorkGraphMachine {
             },
             Some(item.revision),
         )
-        .is_ok()
+        .map(|_| true)
+        .or_else(|error| match error {
+            WorkGraphError::InvalidTimestampMillis { .. } => Err(error),
+            _ => Ok(false),
+        })
     }
 
     pub(crate) fn blocker_satisfies_dependency(item: &WorkItem) -> Result<bool, WorkGraphError> {
@@ -334,11 +336,17 @@ impl WorkGraphMachine {
         terminality_from_effects(&applied.effects)
     }
 
-    pub fn ready_items(items: Vec<WorkItem>, now: DateTime<Utc>) -> Vec<WorkItem> {
-        items
-            .into_iter()
-            .filter(|item| Self::is_ready(item, now))
-            .collect()
+    pub fn ready_items(
+        items: Vec<WorkItem>,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<WorkItem>, WorkGraphError> {
+        let mut ready = Vec::new();
+        for item in items {
+            if Self::is_ready(&item, now)? {
+                ready.push(item);
+            }
+        }
+        Ok(ready)
     }
 
     pub fn validate_link(
@@ -941,6 +949,23 @@ mod tests {
     }
 
     #[test]
+    fn ready_items_rejects_negative_now_timestamp() {
+        let item = create("negative ready now", Utc::now());
+        let now = DateTime::from_timestamp(-1, 0).expect("test timestamp is valid");
+
+        let error = WorkGraphMachine::ready_items(vec![item], now)
+            .expect_err("invalid ready timestamp should fail closed");
+
+        assert!(matches!(
+            error,
+            WorkGraphError::InvalidTimestampMillis {
+                field: "now",
+                millis: -1000
+            }
+        ));
+    }
+
+    #[test]
     fn close_default_completed_comes_from_generated_machine() {
         let now = Utc::now();
         let item = create("default close", now);
@@ -994,7 +1019,11 @@ mod tests {
         let now = Utc::now();
         let item = create("blocked", now);
         let (item, _) = WorkGraphMachine::block_item(item, 1, now).expect("block");
-        assert!(WorkGraphMachine::ready_items(vec![item], now).is_empty());
+        assert!(
+            WorkGraphMachine::ready_items(vec![item], now)
+                .expect("ready classification should pass")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1021,7 +1050,11 @@ mod tests {
         )
         .expect("update due");
 
-        assert!(WorkGraphMachine::ready_items(vec![item], now).is_empty());
+        assert!(
+            WorkGraphMachine::ready_items(vec![item], now)
+                .expect("ready classification should pass")
+                .is_empty()
+        );
     }
 
     #[test]

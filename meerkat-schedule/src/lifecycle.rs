@@ -22,7 +22,10 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScheduleLifecycleInput {
     Create(CreateScheduleRequest),
-    Update(UpdateScheduleRequest),
+    Update {
+        request: UpdateScheduleRequest,
+        at_utc: DateTime<Utc>,
+    },
     RecordPlanningWindow {
         planning_cursor_utc: DateTime<Utc>,
         next_occurrence_ordinal: OccurrenceOrdinal,
@@ -53,6 +56,7 @@ pub enum ScheduleLifecycleEffect {
     },
     SupersedePendingOccurrences {
         superseding_revision: ScheduleRevision,
+        at_utc: DateTime<Utc>,
     },
     PlanningWindowRecorded {
         planning_cursor_utc: DateTime<Utc>,
@@ -96,6 +100,8 @@ pub enum ScheduleLifecycleError {
     InvalidPlanningHorizonOccurrences { value: u64 },
     #[error("ScheduleLifecycleMachine emitted invalid planning cursor timestamp millis `{millis}`")]
     InvalidPlanningCursorUtcMillis { millis: u64 },
+    #[error("ScheduleLifecycleMachine emitted invalid supersession timestamp millis `{millis}`")]
+    InvalidSupersessionAtUtcMillis { millis: u64 },
     #[error("ScheduleLifecycleMachine emitted invalid superseded occurrence id `{id}`: {source}")]
     InvalidSupersededAckId { id: String, source: uuid::Error },
     #[error("schedule timestamp `{field}` cannot be represented as unsigned millis: {millis}")]
@@ -835,9 +841,9 @@ impl Schedule {
             // Update mixes config changes (name, labels, horizons) with
             // revision-affecting changes (trigger, target, policies). The DSL
             // handles only the machine-owned Revise transition.
-            ScheduleLifecycleInput::Update(request) => {
+            ScheduleLifecycleInput::Update { request, at_utc } => {
                 let mut schedule = schedule.ok_or(ScheduleLifecycleError::MissingSchedule)?;
-                let (revision_bumped, effects) = apply_update(&mut schedule, request)?;
+                let (revision_bumped, effects) = apply_update(&mut schedule, request, at_utc)?;
                 Ok(ScheduleLifecycleMutator {
                     schedule,
                     effects,
@@ -1040,6 +1046,7 @@ fn create_schedule_via_dsl(
 fn apply_update(
     schedule: &mut Schedule,
     request: UpdateScheduleRequest,
+    at_utc: DateTime<Utc>,
 ) -> Result<(bool, Vec<ScheduleLifecycleEffect>), ScheduleLifecycleError> {
     if let Some(expected_revision) = &request.expected_revision
         && *expected_revision != schedule.revision
@@ -1102,6 +1109,7 @@ fn apply_update(
             ),
             planning_horizon_days: u64::from(next_planning_horizon_days),
             planning_horizon_occurrences: u64::from(next_planning_horizon_occurrences),
+            at_utc_ms: schedule_datetime_to_millis(at_utc, "at_utc")?,
         };
         let (transition, dsl_state) = run_schedule_dsl(schedule, dsl_input)?;
         verify_schedule_snapshot_keys(
@@ -1349,8 +1357,12 @@ fn map_schedule_effect(
         }),
         sched_dsl::ScheduleLifecycleEffect::SupersedePendingOccurrences {
             superseding_revision,
+            at_utc_ms,
         } => Ok(ScheduleLifecycleEffect::SupersedePendingOccurrences {
             superseding_revision: ScheduleRevision(*superseding_revision),
+            at_utc: millis_to_datetime(*at_utc_ms).ok_or(
+                ScheduleLifecycleError::InvalidSupersessionAtUtcMillis { millis: *at_utc_ms },
+            )?,
         }),
         sched_dsl::ScheduleLifecycleEffect::PlanningWindowRecorded {
             planning_cursor_utc_ms,
@@ -1754,16 +1766,49 @@ mod tests {
 
         let mutator = Schedule::apply(
             Some(schedule.clone()),
-            ScheduleLifecycleInput::Update(UpdateScheduleRequest {
-                name: Some("renamed".into()),
-                ..UpdateScheduleRequest::default()
-            }),
+            ScheduleLifecycleInput::Update {
+                request: UpdateScheduleRequest {
+                    name: Some("renamed".into()),
+                    ..UpdateScheduleRequest::default()
+                },
+                at_utc: Utc::now(),
+            },
         )?;
 
         assert_eq!(mutator.schedule.revision, schedule.revision);
         assert!(!mutator.revision_bumped);
         assert_eq!(mutator.schedule.config.name.as_deref(), Some("renamed"));
         assert!(mutator.effects.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn supersede_effect_timestamp_comes_from_revise_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schedule = sample_schedule();
+        let at_utc = DateTime::from_timestamp(1_700_000_000, 0).expect("test timestamp is valid");
+
+        let mutator = Schedule::apply(
+            Some(schedule.clone()),
+            ScheduleLifecycleInput::Update {
+                request: UpdateScheduleRequest {
+                    expected_revision: Some(schedule.revision),
+                    trigger: Some(TriggerSpec::Once {
+                        due_at_utc: at_utc + Duration::minutes(30),
+                    }),
+                    ..UpdateScheduleRequest::default()
+                },
+                at_utc,
+            },
+        )?;
+
+        assert!(mutator.effects.iter().any(|effect| matches!(
+            effect,
+            ScheduleLifecycleEffect::SupersedePendingOccurrences {
+                superseding_revision,
+                at_utc: effect_at_utc,
+            } if *superseding_revision == mutator.schedule.revision && *effect_at_utc == at_utc
+        )));
         Ok(())
     }
 

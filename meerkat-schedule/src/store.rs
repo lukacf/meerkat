@@ -55,16 +55,14 @@ pub struct PendingSupersession {
 }
 
 impl PendingSupersession {
-    pub fn from_schedule_effect(
-        effect: &crate::ScheduleLifecycleEffect,
-        at_utc: DateTime<Utc>,
-    ) -> Option<Self> {
+    pub fn from_schedule_effect(effect: &crate::ScheduleLifecycleEffect) -> Option<Self> {
         if let crate::ScheduleLifecycleEffect::SupersedePendingOccurrences {
             superseding_revision,
+            at_utc,
         } = effect
         {
             Some(Self {
-                at_utc,
+                at_utc: *at_utc,
                 superseded_by_revision: *superseding_revision,
             })
         } else {

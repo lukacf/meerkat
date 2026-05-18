@@ -96,7 +96,7 @@ impl WorkGraphService {
                 .filter(|item| labels.iter().all(|label| item.labels.contains(label)))
                 .collect(),
             now,
-        );
+        )?;
         if let Some(limit) = filter.limit {
             ready.truncate(limit);
         }
@@ -436,7 +436,7 @@ impl WorkGraphService {
                     .filter(|item| labels.iter().all(|label| item.labels.contains(label)))
                     .collect(),
                 now,
-            );
+            )?;
             ready_ids.extend(ready_items.into_iter().map(|item| item.id));
         }
         Ok(ready_ids)

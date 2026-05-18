@@ -59,17 +59,20 @@ async fn assert_atomic_schedule_mutation_supersedes_old_pending(
     };
     let update_mutator = Schedule::apply(
         Some(original.clone()),
-        ScheduleLifecycleInput::Update(UpdateScheduleRequest {
-            expected_revision: Some(original.revision),
-            trigger: Some(updated_trigger),
-            ..UpdateScheduleRequest::default()
-        }),
+        ScheduleLifecycleInput::Update {
+            request: UpdateScheduleRequest {
+                expected_revision: Some(original.revision),
+                trigger: Some(updated_trigger),
+                ..UpdateScheduleRequest::default()
+            },
+            at_utc: Utc::now(),
+        },
     )
     .expect("schedule update should pass generated authority");
     let supersession = update_mutator
         .effects
         .iter()
-        .find_map(|effect| PendingSupersession::from_schedule_effect(effect, Utc::now()));
+        .find_map(PendingSupersession::from_schedule_effect);
     let mut updated = update_mutator.into_schedule();
     updated = Schedule::apply(
         Some(updated),

@@ -25,7 +25,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Inputs
 - `Create`(schedule_id: ScheduleId, trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, planning_horizon_days: Option<u64>, planning_horizon_occurrences: Option<u64>)
-- `Revise`(trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, planning_horizon_days: u64, planning_horizon_occurrences: u64)
+- `Revise`(trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, planning_horizon_days: u64, planning_horizon_occurrences: u64, at_utc_ms: u64)
 - `UpdatePlanningConfig`(planning_horizon_days: u64, planning_horizon_occurrences: u64)
 - `RecordPlanningWindow`(planning_cursor_utc_ms: u64, next_occurrence_ordinal: u64)
 - `SyncTargetSnapshot`(target_binding_key: String)
@@ -38,7 +38,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Effects
 - `EmitScheduleNotice`(new_state: ScheduleLifecycleState, revision: u64)
-- `SupersedePendingOccurrences`(superseding_revision: u64)
+- `SupersedePendingOccurrences`(superseding_revision: u64, at_utc_ms: u64)
 - `PlanningWindowRecorded`(planning_cursor_utc_ms: u64, next_occurrence_ordinal: u64)
 
 ## Invariants
@@ -55,13 +55,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ReviseActive`
 - From: `Active`
-- On: `Revise`(trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, planning_horizon_days, planning_horizon_occurrences)
+- On: `Revise`(trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, planning_horizon_days, planning_horizon_occurrences, at_utc_ms)
 - Emits: `EmitScheduleNotice`, `SupersedePendingOccurrences`
 - To: `Active`
 
 ### `RevisePaused`
 - From: `Paused`
-- On: `Revise`(trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, planning_horizon_days, planning_horizon_occurrences)
+- On: `Revise`(trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, planning_horizon_days, planning_horizon_occurrences, at_utc_ms)
 - Emits: `EmitScheduleNotice`, `SupersedePendingOccurrences`
 - To: `Paused`
 

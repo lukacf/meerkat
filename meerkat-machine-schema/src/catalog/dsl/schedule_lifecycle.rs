@@ -81,6 +81,7 @@ machine! {
                 missing_target_policy_key: String,
                 planning_horizon_days: u64,
                 planning_horizon_occurrences: u64,
+                at_utc_ms: u64,
             },
             UpdatePlanningConfig { planning_horizon_days: u64, planning_horizon_occurrences: u64 },
             RecordPlanningWindow {
@@ -101,7 +102,7 @@ machine! {
 
         effect ScheduleLifecycleEffect {
             EmitScheduleNotice { new_state: ScheduleLifecycleState, revision: u64 },
-            SupersedePendingOccurrences { superseding_revision: u64 },
+            SupersedePendingOccurrences { superseding_revision: u64, at_utc_ms: u64 },
             PlanningWindowRecorded { planning_cursor_utc_ms: u64, next_occurrence_ordinal: u64 },
         }
 
@@ -172,7 +173,8 @@ machine! {
                 missing_target_policy,
                 missing_target_policy_key,
                 planning_horizon_days,
-                planning_horizon_occurrences
+                planning_horizon_occurrences,
+                at_utc_ms
             }
             guard { self.lifecycle_phase == Phase::Active }
             update {
@@ -191,7 +193,7 @@ machine! {
             }
             to Active
             emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
-            emit SupersedePendingOccurrences { superseding_revision: self.revision }
+            emit SupersedePendingOccurrences { superseding_revision: self.revision, at_utc_ms: at_utc_ms }
         }
 
         transition RevisePaused {
@@ -205,7 +207,8 @@ machine! {
                 missing_target_policy,
                 missing_target_policy_key,
                 planning_horizon_days,
-                planning_horizon_occurrences
+                planning_horizon_occurrences,
+                at_utc_ms
             }
             guard { self.lifecycle_phase == Phase::Paused }
             update {
@@ -224,7 +227,7 @@ machine! {
             }
             to Paused
             emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
-            emit SupersedePendingOccurrences { superseding_revision: self.revision }
+            emit SupersedePendingOccurrences { superseding_revision: self.revision, at_utc_ms: at_utc_ms }
         }
 
         // --- Planning config update ---
@@ -325,7 +328,7 @@ machine! {
             }
             to Deleted
             emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
-            emit SupersedePendingOccurrences { superseding_revision: self.revision }
+            emit SupersedePendingOccurrences { superseding_revision: self.revision, at_utc_ms: at_utc_ms }
         }
 
         transition DeletePaused {
@@ -337,7 +340,7 @@ machine! {
             }
             to Deleted
             emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
-            emit SupersedePendingOccurrences { superseding_revision: self.revision }
+            emit SupersedePendingOccurrences { superseding_revision: self.revision, at_utc_ms: at_utc_ms }
         }
 
         // Idempotent no-op: Delete applied to an already-Deleted schedule

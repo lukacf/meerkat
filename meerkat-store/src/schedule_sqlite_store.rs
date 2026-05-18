@@ -5,9 +5,9 @@ use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use meerkat_schedule::{
     ClaimDueRequest, ClaimDueResult, DeliveryReceipt, DeliveryReceiptStage, Occurrence,
     OccurrenceFailureClass, OccurrenceFilter, OccurrenceId, OccurrenceLifecycleEffect,
-    OccurrenceLifecycleError, OccurrenceLifecycleInput, PendingSupersession, Schedule,
-    ScheduleFilter, ScheduleStore, ScheduleStoreError, ScheduleStoreKind,
-    apply_supersession_feedback,
+    OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator,
+    OccurrencePhase, PendingSupersession, Schedule, ScheduleFilter, ScheduleStore,
+    ScheduleStoreError, ScheduleStoreKind, apply_supersession_feedback,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -696,7 +696,7 @@ fn supersede_pending_occurrences_in_txn(
     let mut stmt = tx.prepare(
         "SELECT occurrence_json
          FROM schedule_occurrences
-         WHERE schedule_id = ?1 AND phase = 'pending'
+         WHERE schedule_id = ?1
          ORDER BY due_at_ms ASC, schedule_revision ASC, occurrence_ordinal ASC",
     )?;
     let rows = stmt.query_map(params![schedule.schedule_id.to_string()], |row| {
@@ -707,7 +707,9 @@ fn supersede_pending_occurrences_in_txn(
         let bytes = row?;
         let occurrence: Occurrence =
             serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
-        if occurrence.schedule_revision >= supersession.superseded_by_revision() {
+        if occurrence.phase != OccurrencePhase::Pending
+            || occurrence.schedule_revision >= supersession.superseded_by_revision()
+        {
             continue;
         }
         let mutator = occurrence
@@ -716,8 +718,11 @@ fn supersede_pending_occurrences_in_txn(
                 at_utc: supersession.at_utc(),
             })
             .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?;
-        effects.extend(mutator.effects);
-        let updated = mutator.into_occurrence();
+        let OccurrenceLifecycleMutator {
+            occurrence: updated,
+            effects: mutator_effects,
+        } = mutator;
+        effects.extend(mutator_effects);
         write_occurrence_in_txn(tx, &updated)?;
     }
     Ok(effects)

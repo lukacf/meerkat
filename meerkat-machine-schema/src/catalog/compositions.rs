@@ -129,7 +129,10 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
                 "occurrence",
                 RouteTargetKind::Input,
                 "Supersede",
-                &[bind("superseded_by_revision", "superseding_revision")],
+                &[
+                    bind("superseded_by_revision", "superseding_revision"),
+                    bind("at_utc_ms", "at_utc_ms"),
+                ],
             ),
             // Reciprocal ack (wave-d D-f): once an occurrence absorbs
             // Supersede it emits OccurrencesSuperseded, routed back to
@@ -271,7 +274,10 @@ pub fn schedule_runtime_bundle_composition() -> CompositionSchema {
                 "occurrence",
                 RouteTargetKind::Input,
                 "Supersede",
-                &[bind("superseded_by_revision", "superseding_revision")],
+                &[
+                    bind("superseded_by_revision", "superseding_revision"),
+                    bind("at_utc_ms", "at_utc_ms"),
+                ],
             ),
             route(
                 "occurrence_supersede_ack_returns_to_schedule",
@@ -361,7 +367,10 @@ pub fn schedule_mob_bundle_composition() -> CompositionSchema {
                 "occurrence",
                 RouteTargetKind::Input,
                 "Supersede",
-                &[bind("superseded_by_revision", "superseding_revision")],
+                &[
+                    bind("superseded_by_revision", "superseding_revision"),
+                    bind("at_utc_ms", "at_utc_ms"),
+                ],
             ),
             route(
                 "occurrence_supersede_ack_returns_to_schedule",

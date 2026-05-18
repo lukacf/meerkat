@@ -339,6 +339,7 @@ pub mod inputs {
         pub missing_target_policy_key: String,
         pub planning_horizon_days: u64,
         pub planning_horizon_occurrences: u64,
+        pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct UpdatePlanningConfig {
@@ -424,6 +425,7 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SupersedePendingOccurrences {
         pub superseding_revision: u64,
+        pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PlanningWindowRecorded {

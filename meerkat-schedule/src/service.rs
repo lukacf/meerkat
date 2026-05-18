@@ -92,15 +92,20 @@ impl ScheduleService {
             .map_err(ScheduleDomainError::InvalidSchedule)?;
         let _planning_guard = self.planning_lock.lock().await;
         let current = self.get(schedule_id).await?;
-        let mut mutator =
-            Schedule::apply(Some(current), ScheduleLifecycleInput::Update(request))
-                .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
         let store_now = self.store.get_store_time_utc().await?;
+        let mut mutator = Schedule::apply(
+            Some(current),
+            ScheduleLifecycleInput::Update {
+                request,
+                at_utc: store_now,
+            },
+        )
+        .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
 
         let planned = self
             .plan_schedule_occurrences(&mut mutator.schedule, store_now)
             .await?;
-        let supersession = pending_supersession_from_effects(&mutator.effects, store_now);
+        let supersession = pending_supersession_from_effects(&mutator.effects);
         let committed = self
             .store
             .commit_schedule_mutation(mutator.schedule.clone(), planned, supersession)
@@ -153,7 +158,7 @@ impl ScheduleService {
         )
         .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
         let deleted = mutator.schedule.clone();
-        let supersession = pending_supersession_from_effects(&mutator.effects, store_now);
+        let supersession = pending_supersession_from_effects(&mutator.effects);
         let committed = self
             .store
             .commit_schedule_mutation(deleted.clone(), Vec::new(), supersession)
@@ -382,11 +387,10 @@ impl ScheduleService {
 
 fn pending_supersession_from_effects(
     effects: &[ScheduleLifecycleEffect],
-    at_utc: chrono::DateTime<Utc>,
 ) -> Option<PendingSupersession> {
     effects
         .iter()
-        .find_map(|effect| PendingSupersession::from_schedule_effect(effect, at_utc))
+        .find_map(PendingSupersession::from_schedule_effect)
 }
 
 #[cfg(test)]

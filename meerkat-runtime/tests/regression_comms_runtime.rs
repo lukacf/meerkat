@@ -13,8 +13,7 @@
 
 use meerkat_core::comms::PeerId;
 use meerkat_core::interaction::{
-    InboxInteraction, InteractionContent, InteractionId, PeerIngressConvention, PeerIngressFact,
-    PeerIngressIdentity, PeerInputCandidate, PeerInputClass, ResponseStatus, TerminalityClass,
+    InboxInteraction, InteractionContent, InteractionId, ResponseStatus,
 };
 use meerkat_core::lifecycle::RunId;
 use meerkat_runtime::comms_bridge::peer_input_candidate_to_runtime_input;
@@ -152,71 +151,13 @@ fn rid() -> LogicalRuntimeId {
     LogicalRuntimeId::new("test-runtime")
 }
 
-fn test_peer_id() -> PeerId {
-    PeerId::parse("33333333-3333-4333-8333-333333333333").expect("canonical test peer id")
-}
-
-fn peer_kind_for_convention(convention: &PeerIngressConvention) -> meerkat_core::PeerIngressKind {
-    match convention {
-        PeerIngressConvention::Message => meerkat_core::PeerIngressKind::Message,
-        PeerIngressConvention::Request { .. } | PeerIngressConvention::Lifecycle { .. } => {
-            meerkat_core::PeerIngressKind::Request
-        }
-        PeerIngressConvention::Response { .. } => meerkat_core::PeerIngressKind::Response,
-        PeerIngressConvention::Ack { .. } => meerkat_core::PeerIngressKind::Ack,
-        PeerIngressConvention::PlainEvent { .. } => meerkat_core::PeerIngressKind::PlainEvent,
-    }
-}
-
 fn runtime_input_for_interaction(
     interaction: &InboxInteraction,
     runtime_id: &LogicalRuntimeId,
 ) -> Input {
-    let id = interaction.id;
-    let (class, convention, response_terminality) = match &interaction.content {
-        InteractionContent::Message { .. } => (
-            PeerInputClass::ActionableMessage,
-            PeerIngressConvention::Message,
-            None,
-        ),
-        InteractionContent::Request { intent, .. } => (
-            PeerInputClass::ActionableRequest,
-            PeerIngressConvention::Request {
-                request_id: id.to_string(),
-                intent: intent.clone(),
-            },
-            None,
-        ),
-        InteractionContent::Response {
-            in_reply_to,
-            status,
-            ..
-        } => {
-            let terminality = meerkat_core::classify_response_terminality(*status);
-            let class = match terminality {
-                TerminalityClass::Progress => PeerInputClass::ResponseProgress,
-                _ => PeerInputClass::ResponseTerminal,
-            };
-            (
-                class,
-                PeerIngressConvention::Response {
-                    in_reply_to: *in_reply_to,
-                    status: *status,
-                },
-                Some(terminality),
-            )
-        }
-    };
-    let kind = peer_kind_for_convention(&convention);
-    let ingress = PeerIngressFact::peer(
-        id,
-        class,
-        kind,
-        Some(meerkat_core::PeerIngressAuthDecision::Required),
-        PeerIngressIdentity::new(test_peer_id(), interaction.from.clone(), convention),
-    );
-    let mut candidate = PeerInputCandidate::new(interaction.clone(), ingress, None);
-    candidate.response_terminality = response_terminality;
+    let peer_id = interaction.from_route.unwrap_or_else(response_route_id);
+    let candidate =
+        meerkat_runtime::test_peer_input_candidate_from_interaction(interaction.clone(), peer_id);
     peer_input_candidate_to_runtime_input(&candidate, runtime_id)
         .expect("test interaction should project to runtime input")
 }
@@ -711,10 +652,11 @@ async fn terminal_response_while_running_requests_idle_wake() {
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::WakeLoop
+        PostAdmissionSignal::None,
+        "terminal peer response accepted while running is queued for the next idle boundary; \
+         it does not fire an immediate driver wake side channel"
     );
 }
 

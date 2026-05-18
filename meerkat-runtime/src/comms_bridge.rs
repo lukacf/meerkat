@@ -351,53 +351,8 @@ mod tests {
     }
 
     fn candidate_for_interaction(interaction: InboxInteraction) -> PeerInputCandidate {
-        let id = interaction.id;
-        let label = interaction.from.clone();
         let peer_id = interaction.from_route.unwrap_or_else(test_peer_id);
-        let (class, convention, response_terminality) = match &interaction.content {
-            InteractionContent::Message { .. } => (
-                PeerInputClass::ActionableMessage,
-                PeerIngressConvention::Message,
-                None,
-            ),
-            InteractionContent::Request { intent, .. } => (
-                PeerInputClass::ActionableRequest,
-                PeerIngressConvention::Request {
-                    request_id: id.to_string(),
-                    intent: intent.clone(),
-                },
-                None,
-            ),
-            InteractionContent::Response {
-                in_reply_to,
-                status,
-                ..
-            } => {
-                let terminality = meerkat_core::interaction::classify_response_terminality(*status);
-                let class = match terminality {
-                    meerkat_core::TerminalityClass::Progress => PeerInputClass::ResponseProgress,
-                    meerkat_core::TerminalityClass::Terminal { .. } => {
-                        PeerInputClass::ResponseTerminal
-                    }
-                    _ => PeerInputClass::ResponseTerminal,
-                };
-                (
-                    class,
-                    PeerIngressConvention::Response {
-                        in_reply_to: *in_reply_to,
-                        status: *status,
-                    },
-                    Some(terminality),
-                )
-            }
-        };
-        let ingress = peer_ingress(id, peer_id, &label, class, convention);
-        PeerInputCandidate {
-            interaction,
-            ingress,
-            lifecycle_peer: None,
-            response_terminality,
-        }
+        crate::test_peer_input_candidate_from_interaction(interaction, peer_id)
     }
 
     fn peer_input_for_test(interaction: &InboxInteraction, runtime_id: &LogicalRuntimeId) -> Input {

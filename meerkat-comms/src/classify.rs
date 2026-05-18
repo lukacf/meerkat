@@ -359,7 +359,7 @@ impl IngressClassificationContext {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     pub(crate) fn runtime_peer_comms_handle_with_silent<I, S>(
         silent_intents: I,
@@ -368,20 +368,7 @@ pub(crate) mod test_support {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let state = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineState {
-            lifecycle_phase: meerkat_runtime::meerkat_machine::dsl::MeerkatPhase::Attached,
-            session_id: Some(meerkat_runtime::meerkat_machine::dsl::SessionId(
-                "test-session".to_string(),
-            )),
-            silent_intent_overrides: silent_intents.into_iter().map(Into::into).collect(),
-            ..Default::default()
-        };
-        let authority = Arc::new(Mutex::new(
-            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::from_state(state),
-        ));
-        Arc::new(meerkat_runtime::RuntimePeerCommsHandle::new(Arc::new(
-            meerkat_runtime::HandleDslAuthority::from_shared(authority),
-        )))
+        meerkat_runtime::test_peer_comms_handle_with_silent(silent_intents)
     }
 
     pub(crate) fn runtime_peer_comms_handle() -> Arc<dyn meerkat_core::handles::PeerCommsHandle> {

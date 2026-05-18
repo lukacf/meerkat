@@ -25,19 +25,7 @@ fn install_test_peer_comms_handle(runtime: &CommsRuntime) {
 }
 
 fn runtime_peer_comms_handle() -> Arc<dyn meerkat_core::handles::PeerCommsHandle> {
-    let state = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineState {
-        lifecycle_phase: meerkat_runtime::meerkat_machine::dsl::MeerkatPhase::Attached,
-        session_id: Some(meerkat_runtime::meerkat_machine::dsl::SessionId(
-            "test-session".to_string(),
-        )),
-        ..Default::default()
-    };
-    let authority = Arc::new(std::sync::Mutex::new(
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::from_state(state),
-    ));
-    Arc::new(meerkat_runtime::RuntimePeerCommsHandle::new(Arc::new(
-        meerkat_runtime::HandleDslAuthority::from_shared(authority),
-    )))
+    meerkat_runtime::test_peer_comms_handle()
 }
 
 fn zero_pubkey() -> PubKey {

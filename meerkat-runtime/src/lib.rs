@@ -168,6 +168,140 @@ pub use ops_lifecycle::{
     RuntimeOpsLifecycleRegistry,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub fn test_peer_comms_handle() -> Arc<dyn meerkat_core::handles::PeerCommsHandle> {
+    test_peer_comms_handle_with_silent(std::iter::empty::<String>())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub fn test_peer_comms_handle_with_silent<I, S>(
+    silent_intents: I,
+) -> Arc<dyn meerkat_core::handles::PeerCommsHandle>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let silent_intents = silent_intents
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test peer-comms runtime should build");
+        runtime.block_on(async move {
+            let machine = MeerkatMachine::ephemeral();
+            let session_id = meerkat_core::SessionId::new();
+            let bindings = machine
+                .prepare_bindings(session_id.clone())
+                .await
+                .expect("generated MeerkatMachine should prepare test peer-comms bindings");
+            if !silent_intents.is_empty() {
+                machine
+                    .set_session_silent_intents(&session_id, silent_intents)
+                    .await;
+            }
+            Arc::clone(bindings.peer_comms())
+        })
+    })
+    .join()
+    .expect("test peer-comms authority thread should finish")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub fn test_peer_input_candidate_from_interaction(
+    interaction: meerkat_core::interaction::InboxInteraction,
+    peer_id: meerkat_core::comms::PeerId,
+) -> meerkat_core::interaction::PeerInputCandidate {
+    use meerkat_core::interaction::{
+        InteractionContent, InteractionId, PeerIngressEnvelopeFacts, PeerIngressEnvelopeKind,
+        PeerIngressFact, PeerIngressIdentity,
+    };
+
+    let handle = test_peer_comms_handle();
+    let facts = PeerIngressEnvelopeFacts {
+        item_id: interaction.id.to_string(),
+        from_peer: interaction.from.clone(),
+        from_peer_id: peer_id,
+        kind: match &interaction.content {
+            InteractionContent::Message { body, .. } => {
+                PeerIngressEnvelopeKind::Message { body: body.clone() }
+            }
+            InteractionContent::Request { intent, params, .. } => {
+                PeerIngressEnvelopeKind::Request {
+                    intent: intent.clone(),
+                    params: params.clone(),
+                }
+            }
+            InteractionContent::Response {
+                in_reply_to,
+                status,
+                result,
+                ..
+            } => PeerIngressEnvelopeKind::Response {
+                in_reply_to: in_reply_to.to_string(),
+                status: *status,
+                result: result.clone(),
+            },
+        },
+    };
+    let admission = handle
+        .classify_external_envelope(facts)
+        .expect("generated peer-comms authority should classify test interaction");
+    let classification = admission.classification;
+    let convention = match &interaction.content {
+        InteractionContent::Message { .. } => meerkat_core::PeerIngressConvention::Message,
+        InteractionContent::Request { intent, .. } => {
+            if let Some(kind) = classification.lifecycle_kind {
+                let peer = admission
+                    .lifecycle_peer
+                    .clone()
+                    .expect("generated lifecycle classification should include a peer subject");
+                meerkat_core::PeerIngressConvention::Lifecycle { kind, peer }
+            } else {
+                let request_id = admission
+                    .request_id
+                    .clone()
+                    .expect("generated request classification should include request id");
+                meerkat_core::PeerIngressConvention::Request {
+                    request_id,
+                    intent: intent.clone(),
+                }
+            }
+        }
+        InteractionContent::Response { status, .. } => {
+            let in_reply_to = admission
+                .request_id
+                .as_deref()
+                .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                .map(InteractionId)
+                .expect("generated response classification should include in-reply-to id");
+            meerkat_core::PeerIngressConvention::Response {
+                in_reply_to,
+                status: *status,
+            }
+        }
+    };
+    let ingress = PeerIngressFact::peer(
+        interaction.id,
+        classification.class,
+        classification.kind,
+        Some(classification.auth),
+        PeerIngressIdentity::new(peer_id, interaction.from.clone(), convention),
+    );
+    let mut candidate = meerkat_core::interaction::PeerInputCandidate::new(
+        interaction,
+        ingress,
+        admission.lifecycle_peer,
+    );
+    candidate.response_terminality = classification.response_terminality;
+    candidate
+}
+
 /// Stamp prompt turn metadata with the runtime-owned input semantics.
 ///
 /// This helper exists for runtime-backed service-turn paths that already hold

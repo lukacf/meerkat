@@ -505,7 +505,6 @@ impl BridgeRequestDeadline {
 mod tests {
     use super::*;
 
-    use meerkat_core::PeerIngressMachinePolicy;
     use meerkat_core::handles::PeerInteractionHandle as _;
     use meerkat_core::interaction::{InboxInteraction, InteractionId, ResponseStatus};
 
@@ -519,9 +518,8 @@ mod tests {
             uuid::Uuid::parse_str("018f6f79-7a82-7c4e-a552-a3b86f9630f5")
                 .expect("valid worker route id"),
         );
-        let classification = PeerIngressMachinePolicy::default().classify_response(status);
-        PeerInputCandidate {
-            interaction: InboxInteraction {
+        meerkat_runtime::test_peer_input_candidate_from_interaction(
+            InboxInteraction {
                 id,
                 from_route: Some(worker_peer_id),
                 from: "worker-rt".to_string(),
@@ -535,23 +533,8 @@ mod tests {
                 handling_mode: HandlingMode::Queue,
                 render_metadata: None,
             },
-            ingress: meerkat_core::PeerIngressFact::peer(
-                id,
-                classification.class,
-                meerkat_core::PeerIngressKind::Response,
-                Some(meerkat_core::PeerIngressAuthDecision::Required),
-                meerkat_core::PeerIngressIdentity::new(
-                    worker_peer_id,
-                    "worker-rt",
-                    meerkat_core::PeerIngressConvention::Response {
-                        in_reply_to: InteractionId(request_envelope_id),
-                        status,
-                    },
-                ),
-            ),
-            lifecycle_peer: None,
-            response_terminality: classification.response_terminality,
-        }
+            worker_peer_id,
+        )
     }
 
     #[test]
@@ -693,9 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn response_value_routes_all_statuses_through_canonical_classifier() {
-        use meerkat_core::interaction::{TerminalityClass, classify_response_terminality};
-
+    fn response_value_routes_all_statuses_through_machine_terminality() {
         for status in [
             ResponseStatus::Accepted,
             ResponseStatus::Completed,
@@ -708,13 +689,16 @@ mod tests {
             let value = MobSupervisorBridge::response_value(&candidate, request_envelope_id)
                 .expect("status-response should parse");
 
-            match classify_response_terminality(status) {
-                TerminalityClass::Terminal { .. } => assert_eq!(
+            match candidate
+                .response_terminality
+                .expect("generated peer-comms authority should classify response terminality")
+            {
+                meerkat_core::TerminalityClass::Terminal { .. } => assert_eq!(
                     value,
                     Some(payload),
                     "terminal classification must surface payload (status={status:?})"
                 ),
-                TerminalityClass::Progress => assert!(
+                meerkat_core::TerminalityClass::Progress => assert!(
                     value.is_none(),
                     "progress classification must not surface payload (status={status:?})"
                 ),

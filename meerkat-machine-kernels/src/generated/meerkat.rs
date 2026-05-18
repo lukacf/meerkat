@@ -3272,6 +3272,66 @@ impl std::fmt::Display for PeerIngressResponseTerminality {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum PeerResponseTerminalObservedStatus {
+    #[default]
+    #[serde(rename = "NotPeerTerminal")]
+    NotPeerTerminal,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+}
+impl PeerResponseTerminalObservedStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotPeerTerminal => "NotPeerTerminal",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerResponseTerminalObservedStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotPeerTerminal" => Ok(Self::NotPeerTerminal),
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            "Cancelled" => Ok(Self::Cancelled),
+            other => Err(format!(
+                "invalid PeerResponseTerminalObservedStatus value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerResponseTerminalObservedStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerResponseTerminalObservedStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum PeerTerminalDisposition {
     #[default]
     #[serde(rename = "Completed")]
@@ -6002,7 +6062,8 @@ pub mod inputs {
         pub input_id: String,
         pub durability_valid: bool,
         pub peer_handling_mode_valid: bool,
-        pub peer_response_terminal_valid: bool,
+        pub peer_response_terminal_structurally_valid: bool,
+        pub peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveAdmissionIdempotency {

@@ -305,6 +305,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum("AdmissionValidationResultKind", &["Accept", "Reject"]),
             NamedTypeBinding::string_enum(
+                "PeerResponseTerminalObservedStatus",
+                &["NotPeerTerminal", "Completed", "Failed", "Cancelled"],
+            ),
+            NamedTypeBinding::string_enum(
                 "AdmissionRejectReasonKind",
                 &[
                     "DurabilityViolation",

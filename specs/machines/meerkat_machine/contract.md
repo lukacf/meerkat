@@ -195,7 +195,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `AcceptWithoutWake`(input_id: InputId)
 - `ResolveAdmissionPlan`(input_id: String, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, silent_intent_match: Bool, existing_superseded_input_id: Option<String>, runtime_running: Bool, without_wake: Bool)
-- `ResolveAdmissionValidation`(input_id: String, durability_valid: Bool, peer_handling_mode_valid: Bool, peer_response_terminal_valid: Bool)
+- `ResolveAdmissionValidation`(input_id: String, durability_valid: Bool, peer_handling_mode_valid: Bool, peer_response_terminal_structurally_valid: Bool, peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus)
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
 - `RegisterAcceptedIdempotency`(input_id: String, idempotency_key: String)
 - `NormalizeRecoveredInputLifecycle`(input_id: String, phase: RecoveredInputObservedPhase, consume_on_accept: Bool, applied_boundary_committed: Option<Bool>)
@@ -1825,7 +1825,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationDurabilityRejectedIdle`
 - From: `Idle`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_invalid`
 - Emits: `AdmissionValidationResolved`
@@ -1833,7 +1833,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationDurabilityRejectedAttached`
 - From: `Attached`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_invalid`
 - Emits: `AdmissionValidationResolved`
@@ -1841,7 +1841,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationDurabilityRejectedRunning`
 - From: `Running`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_invalid`
 - Emits: `AdmissionValidationResolved`
@@ -1849,7 +1849,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationPeerHandlingRejectedIdle`
 - From: `Idle`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_valid`
   - `peer_handling_mode_invalid`
@@ -1858,7 +1858,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationPeerHandlingRejectedAttached`
 - From: `Attached`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_valid`
   - `peer_handling_mode_invalid`
@@ -1867,7 +1867,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationPeerHandlingRejectedRunning`
 - From: `Running`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_valid`
   - `peer_handling_mode_invalid`
@@ -1876,7 +1876,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationPeerTerminalRejectedIdle`
 - From: `Idle`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_valid`
   - `peer_handling_mode_valid`
@@ -1886,7 +1886,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationPeerTerminalRejectedAttached`
 - From: `Attached`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_valid`
   - `peer_handling_mode_valid`
@@ -1896,7 +1896,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationPeerTerminalRejectedRunning`
 - From: `Running`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_valid`
   - `peer_handling_mode_valid`
@@ -1906,31 +1906,34 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationAcceptedIdle`
 - From: `Idle`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_valid`
   - `peer_handling_mode_valid`
-  - `peer_response_terminal_valid`
+  - `peer_response_terminal_structurally_valid`
+  - `peer_response_terminal_status_supported`
 - Emits: `AdmissionValidationResolved`
 - To: `Idle`
 
 ### `ResolveAdmissionValidationAcceptedAttached`
 - From: `Attached`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_valid`
   - `peer_handling_mode_valid`
-  - `peer_response_terminal_valid`
+  - `peer_response_terminal_structurally_valid`
+  - `peer_response_terminal_status_supported`
 - Emits: `AdmissionValidationResolved`
 - To: `Attached`
 
 ### `ResolveAdmissionValidationAcceptedRunning`
 - From: `Running`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_valid`
   - `peer_handling_mode_valid`
-  - `peer_response_terminal_valid`
+  - `peer_response_terminal_structurally_valid`
+  - `peer_response_terminal_status_supported`
 - Emits: `AdmissionValidationResolved`
 - To: `Running`
 

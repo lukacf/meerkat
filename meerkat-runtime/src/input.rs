@@ -635,7 +635,7 @@ pub(crate) fn peer_response_terminal_fact(
         PeerResponseTerminalCorrelationId::parse(request_id)?,
         *status,
         PeerResponseTerminalRenderPayload::new(peer.payload.clone()),
-    )?))
+    )))
 }
 
 pub(crate) fn validate_peer_response_terminal_fact(
@@ -929,7 +929,7 @@ fn peer_response_terminal_context_append(
                 }),
                 request_id: Some(fact.correlation_id.to_string()),
                 intent: None,
-                status: Some(fact.status.generated_terminal_label()?.to_string()),
+                status: Some(fact.status.label().to_string()),
                 summary: Some("Peer terminal response".to_string()),
                 payload: fact.render_payload.as_ref().cloned(),
                 content: Vec::new(),
@@ -1608,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_response_terminal_cancelled_is_not_valid_terminal_fact() {
+    fn peer_response_terminal_validation_is_structural_only() {
         let peer_id = meerkat_core::comms::PeerId::from_uuid(
             uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000161").unwrap(),
         );
@@ -1624,14 +1624,8 @@ mod tests {
             serde_json::json!({"ok": false}),
         );
 
-        let err = validate_peer_response_terminal_fact(&input)
-            .expect_err("cancelled terminal status must fail closed");
-        assert_eq!(
-            err,
-            PeerResponseTerminalFactError::UnsupportedTerminalStatus {
-                status: "cancelled"
-            }
-        );
+        validate_peer_response_terminal_fact(&input)
+            .expect("status support is generated admission authority, structural fact validation should pass");
     }
 
     #[test]

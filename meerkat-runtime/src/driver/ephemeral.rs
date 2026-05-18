@@ -2092,18 +2092,59 @@ impl EphemeralRuntimeDriver {
         input_id: &InputId,
         durability_valid: bool,
         peer_handling_mode_valid: bool,
-        peer_response_terminal_valid: bool,
+        peer_response_terminal_structurally_valid: bool,
+        peer_response_terminal_observed_status: mm_dsl::PeerResponseTerminalObservedStatus,
     ) -> Result<Option<mm_dsl::AdmissionRejectReasonKind>, RuntimeDriverError> {
         let effects = self.dsl_preview(
             mm_dsl::MeerkatMachineInput::ResolveAdmissionValidation {
                 input_id: Self::dsl_key(input_id),
                 durability_valid,
                 peer_handling_mode_valid,
-                peer_response_terminal_valid,
+                peer_response_terminal_structurally_valid,
+                peer_response_terminal_observed_status,
             },
             "ResolveAdmissionValidation",
         )?;
         Self::admission_validation_from_machine_effects(input_id, effects)
+    }
+
+    fn peer_response_terminal_observed_status(
+        input: &Input,
+    ) -> mm_dsl::PeerResponseTerminalObservedStatus {
+        let Input::Peer(peer) = input else {
+            return mm_dsl::PeerResponseTerminalObservedStatus::NotPeerTerminal;
+        };
+        let Some(crate::input::PeerConvention::ResponseTerminal { status, .. }) = &peer.convention
+        else {
+            return mm_dsl::PeerResponseTerminalObservedStatus::NotPeerTerminal;
+        };
+
+        match status {
+            meerkat_core::handles::PeerResponseTerminalProjectionStatus::Completed => {
+                mm_dsl::PeerResponseTerminalObservedStatus::Completed
+            }
+            meerkat_core::handles::PeerResponseTerminalProjectionStatus::Failed => {
+                mm_dsl::PeerResponseTerminalObservedStatus::Failed
+            }
+            meerkat_core::handles::PeerResponseTerminalProjectionStatus::Cancelled => {
+                mm_dsl::PeerResponseTerminalObservedStatus::Cancelled
+            }
+        }
+    }
+
+    fn peer_response_terminal_generated_rejection_detail(input: &Input) -> Option<String> {
+        let Input::Peer(peer) = input else {
+            return None;
+        };
+        let Some(crate::input::PeerConvention::ResponseTerminal { status, .. }) = &peer.convention
+        else {
+            return None;
+        };
+
+        Some(format!(
+            "peer response terminal status rejected by generated authority: {}",
+            status.label()
+        ))
     }
 
     fn reject_reason_from_machine_validation(
@@ -2399,24 +2440,34 @@ impl EphemeralRuntimeDriver {
             crate::peer_handling_mode::validate_peer_handling_mode(&input)
                 .err()
                 .map(|error| error.to_string());
-        let peer_response_terminal_error =
+        let peer_response_terminal_structural_error =
             crate::input::validate_peer_response_terminal_fact(&input)
                 .err()
                 .map(|error| error.to_string());
+        let peer_response_terminal_observed_status =
+            Self::peer_response_terminal_observed_status(&input);
+        let peer_response_terminal_detail = peer_response_terminal_structural_error
+            .clone()
+            .or_else(|| Self::peer_response_terminal_generated_rejection_detail(&input));
         if let Some(reason) = self.resolve_admission_validation(
             &input_id,
             durability_error.is_none(),
             peer_handling_mode_error.is_none(),
-            peer_response_terminal_error.is_none(),
+            peer_response_terminal_structural_error.is_none(),
+            peer_response_terminal_observed_status,
         )? {
-            if let Some(detail) = peer_response_terminal_error.as_deref() {
+            if matches!(
+                reason,
+                mm_dsl::AdmissionRejectReasonKind::PeerResponseTerminalInvalid
+            ) && let Some(detail) = peer_response_terminal_detail.as_deref()
+            {
                 self.reject_peer_response_terminal_observation_if_present(&input, detail);
             }
             let reason = Self::reject_reason_from_machine_validation(
                 reason,
                 durability_error.as_deref(),
                 peer_handling_mode_error.as_deref(),
-                peer_response_terminal_error.as_deref(),
+                peer_response_terminal_detail.as_deref(),
             )?;
             return Ok(AcceptOutcome::Rejected { reason });
         }
@@ -3208,7 +3259,13 @@ mod tests {
         }
 
         let generated_reason = driver
-            .resolve_admission_validation(&input_id, false, true, true)
+            .resolve_admission_validation(
+                &input_id,
+                false,
+                true,
+                true,
+                mm_dsl::PeerResponseTerminalObservedStatus::NotPeerTerminal,
+            )
             .expect("generated validation feedback should resolve");
         assert_eq!(
             generated_reason,
@@ -3323,7 +3380,7 @@ mod tests {
         match outcome {
             crate::accept::AcceptOutcome::Rejected {
                 reason: crate::accept::RejectReason::PeerResponseTerminalInvalid { detail },
-            } => assert!(detail.contains("unsupported peer response terminal status")),
+            } => assert!(detail.contains("rejected by generated authority")),
             other => panic!("expected generated peer terminal rejection, got {other:?}"),
         }
         driver.with_dsl_state(|state| {

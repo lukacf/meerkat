@@ -641,10 +641,9 @@ impl From<meerkat_core::OutboundPeerRequestState> for OutboundPeerRequestState {
             meerkat_core::OutboundPeerRequestState::Completed => Self::Completed,
             meerkat_core::OutboundPeerRequestState::Failed => Self::Failed,
             meerkat_core::OutboundPeerRequestState::TimedOut => Self::TimedOut,
-            // core `#[non_exhaustive]` guard: new variants added there
-            // without a catalog mirror fall back to `Sent`. Detect at
-            // codegen time via the parity test, not at runtime.
-            _ => Self::Sent,
+            _ => panic!(
+                "unsupported OutboundPeerRequestState variant; update generated MeerkatMachine mirror"
+            ),
         }
     }
 }
@@ -675,7 +674,9 @@ impl From<meerkat_core::InboundPeerRequestState> for InboundPeerRequestState {
         match s {
             meerkat_core::InboundPeerRequestState::Received => Self::Received,
             meerkat_core::InboundPeerRequestState::Replied => Self::Replied,
-            _ => Self::Received,
+            _ => panic!(
+                "unsupported InboundPeerRequestState variant; update generated MeerkatMachine mirror"
+            ),
         }
     }
 }
@@ -703,7 +704,9 @@ impl From<meerkat_core::handles::PeerTerminalDisposition> for PeerTerminalDispos
         match d {
             meerkat_core::handles::PeerTerminalDisposition::Completed => Self::Completed,
             meerkat_core::handles::PeerTerminalDisposition::Failed => Self::Failed,
-            _ => Self::Failed,
+            _ => panic!(
+                "unsupported PeerTerminalDisposition variant; update generated MeerkatMachine mirror"
+            ),
         }
     }
 }
@@ -733,7 +736,9 @@ impl From<meerkat_core::InteractionStreamState> for InteractionStreamState {
             meerkat_core::InteractionStreamState::Completed => Self::Completed,
             meerkat_core::InteractionStreamState::Expired => Self::Expired,
             meerkat_core::InteractionStreamState::ClosedEarly => Self::ClosedEarly,
-            _ => Self::Reserved,
+            _ => panic!(
+                "unsupported InteractionStreamState variant; update generated MeerkatMachine mirror"
+            ),
         }
     }
 }
@@ -1534,7 +1539,9 @@ impl From<meerkat_core::lifecycle::CoreApplyFailureCauseKind> for RuntimeApplyFa
                 Self::ExecutorInternal
             }
             meerkat_core::lifecycle::CoreApplyFailureCauseKind::Unknown => Self::Unknown,
-            _ => Self::Unknown,
+            _ => panic!(
+                "unsupported CoreApplyFailureCauseKind variant; update generated MeerkatMachine mirror"
+            ),
         }
     }
 }
@@ -2287,6 +2294,15 @@ pub enum AdmissionValidationResultKind {
     #[default]
     Accept,
     Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerResponseTerminalObservedStatus {
+    #[default]
+    NotPeerTerminal,
+    Completed,
+    Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

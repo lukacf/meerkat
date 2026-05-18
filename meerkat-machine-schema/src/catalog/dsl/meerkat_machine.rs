@@ -1120,6 +1120,15 @@ pub enum AdmissionValidationResultKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerResponseTerminalObservedStatus {
+    #[default]
+    NotPeerTerminal,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum AdmissionRejectReasonKind {
     #[default]
     DurabilityViolation,
@@ -2028,7 +2037,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 input_id: String,
                 durability_valid: bool,
                 peer_handling_mode_valid: bool,
-                peer_response_terminal_valid: bool,
+                peer_response_terminal_structurally_valid: bool,
+                peer_response_terminal_observed_status: Enum<PeerResponseTerminalObservedStatus>,
             },
             ResolveAdmissionIdempotency { input_id: String, idempotency_key: Option<String> },
             RegisterAcceptedIdempotency { input_id: String, idempotency_key: String },
@@ -4317,7 +4327,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // can change.
         transition ResolveAdmissionValidationDurabilityRejected {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid }
+            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
             guard "durability_invalid" { durability_valid == false }
             update {}
             to Idle
@@ -4330,7 +4340,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionValidationPeerHandlingRejected {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid }
+            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
             guard "durability_valid" { durability_valid == true }
             guard "peer_handling_mode_invalid" { peer_handling_mode_valid == false }
             update {}
@@ -4344,10 +4354,13 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionValidationPeerTerminalRejected {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid }
+            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
             guard "durability_valid" { durability_valid == true }
             guard "peer_handling_mode_valid" { peer_handling_mode_valid == true }
-            guard "peer_response_terminal_invalid" { peer_response_terminal_valid == false }
+            guard "peer_response_terminal_invalid" {
+                peer_response_terminal_structurally_valid == false
+                || peer_response_terminal_observed_status == PeerResponseTerminalObservedStatus::Cancelled
+            }
             update {}
             to Idle
             emit AdmissionValidationResolved {
@@ -4359,10 +4372,13 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionValidationAccepted {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid }
+            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
             guard "durability_valid" { durability_valid == true }
             guard "peer_handling_mode_valid" { peer_handling_mode_valid == true }
-            guard "peer_response_terminal_valid" { peer_response_terminal_valid == true }
+            guard "peer_response_terminal_structurally_valid" { peer_response_terminal_structurally_valid == true }
+            guard "peer_response_terminal_status_supported" {
+                peer_response_terminal_observed_status != PeerResponseTerminalObservedStatus::Cancelled
+            }
             update {}
             to Idle
             emit AdmissionValidationResolved {

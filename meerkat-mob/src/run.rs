@@ -3830,9 +3830,7 @@ impl MobRun {
                     ))
                 },
             )?;
-            if transition.from_phase != transition.to_phase {
-                authority.state.lifecycle_phase = transition.to_phase;
-            }
+            let _ = transition;
         }
         Ok(())
     }
@@ -3843,7 +3841,6 @@ impl MobRun {
         }
 
         let mut authority = mob_dsl::MobMachineAuthority::new();
-        authority.state.lifecycle_phase = mob_dsl::MobPhase::Running;
         Self::replay_flow_authority_inputs_into(
             &mut authority,
             &self.flow_authority_inputs,
@@ -3935,7 +3932,6 @@ impl MobRun {
         let run_id = RunId::new();
         let seed_input = Self::create_run_seed_input(&run_id, config)?;
         let mut authority = mob_dsl::MobMachineAuthority::new();
-        authority.state.lifecycle_phase = mob_dsl::MobPhase::Running;
         mob_dsl::MobMachineMutator::apply(&mut authority, seed_input)
             .map_err(|error| MobError::Internal(format!("test CreateRunSeed rejected: {error}")))?;
         Self::flow_state_for_config_with_authority(&run_id, config, &authority.state)
@@ -4295,7 +4291,6 @@ impl MobRun {
         let run_id = RunId::new();
         let seed_input = Self::create_run_seed_input(&run_id, &config)?;
         let mut authority = mob_dsl::MobMachineAuthority::new();
-        authority.state.lifecycle_phase = mob_dsl::MobPhase::Running;
         mob_dsl::MobMachineMutator::apply(&mut authority, seed_input)
             .map_err(|error| MobError::Internal(format!("test CreateRunSeed rejected: {error}")))?;
         Self::flow_state_for_config_with_authority(&run_id, &config, &authority.state)

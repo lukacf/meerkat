@@ -58,9 +58,7 @@ fn apply_seeded_mob_input(
             "MobMachine seeded authority ({context}) rejected {input_debug}: {error}"
         ))
     })?;
-    if transition.from_phase != transition.to_phase {
-        authority.state.lifecycle_phase = transition.to_phase;
-    }
+    let _ = transition;
     Ok(())
 }
 
@@ -75,9 +73,7 @@ fn apply_seeded_mob_signal(
             "MobMachine seeded authority ({context}) rejected {signal_debug}: {error}"
         ))
     })?;
-    if transition.from_phase != transition.to_phase {
-        authority.state.lifecycle_phase = transition.to_phase;
-    }
+    let _ = transition;
     Ok(())
 }
 
@@ -525,9 +521,7 @@ async fn commit_recovered_flow_run_command(
                     ))
                 },
             )?;
-        if transition.from_phase != transition.to_phase {
-            prepared.state.lifecycle_phase = transition.to_phase;
-        }
+        let _ = transition;
         let token =
             MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&authority_input)?;
         let outcome = apply_mob_machine_flow_run_command(
@@ -583,9 +577,7 @@ fn apply_recovered_flow_signal(
             "MobMachine recovered flow signal ({context}) rejected {signal_debug}: {error}"
         ))
     })?;
-    if transition.from_phase != transition.to_phase {
-        authority.state.lifecycle_phase = transition.to_phase;
-    }
+    let _ = transition;
     Ok(())
 }
 

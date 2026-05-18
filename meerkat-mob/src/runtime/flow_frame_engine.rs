@@ -420,9 +420,7 @@ impl FlowFrameKernel {
                         "MobMachine preview rejected staged input {input:?}: {error}"
                     ))
                 })?;
-            if transition.from_phase != transition.to_phase {
-                authority.state.lifecycle_phase = transition.to_phase;
-            }
+            let _ = transition;
         }
         Ok(authority.state)
     }

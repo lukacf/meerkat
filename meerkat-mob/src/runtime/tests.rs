@@ -21116,9 +21116,7 @@ fn apply_authority_input_for_test(
 ) {
     let transition = crate::machines::mob_machine::MobMachineMutator::apply(authority, input)
         .expect("test authority input should be accepted");
-    if transition.from_phase != transition.to_phase {
-        authority.state.lifecycle_phase = transition.to_phase;
-    }
+    let _ = transition;
 }
 
 fn authority_backed_root_frame_run(

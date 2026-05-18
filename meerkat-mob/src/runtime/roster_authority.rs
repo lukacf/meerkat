@@ -85,13 +85,6 @@ impl RosterAuthority {
         self.roster.apply(event);
     }
 
-    /// Flip a roster entry to `Retiring` state. Mirrors
-    /// [`Roster::mark_retiring_by_identity`]. Returns `true` if the member
-    /// was present and was flipped to `Retiring`; `false` otherwise.
-    pub(crate) fn mark_retiring_by_identity(&mut self, identity: &AgentIdentity) -> bool {
-        self.roster.mark_retiring_by_identity(identity)
-    }
-
     pub(crate) fn replace_backend_peer_binding_by_peer_id(
         &mut self,
         prior_peer_id: &str,

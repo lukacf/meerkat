@@ -1401,7 +1401,6 @@ impl MobActor {
         let effects = transition.effects.clone();
         self.queue_routed_effects_from(&transition.effects);
         if transition.from_phase != transition.to_phase {
-            self.dsl_authority.state.lifecycle_phase = transition.to_phase;
             // Publish the projected phase for external observers. This is
             // the sole write seam for the dogma-#13 projection watch.
             let _ = self.phase_watch_tx.send(self.state());
@@ -1437,7 +1436,6 @@ impl MobActor {
                     ))
                 })?;
             if transition.from_phase != transition.to_phase {
-                authority.state.lifecycle_phase = transition.to_phase;
                 phase_changed = true;
             }
             effects.extend(transition.effects);
@@ -1523,9 +1521,7 @@ impl MobActor {
                 "DSL authority preview ({context}) rejected {input_debug}: {e}"
             ))
         })?;
-        if transition.from_phase != transition.to_phase {
-            authority.state.lifecycle_phase = transition.to_phase;
-        }
+        let _ = transition;
         Ok(authority.state)
     }
 
@@ -1545,10 +1541,9 @@ impl MobActor {
                     self.dsl_authority.state.live_runtime_ids,
                     self.dsl_authority.state.runtime_fence_tokens,
                 ))
-            })?;
+        })?;
         self.queue_routed_effects_from(&transition.effects);
         if transition.from_phase != transition.to_phase {
-            self.dsl_authority.state.lifecycle_phase = transition.to_phase;
             let _ = self.phase_watch_tx.send(self.state());
         }
         self.publish_machine_state_projection();
@@ -1767,24 +1762,34 @@ impl MobActor {
         })
     }
 
+    fn machine_roster_state_for_entry(&self, entry: &RosterEntry) -> crate::roster::MemberState {
+        let domain_identity = crate::ids::AgentIdentity::from(entry.agent_identity.as_str());
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
+        let lifecycle = self
+            .dsl_authority
+            .state
+            .member_lifecycle_for_identity(&dsl_identity, true);
+        MobMemberLifecycleProjection::roster_state_for_machine_lifecycle(&lifecycle)
+    }
+
     async fn project_member_list_from_machine(
         &self,
         include_retiring: bool,
     ) -> Vec<MobMemberListEntry> {
         let entries: Vec<_> = {
             let roster = self.roster.read().await;
-            if include_retiring {
-                roster.list_all().cloned().collect()
-            } else {
-                roster.list().cloned().collect()
-            }
+            roster.list_all().cloned().collect()
         };
         let mut projected = Vec::with_capacity(entries.len());
         for entry in entries {
-            let snapshot = self
+            let material = self
                 .machine_member_material(&entry.agent_identity, false)
-                .await
-                .to_snapshot();
+                .await;
+            let state = material.roster_state();
+            if !include_retiring && state == crate::roster::MemberState::Retiring {
+                continue;
+            }
+            let snapshot = material.to_snapshot();
             let current_bridge_session_id = snapshot.current_bridge_session_id().cloned();
             projected.push(
                 MobMemberListEntry {
@@ -1795,7 +1800,7 @@ impl MobActor {
                     runtime_mode: entry.runtime_mode,
                     peer_id: entry.peer_id,
                     transport_public_key: entry.transport_public_key,
-                    state: entry.state,
+                    state,
                     wired_to: entry.wired_to,
                     external_peer_specs: entry.external_peer_specs,
                     labels: entry.labels,
@@ -2440,9 +2445,7 @@ impl MobActor {
         };
         let transition = mob_dsl::MobMachineMutator::apply(&mut authority, spawn)
             .map_err(|_| self.invalid_transition_to(MobState::Running))?;
-        if transition.from_phase != transition.to_phase {
-            authority.state.lifecycle_phase = transition.to_phase;
-        }
+        let _ = transition;
 
         mob_dsl::MobMachineMutator::apply(
             &mut authority,
@@ -5511,7 +5514,8 @@ impl MobActor {
                 roster
                     .by_profile(&orchestrator.profile)
                     .filter(|entry| {
-                        entry.state == crate::roster::MemberState::Active
+                        self.machine_roster_state_for_entry(entry)
+                            == crate::roster::MemberState::Active
                             && !broken_members.contains(&entry.agent_identity)
                     })
                     .map(|entry| entry.agent_identity.clone())
@@ -5538,7 +5542,8 @@ impl MobActor {
                     roster
                         .by_profile(target_profile)
                         .filter(|entry| {
-                            entry.state == crate::roster::MemberState::Active
+                            self.machine_roster_state_for_entry(entry)
+                                == crate::roster::MemberState::Active
                                 && !broken_members.contains(&entry.agent_identity)
                                 && entry.agent_identity != *agent_identity
                         })
@@ -5573,7 +5578,7 @@ impl MobActor {
         roster
             .list()
             .find(|entry| {
-                entry.state == crate::roster::MemberState::Active
+                self.machine_roster_state_for_entry(entry) == crate::roster::MemberState::Active
                     && entry.agent_identity != *spawned_meerkat_id
                     && !broken_members.contains(&entry.agent_identity)
                     && entry.member_ref.bridge_session_id() == Some(owner_bridge_session_id)
@@ -7504,10 +7509,6 @@ impl MobActor {
                     obligation,
                 )?;
             }
-            {
-                let mut roster = self.roster.write().await;
-                roster.mark_retiring_by_identity(agent_identity);
-            }
             return self.flush_routed_effects().await;
         }
 
@@ -7541,11 +7542,6 @@ impl MobActor {
                     obligation,
                 )?;
             }
-        }
-
-        {
-            let mut roster = self.roster.write().await;
-            roster.mark_retiring_by_identity(agent_identity);
         }
 
         self.flush_routed_effects().await
@@ -7635,21 +7631,6 @@ impl MobActor {
         {
             self.detach_session_ingress_for_mob_destroy(&session_id, obligation)
                 .await?;
-        }
-
-        // #31 Wave D (D-trust-reconciliation subsystem 4): flip the roster
-        // entry's state to `Retiring` so live readers of
-        // `list_members()` / `member_status()` observe the retiring state
-        // during the disposal window (notify peers, archive session).
-        // The canonical removal still runs in the finally block of
-        // `dispose_member`. Without this explicit flip the
-        // `RosterEntry.state` stayed `Active` right up to removal because
-        // the `MemberRetired` event projection is "remove-by-identity",
-        // not "mark-retiring" — there was a lost observability seam for
-        // the in-flight-retire window.
-        {
-            let mut roster = self.roster.write().await;
-            roster.mark_retiring_by_identity(&entry.agent_identity);
         }
 
         // Flush routed effects *before* the disposal pipeline tears down
@@ -8855,10 +8836,6 @@ impl MobActor {
         entry: RosterEntry,
         report: &mut super::handle::MobDestroyReport,
     ) -> Result<(), super::handle::MobDestroyError> {
-        {
-            let mut roster = self.roster.write().await;
-            roster.mark_retiring_by_identity(&entry.agent_identity);
-        }
         let ctx = self
             .disposal_context_from_entry(&entry.agent_identity, &entry)
             .await;
@@ -10340,7 +10317,9 @@ impl MobActor {
                             "auto-spawned member '{identity}' missing from roster after completion"
                         ))
                     })?;
-                    if spawned_entry.state != crate::roster::MemberState::Active {
+                    if self.machine_roster_state_for_entry(&spawned_entry)
+                        != crate::roster::MemberState::Active
+                    {
                         return Err(MobError::Internal(format!(
                             "auto-spawned member '{identity}' is not active"
                         )));
@@ -10382,7 +10361,6 @@ impl MobActor {
             }
         };
         if transition.from_phase != transition.to_phase {
-            self.dsl_authority.state.lifecycle_phase = transition.to_phase;
             let _ = self.phase_watch_tx.send(self.state());
         }
         self.publish_machine_state_projection();
@@ -10463,7 +10441,6 @@ impl MobActor {
             }
         };
         if transition.from_phase != transition.to_phase {
-            self.dsl_authority.state.lifecycle_phase = transition.to_phase;
             let _ = self.phase_watch_tx.send(self.state());
         }
         self.publish_machine_state_projection();

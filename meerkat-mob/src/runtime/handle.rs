@@ -1469,7 +1469,7 @@ impl MobHandle {
                 }
             }
             MobMachineCommand::RosterSnapshot => {
-                let roster = self.roster.read().await.snapshot();
+                let roster = self.project_roster_snapshot_from_machine_state().await;
                 Ok(MobMachineCommandResult::RosterSnapshot(roster))
             }
             MobMachineCommand::ListMembers => {
@@ -1493,7 +1493,7 @@ impl MobHandle {
                 ))
             }
             MobMachineCommand::ListAllMembers => {
-                let members = self.roster.read().await.list_all().cloned().collect();
+                let members = self.project_all_roster_entries_from_machine_state().await;
                 Ok(MobMachineCommandResult::ListAllMembers(members))
             }
             MobMachineCommand::MemberStatus { agent_identity } => {
@@ -1566,7 +1566,15 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::GetMember { agent_identity } => {
-                let member = self.roster.read().await.entry(&agent_identity);
+                let member = self
+                    .roster
+                    .read()
+                    .await
+                    .entry(&agent_identity)
+                    .map(|entry| {
+                        let machine_state = self.machine_state_watch_rx.borrow().clone();
+                        Self::project_roster_entry_from_machine_state(entry, &machine_state)
+                    });
                 Ok(MobMachineCommandResult::GetMember(member))
             }
             #[cfg(test)]
@@ -1852,9 +1860,6 @@ impl MobHandle {
     /// live peer-connectivity fanout. Use [`member_status`](Self::member_status)
     /// for deep per-member inspection including live comms reachability.
     pub async fn list_members_including_retiring(&self) -> Vec<MobMemberListEntry> {
-        if let Some(entries) = self.inflight_retiring_member_list().await {
-            return entries;
-        }
         match self
             .execute_machine_command(MobMachineCommand::ListMembersIncludingRetiring)
             .await
@@ -1866,22 +1871,6 @@ impl MobHandle {
             }
             Err(_) => Vec::new(),
         }
-    }
-
-    async fn inflight_retiring_member_list(&self) -> Option<Vec<MobMemberListEntry>> {
-        let entries: Vec<_> = {
-            let roster = self.roster.read().await;
-            let entries: Vec<_> = roster.list_all().cloned().collect();
-            if !entries
-                .iter()
-                .any(|entry| entry.state == crate::roster::MemberState::Retiring)
-            {
-                return None;
-            }
-            entries
-        };
-        let machine_state = self.machine_state_watch_rx.borrow().clone();
-        Some(self.project_member_list_entries_from_machine_state(entries, &machine_state))
     }
 
     fn project_member_list_entries_from_machine_state(
@@ -1916,6 +1905,7 @@ impl MobHandle {
                     peer_connectivity: None,
                     kickoff: entry.kickoff.clone(),
                 });
+                let state = material.roster_state();
                 let snapshot = material.to_snapshot();
                 let current_bridge_session_id = snapshot.current_bridge_session_id().cloned();
                 MobMemberListEntry {
@@ -1926,7 +1916,7 @@ impl MobHandle {
                     runtime_mode: entry.runtime_mode,
                     peer_id: entry.peer_id,
                     transport_public_key: entry.transport_public_key,
-                    state: entry.state,
+                    state,
                     wired_to: entry.wired_to,
                     external_peer_specs: entry.external_peer_specs,
                     labels: entry.labels,
@@ -1942,6 +1932,64 @@ impl MobHandle {
             .collect()
     }
 
+    fn project_roster_entry_from_machine_state(
+        mut entry: RosterEntry,
+        machine_state: &mob_dsl::MobMachineState,
+    ) -> RosterEntry {
+        let machine_lifecycle =
+            Self::member_lifecycle_from_machine_state(&entry.agent_identity, machine_state, true);
+        entry.state =
+            MobMemberLifecycleProjection::roster_state_for_machine_lifecycle(&machine_lifecycle);
+        entry
+    }
+
+    fn member_lifecycle_from_machine_state(
+        identity: &crate::ids::AgentIdentity,
+        machine_state: &mob_dsl::MobMachineState,
+        member_present: bool,
+    ) -> mob_dsl::MobMemberLifecycleMaterial {
+        let domain_identity = crate::ids::AgentIdentity::from(identity.as_str());
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
+        machine_state.member_lifecycle_for_identity(&dsl_identity, member_present)
+    }
+
+    fn project_roster_from_machine_state(
+        mut roster: Roster,
+        machine_state: &mob_dsl::MobMachineState,
+    ) -> Roster {
+        roster.project_member_states(|entry| {
+            let machine_lifecycle = Self::member_lifecycle_from_machine_state(
+                &entry.agent_identity,
+                machine_state,
+                true,
+            );
+            MobMemberLifecycleProjection::roster_state_for_machine_lifecycle(&machine_lifecycle)
+        });
+        roster
+    }
+
+    async fn project_roster_snapshot_from_machine_state(&self) -> Roster {
+        let roster = self.roster.read().await.snapshot();
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        Self::project_roster_from_machine_state(roster, &machine_state)
+    }
+
+    async fn project_all_roster_entries_from_machine_state(&self) -> Vec<RosterEntry> {
+        let entries = self.roster.read().await.list_all().cloned().collect();
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        Self::project_roster_entries_from_machine_state(entries, &machine_state)
+    }
+
+    fn project_roster_entries_from_machine_state(
+        entries: Vec<RosterEntry>,
+        machine_state: &mob_dsl::MobMachineState,
+    ) -> Vec<RosterEntry> {
+        entries
+            .into_iter()
+            .map(|entry| Self::project_roster_entry_from_machine_state(entry, machine_state))
+            .collect()
+    }
+
     /// List members currently eligible for runtime work dispatch.
     ///
     /// Excludes retiring, completed, broken, or unknown members even if they
@@ -1950,20 +1998,16 @@ impl MobHandle {
         self.list_members()
             .await
             .into_iter()
-            .filter(|entry| {
-                entry.state == crate::roster::MemberState::Active
-                    && entry.status == MobMemberStatus::Active
-            })
+            .filter(|entry| entry.status == MobMemberStatus::Active)
             .collect()
     }
 
     /// List all members including those in `Retiring` state.
     ///
-    /// The `state` field on each [`RosterEntry`] distinguishes `Active` from
-    /// `Retiring`. Use this for observability and membership inspection where
-    /// in-flight retires should be visible.
+    /// The `state` field on each [`RosterEntry`] is projected from
+    /// `MobMachineState`, not from the event roster's compatibility mirror.
     pub async fn list_all_members(&self) -> Vec<RosterEntry> {
-        self.roster.read().await.list_all().cloned().collect()
+        self.project_all_roster_entries_from_machine_state().await
     }
 
     /// Get a specific member entry by identity.
@@ -2046,7 +2090,10 @@ impl MobHandle {
             .get_member(identity)
             .await
             .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
-        if entry.state != crate::roster::MemberState::Active {
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let lifecycle =
+            Self::member_lifecycle_from_machine_state(&entry.agent_identity, &machine_state, true);
+        if lifecycle.status != mob_dsl::MobMemberLifecycleStatus::Active {
             return Err(MobError::MemberNotFound(meerkat_id.clone()));
         }
         Ok(MemberHandle {
@@ -2894,18 +2941,15 @@ impl MobHandle {
         agent_identity: MeerkatId,
         message: meerkat_core::types::ContentInput,
     ) -> Result<(), MobError> {
-        // #31 Wave D: retiring members reject new internal work. This
-        // matches the `member()` gate for external turns so the observable
-        // contract is symmetric across the retire window.
-        {
-            let roster = self.roster.read().await;
-            match roster.get(&agent_identity) {
-                None => return Err(MobError::MemberNotFound(agent_identity)),
-                Some(entry) if entry.state != crate::roster::MemberState::Active => {
-                    return Err(MobError::MemberNotFound(agent_identity));
-                }
-                _ => {}
-            }
+        let domain_identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
+        let Some(entry) = self.get_member(&domain_identity).await else {
+            return Err(MobError::MemberNotFound(agent_identity));
+        };
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let lifecycle =
+            Self::member_lifecycle_from_machine_state(&entry.agent_identity, &machine_state, true);
+        if lifecycle.status != mob_dsl::MobMemberLifecycleStatus::Active {
+            return Err(MobError::MemberNotFound(agent_identity));
         }
         let snapshot = self
             .member_status(&AgentIdentity::from(agent_identity.as_str()))
@@ -3405,9 +3449,6 @@ impl MobHandle {
         &self,
         identity: &AgentIdentity,
     ) -> Result<MobMemberSnapshot, MobError> {
-        if let Some(snapshot) = self.inflight_retiring_snapshot(identity).await {
-            return Ok(snapshot);
-        }
         let mut snapshot = match self
             .execute_machine_command(MobMachineCommand::MemberStatus {
                 agent_identity: MeerkatId::from(identity),
@@ -3421,8 +3462,6 @@ impl MobHandle {
                 ));
             }
         };
-        self.apply_inflight_member_projection(identity, &mut snapshot)
-            .await;
         snapshot.peer_connectivity = match tokio::time::timeout(
             Duration::from_secs(2),
             self.project_member_peer_connectivity(identity, &snapshot),
@@ -3443,57 +3482,6 @@ impl MobHandle {
             .project_external_member_observation(identity, &snapshot)
             .await;
         Ok(snapshot)
-    }
-
-    async fn inflight_retiring_snapshot(
-        &self,
-        identity: &AgentIdentity,
-    ) -> Option<MobMemberSnapshot> {
-        let entry = {
-            let roster = self.roster.read().await;
-            roster.get(&MeerkatId::from(identity)).cloned()
-        }?;
-        if entry.state != crate::roster::MemberState::Retiring {
-            return None;
-        }
-        Some(
-            MobMemberSnapshot {
-                status: MobMemberStatus::Retiring,
-                agent_runtime_id: entry.agent_runtime_id,
-                fence_token: entry.fence_token,
-                output_preview: None,
-                error: None,
-                tokens_used: 0,
-                is_final: false,
-                current_session_id: None,
-                current_bridge_session_id: None,
-                peer_connectivity: None,
-                kickoff: entry.kickoff,
-                external_member: None,
-                resolved_capabilities: None,
-            }
-            .with_current_bridge_session_id(entry.member_ref.bridge_session_id().cloned()),
-        )
-    }
-
-    async fn apply_inflight_member_projection(
-        &self,
-        identity: &AgentIdentity,
-        snapshot: &mut MobMemberSnapshot,
-    ) {
-        if snapshot.status != MobMemberStatus::Unknown {
-            return;
-        }
-        let is_retiring = {
-            let roster = self.roster.read().await;
-            roster
-                .get(&MeerkatId::from(identity))
-                .is_some_and(|entry| entry.state == crate::roster::MemberState::Retiring)
-        };
-        if is_retiring {
-            snapshot.status = MobMemberStatus::Retiring;
-            snapshot.is_final = false;
-        }
     }
 
     async fn project_member_peer_connectivity(

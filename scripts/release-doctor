@@ -130,14 +130,15 @@ else
   bad "Release workflow should build Linux/macOS/Windows assets on BuildBuddy for owner releases"
 fi
 
-if grep -Fq 'Use BuildBuddy Windows release endpoint' .github/workflows/release.yml &&
-  grep -Fq 'BUILDBUDDY_ENDPOINT:' .github/workflows/release.yml &&
-  grep -Fq 'secrets.BUILDBUDDY_ENDPOINT' .github/workflows/release.yml &&
+if grep -Fq 'Use hosted BuildBuddy Windows release endpoint' .github/workflows/release.yml &&
+  grep -Fq 'BUILDBUDDY_GRPC_URL:' .github/workflows/release.yml &&
+  grep -Fq 'grpcs://king.europe.buildbuddy.io' .github/workflows/release.yml &&
+  ! grep -Fq "release-build-windows-x86' && secrets.BUILDBUDDY_ENDPOINT" .github/workflows/release.yml &&
   grep -Fq 'build:buildbuddy-windows-rbe --remote_default_exec_properties=use-self-hosted-executors=true' .bazelrc &&
   grep -Fq '"use-self-hosted-executors": "true"' platforms/BUILD.bazel; then
-  pass "Release workflow routes Windows recovery builds to the hosted BuildBuddy endpoint"
+  pass "Release workflow routes Windows builds to the hosted King BuildBuddy endpoint"
 else
-  bad "Release workflow should route Windows recovery builds to the hosted BuildBuddy endpoint"
+  bad "Release workflow should route Windows builds to grpcs://king.europe.buildbuddy.io, not a private/stale secret endpoint"
 fi
 
 web_build_timeout="$(

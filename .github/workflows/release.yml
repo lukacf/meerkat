@@ -484,7 +484,7 @@ jobs:
         with:
           profile: native
 
-      - name: Use BuildBuddy Windows release endpoint
+      - name: Use hosted BuildBuddy Windows release endpoint
         if: ${{ matrix.target == 'x86_64-pc-windows-msvc' }}
         shell: bash
         run: |
@@ -509,7 +509,8 @@ jobs:
         shell: bash
         env:
           BUILDBUDDY_BAZEL_COMMAND: ${{ matrix.bb_command }}
-          BUILDBUDDY_ENDPOINT: ${{ matrix.bb_command == 'release-build-windows-x86' && secrets.BUILDBUDDY_ENDPOINT || '' }}
+          BUILDBUDDY_GRPC_URL: ${{ matrix.bb_command == 'release-build-windows-x86' && 'grpcs://king.europe.buildbuddy.io' || '' }}
+          BUILDBUDDY_HTTP_URL: ${{ matrix.bb_command == 'release-build-windows-x86' && 'https://king.europe.buildbuddy.io' || '' }}
           BUILDBUDDY_OUTPUT_LANE: release-build-${{ matrix.target }}
           BUILDBUDDY_OUTPUT_BASE: ${{ runner.temp }}/bb-release-${{ matrix.target }}
           MEERKAT_BUILDBUDDY_OUTPUT_ROOT: ${{ runner.temp }}/bb-release

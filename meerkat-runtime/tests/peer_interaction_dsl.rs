@@ -58,6 +58,33 @@ fn request_sent_rejects_duplicate() {
 }
 
 #[test]
+fn response_reply_terminality_comes_from_machine_signal() {
+    let handle = new_handle();
+    assert_eq!(
+        handle
+            .classify_response_reply(meerkat_core::ResponseStatus::Accepted)
+            .unwrap(),
+        meerkat_core::TerminalityClass::Progress
+    );
+    assert_eq!(
+        handle
+            .classify_response_reply(meerkat_core::ResponseStatus::Completed)
+            .unwrap(),
+        meerkat_core::TerminalityClass::Terminal {
+            disposition: meerkat_core::TerminalDisposition::Completed,
+        }
+    );
+    assert_eq!(
+        handle
+            .classify_response_reply(meerkat_core::ResponseStatus::Failed)
+            .unwrap(),
+        meerkat_core::TerminalityClass::Terminal {
+            disposition: meerkat_core::TerminalDisposition::Failed,
+        }
+    );
+}
+
+#[test]
 fn progress_advances_state_to_accepted() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();

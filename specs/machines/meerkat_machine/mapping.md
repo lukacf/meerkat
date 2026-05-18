@@ -1267,6 +1267,60 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyPlainEventRunning`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `ClassifyPeerResponseReplyAcceptedInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyPeerResponseReplyAcceptedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyPeerResponseReplyAcceptedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyPeerResponseReplyAcceptedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyPeerResponseReplyAcceptedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyPeerResponseReplyAcceptedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyPeerResponseReplyCompletedInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyPeerResponseReplyCompletedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+- `ClassifyPeerResponseReplyCompletedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+- `ClassifyPeerResponseReplyCompletedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyPeerResponseReplyCompletedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+- `ClassifyPeerResponseReplyCompletedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyPeerResponseReplyFailedInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+- `ClassifyPeerResponseReplyFailedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`
+- `ClassifyPeerResponseReplyFailedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ClassifyPeerResponseReplyFailedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+- `ClassifyPeerResponseReplyFailedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`
+- `ClassifyPeerResponseReplyFailedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
 - `PrepareIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
@@ -3048,6 +3102,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PeerIngressClassified`
   - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
   - scenarios: `input_admission_and_queueing`
+- `PeerResponseReplyClassified`
+  - anchors: `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
 - `PeerIngressReceiveResolved`
   - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
   - scenarios: `peer_reachability_probe`

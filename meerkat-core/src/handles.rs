@@ -1315,6 +1315,13 @@ pub trait PeerInteractionHandle: Send + Sync {
     /// Guard: `corr_id` is not already in `inbound_peer_requests`.
     fn request_received(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
 
+    /// Ask the generated machine authority to classify a typed outbound reply
+    /// status before shell transport send/cleanup code consumes terminality.
+    fn classify_response_reply(
+        &self,
+        status: crate::ResponseStatus,
+    ) -> Result<crate::TerminalityClass, DslTransitionError>;
+
     /// Fire `PeerResponseReplied { corr_id }` (inbound reply sent).
     ///
     /// Guard: `corr_id` is in `inbound_peer_requests` with state `Received`.

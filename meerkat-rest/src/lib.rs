@@ -2192,8 +2192,8 @@ fn session_metadata_marks_mob_member(session: &Session) -> bool {
 
 fn runtime_state_to_wire(
     state: meerkat_runtime::RuntimeState,
-) -> meerkat_contracts::WireRuntimeState {
-    match state {
+) -> Option<meerkat_contracts::WireRuntimeState> {
+    Some(match state {
         meerkat_runtime::RuntimeState::Initializing => {
             meerkat_contracts::WireRuntimeState::Initializing
         }
@@ -2203,8 +2203,8 @@ fn runtime_state_to_wire(
         meerkat_runtime::RuntimeState::Retired => meerkat_contracts::WireRuntimeState::Retired,
         meerkat_runtime::RuntimeState::Stopped => meerkat_contracts::WireRuntimeState::Stopped,
         meerkat_runtime::RuntimeState::Destroyed => meerkat_contracts::WireRuntimeState::Destroyed,
-        _ => meerkat_contracts::WireRuntimeState::Destroyed,
-    }
+        _ => return None,
+    })
 }
 
 async fn get_runtime_status(
@@ -2221,8 +2221,15 @@ async fn get_runtime_status(
         )
             .into_response()
     })?;
+    let Some(runtime_state) = runtime_state_to_wire(runtime_state) else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "runtime state projection is unsupported by this REST surface"})),
+        )
+            .into_response());
+    };
     Ok(Json(RuntimeStateResult {
-        state: runtime_state_to_wire(runtime_state),
+        state: runtime_state,
     }))
 }
 

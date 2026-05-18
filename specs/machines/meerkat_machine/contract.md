@@ -353,6 +353,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `BoundaryApplied`(revision: u64)
 - `DrainQueuedRun`(run_id: RunId)
 - `ClassifyExternalEnvelope`(item_id: String, from_peer: String, envelope_kind: PeerIngressEnvelopeClass, request_intent: String, lifecycle_kind: PeerIngressLifecycleClass, lifecycle_peer_param: Option<String>, response_status: PeerIngressResponseStatus, in_reply_to: String)
+- `ClassifyPeerResponseReply`(status: PeerIngressResponseStatus)
 - `ClassifyPlainEvent`(source_name: String)
 - `EnsureDrainRunning`
 
@@ -420,6 +421,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CollectCompletedResult`
 - `EnqueueClassifiedEntry`
 - `PeerIngressClassified`(class: PeerIngressInputClass, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
+- `PeerResponseReplyClassified`(response_terminality: PeerIngressResponseTerminality)
 - `PeerIngressReceiveResolved`(outcome: PeerIngressReceiveOutcomeClass, admission_diagnostic: Option<PeerIngressAdmissionDiagnosticClass>, phase: PeerIngressAuthorityPhaseClass)
 - `PeerIngressDequeueResolved`(phase: PeerIngressAuthorityPhaseClass)
 - `SpawnDrainTask`
@@ -4089,6 +4091,150 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Running`
+
+### `ClassifyPeerResponseReplyAcceptedInitializing`
+- From: `Initializing`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_accepted`
+- Emits: `PeerResponseReplyClassified`
+- To: `Initializing`
+
+### `ClassifyPeerResponseReplyAcceptedIdle`
+- From: `Idle`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_accepted`
+- Emits: `PeerResponseReplyClassified`
+- To: `Idle`
+
+### `ClassifyPeerResponseReplyAcceptedAttached`
+- From: `Attached`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_accepted`
+- Emits: `PeerResponseReplyClassified`
+- To: `Attached`
+
+### `ClassifyPeerResponseReplyAcceptedRunning`
+- From: `Running`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_accepted`
+- Emits: `PeerResponseReplyClassified`
+- To: `Running`
+
+### `ClassifyPeerResponseReplyAcceptedRetired`
+- From: `Retired`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_accepted`
+- Emits: `PeerResponseReplyClassified`
+- To: `Retired`
+
+### `ClassifyPeerResponseReplyAcceptedStopped`
+- From: `Stopped`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_accepted`
+- Emits: `PeerResponseReplyClassified`
+- To: `Stopped`
+
+### `ClassifyPeerResponseReplyCompletedInitializing`
+- From: `Initializing`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_completed`
+- Emits: `PeerResponseReplyClassified`
+- To: `Initializing`
+
+### `ClassifyPeerResponseReplyCompletedIdle`
+- From: `Idle`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_completed`
+- Emits: `PeerResponseReplyClassified`
+- To: `Idle`
+
+### `ClassifyPeerResponseReplyCompletedAttached`
+- From: `Attached`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_completed`
+- Emits: `PeerResponseReplyClassified`
+- To: `Attached`
+
+### `ClassifyPeerResponseReplyCompletedRunning`
+- From: `Running`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_completed`
+- Emits: `PeerResponseReplyClassified`
+- To: `Running`
+
+### `ClassifyPeerResponseReplyCompletedRetired`
+- From: `Retired`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_completed`
+- Emits: `PeerResponseReplyClassified`
+- To: `Retired`
+
+### `ClassifyPeerResponseReplyCompletedStopped`
+- From: `Stopped`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_completed`
+- Emits: `PeerResponseReplyClassified`
+- To: `Stopped`
+
+### `ClassifyPeerResponseReplyFailedInitializing`
+- From: `Initializing`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_failed`
+- Emits: `PeerResponseReplyClassified`
+- To: `Initializing`
+
+### `ClassifyPeerResponseReplyFailedIdle`
+- From: `Idle`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_failed`
+- Emits: `PeerResponseReplyClassified`
+- To: `Idle`
+
+### `ClassifyPeerResponseReplyFailedAttached`
+- From: `Attached`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_failed`
+- Emits: `PeerResponseReplyClassified`
+- To: `Attached`
+
+### `ClassifyPeerResponseReplyFailedRunning`
+- From: `Running`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_failed`
+- Emits: `PeerResponseReplyClassified`
+- To: `Running`
+
+### `ClassifyPeerResponseReplyFailedRetired`
+- From: `Retired`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_failed`
+- Emits: `PeerResponseReplyClassified`
+- To: `Retired`
+
+### `ClassifyPeerResponseReplyFailedStopped`
+- From: `Stopped`
+- On: `ClassifyPeerResponseReply`(status)
+- Guards:
+  - `peer_reply_status_failed`
+- Emits: `PeerResponseReplyClassified`
+- To: `Stopped`
 
 ### `PrepareIdle`
 - From: `Idle`

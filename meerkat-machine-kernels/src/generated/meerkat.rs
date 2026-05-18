@@ -7621,6 +7621,10 @@ pub mod signals {
         pub in_reply_to: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyPeerResponseReply {
+        pub status: PeerIngressResponseStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyPlainEvent {
         pub source_name: String,
     }
@@ -7634,6 +7638,7 @@ pub enum Signal {
     BoundaryApplied(signals::BoundaryApplied),
     DrainQueuedRun(signals::DrainQueuedRun),
     ClassifyExternalEnvelope(signals::ClassifyExternalEnvelope),
+    ClassifyPeerResponseReply(signals::ClassifyPeerResponseReply),
     ClassifyPlainEvent(signals::ClassifyPlainEvent),
     EnsureDrainRunning(signals::EnsureDrainRunning),
 }
@@ -7644,6 +7649,7 @@ impl Signal {
             Self::BoundaryApplied(_) => SignalKind::BoundaryApplied,
             Self::DrainQueuedRun(_) => SignalKind::DrainQueuedRun,
             Self::ClassifyExternalEnvelope(_) => SignalKind::ClassifyExternalEnvelope,
+            Self::ClassifyPeerResponseReply(_) => SignalKind::ClassifyPeerResponseReply,
             Self::ClassifyPlainEvent(_) => SignalKind::ClassifyPlainEvent,
             Self::EnsureDrainRunning(_) => SignalKind::EnsureDrainRunning,
         }
@@ -7655,6 +7661,7 @@ pub enum SignalKind {
     BoundaryApplied,
     DrainQueuedRun,
     ClassifyExternalEnvelope,
+    ClassifyPeerResponseReply,
     ClassifyPlainEvent,
     EnsureDrainRunning,
 }
@@ -7944,6 +7951,10 @@ pub mod effects {
         pub response_terminality: Option<PeerIngressResponseTerminality>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PeerResponseReplyClassified {
+        pub response_terminality: PeerIngressResponseTerminality,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerIngressReceiveResolved {
         pub outcome: PeerIngressReceiveOutcomeClass,
         pub admission_diagnostic: Option<PeerIngressAdmissionDiagnosticClass>,
@@ -8111,6 +8122,7 @@ pub enum Effect {
     CollectCompletedResult(effects::CollectCompletedResult),
     EnqueueClassifiedEntry(effects::EnqueueClassifiedEntry),
     PeerIngressClassified(effects::PeerIngressClassified),
+    PeerResponseReplyClassified(effects::PeerResponseReplyClassified),
     PeerIngressReceiveResolved(effects::PeerIngressReceiveResolved),
     PeerIngressDequeueResolved(effects::PeerIngressDequeueResolved),
     SpawnDrainTask(effects::SpawnDrainTask),
@@ -8198,6 +8210,7 @@ pub enum EffectKind {
     CollectCompletedResult,
     EnqueueClassifiedEntry,
     PeerIngressClassified,
+    PeerResponseReplyClassified,
     PeerIngressReceiveResolved,
     PeerIngressDequeueResolved,
     SpawnDrainTask,
@@ -8637,6 +8650,24 @@ pub enum TransitionId {
     ClassifyExternalEnvelopeAckRunning,
     ClassifyPlainEventAttached,
     ClassifyPlainEventRunning,
+    ClassifyPeerResponseReplyAcceptedInitializing,
+    ClassifyPeerResponseReplyAcceptedIdle,
+    ClassifyPeerResponseReplyAcceptedAttached,
+    ClassifyPeerResponseReplyAcceptedRunning,
+    ClassifyPeerResponseReplyAcceptedRetired,
+    ClassifyPeerResponseReplyAcceptedStopped,
+    ClassifyPeerResponseReplyCompletedInitializing,
+    ClassifyPeerResponseReplyCompletedIdle,
+    ClassifyPeerResponseReplyCompletedAttached,
+    ClassifyPeerResponseReplyCompletedRunning,
+    ClassifyPeerResponseReplyCompletedRetired,
+    ClassifyPeerResponseReplyCompletedStopped,
+    ClassifyPeerResponseReplyFailedInitializing,
+    ClassifyPeerResponseReplyFailedIdle,
+    ClassifyPeerResponseReplyFailedAttached,
+    ClassifyPeerResponseReplyFailedRunning,
+    ClassifyPeerResponseReplyFailedRetired,
+    ClassifyPeerResponseReplyFailedStopped,
     PrepareIdle,
     PrepareAttached,
     DrainQueuedRunRetired,

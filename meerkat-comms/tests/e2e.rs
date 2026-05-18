@@ -154,6 +154,21 @@ impl meerkat_core::handles::PeerInteractionHandle for TestPeerInteractionHandle 
         Ok(())
     }
 
+    fn classify_response_reply(
+        &self,
+        status: meerkat_core::ResponseStatus,
+    ) -> Result<meerkat_core::TerminalityClass, DslTransitionError> {
+        Ok(match status {
+            meerkat_core::ResponseStatus::Accepted => meerkat_core::TerminalityClass::Progress,
+            meerkat_core::ResponseStatus::Completed => meerkat_core::TerminalityClass::Terminal {
+                disposition: meerkat_core::TerminalDisposition::Completed,
+            },
+            meerkat_core::ResponseStatus::Failed => meerkat_core::TerminalityClass::Terminal {
+                disposition: meerkat_core::TerminalDisposition::Failed,
+            },
+        })
+    }
+
     fn response_replied(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
         if self.inbound.lock().remove(&corr_id).is_none() {
             return Err(Self::rejection(

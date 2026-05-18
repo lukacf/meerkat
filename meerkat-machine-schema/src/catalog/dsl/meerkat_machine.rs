@@ -2521,6 +2521,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 response_status: Enum<PeerIngressResponseStatus>,
                 in_reply_to: String,
             },
+            ClassifyPeerResponseReply { status: Enum<PeerIngressResponseStatus> },
             ClassifyPlainEvent { source_name: String },
             EnsureDrainRunning,
         }
@@ -2673,6 +2674,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 request_id: Option<String>,
                 response_terminality: Option<Enum<PeerIngressResponseTerminality>>,
             },
+            PeerResponseReplyClassified {
+                response_terminality: Enum<PeerIngressResponseTerminality>,
+            },
             PeerIngressReceiveResolved {
                 outcome: Enum<PeerIngressReceiveOutcomeClass>,
                 admission_diagnostic: Option<Enum<PeerIngressAdmissionDiagnosticClass>>,
@@ -2812,6 +2816,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition CollectCompletedResult => local,
         disposition EnqueueClassifiedEntry => local,
         disposition PeerIngressClassified => local,
+        disposition PeerResponseReplyClassified => local,
         disposition PeerIngressReceiveResolved => local,
         disposition PeerIngressDequeueResolved => local,
         disposition SpawnDrainTask => local,
@@ -7054,6 +7059,39 @@ macro_rules! meerkat_catalog_machine_dsl {
                 lifecycle_peer: None,
                 request_id: None,
                 response_terminality: None
+            }
+        }
+
+        transition ClassifyPeerResponseReplyAccepted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on signal ClassifyPeerResponseReply { status }
+            guard "peer_reply_status_accepted" { status == PeerIngressResponseStatus::Accepted }
+            update {}
+            to Idle
+            emit PeerResponseReplyClassified {
+                response_terminality: PeerIngressResponseTerminality::Progress
+            }
+        }
+
+        transition ClassifyPeerResponseReplyCompleted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on signal ClassifyPeerResponseReply { status }
+            guard "peer_reply_status_completed" { status == PeerIngressResponseStatus::Completed }
+            update {}
+            to Idle
+            emit PeerResponseReplyClassified {
+                response_terminality: PeerIngressResponseTerminality::TerminalCompleted
+            }
+        }
+
+        transition ClassifyPeerResponseReplyFailed {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on signal ClassifyPeerResponseReply { status }
+            guard "peer_reply_status_failed" { status == PeerIngressResponseStatus::Failed }
+            update {}
+            to Idle
+            emit PeerResponseReplyClassified {
+                response_terminality: PeerIngressResponseTerminality::TerminalFailed
             }
         }
 

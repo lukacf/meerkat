@@ -1442,11 +1442,13 @@ impl SystemNoticeBlock {
                         request_id.as_deref().unwrap_or_default()
                     )],
                     "response_terminal" | "peer_response_terminal" => {
-                        let status = status.as_deref().unwrap_or("completed");
                         let mut text = format!(
-                            "Peer terminal response from {peer_label}\nRequest ID: {}\nStatus: {status}",
+                            "Peer terminal response from {peer_label}\nRequest ID: {}",
                             request_id.as_deref().unwrap_or_default()
                         );
+                        if let Some(status) = status.as_deref() {
+                            text.push_str(&format!("\nStatus: {status}"));
+                        }
                         if let Some(payload) = payload {
                             text.push_str(&format!("\nResult: {}", format_notice_payload(payload)));
                         }

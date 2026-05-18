@@ -202,9 +202,9 @@ pub use interaction::{
     PeerIngressPlainEventFacts, PeerIngressQueueSnapshot, PeerIngressReceiveAuthority,
     PeerIngressReceiveFacts, PeerIngressReceiveOutcome, PeerIngressRuntimeSnapshot, PeerInputClass,
     ResponseStatus, SendResponseCallProjection, TerminalDisposition, TerminalityClass,
-    classify_response_terminality, format_external_event_projection, format_peer_ack_projection,
-    format_peer_message_projection, format_peer_request_projection,
-    format_peer_response_projection, peer_lifecycle_subject, render_peer_ingress_admitted_text,
+    format_external_event_projection, format_peer_ack_projection, format_peer_message_projection,
+    format_peer_request_projection, format_peer_response_projection, peer_lifecycle_subject,
+    render_peer_ingress_admitted_text,
 };
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreApplyFailureCause,

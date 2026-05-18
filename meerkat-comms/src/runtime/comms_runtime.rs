@@ -651,30 +651,39 @@ impl CoreCommsRuntime for CommsRuntime {
                     self.require_peer_request_response_authority("PeerResponse")?;
                 let corr_id = meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0);
                 let core_status = status;
-                let status = match status {
-                    meerkat_core::ResponseStatus::Accepted => crate::Status::Accepted,
-                    meerkat_core::ResponseStatus::Completed => crate::Status::Completed,
-                    meerkat_core::ResponseStatus::Failed => crate::Status::Failed,
-                };
+                let status = crate::Status::from(status);
                 if peer_handle.inbound_state(corr_id).is_none() {
                     return Err(SendError::Validation(format!(
                         "PeerResponse requires machine inbound peer request state for corr_id {corr_id}"
                     )));
                 }
+                let reply_terminality =
+                    peer_handle
+                        .classify_response_reply(core_status)
+                        .map_err(|err| {
+                            SendError::Validation(format!(
+                                "DSL rejected PeerResponse reply classification for corr_id {corr_id}: {err}"
+                            ))
+                        })?;
                 let is_terminal_reply = matches!(
-                    core_status,
-                    meerkat_core::ResponseStatus::Completed | meerkat_core::ResponseStatus::Failed
+                    reply_terminality,
+                    meerkat_core::TerminalityClass::Terminal { .. }
                 );
-                let effective_handling_mode = handling_mode.or_else(|| {
-                    is_terminal_reply
-                        .then(|| {
-                            self.inbound_request_handling_modes
-                                .lock()
-                                .get(&corr_id)
-                                .copied()
-                        })
-                        .flatten()
-                });
+                if !is_terminal_reply && handling_mode.is_some() {
+                    return Err(SendError::Validation(
+                        "handling_mode is forbidden on progress peer responses".to_string(),
+                    ));
+                }
+                let effective_handling_mode = if is_terminal_reply {
+                    handling_mode.or_else(|| {
+                        self.inbound_request_handling_modes
+                            .lock()
+                            .get(&corr_id)
+                            .copied()
+                    })
+                } else {
+                    None
+                };
                 let envelope_id = self
                     .send_peer_command(
                         &to,
@@ -3152,6 +3161,24 @@ mod tests {
             }
             inbound.insert(corr_id, meerkat_core::InboundPeerRequestState::Received);
             Ok(())
+        }
+
+        fn classify_response_reply(
+            &self,
+            status: meerkat_core::ResponseStatus,
+        ) -> Result<meerkat_core::TerminalityClass, meerkat_core::handles::DslTransitionError>
+        {
+            Ok(match status {
+                meerkat_core::ResponseStatus::Accepted => meerkat_core::TerminalityClass::Progress,
+                meerkat_core::ResponseStatus::Completed => {
+                    meerkat_core::TerminalityClass::Terminal {
+                        disposition: meerkat_core::TerminalDisposition::Completed,
+                    }
+                }
+                meerkat_core::ResponseStatus::Failed => meerkat_core::TerminalityClass::Terminal {
+                    disposition: meerkat_core::TerminalDisposition::Failed,
+                },
+            })
         }
 
         fn response_replied(

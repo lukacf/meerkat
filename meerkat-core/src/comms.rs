@@ -509,9 +509,9 @@ impl std::fmt::Display for PeerLifecycleKind {
 /// `status`) become serde deserialization errors rather than runtime
 /// string-match failures.
 ///
-/// Cross-field invariants that cannot be expressed structurally (e.g.
-/// `handling_mode` is forbidden on `Accepted` peer responses) are checked
-/// in [`CommsCommandRequest::into_command`].
+/// Cross-field invariants that depend on machine-owned semantics, such as
+/// progress-vs-terminal peer response handling, are checked by the runtime
+/// after generated authority emits the typed classification.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -579,11 +579,12 @@ pub enum CommsCommandRequest {
 /// — only invariants that span multiple fields surface here.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CommsCommandError {
-    /// `handling_mode` is set on a `peer_response` whose `status` is
-    /// `Accepted`. Progress responses cannot carry a handling mode — the
-    /// receiver's admission gate would drop them, so reject at parse time.
-    #[error("handling_mode is forbidden on accepted peer responses")]
-    HandlingModeForbiddenForAcceptedResponse,
+    /// `handling_mode` is set on a `peer_response` whose machine-classified
+    /// terminality is progress. Progress responses cannot carry a handling
+    /// mode — the receiver's admission gate would drop them, so reject after
+    /// generated terminality feedback is available.
+    #[error("handling_mode is forbidden on progress peer responses")]
+    HandlingModeForbiddenForProgressResponse,
 }
 
 impl CommsCommandRequest {
@@ -654,19 +655,14 @@ impl CommsCommandRequest {
                 result,
                 blocks,
                 handling_mode,
-            } => {
-                if status == ResponseStatus::Accepted && handling_mode.is_some() {
-                    return Err(CommsCommandError::HandlingModeForbiddenForAcceptedResponse);
-                }
-                CommsCommand::PeerResponse {
-                    to: PeerRoute::new(to),
-                    in_reply_to,
-                    status,
-                    result,
-                    blocks,
-                    handling_mode,
-                }
-            }
+            } => CommsCommand::PeerResponse {
+                to: PeerRoute::new(to),
+                in_reply_to,
+                status,
+                result,
+                blocks,
+                handling_mode,
+            },
         })
     }
 

@@ -56,19 +56,6 @@ pub enum TerminalDisposition {
     Failed,
 }
 
-/// Single source of truth for "is this response terminal?".
-pub fn classify_response_terminality(status: ResponseStatus) -> TerminalityClass {
-    match status {
-        ResponseStatus::Accepted => TerminalityClass::Progress,
-        ResponseStatus::Completed => TerminalityClass::Terminal {
-            disposition: TerminalDisposition::Completed,
-        },
-        ResponseStatus::Failed => TerminalityClass::Terminal {
-            disposition: TerminalDisposition::Failed,
-        },
-    }
-}
-
 /// Simplified interaction content for the core agent loop.
 ///
 /// This is an adapter type — `CommsContent` in meerkat-comms has richer types
@@ -1009,26 +996,6 @@ mod tests {
             let parsed: ResponseStatus = serde_json::from_value(json).unwrap();
             assert_eq!(variant, parsed);
         }
-    }
-
-    #[test]
-    fn classify_response_terminality_covers_all_variants() {
-        assert_eq!(
-            classify_response_terminality(ResponseStatus::Accepted),
-            TerminalityClass::Progress
-        );
-        assert_eq!(
-            classify_response_terminality(ResponseStatus::Completed),
-            TerminalityClass::Terminal {
-                disposition: TerminalDisposition::Completed
-            }
-        );
-        assert_eq!(
-            classify_response_terminality(ResponseStatus::Failed),
-            TerminalityClass::Terminal {
-                disposition: TerminalDisposition::Failed
-            }
-        );
     }
 
     #[test]

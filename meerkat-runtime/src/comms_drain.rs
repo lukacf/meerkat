@@ -2093,6 +2093,24 @@ mod tests {
             Ok(())
         }
 
+        fn classify_response_reply(
+            &self,
+            status: meerkat_core::ResponseStatus,
+        ) -> Result<meerkat_core::TerminalityClass, meerkat_core::handles::DslTransitionError>
+        {
+            Ok(match status {
+                meerkat_core::ResponseStatus::Accepted => meerkat_core::TerminalityClass::Progress,
+                meerkat_core::ResponseStatus::Completed => {
+                    meerkat_core::TerminalityClass::Terminal {
+                        disposition: meerkat_core::TerminalDisposition::Completed,
+                    }
+                }
+                meerkat_core::ResponseStatus::Failed => meerkat_core::TerminalityClass::Terminal {
+                    disposition: meerkat_core::TerminalDisposition::Failed,
+                },
+            })
+        }
+
         fn request_received(
             &self,
             corr_id: meerkat_core::PeerCorrelationId,

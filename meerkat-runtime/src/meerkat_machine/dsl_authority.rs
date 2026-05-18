@@ -133,11 +133,6 @@ pub(crate) fn project_state(
 ) -> mm_dsl::MeerkatMachineState {
     let (effective_phase, effective_current_run_id, effective_pre_run_phase) =
         match (runtime_phase, current_run_id, pre_run_phase) {
-            (RuntimeState::Running, None, pre_run_phase) => (
-                crate::runtime_state::run_return_phase_from_pre_run_phase(pre_run_phase),
-                None,
-                None,
-            ),
             (RuntimeState::Running | RuntimeState::Retired, current_run_id, pre_run_phase) => {
                 (runtime_phase, current_run_id, pre_run_phase)
             }

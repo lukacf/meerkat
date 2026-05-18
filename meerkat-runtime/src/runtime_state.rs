@@ -5,21 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-fn can_transition(from: &RuntimeState, next: &RuntimeState) -> bool {
-    use RuntimeState::{Attached, Destroyed, Idle, Initializing, Retired, Running, Stopped};
-
-    matches!(
-        (from, next),
-        (Initializing, Idle | Stopped | Destroyed)
-            | (Idle, Attached | Running | Retired | Stopped | Destroyed)
-            | (Attached, Running | Idle | Retired | Stopped | Destroyed)
-            | (Running, Idle | Attached | Retired | Stopped | Destroyed)
-            | (Retired, Running | Stopped | Destroyed)
-            | (Stopped, Destroyed)
-    )
-}
-
 /// The state of a runtime instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,41 +53,6 @@ impl RuntimeState {
     /// Check if the runtime is Idle or Attached.
     pub fn is_idle_or_attached(&self) -> bool {
         matches!(self, Self::Idle | Self::Attached)
-    }
-}
-
-/// Classify the machine-owned coarse phase a run should return to after a
-/// terminal outcome.
-///
-/// The checked-in `MeerkatMachine` owns the return-phase semantics through its
-/// `current_run_id` / `pre_run_phase` state. Runtime helpers may realize that
-/// projection, but they should not invent the mapping themselves.
-pub fn run_return_phase_from_pre_run_phase(pre_run_phase: Option<RuntimeState>) -> RuntimeState {
-    match pre_run_phase {
-        Some(RuntimeState::Attached) => RuntimeState::Attached,
-        Some(RuntimeState::Retired) => RuntimeState::Retired,
-        Some(
-            RuntimeState::Idle
-            | RuntimeState::Initializing
-            | RuntimeState::Running
-            | RuntimeState::Stopped
-            | RuntimeState::Destroyed,
-        )
-        | None => RuntimeState::Idle,
-    }
-}
-
-/// Classify the machine-owned pre-run phase that should be remembered when a
-/// new run starts from the current coarse runtime phase.
-pub fn run_start_pre_phase_from_phase(
-    phase: RuntimeState,
-) -> Result<RuntimeState, RuntimeStateTransitionError> {
-    match phase {
-        RuntimeState::Idle | RuntimeState::Attached | RuntimeState::Retired => Ok(phase),
-        from => Err(RuntimeStateTransitionError {
-            from,
-            to: RuntimeState::Running,
-        }),
     }
 }
 
@@ -163,104 +113,6 @@ mod tests {
         assert!(RuntimeState::Idle.is_idle_or_attached());
         assert!(RuntimeState::Attached.is_idle_or_attached());
         assert!(!RuntimeState::Running.is_idle_or_attached());
-    }
-
-    #[test]
-    fn transition_table_matches_spec_examples() {
-        assert!(can_transition(
-            &RuntimeState::Initializing,
-            &RuntimeState::Idle
-        ));
-        assert!(can_transition(&RuntimeState::Idle, &RuntimeState::Attached));
-        assert!(can_transition(
-            &RuntimeState::Attached,
-            &RuntimeState::Running
-        ));
-        assert!(can_transition(
-            &RuntimeState::Running,
-            &RuntimeState::Retired
-        ));
-        assert!(can_transition(
-            &RuntimeState::Retired,
-            &RuntimeState::Stopped
-        ));
-
-        assert!(!can_transition(&RuntimeState::Stopped, &RuntimeState::Idle));
-        assert!(!can_transition(
-            &RuntimeState::Destroyed,
-            &RuntimeState::Running
-        ));
-        assert!(!can_transition(&RuntimeState::Retired, &RuntimeState::Idle));
-    }
-
-    #[test]
-    fn run_return_phase_classifier_matches_machine_projection() {
-        assert_eq!(
-            run_return_phase_from_pre_run_phase(Some(RuntimeState::Idle)),
-            RuntimeState::Idle
-        );
-        assert_eq!(
-            run_return_phase_from_pre_run_phase(Some(RuntimeState::Attached)),
-            RuntimeState::Attached
-        );
-        assert_eq!(
-            run_return_phase_from_pre_run_phase(Some(RuntimeState::Retired)),
-            RuntimeState::Retired
-        );
-        assert_eq!(
-            run_return_phase_from_pre_run_phase(None),
-            RuntimeState::Idle
-        );
-    }
-
-    #[test]
-    fn run_start_pre_phase_classifier_matches_machine_projection() {
-        assert!(
-            matches!(
-                run_start_pre_phase_from_phase(RuntimeState::Idle),
-                Ok(RuntimeState::Idle)
-            ),
-            "idle should be a legal run start phase"
-        );
-        assert!(
-            matches!(
-                run_start_pre_phase_from_phase(RuntimeState::Attached),
-                Ok(RuntimeState::Attached)
-            ),
-            "attached should be a legal run start phase"
-        );
-        assert!(
-            matches!(
-                run_start_pre_phase_from_phase(RuntimeState::Retired),
-                Ok(RuntimeState::Retired)
-            ),
-            "retired should be a legal drain start phase"
-        );
-        assert!(
-            run_start_pre_phase_from_phase(RuntimeState::Stopped).is_err(),
-            "stopped should not be a legal run start phase"
-        );
-    }
-
-    #[test]
-    fn transition_failure_shape_matches_runtime_error() {
-        let result = if can_transition(&RuntimeState::Stopped, &RuntimeState::Idle) {
-            Ok(())
-        } else {
-            Err(RuntimeStateTransitionError {
-                from: RuntimeState::Stopped,
-                to: RuntimeState::Idle,
-            })
-        };
-
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            RuntimeStateTransitionError {
-                from: RuntimeState::Stopped,
-                to: RuntimeState::Idle
-            }
-        ));
     }
 
     #[test]

@@ -1343,17 +1343,6 @@ impl EphemeralRuntimeDriver {
         if from == RuntimeState::Running && self.current_run_id().as_ref() == Some(&run_id) {
             return Ok(());
         }
-        if self.current_run_id().is_some() {
-            return Err(RuntimeDriverError::Internal(
-                crate::runtime_state::RuntimeStateTransitionError {
-                    from,
-                    to: RuntimeState::Running,
-                }
-                .to_string(),
-            ));
-        }
-        crate::runtime_state::run_start_pre_phase_from_phase(from)
-            .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
 
         let session_id = self.ensure_contract_session_authority()?;
         if from == RuntimeState::Retired {

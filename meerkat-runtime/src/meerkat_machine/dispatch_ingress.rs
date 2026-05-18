@@ -452,14 +452,10 @@ impl MeerkatMachine {
                     }
                     if let Err(err) = driver.stage_input(&dequeued_id, &run_id) {
                         let _ = driver.rollback_staged(std::slice::from_ref(&dequeued_id));
-                        let next_phase = crate::runtime_state::run_return_phase_from_pre_run_phase(
-                            driver.pre_run_phase(),
-                        );
                         if let Err(rollback_err) = machine_apply_run_return_projection(
                             &mut driver,
                             &run_id,
                             crate::meerkat_machine::driver::RunReturnDisposition::Rollback,
-                            next_phase,
                         ) {
                             return Err(RuntimeDriverError::Internal(format!(
                                 "failed to roll back runtime run after staging failure: {rollback_err}; staging failure: {err}"
@@ -502,15 +498,10 @@ impl MeerkatMachine {
                         Ok(primitive) => primitive,
                         Err(err) => {
                             let _ = driver.rollback_staged(std::slice::from_ref(&dequeued_id));
-                            let next_phase =
-                                crate::runtime_state::run_return_phase_from_pre_run_phase(
-                                    driver.pre_run_phase(),
-                                );
                             if let Err(rollback_err) = machine_apply_run_return_projection(
                                 &mut driver,
                                 &run_id,
                                 crate::meerkat_machine::driver::RunReturnDisposition::Rollback,
-                                next_phase,
                             ) {
                                 return Err(RuntimeDriverError::Internal(format!(
                                     "failed to roll back runtime run after primitive build failure: {rollback_err}; primitive build failure: {err}"

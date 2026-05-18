@@ -24,6 +24,27 @@ use chrono::Utc;
 /// Shared driver handle used by both the adapter and the RuntimeLoop.
 pub(crate) type SharedDriver = Arc<Mutex<DriverEntry>>;
 
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeLifecycleProjection {
+    pub(crate) phase: RuntimeState,
+    pub(crate) current_run_id: Option<RunId>,
+    pub(crate) pre_run_phase: Option<RuntimeState>,
+}
+
+impl RuntimeLifecycleProjection {
+    fn from_authority(authority: &crate::meerkat_machine::dsl::MeerkatMachineAuthority) -> Self {
+        Self {
+            phase: crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(authority),
+            current_run_id: crate::meerkat_machine::dsl_authority::current_run_id_from_authority(
+                authority,
+            ),
+            pre_run_phase: crate::meerkat_machine::dsl_authority::pre_run_phase_from_authority(
+                authority,
+            ),
+        }
+    }
+}
+
 /// Read-only view over driver-local ingress state. The driver itself owns
 /// the DSL and shell metadata; this view just forwards the read accessors
 /// needed by callers that used to inspect the deleted `RuntimeIngressAuthority`.
@@ -581,30 +602,6 @@ impl DriverEntry {
 /// Shared completion registry (accessed by adapter for registration and loop for resolution).
 pub(crate) type SharedCompletionRegistry = Arc<Mutex<crate::completion::CompletionRegistry>>;
 
-pub(crate) fn machine_validate_active_run(
-    driver: &DriverEntry,
-    run_id: &RunId,
-    next_phase: RuntimeState,
-) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
-    match driver.runtime_state() {
-        RuntimeState::Running | RuntimeState::Retired => {}
-        from => {
-            return Err(crate::runtime_state::RuntimeStateTransitionError {
-                from,
-                to: next_phase,
-            });
-        }
-    }
-
-    match driver.current_run_id() {
-        Some(active_id) if &active_id == run_id => Ok(()),
-        _ => Err(crate::runtime_state::RuntimeStateTransitionError {
-            from: driver.runtime_state(),
-            to: next_phase,
-        }),
-    }
-}
-
 pub(crate) fn machine_begin_run(
     driver: &mut DriverEntry,
     run_id: RunId,
@@ -612,13 +609,6 @@ pub(crate) fn machine_begin_run(
     let from = driver.runtime_state();
     if from == RuntimeState::Running && driver.current_run_id().as_ref() == Some(&run_id) {
         return Ok(());
-    }
-    let pre_run_phase = crate::runtime_state::run_start_pre_phase_from_phase(from)?;
-    if driver.current_run_id().is_some() {
-        return Err(crate::runtime_state::RuntimeStateTransitionError {
-            from,
-            to: RuntimeState::Running,
-        });
     }
 
     // DSL is authoritative for `lifecycle_phase` + `current_run_id`
@@ -633,14 +623,8 @@ pub(crate) fn machine_begin_run(
     // go through DSL uniformly. Shell `control_projection` remains only as
     // mechanical projection/event plumbing; DriverEntry reads the DSL
     // authority directly.
-    let authority = driver.shared_dsl_authority();
-    let dsl_session_id = {
-        let auth = authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        auth.state().session_id.clone()
-    };
-    if let Some(dsl_session_id) = dsl_session_id {
+    let projection = {
+        let authority = driver.shared_dsl_authority();
         let mut auth = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -662,6 +646,12 @@ pub(crate) fn machine_begin_run(
                 )
                 .map(|_| ())
             } else {
+                let Some(dsl_session_id) = auth.state().session_id.clone() else {
+                    return Err(crate::runtime_state::RuntimeStateTransitionError {
+                        from,
+                        to: RuntimeState::Running,
+                    });
+                };
                 crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                     &mut *auth,
                     crate::meerkat_machine::dsl::MeerkatMachineInput::Prepare {
@@ -678,9 +668,14 @@ pub(crate) fn machine_begin_run(
                 });
             }
         }
-    }
+        RuntimeLifecycleProjection::from_authority(&auth)
+    };
 
-    driver.set_control_projection(RuntimeState::Running, Some(run_id), Some(pre_run_phase));
+    driver.set_control_projection(
+        projection.phase,
+        projection.current_run_id,
+        projection.pre_run_phase,
+    );
     Ok(())
 }
 
@@ -768,19 +763,15 @@ pub(crate) fn machine_apply_run_return_projection(
     driver: &mut DriverEntry,
     run_id: &RunId,
     disposition: RunReturnDisposition<'_>,
-    next_phase: RuntimeState,
-) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
+) -> Result<RuntimeLifecycleProjection, crate::runtime_state::RuntimeStateTransitionError> {
     let current_phase = driver.runtime_state();
-    if matches!(
-        current_phase,
-        RuntimeState::Retired | RuntimeState::Stopped | RuntimeState::Destroyed
-    ) {
-        return Ok(());
+    if !matches!(current_phase, RuntimeState::Running) {
+        return Ok(RuntimeLifecycleProjection {
+            phase: driver.runtime_state(),
+            current_run_id: driver.current_run_id(),
+            pre_run_phase: driver.pre_run_phase(),
+        });
     }
-    if current_phase == next_phase && driver.current_run_id().is_none() {
-        return Ok(());
-    }
-    machine_validate_active_run(driver, run_id, next_phase)?;
 
     // DSL is authoritative for `lifecycle_phase` post-#32 W6-J (dogma #1
     // split). Fire the typed `Commit {input_id, run_id}` or `Fail {run_id}`
@@ -793,7 +784,7 @@ pub(crate) fn machine_apply_run_return_projection(
     let publish_control_immediately = matches!(driver, DriverEntry::Ephemeral(_))
         || matches!(disposition, RunReturnDisposition::Rollback);
     let authority = driver.shared_dsl_authority();
-    {
+    let projection = {
         let mut auth = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -823,18 +814,23 @@ pub(crate) fn machine_apply_run_return_projection(
         if crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *auth, input).is_err() {
             return Err(crate::runtime_state::RuntimeStateTransitionError {
                 from: current_phase,
-                to: next_phase,
+                to: RuntimeState::Running,
             });
         }
-    }
+        RuntimeLifecycleProjection::from_authority(&auth)
+    };
 
     // Persistent terminal paths publish the user-visible control projection
     // only after the durable receipt succeeds. Rollback is non-terminal
     // cleanup, and ephemeral drivers have no durable receipt to await.
     if publish_control_immediately {
-        driver.set_control_projection(next_phase, None, None);
+        driver.set_control_projection(
+            projection.phase,
+            projection.current_run_id.clone(),
+            projection.pre_run_phase,
+        );
     }
-    Ok(())
+    Ok(projection)
 }
 
 pub(crate) async fn machine_commit_service_turn_terminal_receipt(
@@ -874,8 +870,6 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
                 | crate::meerkat_machine::dsl::TurnPhase::Cancelled
         )
     };
-    let next_phase =
-        crate::runtime_state::run_return_phase_from_pre_run_phase(driver.pre_run_phase());
     let terminal_checkpoint = driver.rollback_snapshot();
     if turn_needs_completion && let Err(err) = machine_apply_turn_run_completed(driver, &run_id) {
         driver.restore_rollback_snapshot(terminal_checkpoint);
@@ -896,24 +890,34 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
             RuntimeDriverError::Internal(
                 crate::runtime_state::RuntimeStateTransitionError {
                     from: current_phase,
-                    to: next_phase,
+                    to: RuntimeState::Running,
                 }
                 .to_string(),
             )
-        })
+        })?;
+        Ok::<RuntimeLifecycleProjection, RuntimeDriverError>(
+            RuntimeLifecycleProjection::from_authority(&auth),
+        )
     };
-    if let Err(err) = service_turn_commit_result {
-        driver.restore_rollback_snapshot(terminal_checkpoint);
-        return Err(err);
-    }
+    let projection = match service_turn_commit_result {
+        Ok(projection) => projection,
+        Err(err) => {
+            driver.restore_rollback_snapshot(terminal_checkpoint);
+            return Err(err);
+        }
+    };
     match (driver, terminal_checkpoint) {
         (DriverEntry::Persistent(driver), DriverRollbackSnapshot::Persistent(rollback)) => {
             driver
-                .publish_service_turn_terminal_lifecycle(rollback, next_phase)
+                .publish_service_turn_terminal_lifecycle(rollback, projection.phase)
                 .await?;
         }
         (DriverEntry::Ephemeral(driver), DriverRollbackSnapshot::Ephemeral(_)) => {
-            driver.set_control_projection(next_phase, None, None);
+            driver.set_control_projection(
+                projection.phase,
+                projection.current_run_id,
+                projection.pre_run_phase,
+            );
         }
         (driver, checkpoint) => {
             driver.restore_rollback_snapshot(checkpoint);
@@ -929,14 +933,14 @@ fn machine_rollback_active_run_after_boundary_commit_failure(
     driver: &mut DriverEntry,
     run_id: &RunId,
     input_ids: &[InputId],
-    next_phase: RuntimeState,
 ) -> Result<(), RuntimeDriverError> {
     driver.rollback_staged(input_ids).map_err(|err| {
         RuntimeDriverError::Internal(format!(
             "failed to roll back staged inputs after boundary commit failure: {err}"
         ))
     })?;
-    machine_apply_run_return_projection(driver, run_id, RunReturnDisposition::Rollback, next_phase)
+    machine_apply_run_return_projection(driver, run_id, RunReturnDisposition::Rollback)
+        .map(|_| ())
         .map_err(|err| {
             RuntimeDriverError::Internal(format!(
                 "failed to roll back runtime run after boundary commit failure: {err}"
@@ -950,14 +954,7 @@ pub(crate) async fn rollback_runtime_loop_run_after_boundary_commit_failure(
     input_ids: &[InputId],
 ) -> Result<(), RuntimeDriverError> {
     let mut driver = driver.lock().await;
-    let next_phase =
-        crate::runtime_state::run_return_phase_from_pre_run_phase(driver.pre_run_phase());
-    machine_rollback_active_run_after_boundary_commit_failure(
-        &mut driver,
-        run_id,
-        input_ids,
-        next_phase,
-    )
+    machine_rollback_active_run_after_boundary_commit_failure(&mut driver, run_id, input_ids)
 }
 
 fn machine_apply_turn_run_completed(
@@ -2622,13 +2619,10 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
 
     if let Err(err) = driver.machine_realize_stage_batch(staged_ids, &run_id) {
         let _ = driver.rollback_staged(staged_ids);
-        let next_phase =
-            crate::runtime_state::run_return_phase_from_pre_run_phase(driver.pre_run_phase());
         if let Err(rollback_err) = machine_apply_run_return_projection(
             &mut driver,
             &run_id,
             RunReturnDisposition::Rollback,
-            next_phase,
         ) {
             return Err(RuntimeDriverError::Internal(format!(
                 "failed to roll back runtime run after batch staging failure: {rollback_err}; staging failure: {err}"
@@ -2650,8 +2644,6 @@ pub(crate) async fn commit_runtime_loop_run(
     session_snapshot: Option<Vec<u8>>,
 ) -> Result<(), RuntimeLoopRunCommitError> {
     let mut driver = driver.lock().await;
-    let next_phase =
-        crate::runtime_state::run_return_phase_from_pre_run_phase(driver.pre_run_phase());
     // Pick the first consumed input as the DSL `Commit { input_id, run_id }`
     // identifier. The DSL Commit transitions only read `run_id` in their
     // guards (input_id is informational), so firing once with any
@@ -2659,9 +2651,6 @@ pub(crate) async fn commit_runtime_loop_run(
     let commit_input_id = consumed_input_ids.first().cloned();
     machine_validate_run_commit_receipt(&driver, &run_id, &consumed_input_ids, &receipt)
         .map_err(RuntimeLoopRunCommitError::Rejected)?;
-    machine_validate_active_run(&driver, &run_id, next_phase).map_err(|err| {
-        RuntimeLoopRunCommitError::Rejected(RuntimeDriverError::Internal(err.to_string()))
-    })?;
     let completed_run_id = run_id.clone();
 
     let terminal_checkpoint = driver.rollback_snapshot();
@@ -2688,16 +2677,18 @@ pub(crate) async fn commit_runtime_loop_run(
         Some(input_id) => RunReturnDisposition::Commit { input_id },
         None => RunReturnDisposition::Rollback,
     };
-    if let Err(err) =
-        machine_apply_run_return_projection(&mut driver, &completed_run_id, disposition, next_phase)
-    {
-        driver.restore_rollback_snapshot(terminal_checkpoint);
-        return Err(RuntimeLoopRunCommitError::Rejected(
-            RuntimeDriverError::Internal(format!(
-                "failed to apply runtime return projection after completion: {err}"
-            )),
-        ));
-    }
+    let return_projection =
+        match machine_apply_run_return_projection(&mut driver, &completed_run_id, disposition) {
+            Ok(projection) => projection,
+            Err(err) => {
+                driver.restore_rollback_snapshot(terminal_checkpoint);
+                return Err(RuntimeLoopRunCommitError::Rejected(
+                    RuntimeDriverError::Internal(format!(
+                        "failed to apply runtime return projection after completion: {err}"
+                    )),
+                ));
+            }
+        };
     if let Err(err) =
         driver.machine_realize_run_completed_in_memory(&completed_run_id, &consumed_input_ids)
     {
@@ -2720,7 +2711,11 @@ pub(crate) async fn commit_runtime_loop_run(
         ));
     }
     if matches!(&*driver, DriverEntry::Persistent(_)) {
-        driver.set_control_projection(next_phase, None, None);
+        driver.set_control_projection(
+            return_projection.phase,
+            return_projection.current_run_id,
+            return_projection.pre_run_phase,
+        );
     }
 
     Ok(())
@@ -2763,8 +2758,6 @@ pub(crate) async fn cancel_runtime_loop_run(
     run_id: RunId,
 ) -> Result<(), RuntimeLoopRunFailError> {
     let mut driver = driver.lock().await;
-    let next_phase =
-        crate::runtime_state::run_return_phase_from_pre_run_phase(driver.pre_run_phase());
     let cancelled_run_id = run_id.clone();
     let staged_input_ids = machine_staged_contributors(&driver);
     machine_validate_run_cancelled(&driver, &staged_input_ids)
@@ -2778,7 +2771,6 @@ pub(crate) async fn cancel_runtime_loop_run(
         &mut driver,
         &cancelled_run_id,
         RunReturnDisposition::Cancelled,
-        next_phase,
     ) {
         driver.restore_rollback_snapshot(terminal_checkpoint);
         return Err(RuntimeLoopRunFailError::Rejected(
@@ -2799,7 +2791,7 @@ pub(crate) async fn cancel_runtime_loop_run(
         ));
     }
     if matches!(&*driver, DriverEntry::Persistent(_)) {
-        driver.set_control_projection(next_phase, None, None);
+        driver.sync_control_projection_from_dsl_authority();
     }
     Ok(())
 }
@@ -2821,8 +2813,6 @@ async fn fail_runtime_loop_run_inner(
     }
 
     let mut driver = driver.lock().await;
-    let next_phase =
-        crate::runtime_state::run_return_phase_from_pre_run_phase(driver.pre_run_phase());
     let failed_run_id = run_id.clone();
     let staged_input_ids = machine_staged_contributors(&driver);
     machine_validate_run_failed(&driver, &staged_input_ids)
@@ -2847,7 +2837,6 @@ async fn fail_runtime_loop_run_inner(
         &mut driver,
         &failed_run_id,
         RunReturnDisposition::Failed,
-        next_phase,
     ) {
         driver.restore_rollback_snapshot(terminal_checkpoint);
         return Err(RuntimeLoopRunFailError::Rejected(
@@ -2874,7 +2863,7 @@ async fn fail_runtime_loop_run_inner(
     }
     driver.absorb_post_admission_effects(&run_failed_effects);
     if matches!(&*driver, DriverEntry::Persistent(_)) {
-        driver.set_control_projection(next_phase, None, None);
+        driver.sync_control_projection_from_dsl_authority();
     }
     Ok(())
 }

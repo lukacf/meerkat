@@ -4,12 +4,13 @@
 use chrono::{Duration, Utc};
 use meerkat_core::{ContentInput, SessionId};
 use meerkat_schedule::{
-    CreateScheduleRequest, MisfirePolicy, MissingTargetPolicy, Occurrence, OccurrenceFilter,
-    OccurrencePhase, OverlapPolicy, PendingSupersession, Schedule, ScheduleLifecycleInput,
-    ScheduleStore, ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
-    UpdateScheduleRequest,
+    ClaimDueRequest, CreateScheduleRequest, MisfirePolicy, MissingTargetPolicy, Occurrence,
+    OccurrenceFilter, OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, PendingSupersession,
+    Schedule, ScheduleLifecycleInput, ScheduleStore, ScheduledSessionAction, SessionTargetBinding,
+    TargetBinding, TriggerSpec, UpdateScheduleRequest,
 };
 use meerkat_store::SqliteScheduleStore;
+use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -146,4 +147,41 @@ async fn sqlite_atomic_schedule_mutation_supersedes_old_pending()
         dir.path().join("schedule.sqlite3"),
     )?) as Arc<dyn ScheduleStore>;
     assert_atomic_schedule_mutation_supersedes_old_pending(store).await
+}
+
+#[tokio::test]
+async fn sqlite_claim_due_reads_canonical_schedule_phase() -> Result<(), Box<dyn std::error::Error>>
+{
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("schedule.sqlite3");
+    let store = SqliteScheduleStore::open(&path)?;
+
+    let schedule = sample_schedule();
+    store.put_schedule(schedule.clone()).await?;
+    let occurrence = Occurrence::planned_from_schedule(
+        &schedule,
+        OccurrenceOrdinal(0),
+        Utc::now() - Duration::seconds(1),
+    )
+    .expect("due occurrence planning should pass generated authority");
+    store.put_occurrence(occurrence.clone()).await?;
+
+    let conn = Connection::open(&path)?;
+    conn.execute(
+        "UPDATE schedule_schedules SET phase = 'deleted' WHERE schedule_id = ?1",
+        [schedule.schedule_id.to_string()],
+    )?;
+    drop(conn);
+
+    let claimed = store
+        .claim_due_occurrences(ClaimDueRequest {
+            owner_id: "sqlite-canonical-phase-test".to_string(),
+            limit: 1,
+            lease_duration: Duration::minutes(5),
+        })
+        .await?;
+
+    assert_eq!(claimed.claimed.len(), 1);
+    assert_eq!(claimed.claimed[0].occurrence_id, occurrence.occurrence_id);
+    Ok(())
 }

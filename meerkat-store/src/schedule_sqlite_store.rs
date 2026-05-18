@@ -7,7 +7,8 @@ use meerkat_schedule::{
     OccurrenceDueAction, OccurrenceFailureClass, OccurrenceFilter, OccurrenceId,
     OccurrenceLifecycleEffect, OccurrenceLifecycleError, OccurrenceLifecycleInput,
     OccurrenceLifecycleMutator, OccurrencePhase, PendingSupersession, Schedule, ScheduleFilter,
-    ScheduleStore, ScheduleStoreError, ScheduleStoreKind, apply_supersession_feedback,
+    SchedulePhase, ScheduleStore, ScheduleStoreError, ScheduleStoreKind,
+    apply_supersession_feedback,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -308,18 +309,24 @@ impl SqliteScheduleStore {
             {
                 let mut stmt = tx.prepare(
                     r"
-                    SELECT o.occurrence_json
+                    SELECT o.occurrence_json, s.schedule_json
                     FROM schedule_occurrences o
                     JOIN schedule_schedules s ON s.schedule_id = o.schedule_id
-                    WHERE s.phase = 'active'
                     ORDER BY o.due_at_ms ASC, o.schedule_revision ASC, o.occurrence_ordinal ASC
                     ",
                 )?;
-                let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })?;
                 for row in rows {
-                    let bytes = row?;
-                    let occurrence: Occurrence =
-                        serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
+                    let (occurrence_bytes, schedule_bytes) = row?;
+                    let schedule: Schedule = serde_json::from_slice(&schedule_bytes)
+                        .map_err(StoreError::Serialization)?;
+                    if schedule.phase != SchedulePhase::Active {
+                        continue;
+                    }
+                    let occurrence: Occurrence = serde_json::from_slice(&occurrence_bytes)
+                        .map_err(StoreError::Serialization)?;
                     occurrences.push(occurrence);
                 }
             }

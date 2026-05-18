@@ -212,6 +212,68 @@ impl std::fmt::Display for AdmissionInputKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum AdmissionInputOriginKind {
+    #[default]
+    #[serde(rename = "Operator")]
+    Operator,
+    #[serde(rename = "Peer")]
+    Peer,
+    #[serde(rename = "Flow")]
+    Flow,
+    #[serde(rename = "System")]
+    System,
+    #[serde(rename = "External")]
+    External,
+}
+impl AdmissionInputOriginKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Operator => "Operator",
+            Self::Peer => "Peer",
+            Self::Flow => "Flow",
+            Self::System => "System",
+            Self::External => "External",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionInputOriginKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Operator" => Ok(Self::Operator),
+            "Peer" => Ok(Self::Peer),
+            "Flow" => Ok(Self::Flow),
+            "System" => Ok(Self::System),
+            "External" => Ok(Self::External),
+            other => Err(format!("invalid AdmissionInputOriginKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionInputOriginKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionInputOriginKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum AdmissionPeerResponseTerminalApplyIntent {
     #[default]
     #[serde(rename = "AppendContextAndRun")]
@@ -1629,6 +1691,64 @@ impl std::convert::TryFrom<String> for InputAbandonReason {
     }
 }
 impl std::fmt::Display for InputAbandonReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InputDurabilityKind {
+    #[default]
+    #[serde(rename = "Durable")]
+    Durable,
+    #[serde(rename = "Ephemeral")]
+    Ephemeral,
+    #[serde(rename = "Derived")]
+    Derived,
+    #[serde(rename = "Missing")]
+    Missing,
+}
+impl InputDurabilityKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Durable => "Durable",
+            Self::Ephemeral => "Ephemeral",
+            Self::Derived => "Derived",
+            Self::Missing => "Missing",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InputDurabilityKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Durable" => Ok(Self::Durable),
+            "Ephemeral" => Ok(Self::Ephemeral),
+            "Derived" => Ok(Self::Derived),
+            "Missing" => Ok(Self::Missing),
+            other => Err(format!("invalid InputDurabilityKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InputDurabilityKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InputDurabilityKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -3694,6 +3814,58 @@ impl std::convert::TryFrom<String> for RecoveredInputObservedPhase {
     }
 }
 impl std::fmt::Display for RecoveredInputObservedPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredInputRecoveryDisposition {
+    #[default]
+    #[serde(rename = "Retain")]
+    Retain,
+    #[serde(rename = "Discard")]
+    Discard,
+}
+impl RecoveredInputRecoveryDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retain => "Retain",
+            Self::Discard => "Discard",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredInputRecoveryDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Retain" => Ok(Self::Retain),
+            "Discard" => Ok(Self::Discard),
+            other => Err(format!(
+                "invalid RecoveredInputRecoveryDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredInputRecoveryDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredInputRecoveryDisposition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -6060,7 +6232,9 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveAdmissionValidation {
         pub input_id: String,
-        pub durability_valid: bool,
+        pub input_kind: AdmissionInputKind,
+        pub input_origin: AdmissionInputOriginKind,
+        pub durability: InputDurabilityKind,
         pub peer_handling_mode_valid: bool,
         pub peer_response_terminal_structurally_valid: bool,
         pub peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus,
@@ -6081,6 +6255,11 @@ pub mod inputs {
         pub phase: RecoveredInputObservedPhase,
         pub consume_on_accept: bool,
         pub applied_boundary_committed: Option<bool>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyRecoveredInputDurability {
+        pub input_id: String,
+        pub durability: InputDurabilityKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveInputPublicLifecycle {
@@ -6758,6 +6937,7 @@ pub enum Input {
     ResolveAdmissionIdempotency(inputs::ResolveAdmissionIdempotency),
     RegisterAcceptedIdempotency(inputs::RegisterAcceptedIdempotency),
     NormalizeRecoveredInputLifecycle(inputs::NormalizeRecoveredInputLifecycle),
+    ClassifyRecoveredInputDurability(inputs::ClassifyRecoveredInputDurability),
     ResolveInputPublicLifecycle(inputs::ResolveInputPublicLifecycle),
     ResolveInputPublicTerminalOutcome(inputs::ResolveInputPublicTerminalOutcome),
     ClassifyInputTerminality(inputs::ClassifyInputTerminality),
@@ -6949,6 +7129,9 @@ impl Input {
             Self::RegisterAcceptedIdempotency(_) => InputKind::RegisterAcceptedIdempotency,
             Self::NormalizeRecoveredInputLifecycle(_) => {
                 InputKind::NormalizeRecoveredInputLifecycle
+            }
+            Self::ClassifyRecoveredInputDurability(_) => {
+                InputKind::ClassifyRecoveredInputDurability
             }
             Self::ResolveInputPublicLifecycle(_) => InputKind::ResolveInputPublicLifecycle,
             Self::ResolveInputPublicTerminalOutcome(_) => {
@@ -7147,6 +7330,7 @@ pub enum InputKind {
     ResolveAdmissionIdempotency,
     RegisterAcceptedIdempotency,
     NormalizeRecoveredInputLifecycle,
+    ClassifyRecoveredInputDurability,
     ResolveInputPublicLifecycle,
     ResolveInputPublicTerminalOutcome,
     ClassifyInputTerminality,
@@ -7511,6 +7695,11 @@ pub mod effects {
         pub history_reason: Option<RecoveredInputNormalizationReasonKind>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoveredInputDurabilityClassified {
+        pub input_id: String,
+        pub disposition: RecoveredInputRecoveryDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct InputPublicLifecycleResolved {
         pub input_id: String,
         pub phase: InputPublicLifecycleState,
@@ -7754,6 +7943,7 @@ pub enum Effect {
     AdmissionValidationResolved(effects::AdmissionValidationResolved),
     AdmissionIdempotencyResolved(effects::AdmissionIdempotencyResolved),
     RecoveredInputLifecycleNormalized(effects::RecoveredInputLifecycleNormalized),
+    RecoveredInputDurabilityClassified(effects::RecoveredInputDurabilityClassified),
     InputPublicLifecycleResolved(effects::InputPublicLifecycleResolved),
     InputPublicTerminalOutcomeResolved(effects::InputPublicTerminalOutcomeResolved),
     InputBehavioralTerminalityResolved(effects::InputBehavioralTerminalityResolved),
@@ -7838,6 +8028,7 @@ pub enum EffectKind {
     AdmissionValidationResolved,
     AdmissionIdempotencyResolved,
     RecoveredInputLifecycleNormalized,
+    RecoveredInputDurabilityClassified,
     InputPublicLifecycleResolved,
     InputPublicTerminalOutcomeResolved,
     InputBehavioralTerminalityResolved,
@@ -8122,6 +8313,18 @@ pub enum TransitionId {
     NormalizeRecoveredInputQueuedRunning,
     NormalizeRecoveredInputQueuedRetired,
     NormalizeRecoveredInputQueuedStopped,
+    ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing,
+    ClassifyRecoveredInputDurabilityDiscardEphemeralIdle,
+    ClassifyRecoveredInputDurabilityDiscardEphemeralAttached,
+    ClassifyRecoveredInputDurabilityDiscardEphemeralRunning,
+    ClassifyRecoveredInputDurabilityDiscardEphemeralRetired,
+    ClassifyRecoveredInputDurabilityDiscardEphemeralStopped,
+    ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing,
+    ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle,
+    ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached,
+    ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning,
+    ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired,
+    ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped,
     ResolveInputPublicLifecycleAcceptedIdle,
     ResolveInputPublicLifecycleQueuedIdle,
     ResolveInputPublicLifecycleStagedIdle,

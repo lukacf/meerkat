@@ -5,7 +5,6 @@
 use indexmap::IndexMap;
 use meerkat_core::lifecycle::InputId;
 
-use crate::input::InputDurability;
 use crate::input_state::InputState;
 
 /// In-memory ledger tracking InputState for all inputs.
@@ -26,18 +25,12 @@ impl InputLedger {
         self.states.insert(state.input_id.clone(), state);
     }
 
-    /// Recover a durable InputState from persistent storage.
+    /// Recover an InputState after generated recovery authority retained it.
     ///
-    /// Unlike `accept()`, this filters out Ephemeral inputs (which should not
-    /// survive restart). Idempotency ownership lives in the generated
+    /// Recovery retention and idempotency ownership live in the generated
     /// MeerkatMachine recovery/admission path, not in the ledger.
-    /// Returns `true` if the state was inserted, `false` if filtered.
+    /// Returns `true` if the state was inserted.
     pub fn recover(&mut self, state: InputState) -> bool {
-        // Ephemeral inputs should not survive restarts
-        if state.durability == Some(InputDurability::Ephemeral) {
-            return false;
-        }
-
         self.states.insert(state.input_id.clone(), state);
         true
     }
@@ -112,22 +105,15 @@ mod tests {
     }
 
     #[test]
-    fn recover_filters_ephemeral() {
+    fn recover_does_not_interpret_durability() {
         let mut ledger = InputLedger::new();
 
-        // Ephemeral input should be filtered out during recovery
         let mut state = InputState::new_accepted(InputId::new());
-        state.durability = Some(InputDurability::Ephemeral);
+        state.durability = Some(crate::input::InputDurability::Ephemeral);
         assert!(
-            !ledger.recover(state),
-            "Ephemeral inputs should be filtered"
+            ledger.recover(state),
+            "the ledger inserts rows after machine authority has made the retention decision"
         );
-        assert!(ledger.is_empty());
-
-        // Durable input should be kept
-        let mut state = InputState::new_accepted(InputId::new());
-        state.durability = Some(InputDurability::Durable);
-        assert!(ledger.recover(state), "Durable inputs should be kept");
         assert_eq!(ledger.len(), 1);
     }
 }

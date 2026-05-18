@@ -195,10 +195,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `AcceptWithoutWake`(input_id: InputId)
 - `ResolveAdmissionPlan`(input_id: String, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, silent_intent_match: Bool, existing_superseded_input_id: Option<String>, runtime_running: Bool, without_wake: Bool)
-- `ResolveAdmissionValidation`(input_id: String, durability_valid: Bool, peer_handling_mode_valid: Bool, peer_response_terminal_structurally_valid: Bool, peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus)
+- `ResolveAdmissionValidation`(input_id: String, input_kind: AdmissionInputKind, input_origin: AdmissionInputOriginKind, durability: InputDurabilityKind, peer_handling_mode_valid: Bool, peer_response_terminal_structurally_valid: Bool, peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus)
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
 - `RegisterAcceptedIdempotency`(input_id: String, idempotency_key: String)
 - `NormalizeRecoveredInputLifecycle`(input_id: String, phase: RecoveredInputObservedPhase, consume_on_accept: Bool, applied_boundary_committed: Option<Bool>)
+- `ClassifyRecoveredInputDurability`(input_id: String, durability: InputDurabilityKind)
 - `ResolveInputPublicLifecycle`(input_id: String, phase: RecoveredInputObservedPhase)
 - `ResolveInputPublicTerminalOutcome`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `ClassifyInputTerminality`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
@@ -388,6 +389,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdmissionValidationResolved`(input_id: String, result: AdmissionValidationResultKind, reject_reason: Option<AdmissionRejectReasonKind>)
 - `AdmissionIdempotencyResolved`(input_id: String, result: AdmissionIdempotencyResultKind, existing_input_id: Option<String>)
 - `RecoveredInputLifecycleNormalized`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, recovered: Bool, abandoned: Bool, requeued: Bool, history_reason: Option<RecoveredInputNormalizationReasonKind>)
+- `RecoveredInputDurabilityClassified`(input_id: String, disposition: RecoveredInputRecoveryDisposition)
 - `InputPublicLifecycleResolved`(input_id: String, phase: InputPublicLifecycleState)
 - `InputPublicTerminalOutcomeResolved`(input_id: String, terminal_outcome: Option<InputPublicTerminalOutcome>)
 - `InputBehavioralTerminalityResolved`(input_id: String, terminal: Bool)
@@ -1832,7 +1834,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationDurabilityRejectedIdle`
 - From: `Idle`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_invalid`
 - Emits: `AdmissionValidationResolved`
@@ -1840,7 +1842,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationDurabilityRejectedAttached`
 - From: `Attached`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_invalid`
 - Emits: `AdmissionValidationResolved`
@@ -1848,7 +1850,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationDurabilityRejectedRunning`
 - From: `Running`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
   - `durability_invalid`
 - Emits: `AdmissionValidationResolved`
@@ -1856,36 +1858,36 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationPeerHandlingRejectedIdle`
 - From: `Idle`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_valid`
+  - `durability_authorized`
   - `peer_handling_mode_invalid`
 - Emits: `AdmissionValidationResolved`
 - To: `Idle`
 
 ### `ResolveAdmissionValidationPeerHandlingRejectedAttached`
 - From: `Attached`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_valid`
+  - `durability_authorized`
   - `peer_handling_mode_invalid`
 - Emits: `AdmissionValidationResolved`
 - To: `Attached`
 
 ### `ResolveAdmissionValidationPeerHandlingRejectedRunning`
 - From: `Running`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_valid`
+  - `durability_authorized`
   - `peer_handling_mode_invalid`
 - Emits: `AdmissionValidationResolved`
 - To: `Running`
 
 ### `ResolveAdmissionValidationPeerTerminalRejectedIdle`
 - From: `Idle`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_valid`
+  - `durability_authorized`
   - `peer_handling_mode_valid`
   - `peer_response_terminal_invalid`
 - Emits: `AdmissionValidationResolved`
@@ -1893,9 +1895,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationPeerTerminalRejectedAttached`
 - From: `Attached`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_valid`
+  - `durability_authorized`
   - `peer_handling_mode_valid`
   - `peer_response_terminal_invalid`
 - Emits: `AdmissionValidationResolved`
@@ -1903,9 +1905,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationPeerTerminalRejectedRunning`
 - From: `Running`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_valid`
+  - `durability_authorized`
   - `peer_handling_mode_valid`
   - `peer_response_terminal_invalid`
 - Emits: `AdmissionValidationResolved`
@@ -1913,9 +1915,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationAcceptedIdle`
 - From: `Idle`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_valid`
+  - `durability_authorized`
   - `peer_handling_mode_valid`
   - `peer_response_terminal_structurally_valid`
   - `peer_response_terminal_status_supported`
@@ -1924,9 +1926,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationAcceptedAttached`
 - From: `Attached`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_valid`
+  - `durability_authorized`
   - `peer_handling_mode_valid`
   - `peer_response_terminal_structurally_valid`
   - `peer_response_terminal_status_supported`
@@ -1935,9 +1937,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveAdmissionValidationAcceptedRunning`
 - From: `Running`
-- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_valid`
+  - `durability_authorized`
   - `peer_handling_mode_valid`
   - `peer_response_terminal_structurally_valid`
   - `peer_response_terminal_status_supported`
@@ -2308,6 +2310,102 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
+- To: `Stopped`
+
+### `ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing`
+- From: `Initializing`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- Guards:
+  - `ephemeral_durability`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Initializing`
+
+### `ClassifyRecoveredInputDurabilityDiscardEphemeralIdle`
+- From: `Idle`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- Guards:
+  - `ephemeral_durability`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Idle`
+
+### `ClassifyRecoveredInputDurabilityDiscardEphemeralAttached`
+- From: `Attached`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- Guards:
+  - `ephemeral_durability`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Attached`
+
+### `ClassifyRecoveredInputDurabilityDiscardEphemeralRunning`
+- From: `Running`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- Guards:
+  - `ephemeral_durability`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Running`
+
+### `ClassifyRecoveredInputDurabilityDiscardEphemeralRetired`
+- From: `Retired`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- Guards:
+  - `ephemeral_durability`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Retired`
+
+### `ClassifyRecoveredInputDurabilityDiscardEphemeralStopped`
+- From: `Stopped`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- Guards:
+  - `ephemeral_durability`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Stopped`
+
+### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing`
+- From: `Initializing`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- Guards:
+  - `retained_durability`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Initializing`
+
+### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle`
+- From: `Idle`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- Guards:
+  - `retained_durability`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Idle`
+
+### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached`
+- From: `Attached`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- Guards:
+  - `retained_durability`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Attached`
+
+### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning`
+- From: `Running`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- Guards:
+  - `retained_durability`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Running`
+
+### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired`
+- From: `Retired`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- Guards:
+  - `retained_durability`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Retired`
+
+### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped`
+- From: `Stopped`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- Guards:
+  - `retained_durability`
+- Emits: `RecoveredInputDurabilityClassified`
 - To: `Stopped`
 
 ### `ResolveInputPublicLifecycleAcceptedIdle`

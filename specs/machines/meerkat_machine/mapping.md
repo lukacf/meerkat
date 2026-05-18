@@ -721,6 +721,42 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `NormalizeRecoveredInputQueuedStopped`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+- `ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyRecoveredInputDurabilityDiscardEphemeralIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyRecoveredInputDurabilityDiscardEphemeralAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyRecoveredInputDurabilityDiscardEphemeralRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyRecoveredInputDurabilityDiscardEphemeralRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyRecoveredInputDurabilityDiscardEphemeralStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `ResolveInputPublicLifecycleAcceptedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -2772,6 +2808,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoveredInputLifecycleNormalized`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
+- `RecoveredInputDurabilityClassified`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `InputPublicLifecycleResolved`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`

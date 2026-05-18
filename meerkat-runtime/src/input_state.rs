@@ -3,10 +3,12 @@
 //! Canonical lifecycle truth for every input lives in the MeerkatMachine DSL
 //! (`input_phases`, `input_run_associations`, `input_boundary_sequences` plus
 //! the `QueueAccepted` / `StageForRun` / `RecordBoundarySeq` / etc.
-//! transitions). This module owns ONLY the per-input shell metadata that has
-//! no DSL home today: a history log, timestamps, policy snapshot, durability
-//! class, idempotency key, and the cached payload needed to rebuild queued
-//! work after recovery.
+//! transitions). This module owns ONLY the per-input shell metadata needed for
+//! persistence/projection: a history log, timestamps, policy snapshot,
+//! durability observation, idempotency key, and the cached payload needed to
+//! rebuild queued work after recovery. Durability admission validity and
+//! recovered keep/drop behavior are emitted by generated MeerkatMachine
+//! inputs/effects.
 //!
 //! `InputState` still caches terminal outcome and attempt count for persistence,
 //! recovery normalization, and compatibility reads, but the authoritative live

@@ -253,6 +253,14 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "InputDurabilityKind",
+                &["Durable", "Ephemeral", "Derived", "Missing"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionInputOriginKind",
+                &["Operator", "Peer", "Flow", "System", "External"],
+            ),
+            NamedTypeBinding::string_enum(
                 "AdmissionPolicyApplyMode",
                 &["StageRunStart", "StageRunBoundary", "InjectNow", "Ignore"],
             ),
@@ -665,6 +673,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Continuation",
                     "Operation",
                 ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredInputRecoveryDisposition",
+                &["Retain", "Discard"],
             ),
             NamedTypeBinding::string_enum(
                 "RecoveredPolicyApplyMode",

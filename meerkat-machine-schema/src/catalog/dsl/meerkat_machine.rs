@@ -1006,6 +1006,31 @@ pub enum AdmissionInputKind {
     Operation,
 }
 
+/// Typed durability class observed on an input. The shell may observe and
+/// carry this class, but admission validity and recovered-retention behavior
+/// are generated MeerkatMachine decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputDurabilityKind {
+    #[default]
+    Durable,
+    Ephemeral,
+    Derived,
+    Missing,
+}
+
+/// Typed origin class observed at live admission. The machine combines this
+/// with `AdmissionInputKind` and `InputDurabilityKind` so the shell does not
+/// own the derived-durability legality table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionInputOriginKind {
+    #[default]
+    Operator,
+    Peer,
+    Flow,
+    System,
+    External,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum AdmissionPolicyApplyMode {
     #[default]
@@ -1192,6 +1217,15 @@ pub enum RecoveredInputKind {
     ExternalEvent,
     Continuation,
     Operation,
+}
+
+/// Generated recovery disposition for a persisted input row after the machine
+/// observes its durability class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputRecoveryDisposition {
+    #[default]
+    Retain,
+    Discard,
 }
 
 /// Typed mirror of the recovered policy apply mode used only as an admission
@@ -2035,7 +2069,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             },
             ResolveAdmissionValidation {
                 input_id: String,
-                durability_valid: bool,
+                input_kind: Enum<AdmissionInputKind>,
+                input_origin: Enum<AdmissionInputOriginKind>,
+                durability: Enum<InputDurabilityKind>,
                 peer_handling_mode_valid: bool,
                 peer_response_terminal_structurally_valid: bool,
                 peer_response_terminal_observed_status: Enum<PeerResponseTerminalObservedStatus>,
@@ -2047,6 +2083,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 phase: Enum<RecoveredInputObservedPhase>,
                 consume_on_accept: bool,
                 applied_boundary_committed: Option<bool>,
+            },
+            ClassifyRecoveredInputDurability {
+                input_id: String,
+                durability: Enum<InputDurabilityKind>,
             },
             ResolveInputPublicLifecycle {
                 input_id: String,
@@ -2535,6 +2575,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requeued: bool,
                 history_reason: Option<Enum<RecoveredInputNormalizationReasonKind>>,
             },
+            RecoveredInputDurabilityClassified {
+                input_id: String,
+                disposition: Enum<RecoveredInputRecoveryDisposition>,
+            },
             InputPublicLifecycleResolved {
                 input_id: String,
                 phase: Enum<InputPublicLifecycleState>,
@@ -2695,6 +2739,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition AdmissionValidationResolved => local,
         disposition AdmissionIdempotencyResolved => local,
         disposition RecoveredInputLifecycleNormalized => local,
+        disposition RecoveredInputDurabilityClassified => local,
         disposition InputPublicLifecycleResolved => local,
         disposition InputPublicTerminalOutcomeResolved => local,
         disposition InputBehavioralTerminalityResolved => local,
@@ -4352,8 +4397,19 @@ macro_rules! meerkat_catalog_machine_dsl {
         // can change.
         transition ResolveAdmissionValidationDurabilityRejected {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
-            guard "durability_invalid" { durability_valid == false }
+            on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "durability_invalid" {
+                durability == InputDurabilityKind::Missing
+                || (durability == InputDurabilityKind::Derived
+                    && (input_origin == AdmissionInputOriginKind::Operator
+                        || input_origin == AdmissionInputOriginKind::Peer
+                        || input_origin == AdmissionInputOriginKind::External
+                        || input_kind == AdmissionInputKind::Prompt
+                        || input_kind == AdmissionInputKind::PeerMessage
+                        || input_kind == AdmissionInputKind::PeerRequest
+                        || input_kind == AdmissionInputKind::PeerResponseTerminal
+                        || input_kind == AdmissionInputKind::FlowStep))
+            }
             update {}
             to Idle
             emit AdmissionValidationResolved {
@@ -4365,8 +4421,19 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionValidationPeerHandlingRejected {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
-            guard "durability_valid" { durability_valid == true }
+            on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "durability_authorized" {
+                durability == InputDurabilityKind::Durable
+                || durability == InputDurabilityKind::Ephemeral
+                || (durability == InputDurabilityKind::Derived
+                    && (input_origin == AdmissionInputOriginKind::Flow
+                        || input_origin == AdmissionInputOriginKind::System)
+                    && input_kind != AdmissionInputKind::Prompt
+                    && input_kind != AdmissionInputKind::PeerMessage
+                    && input_kind != AdmissionInputKind::PeerRequest
+                    && input_kind != AdmissionInputKind::PeerResponseTerminal
+                    && input_kind != AdmissionInputKind::FlowStep)
+            }
             guard "peer_handling_mode_invalid" { peer_handling_mode_valid == false }
             update {}
             to Idle
@@ -4379,8 +4446,19 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionValidationPeerTerminalRejected {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
-            guard "durability_valid" { durability_valid == true }
+            on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "durability_authorized" {
+                durability == InputDurabilityKind::Durable
+                || durability == InputDurabilityKind::Ephemeral
+                || (durability == InputDurabilityKind::Derived
+                    && (input_origin == AdmissionInputOriginKind::Flow
+                        || input_origin == AdmissionInputOriginKind::System)
+                    && input_kind != AdmissionInputKind::Prompt
+                    && input_kind != AdmissionInputKind::PeerMessage
+                    && input_kind != AdmissionInputKind::PeerRequest
+                    && input_kind != AdmissionInputKind::PeerResponseTerminal
+                    && input_kind != AdmissionInputKind::FlowStep)
+            }
             guard "peer_handling_mode_valid" { peer_handling_mode_valid == true }
             guard "peer_response_terminal_invalid" {
                 peer_response_terminal_structurally_valid == false
@@ -4397,8 +4475,19 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionValidationAccepted {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
-            guard "durability_valid" { durability_valid == true }
+            on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "durability_authorized" {
+                durability == InputDurabilityKind::Durable
+                || durability == InputDurabilityKind::Ephemeral
+                || (durability == InputDurabilityKind::Derived
+                    && (input_origin == AdmissionInputOriginKind::Flow
+                        || input_origin == AdmissionInputOriginKind::System)
+                    && input_kind != AdmissionInputKind::Prompt
+                    && input_kind != AdmissionInputKind::PeerMessage
+                    && input_kind != AdmissionInputKind::PeerRequest
+                    && input_kind != AdmissionInputKind::PeerResponseTerminal
+                    && input_kind != AdmissionInputKind::FlowStep)
+            }
             guard "peer_handling_mode_valid" { peer_handling_mode_valid == true }
             guard "peer_response_terminal_structurally_valid" { peer_response_terminal_structurally_valid == true }
             guard "peer_response_terminal_status_supported" {
@@ -4558,7 +4647,39 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // 26c. ResolveInputPublicLifecycle /
+        // 26c. ClassifyRecoveredInputDurability: generated durability
+        // retention authority. Persistent recovery may only retain/drop a row
+        // after this typed effect is observed; ledgers and queues must not
+        // interpret durability classes themselves.
+        transition ClassifyRecoveredInputDurabilityDiscardEphemeral {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyRecoveredInputDurability { input_id, durability }
+            guard "ephemeral_durability" { durability == InputDurabilityKind::Ephemeral }
+            update {}
+            to Idle
+            emit RecoveredInputDurabilityClassified {
+                input_id: input_id,
+                disposition: RecoveredInputRecoveryDisposition::Discard
+            }
+        }
+
+        transition ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissing {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyRecoveredInputDurability { input_id, durability }
+            guard "retained_durability" {
+                durability == InputDurabilityKind::Durable
+                || durability == InputDurabilityKind::Derived
+                || durability == InputDurabilityKind::Missing
+            }
+            update {}
+            to Idle
+            emit RecoveredInputDurabilityClassified {
+                input_id: input_id,
+                disposition: RecoveredInputRecoveryDisposition::Retain
+            }
+        }
+
+        // 26d. ResolveInputPublicLifecycle /
         // ResolveInputPublicTerminalOutcome: generated public projection
         // authority for RPC/SDK-facing input lifecycle/result classes.
         // Surfaces pass only the machine-derived seed facts; the generated

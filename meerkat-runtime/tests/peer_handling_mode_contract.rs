@@ -10,12 +10,34 @@ use meerkat_runtime::input::{
 };
 use meerkat_runtime::policy_table::DefaultPolicyTable;
 use meerkat_runtime::traits::RuntimeDriver;
-use meerkat_runtime::{
-    ApplyMode, RoutingDisposition, WakeMode, post_admission_signal_from_accept_outcome,
-};
+use meerkat_runtime::{ApplyMode, RoutingDisposition, WakeMode};
 
 fn runtime_id() -> LogicalRuntimeId {
     LogicalRuntimeId::new("peer-handling-mode-contract")
+}
+
+fn test_expected_post_admission_signal(
+    outcome: &meerkat_runtime::AcceptOutcome,
+    request_immediate_processing: bool,
+) -> PostAdmissionSignal {
+    if !outcome.is_accepted() {
+        return PostAdmissionSignal::None;
+    }
+    if request_immediate_processing {
+        return PostAdmissionSignal::RequestImmediateProcessing;
+    }
+
+    match outcome {
+        meerkat_runtime::AcceptOutcome::Accepted { policy, .. } => match policy.wake_mode {
+            WakeMode::InterruptYielding => PostAdmissionSignal::InterruptYielding,
+            WakeMode::WakeIfIdle => PostAdmissionSignal::WakeLoop,
+            WakeMode::None => PostAdmissionSignal::None,
+            _ => PostAdmissionSignal::None,
+        },
+        meerkat_runtime::AcceptOutcome::Deduplicated { .. }
+        | meerkat_runtime::AcceptOutcome::Rejected { .. } => PostAdmissionSignal::None,
+        _ => PostAdmissionSignal::None,
+    }
 }
 
 fn bind_running(driver: &mut EphemeralRuntimeDriver) {
@@ -65,7 +87,7 @@ async fn running_queue_peer_message_interrupts_yielding() {
     let outcome = driver.accept_input(input).await.expect("accept input");
     assert!(outcome.is_accepted());
     assert_eq!(
-        post_admission_signal_from_accept_outcome(&outcome, false),
+        test_expected_post_admission_signal(&outcome, false),
         PostAdmissionSignal::InterruptYielding
     );
     assert_eq!(
@@ -87,7 +109,7 @@ async fn running_steer_peer_message_requests_immediate_processing() {
 
     let outcome = driver.accept_input(input).await.expect("accept input");
     assert!(outcome.is_accepted());
-    let signal = post_admission_signal_from_accept_outcome(&outcome, true);
+    let signal = test_expected_post_admission_signal(&outcome, true);
     assert_eq!(signal, PostAdmissionSignal::RequestImmediateProcessing);
     assert!(signal.should_wake());
     assert_eq!(

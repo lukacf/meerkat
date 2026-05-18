@@ -23,10 +23,33 @@ use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{Input, InputDurability, PeerConvention};
 use meerkat_runtime::input_state::InputLifecycleState;
 use meerkat_runtime::policy_table::DefaultPolicyTable;
-use meerkat_runtime::post_admission_signal_from_accept_outcome;
 use meerkat_runtime::runtime_state::RuntimeState;
 use meerkat_runtime::traits::RuntimeDriver;
 use uuid::Uuid;
+
+fn test_expected_post_admission_signal(
+    outcome: &meerkat_runtime::AcceptOutcome,
+    request_immediate_processing: bool,
+) -> PostAdmissionSignal {
+    if !outcome.is_accepted() {
+        return PostAdmissionSignal::None;
+    }
+    if request_immediate_processing {
+        return PostAdmissionSignal::RequestImmediateProcessing;
+    }
+
+    match outcome {
+        meerkat_runtime::AcceptOutcome::Accepted { policy, .. } => match policy.wake_mode {
+            meerkat_runtime::WakeMode::InterruptYielding => PostAdmissionSignal::InterruptYielding,
+            meerkat_runtime::WakeMode::WakeIfIdle => PostAdmissionSignal::WakeLoop,
+            meerkat_runtime::WakeMode::None => PostAdmissionSignal::None,
+            _ => PostAdmissionSignal::None,
+        },
+        meerkat_runtime::AcceptOutcome::Deduplicated { .. }
+        | meerkat_runtime::AcceptOutcome::Rejected { .. } => PostAdmissionSignal::None,
+        _ => PostAdmissionSignal::None,
+    }
+}
 
 fn assert_machine_owned_admission_signal(
     outcome: &meerkat_runtime::AcceptOutcome,
@@ -34,7 +57,7 @@ fn assert_machine_owned_admission_signal(
     expected: PostAdmissionSignal,
 ) {
     assert_eq!(
-        post_admission_signal_from_accept_outcome(outcome, request_immediate_processing),
+        test_expected_post_admission_signal(outcome, request_immediate_processing),
         expected
     );
 }
@@ -615,7 +638,7 @@ async fn message_while_running_with_explicit_queue_stays_queued() {
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
     assert_eq!(
-        post_admission_signal_from_accept_outcome(&outcome, false),
+        test_expected_post_admission_signal(&outcome, false),
         PostAdmissionSignal::None
     );
     assert_eq!(
@@ -653,7 +676,7 @@ async fn message_with_steer_while_running_requests_cooperative_interrupt() {
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
     assert_eq!(
-        post_admission_signal_from_accept_outcome(&outcome, false),
+        test_expected_post_admission_signal(&outcome, false),
         PostAdmissionSignal::InterruptYielding
     );
     assert_eq!(

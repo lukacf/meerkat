@@ -1654,6 +1654,47 @@ pub(crate) fn machine_apply_recovered_input_normalization(
     Ok(delta)
 }
 
+pub(crate) fn machine_classify_recovered_input_durability(
+    state: &InputState,
+) -> Result<crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition, RuntimeDriverError> {
+    let input_id = state.input_id.to_string();
+    let mut authority = crate::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+    let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        crate::meerkat_machine::dsl::MeerkatMachineInput::ClassifyRecoveredInputDurability {
+            input_id: input_id.clone(),
+            durability: crate::meerkat_machine::dsl::InputDurabilityKind::from(state.durability),
+        },
+    )
+    .map_err(|err| {
+        RuntimeDriverError::Internal(format!(
+            "ClassifyRecoveredInputDurability rejected recovered input '{input_id}': {err:?}"
+        ))
+    })?;
+
+    let Some((effect_input_id, disposition)) = transition.effects.into_iter().find_map(|effect| {
+        match effect {
+            crate::meerkat_machine::dsl::MeerkatMachineEffect::RecoveredInputDurabilityClassified {
+                input_id,
+                disposition,
+            } => Some((input_id, disposition)),
+            _ => None,
+        }
+    }) else {
+        return Err(RuntimeDriverError::Internal(format!(
+            "ClassifyRecoveredInputDurability emitted no retention effect for '{input_id}'"
+        )));
+    };
+
+    if effect_input_id != input_id {
+        return Err(RuntimeDriverError::Internal(format!(
+            "ClassifyRecoveredInputDurability returned input id '{effect_input_id}' for '{input_id}'"
+        )));
+    }
+
+    Ok(disposition)
+}
+
 pub(crate) struct RecoveredIngressEntry {
     pub runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
     pub policy: crate::policy::PolicyDecision,
@@ -1777,7 +1818,10 @@ pub(crate) async fn machine_recover_persistent_driver(
     {
         let bundle = machine_normalize_recovered_input_state(store, runtime_id, bundle).await?;
 
-        if bundle.state.durability == Some(crate::input::InputDurability::Ephemeral) {
+        if matches!(
+            machine_classify_recovered_input_durability(&bundle.state)?,
+            crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition::Discard
+        ) {
             continue;
         }
 
@@ -3010,6 +3054,32 @@ mod recovery_tests {
         let mut seed = queued_seed();
         seed.admission_sequence = Some(sequence);
         seed
+    }
+
+    #[test]
+    fn recovered_durability_retention_is_generated() {
+        let mut state = crate::input_state::InputState::new_accepted(InputId::new());
+
+        state.durability = Some(crate::input::InputDurability::Ephemeral);
+        assert_eq!(
+            machine_classify_recovered_input_durability(&state)
+                .expect("generated durability classification should accept ephemeral witness"),
+            crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition::Discard
+        );
+
+        state.durability = Some(crate::input::InputDurability::Durable);
+        assert_eq!(
+            machine_classify_recovered_input_durability(&state)
+                .expect("generated durability classification should accept durable witness"),
+            crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition::Retain
+        );
+
+        state.durability = None;
+        assert_eq!(
+            machine_classify_recovered_input_durability(&state)
+                .expect("generated durability classification should accept missing witness"),
+            crate::meerkat_machine::dsl::RecoveredInputRecoveryDisposition::Retain
+        );
     }
 
     fn recovered_admission_rejection(state: crate::input_state::InputState) -> String {

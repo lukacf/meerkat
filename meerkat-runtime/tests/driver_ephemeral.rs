@@ -9,7 +9,6 @@ use meerkat_runtime::{
     MeerkatMachine, PeerConvention, PeerInput, PostAdmissionSignal, PromptInput,
     ResponseProgressPhase, ResponseTerminalStatus, RuntimeControlPlane, RuntimeDriver,
     RuntimeDriverError, RuntimeEvent, RuntimeState, SessionServiceRuntimeExt,
-    post_admission_signal_from_accept_outcome,
 };
 
 fn make_prompt_input(text: &str) -> Input {
@@ -89,6 +88,30 @@ fn make_continuation() -> Input {
     Input::Continuation(ContinuationInput::detached_background_op_completed())
 }
 
+fn test_expected_post_admission_signal(
+    outcome: &meerkat_runtime::AcceptOutcome,
+    request_immediate_processing: bool,
+) -> PostAdmissionSignal {
+    if !outcome.is_accepted() {
+        return PostAdmissionSignal::None;
+    }
+    if request_immediate_processing {
+        return PostAdmissionSignal::RequestImmediateProcessing;
+    }
+
+    match outcome {
+        meerkat_runtime::AcceptOutcome::Accepted { policy, .. } => match policy.wake_mode {
+            meerkat_runtime::WakeMode::InterruptYielding => PostAdmissionSignal::InterruptYielding,
+            meerkat_runtime::WakeMode::WakeIfIdle => PostAdmissionSignal::WakeLoop,
+            meerkat_runtime::WakeMode::None => PostAdmissionSignal::None,
+            _ => PostAdmissionSignal::None,
+        },
+        meerkat_runtime::AcceptOutcome::Deduplicated { .. }
+        | meerkat_runtime::AcceptOutcome::Rejected { .. } => PostAdmissionSignal::None,
+        _ => PostAdmissionSignal::None,
+    }
+}
+
 fn assert_queue_projection_alignment(driver: &EphemeralRuntimeDriver) {
     assert_eq!(driver.queue().input_ids(), driver.queue_lane().as_slice());
     assert_eq!(
@@ -103,7 +126,7 @@ fn assert_machine_owned_admission_signal(
     expected: PostAdmissionSignal,
 ) {
     assert_eq!(
-        post_admission_signal_from_accept_outcome(outcome, request_immediate_processing),
+        test_expected_post_admission_signal(outcome, request_immediate_processing),
         expected
     );
 }
@@ -939,7 +962,7 @@ async fn post_admission_signal_queue_peer_message_while_running_interrupts_yield
         handling_mode: None,
     });
     let outcome = driver.accept_input(peer).await.unwrap();
-    let signal = post_admission_signal_from_accept_outcome(&outcome, false);
+    let signal = test_expected_post_admission_signal(&outcome, false);
 
     assert_eq!(
         signal,

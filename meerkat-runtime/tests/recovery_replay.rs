@@ -78,6 +78,7 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
             last_boundary_sequence: Some(sequence),
             terminal_outcome: None,
             attempt_count: 1,
+            admission_sequence: None,
         },
     }
 }

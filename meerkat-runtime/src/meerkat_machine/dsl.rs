@@ -2085,6 +2085,55 @@ pub enum AdmissionInputKind {
     Operation,
 }
 
+/// Typed durability class observed on an input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputDurabilityKind {
+    #[default]
+    Durable,
+    Ephemeral,
+    Derived,
+    Missing,
+}
+
+impl From<crate::input::InputDurability> for InputDurabilityKind {
+    fn from(durability: crate::input::InputDurability) -> Self {
+        match durability {
+            crate::input::InputDurability::Durable => Self::Durable,
+            crate::input::InputDurability::Ephemeral => Self::Ephemeral,
+            crate::input::InputDurability::Derived => Self::Derived,
+        }
+    }
+}
+
+impl From<Option<crate::input::InputDurability>> for InputDurabilityKind {
+    fn from(durability: Option<crate::input::InputDurability>) -> Self {
+        durability.map(Self::from).unwrap_or(Self::Missing)
+    }
+}
+
+/// Typed input-origin class observed at live admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionInputOriginKind {
+    #[default]
+    Operator,
+    Peer,
+    Flow,
+    System,
+    External,
+}
+
+impl From<&crate::input::InputOrigin> for AdmissionInputOriginKind {
+    fn from(origin: &crate::input::InputOrigin) -> Self {
+        match origin {
+            crate::input::InputOrigin::Operator => Self::Operator,
+            crate::input::InputOrigin::Peer { .. } => Self::Peer,
+            crate::input::InputOrigin::Flow { .. } => Self::Flow,
+            crate::input::InputOrigin::System => Self::System,
+            crate::input::InputOrigin::External { .. } => Self::External,
+        }
+    }
+}
+
 impl From<crate::identifiers::InputKind> for AdmissionInputKind {
     fn from(kind: crate::identifiers::InputKind) -> Self {
         match kind {
@@ -2367,6 +2416,14 @@ pub enum RecoveredInputKind {
     ExternalEvent,
     Continuation,
     Operation,
+}
+
+/// Generated recovery disposition for a persisted input row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputRecoveryDisposition {
+    #[default]
+    Retain,
+    Discard,
 }
 
 impl From<crate::identifiers::InputKind> for RecoveredInputKind {

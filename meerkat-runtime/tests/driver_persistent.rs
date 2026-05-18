@@ -512,7 +512,7 @@ async fn recover_rebuilds_dedup_index() {
 }
 
 #[tokio::test]
-async fn recover_filters_ephemeral_inputs() {
+async fn recover_discards_machine_classified_ephemeral_inputs() {
     let store = Arc::new(InMemoryRuntimeStore::new());
     let rid = LogicalRuntimeId::new("test");
 
@@ -529,7 +529,8 @@ async fn recover_filters_ephemeral_inputs() {
     let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
     let report = driver.recover().await.unwrap();
 
-    // Ephemeral input should NOT be recovered (it shouldn't survive restart)
+    // Generated recovery durability authority discards ephemeral rows before
+    // the ledger or queue projections can recover them.
     assert!(
         driver.input_state(&input_id).is_none(),
         "Ephemeral inputs should be filtered during recovery"
@@ -757,6 +758,7 @@ async fn recover_allows_legacy_unstamped_terminal_rows() {
                     last_boundary_sequence: None,
                     terminal_outcome: Some(InputTerminalOutcome::Consumed),
                     attempt_count: 0,
+                    admission_sequence: None,
                 },
             },
         )
@@ -823,6 +825,7 @@ async fn recover_consumes_committed_applied_pending_inputs() {
             last_boundary_sequence: Some(0),
             terminal_outcome: None,
             attempt_count: 1,
+            admission_sequence: None,
         },
     };
     store.persist_input_state(&rid, &stored).await.unwrap();
@@ -894,6 +897,7 @@ async fn recover_duplicate_legacy_input_row_keeps_canonical_boundary_receipt() {
             last_boundary_sequence: Some(0),
             terminal_outcome: None,
             attempt_count: 1,
+            admission_sequence: None,
         },
     };
     store
@@ -967,6 +971,7 @@ async fn recover_prefers_canonical_duplicate_over_newer_stale_legacy_row() {
             last_boundary_sequence: Some(0),
             terminal_outcome: None,
             attempt_count: 1,
+            admission_sequence: None,
         },
     };
     store
@@ -1037,6 +1042,7 @@ async fn recover_ignores_legacy_boundary_receipt_load_error_after_canonical_miss
                     last_boundary_sequence: Some(0),
                     terminal_outcome: None,
                     attempt_count: 1,
+                    admission_sequence: None,
                 },
             },
         )
@@ -1097,6 +1103,7 @@ async fn recover_treats_canonical_boundary_receipt_miss_as_authoritative() {
                     last_boundary_sequence: Some(0),
                     terminal_outcome: None,
                     attempt_count: 1,
+                    admission_sequence: None,
                 },
             },
         )

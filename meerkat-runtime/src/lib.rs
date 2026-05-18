@@ -109,7 +109,7 @@ pub use coalescing::{
 };
 pub use completion::{CompletionHandle, CompletionOutcome};
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
-pub use durability::{DurabilityError, validate_durability};
+pub use durability::DurabilityError;
 pub use handles::{
     HandleDslAuthority, RuntimeAuthLeaseHandle, RuntimeCommsDrainHandle,
     RuntimeExternalToolSurfaceHandle, RuntimeInteractionStreamHandle,

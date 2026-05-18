@@ -21,7 +21,7 @@ use crate::accept::{
     AcceptOutcome, AdmissionPlan, AdmissionQueueAction, CoarseAdmissionFlags,
     ExistingQueuedAdmissionAction, MachineAdmissionAuthority, RejectReason, ResolvedAdmission,
 };
-use crate::durability::validate_durability;
+use crate::durability::durability_rejection_detail;
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId, PolicyVersion};
 use crate::ingress_types::{
     ContentShape, RequestId, ReservationKey, RuntimeInputProjection, RuntimeInputSemantics,
@@ -2118,7 +2118,9 @@ impl EphemeralRuntimeDriver {
     fn resolve_admission_validation(
         &self,
         input_id: &InputId,
-        durability_valid: bool,
+        input_kind: crate::identifiers::InputKind,
+        input_origin: &crate::input::InputOrigin,
+        durability: crate::input::InputDurability,
         peer_handling_mode_valid: bool,
         peer_response_terminal_structurally_valid: bool,
         peer_response_terminal_observed_status: mm_dsl::PeerResponseTerminalObservedStatus,
@@ -2126,7 +2128,9 @@ impl EphemeralRuntimeDriver {
         let effects = self.dsl_preview(
             mm_dsl::MeerkatMachineInput::ResolveAdmissionValidation {
                 input_id: Self::dsl_key(input_id),
-                durability_valid,
+                input_kind: mm_dsl::AdmissionInputKind::from(input_kind),
+                input_origin: mm_dsl::AdmissionInputOriginKind::from(input_origin),
+                durability: mm_dsl::InputDurabilityKind::from(durability),
                 peer_handling_mode_valid,
                 peer_response_terminal_structurally_valid,
                 peer_response_terminal_observed_status,
@@ -2461,9 +2465,7 @@ impl EphemeralRuntimeDriver {
         }
 
         let input_id = input.id().clone();
-        let durability_error = validate_durability(&input)
-            .err()
-            .map(|error| error.to_string());
+        let durability_detail = durability_rejection_detail(&input);
         let peer_handling_mode_error =
             crate::peer_handling_mode::validate_peer_handling_mode(&input)
                 .err()
@@ -2479,7 +2481,9 @@ impl EphemeralRuntimeDriver {
             .or_else(|| Self::peer_response_terminal_generated_rejection_detail(&input));
         if let Some(reason) = self.resolve_admission_validation(
             &input_id,
-            durability_error.is_none(),
+            input.kind(),
+            &input.header().source,
+            input.header().durability,
             peer_handling_mode_error.is_none(),
             peer_response_terminal_structural_error.is_none(),
             peer_response_terminal_observed_status,
@@ -2493,7 +2497,9 @@ impl EphemeralRuntimeDriver {
             }
             let reason = Self::reject_reason_from_machine_validation(
                 reason,
-                durability_error.as_deref(),
+                durability_detail
+                    .as_deref()
+                    .or(Some("durability rejected by generated authority")),
                 peer_handling_mode_error.as_deref(),
                 peer_response_terminal_detail.as_deref(),
             )?;
@@ -3285,7 +3291,9 @@ mod tests {
         let generated_reason = driver
             .resolve_admission_validation(
                 &input_id,
-                false,
+                input.kind(),
+                &input.header().source,
+                input.header().durability,
                 true,
                 true,
                 mm_dsl::PeerResponseTerminalObservedStatus::NotPeerTerminal,

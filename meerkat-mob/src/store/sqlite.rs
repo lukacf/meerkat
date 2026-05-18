@@ -2549,6 +2549,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sqlite_run_store_create_rejects_preset_provenance_ledgers_without_authority() {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path).unwrap().run_store();
+        let mut run = sample_run(MobRunStatus::Running);
+        run.step_ledger.push(StepLedgerEntry {
+            step_id: StepId::from("step-1"),
+            agent_identity: AgentIdentity::from("worker-1"),
+            status: StepRunStatus::Dispatched,
+            output: None,
+            timestamp: Utc::now(),
+        });
+
+        let error = store
+            .create_run(run)
+            .await
+            .expect_err("raw step provenance must be rejected");
+        assert!(error.to_string().contains("step ledger entry"));
+
+        let mut run = sample_run(MobRunStatus::Running);
+        run.failure_ledger.push(FailureLedgerEntry {
+            step_id: StepId::from("step-1"),
+            reason: "caller-injected failure".to_string(),
+            error_report: None,
+            error: None,
+            timestamp: Utc::now(),
+        });
+
+        let error = store
+            .create_run(run)
+            .await
+            .expect_err("raw failure provenance must be rejected");
+        assert!(error.to_string().contains("failure ledger entry"));
+    }
+
+    #[tokio::test]
     async fn test_sqlite_run_store_snapshot_rejects_missing_authority_without_mutation() {
         let (_dir, path) = temp_db_path();
         let store = SqliteMobStores::open(&path).unwrap().run_store();

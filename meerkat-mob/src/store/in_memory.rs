@@ -1306,6 +1306,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_store_create_rejects_preset_provenance_ledgers_without_authority() {
+        let store = InMemoryMobRunStore::new();
+        let mut run = sample_run(MobRunStatus::Running);
+        run.step_ledger.push(StepLedgerEntry {
+            step_id: StepId::from("step-1"),
+            agent_identity: AgentIdentity::from("worker-1"),
+            status: StepRunStatus::Dispatched,
+            output: None,
+            timestamp: Utc::now(),
+        });
+
+        let error = store
+            .create_run(run)
+            .await
+            .expect_err("raw step provenance must be rejected");
+        assert!(error.to_string().contains("step ledger entry"));
+
+        let mut run = sample_run(MobRunStatus::Running);
+        run.failure_ledger.push(FailureLedgerEntry {
+            step_id: StepId::from("step-1"),
+            reason: "caller-injected failure".to_string(),
+            error_report: None,
+            error: None,
+            timestamp: Utc::now(),
+        });
+
+        let error = store
+            .create_run(run)
+            .await
+            .expect_err("raw failure provenance must be rejected");
+        assert!(error.to_string().contains("failure ledger entry"));
+    }
+
+    #[tokio::test]
     async fn test_spec_store_revision_conflict_behavior() {
         let store = InMemoryMobSpecStore::new();
         let definition = sample_definition();

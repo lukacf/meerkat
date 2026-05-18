@@ -3847,7 +3847,7 @@ impl MobRun {
         Ok(())
     }
 
-    pub(crate) fn validate_flow_authority_projection(&self) -> Result<(), MobError> {
+    fn validate_flow_authority_projection_core(&self) -> Result<(), MobError> {
         if self.flow_authority_inputs.is_empty() {
             return Err(MobError::Internal(format!(
                 "flow authority log projection mismatch for run '{}': missing MobMachine authority inputs",
@@ -3940,6 +3940,65 @@ impl MobRun {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn validate_flow_authority_projection(&self) -> Result<(), MobError> {
+        self.validate_flow_authority_projection_core()?;
+        self.validate_provenance_ledgers()
+    }
+
+    fn validate_provenance_ledgers(&self) -> Result<(), MobError> {
+        for entry in &self.step_ledger {
+            if !self.step_entry_has_authority(entry) {
+                return Err(MobError::Internal(format!(
+                    "run '{}' step ledger entry for step '{}' status {:?} is not authorized by the MobMachine authority log",
+                    self.run_id, entry.step_id, entry.status
+                )));
+            }
+        }
+        for entry in &self.failure_ledger {
+            if !self.failure_entry_has_authority(entry) {
+                return Err(MobError::Internal(format!(
+                    "run '{}' failure ledger entry for step '{}' is not authorized by the MobMachine authority log",
+                    self.run_id, entry.step_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn step_entry_has_authority(&self, entry: &StepLedgerEntry) -> bool {
+        self.flow_authority_inputs
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record,
+                    FlowAuthorityInputRecord::AuthorizeFlowRunReducerCommand { .. }
+                )
+            })
+            .any(|record| {
+                let authority = MobRunProvenanceAuthority {
+                    input: record.to_machine_input(),
+                };
+                authority.validate_step_entry(self, entry).is_ok()
+            })
+    }
+
+    fn failure_entry_has_authority(&self, entry: &FailureLedgerEntry) -> bool {
+        self.flow_authority_inputs
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record,
+                    FlowAuthorityInputRecord::AuthorizeFlowRunReducerCommand { .. }
+                )
+            })
+            .any(|record| {
+                let authority = MobRunProvenanceAuthority {
+                    input: record.to_machine_input(),
+                };
+                authority.validate_failure_entry(self, entry).is_ok()
+            })
     }
 
     #[cfg(test)]
@@ -4682,7 +4741,7 @@ impl MobRunProvenanceAuthority {
         run: &MobRun,
         entry: &StepLedgerEntry,
     ) -> Result<(), MobError> {
-        run.validate_flow_authority_projection()?;
+        run.validate_flow_authority_projection_core()?;
         if entry.agent_identity.as_str() != FLOW_RUN_PROVENANCE_AGENT_ID {
             return Err(MobError::Internal(format!(
                 "run '{}' step ledger authority only permits system provenance '{}', entry has '{}'",
@@ -4757,7 +4816,7 @@ impl MobRunProvenanceAuthority {
         run: &MobRun,
         entry: &FailureLedgerEntry,
     ) -> Result<(), MobError> {
-        run.validate_flow_authority_projection()?;
+        run.validate_flow_authority_projection_core()?;
         let record = self.validate_present(run)?;
         let FlowAuthorityInputRecord::AuthorizeFlowRunReducerCommand {
             command, step_id, ..

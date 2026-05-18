@@ -119,16 +119,16 @@ else
 fi
 
 if ! grep -Fq 'BUILDBUDDY_ENDPOINT' .github/workflows/release.yml &&
-  ! awk '
+  awk '
     /^  build_binaries_buildbuddy:/ { in_job = 1; next }
     in_job && /^  [[:alnum:]_-]+:/ { in_job = 0 }
     in_job && /release-build-windows-x86/ { found = 1 }
     END { exit found ? 0 : 1 }
   ' .github/workflows/release.yml &&
-  grep -Fq 'GitHub-hosted Windows release binary fallback' .github/workflows/release.yml; then
-  pass "Release workflow keeps Windows off BuildBuddy and uses the GitHub-hosted fallback"
+  grep -Fq 'GitHub-hosted release binary build skipped' .github/workflows/release.yml; then
+  pass "Release workflow builds Linux/macOS/Windows assets on BuildBuddy for owner releases"
 else
-  bad "Release workflow should build Linux/macOS on BuildBuddy and Windows via GitHub-hosted fallback"
+  bad "Release workflow should build Linux/macOS/Windows assets on BuildBuddy for owner releases"
 fi
 
 web_build_timeout="$(

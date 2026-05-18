@@ -971,19 +971,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         state: Box<dsl::MeerkatMachineState>,
     ) {
-        if let Ok(authority) = self.session_dsl_authority(session_id).await {
-            Self::restore_dsl_authority_state(&authority, state);
-        }
-    }
-
-    fn restore_dsl_authority_state(
-        authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
-        state: Box<dsl::MeerkatMachineState>,
-    ) {
-        let mut authority = authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *authority = dsl::MeerkatMachineAuthority::from_state(*state);
+        let _ = (session_id, state);
     }
 }
 

@@ -110,7 +110,6 @@ pub struct ReplayQueuedContributorsPlan {
 #[derive(Clone)]
 pub(crate) struct EphemeralDriverRollbackSnapshot {
     control_projection: RuntimeControlProjection,
-    dsl_state: mm_dsl::MeerkatMachineState,
     ledger: InputLedger,
     queue: InputQueue,
     steer_queue: InputQueue,
@@ -269,7 +268,6 @@ impl EphemeralRuntimeDriver {
     pub(crate) fn rollback_snapshot(&self) -> EphemeralDriverRollbackSnapshot {
         EphemeralDriverRollbackSnapshot {
             control_projection: self.read_control_projection().clone(),
-            dsl_state: self.with_dsl_state(Clone::clone),
             ledger: self.ledger.clone(),
             queue: self.queue.clone(),
             steer_queue: self.steer_queue.clone(),
@@ -288,14 +286,20 @@ impl EphemeralRuntimeDriver {
         }
     }
 
+    pub(crate) fn clone_with_isolated_dsl_authority(&self) -> Self {
+        let mut clone = self.clone();
+        let dsl_state = self.with_dsl_state(Clone::clone);
+        clone.dsl = DslAuthority(Arc::new(Mutex::new(
+            mm_dsl::MeerkatMachineAuthority::from_state(dsl_state),
+        )));
+        clone.control = Arc::new(StdRwLock::new(self.read_control_projection().clone()));
+        clone
+    }
+
     pub(crate) fn restore_rollback_snapshot(&mut self, snapshot: EphemeralDriverRollbackSnapshot) {
         {
             let mut control = self.write_control_projection();
             *control = snapshot.control_projection;
-        }
-        {
-            let mut authority = self.dsl.lock();
-            authority.state = snapshot.dsl_state;
         }
         self.ledger = snapshot.ledger;
         self.queue = snapshot.queue;
@@ -728,6 +732,7 @@ impl EphemeralRuntimeDriver {
         policy: PolicyDecision,
         request_id: Option<RequestId>,
         reservation_key: Option<ReservationKey>,
+        admission_sequence_recovery: Option<mm_dsl::RecoveredInputNormalizationReasonKind>,
     ) -> Result<(), RuntimeDriverError> {
         let persisted_input = recovered_state.persisted_input.as_ref().ok_or_else(|| {
             RuntimeDriverError::Internal(format!(
@@ -747,7 +752,12 @@ impl EphemeralRuntimeDriver {
             runtime_semantics,
             &policy,
         )?;
-        self.apply_recovered_lifecycle(&work_id, recovered_seed, Some(handling_mode))?;
+        self.apply_recovered_lifecycle(
+            &work_id,
+            recovered_seed,
+            Some(handling_mode),
+            admission_sequence_recovery,
+        )?;
         self.register_accepted_idempotency(&work_id, recovered_state.idempotency_key.as_ref())?;
         self.record_admission_metadata(
             &work_id,
@@ -823,7 +833,7 @@ impl EphemeralRuntimeDriver {
                 "terminal recovery path received non-terminal input '{work_id}'"
             )));
         }
-        self.apply_recovered_lifecycle(work_id, recovered_seed, None)?;
+        self.apply_recovered_lifecycle(work_id, recovered_seed, None, None)?;
         self.register_accepted_idempotency(work_id, idempotency_key)
     }
 
@@ -852,6 +862,7 @@ impl EphemeralRuntimeDriver {
         work_id: &InputId,
         recovered_seed: &InputStateSeed,
         handling_mode: Option<HandlingMode>,
+        admission_sequence_recovery: Option<mm_dsl::RecoveredInputNormalizationReasonKind>,
     ) -> Result<(), RuntimeDriverError> {
         let key = Self::dsl_key(work_id);
         let lifecycle_state = recovered_seed.phase;
@@ -925,6 +936,7 @@ impl EphemeralRuntimeDriver {
                     .map(std::string::ToString::to_string),
                 boundary_sequence: recovered_seed.last_boundary_sequence,
                 admission_sequence: recovered_seed.admission_sequence,
+                admission_sequence_recovery,
                 lane,
             },
             "RecoverInputLifecycle",
@@ -1266,7 +1278,7 @@ impl EphemeralRuntimeDriver {
         mm_dsl::SessionId::from(self.runtime_id.to_string())
     }
 
-    fn ensure_contract_session_authority(
+    pub(crate) fn ensure_contract_session_authority(
         &mut self,
     ) -> Result<mm_dsl::SessionId, RuntimeDriverError> {
         let existing = {
@@ -1551,9 +1563,7 @@ impl EphemeralRuntimeDriver {
         if state.runtime_semantics.is_none() {
             state.runtime_semantics = self.admitted_runtime_semantics(input_id);
         }
-        let phase = self
-            .input_phase(input_id)
-            .unwrap_or(InputLifecycleState::Accepted);
+        let phase = self.input_phase(input_id)?;
         let seed = InputStateSeed {
             phase,
             last_run_id: self.input_last_run_id(input_id),
@@ -1566,7 +1576,9 @@ impl EphemeralRuntimeDriver {
     }
 
     /// Snapshot of every ledger entry paired with its DSL seed.
-    pub fn stored_input_states_snapshot(&self) -> Vec<StoredInputState> {
+    pub fn stored_input_states_snapshot(
+        &self,
+    ) -> Result<Vec<StoredInputState>, RuntimeDriverError> {
         self.ledger
             .iter()
             .map(|(input_id, state)| {
@@ -1574,9 +1586,11 @@ impl EphemeralRuntimeDriver {
                 if state.runtime_semantics.is_none() {
                     state.runtime_semantics = self.admitted_runtime_semantics(input_id);
                 }
-                let phase = self
-                    .input_phase(input_id)
-                    .unwrap_or(InputLifecycleState::Accepted);
+                let phase = self.input_phase(input_id).ok_or_else(|| {
+                    RuntimeDriverError::Internal(format!(
+                        "generated input lifecycle phase missing for persisted input {input_id}"
+                    ))
+                })?;
                 let seed = InputStateSeed {
                     phase,
                     last_run_id: self.input_last_run_id(input_id),
@@ -1585,7 +1599,7 @@ impl EphemeralRuntimeDriver {
                     terminal_outcome: self.input_terminal_outcome(input_id),
                     attempt_count: self.input_attempt_count(input_id),
                 };
-                StoredInputState { state, seed }
+                Ok(StoredInputState { state, seed })
             })
             .collect()
     }
@@ -2444,6 +2458,22 @@ impl EphemeralRuntimeDriver {
         self.resolve_admission_with_wake_policy(input, true)
     }
 
+    pub(crate) fn machine_apply_accept_with_completion_signal(
+        &mut self,
+        input_id: &InputId,
+        flags: crate::accept::CoarseAdmissionFlags,
+    ) -> Result<(), RuntimeDriverError> {
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::AcceptWithCompletion {
+                input_id: mm_dsl::InputId::from_domain(input_id),
+                request_immediate_processing: flags.request_immediate_processing,
+                interrupt_yielding: flags.interrupt_yielding,
+                wake_if_idle: flags.wake_if_idle,
+            },
+            "AcceptWithCompletion(RuntimeDriver)",
+        )
+    }
+
     pub(crate) async fn accept_resolved_input(
         &mut self,
         input: Input,
@@ -2679,9 +2709,11 @@ impl EphemeralRuntimeDriver {
         for id in &non_terminal_ids {
             let key = Self::dsl_key(id);
             let attempt_count = u64::from(self.input_attempt_count(id));
-            let from_phase = self
-                .input_phase(id)
-                .unwrap_or(InputLifecycleState::Accepted);
+            let from_phase = self.input_phase(id).ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "generated input lifecycle phase missing before abandoning input {id}"
+                ))
+            })?;
             self.dsl_apply(
                 mm_dsl::MeerkatMachineInput::AbandonInput {
                     input_id: key.clone(),
@@ -2909,15 +2941,7 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
             }
         };
         if let AcceptOutcome::Accepted { input_id, .. } = &outcome {
-            if let Err(err) = self.dsl_apply(
-                mm_dsl::MeerkatMachineInput::AcceptWithCompletion {
-                    input_id: mm_dsl::InputId::from_domain(input_id),
-                    request_immediate_processing: flags.request_immediate_processing,
-                    interrupt_yielding: flags.interrupt_yielding,
-                    wake_if_idle: flags.wake_if_idle,
-                },
-                "AcceptWithCompletion(RuntimeDriver)",
-            ) {
+            if let Err(err) = self.machine_apply_accept_with_completion_signal(input_id, flags) {
                 self.restore_rollback_snapshot(checkpoint);
                 return Err(err);
             }
@@ -3537,6 +3561,7 @@ mod tests {
                     run_id: None,
                     boundary_sequence: None,
                     admission_sequence: None,
+                    admission_sequence_recovery: None,
                     lane: None,
                 },
                 "RecoverInputLifecycle(test)",

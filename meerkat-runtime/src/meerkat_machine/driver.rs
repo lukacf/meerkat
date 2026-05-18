@@ -1379,7 +1379,13 @@ pub(crate) async fn machine_normalize_recovered_input_state(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
     mut bundle: StoredInputState,
-) -> Result<StoredInputState, RuntimeDriverError> {
+) -> Result<
+    (
+        StoredInputState,
+        Option<crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind>,
+    ),
+    RuntimeDriverError,
+> {
     let applied_boundary_committed = if matches!(
         bundle.seed.phase,
         InputLifecycleState::Applied | InputLifecycleState::AppliedPendingConsumption
@@ -1402,9 +1408,10 @@ pub(crate) async fn machine_normalize_recovered_input_state(
         None
     };
 
-    let _ = machine_apply_recovered_input_normalization(&mut bundle, applied_boundary_committed)?;
+    let delta =
+        machine_apply_recovered_input_normalization(&mut bundle, applied_boundary_committed)?;
 
-    Ok(bundle)
+    Ok((bundle, delta.admission_sequence_recovery))
 }
 
 pub(super) async fn load_boundary_receipt_for_runtime(
@@ -1435,6 +1442,8 @@ pub(crate) struct MachineRecoveryDelta {
     pub recovered: usize,
     pub abandoned: usize,
     pub requeued: usize,
+    pub admission_sequence_recovery:
+        Option<crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind>,
 }
 
 fn recovered_observed_phase(
@@ -1626,6 +1635,10 @@ pub(crate) fn machine_apply_recovered_input_normalization(
         )));
     }
 
+    if next_phase == InputLifecycleState::Queued && seed.admission_sequence.is_none() {
+        delta.admission_sequence_recovery = history_reason;
+    }
+
     if let Some(reason) = history_reason {
         let now = Utc::now();
         state.history.push(InputStateHistoryEntry {
@@ -1751,7 +1764,8 @@ pub(crate) fn machine_recover_ephemeral_driver(
     // so recovery facts re-enter via typed DSL input.
     let active_ids: Vec<InputId> = driver.active_input_ids();
 
-    let mut normalized: Vec<(InputId, StoredInputState)> = Vec::with_capacity(active_ids.len());
+    let mut normalized: Vec<(InputId, StoredInputState, MachineRecoveryDelta)> =
+        Vec::with_capacity(active_ids.len());
     for input_id in &active_ids {
         let Some(mut bundle) = driver.stored_input_state(input_id) else {
             continue;
@@ -1760,25 +1774,36 @@ pub(crate) fn machine_recover_ephemeral_driver(
         recovered += delta.recovered;
         abandoned += delta.abandoned;
         requeued += delta.requeued;
-        normalized.push((input_id.clone(), bundle));
+        normalized.push((input_id.clone(), bundle, delta));
     }
 
     // Replay recovered lifecycle facts through the driver's DSL authority.
     // No rebuilt authority — the DSL is the only owner of recovered phase,
     // run/boundary associations, typed terminal metadata, attempt count, and
     // lane membership.
-    let mut recovered_entries: Vec<(InputId, RecoveredIngressEntry, InputState, InputStateSeed)> =
-        Vec::with_capacity(normalized.len());
-    for (input_id, bundle) in normalized {
+    let mut recovered_entries: Vec<(
+        InputId,
+        RecoveredIngressEntry,
+        InputState,
+        InputStateSeed,
+        Option<crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind>,
+    )> = Vec::with_capacity(normalized.len());
+    for (input_id, bundle, delta) in normalized {
         let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {
             return Err(RuntimeDriverError::Internal(
                 missing_recovered_ingress_entry_reason(&bundle.state),
             ));
         };
-        recovered_entries.push((input_id, entry, bundle.state, bundle.seed));
+        recovered_entries.push((
+            input_id,
+            entry,
+            bundle.state,
+            bundle.seed,
+            delta.admission_sequence_recovery,
+        ));
     }
 
-    for (input_id, entry, state, seed) in recovered_entries {
+    for (input_id, entry, state, seed, admission_sequence_recovery) in recovered_entries {
         driver.admit_recovered_to_ingress(
             input_id.clone(),
             entry.runtime_semantics,
@@ -1787,6 +1812,7 @@ pub(crate) fn machine_recover_ephemeral_driver(
             entry.policy,
             None,
             None,
+            admission_sequence_recovery,
         )?;
         // Persist the normalized shell back into the ledger only after
         // generated recovered-admission authority accepts the witness.
@@ -1816,7 +1842,8 @@ pub(crate) async fn machine_recover_persistent_driver(
         .await
         .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
     {
-        let bundle = machine_normalize_recovered_input_state(store, runtime_id, bundle).await?;
+        let (bundle, admission_sequence_recovery) =
+            machine_normalize_recovered_input_state(store, runtime_id, bundle).await?;
 
         if matches!(
             machine_classify_recovered_input_durability(&bundle.state)?,
@@ -1858,6 +1885,7 @@ pub(crate) async fn machine_recover_persistent_driver(
                 entry.policy,
                 None,
                 None,
+                admission_sequence_recovery,
             )?;
 
             let inserted = driver.ledger_mut().recover(bundle.state.clone());
@@ -2049,6 +2077,7 @@ mod tests {
                 policy,
                 None,
                 None,
+                None,
             )
             .expect_err("lower-level recovered admission must reject contradictory stamps");
 
@@ -2116,6 +2145,7 @@ mod tests {
                 resume_policy,
                 None,
                 None,
+                None,
             )
             .expect("recover queued resume input");
         driver
@@ -2132,6 +2162,7 @@ mod tests {
                     crate::policy::WakeMode::WakeIfIdle,
                     crate::policy::DrainPolicy::QueueNextTurn,
                 ),
+                None,
                 None,
                 None,
             )
@@ -2188,6 +2219,7 @@ mod tests {
                 prefix_policy,
                 None,
                 None,
+                None,
             )
             .expect("recover queued prefix input");
         driver
@@ -2204,6 +2236,7 @@ mod tests {
                     crate::policy::WakeMode::WakeIfIdle,
                     crate::policy::DrainPolicy::QueueNextTurn,
                 ),
+                None,
                 None,
                 None,
             )
@@ -2281,6 +2314,7 @@ mod tests {
                 ),
                 None,
                 None,
+                None,
             )
             .expect("recover queued event input");
         driver
@@ -2297,6 +2331,7 @@ mod tests {
                     crate::policy::WakeMode::WakeIfIdle,
                     crate::policy::DrainPolicy::QueueNextTurn,
                 ),
+                None,
                 None,
                 None,
             )
@@ -2345,6 +2380,7 @@ mod tests {
                 ),
                 None,
                 None,
+                None,
             )
             .expect("recover queued prompt input");
         driver.rebuild_queue_projections_after_recovery();
@@ -2391,6 +2427,7 @@ mod tests {
                 &state,
                 &seed,
                 policy,
+                None,
                 None,
                 None,
             )
@@ -3099,6 +3136,7 @@ mod recovery_tests {
                 &state,
                 &queued_seed(),
                 entry.policy,
+                None,
                 None,
                 None,
             )

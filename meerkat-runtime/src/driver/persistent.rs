@@ -126,7 +126,7 @@ impl PersistentRuntimeDriver {
         target_state: RuntimeState,
         context: &str,
     ) -> Result<(), RuntimeDriverError> {
-        let input_states = self.inner.stored_input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot()?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(
@@ -273,34 +273,61 @@ impl PersistentRuntimeDriver {
         input: Input,
         resolved: crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let checkpoint = self.inner.rollback_snapshot();
-        let input_for_recovery = input.clone();
+        let flags = resolved.coarse_flags();
+        let mut staged = self.inner.clone_with_isolated_dsl_authority();
+        staged.ensure_contract_session_authority()?;
+        let staged_outcome = staged
+            .accept_resolved_input(input.clone(), resolved.clone())
+            .await?;
 
+        let AcceptOutcome::Accepted {
+            input_id: staged_input_id,
+            ..
+        } = staged_outcome
+        else {
+            return self.inner.accept_resolved_input(input, resolved).await;
+        };
+
+        staged.machine_apply_accept_with_completion_signal(&staged_input_id, flags)?;
+        let Some(mut staged_bundle) = staged.stored_input_state(&staged_input_id) else {
+            return Err(RuntimeDriverError::Internal(format!(
+                "generated input lifecycle phase missing for accepted input {staged_input_id}"
+            )));
+        };
+        let mut input_for_recovery = input.clone();
+        externalize_input_images(self.blob_store.as_ref(), &mut input_for_recovery)
+            .await
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!(
+                    "failed to externalize runtime input images: {err}"
+                ))
+            })?;
+        staged_bundle.state.persisted_input = Some(input_for_recovery.clone());
+        self.persist_state(&staged_bundle).await?;
+
+        self.inner.ensure_contract_session_authority()?;
         let mut outcome = self.inner.accept_resolved_input(input, resolved).await?;
-
         if let AcceptOutcome::Accepted {
             ref input_id,
             ref mut state,
             ref mut seed,
             ..
         } = outcome
-            && let Some(mut bundle) = self.inner.stored_input_state(input_id)
         {
-            let mut input_for_recovery = input_for_recovery.clone();
-            if let Err(err) =
-                externalize_input_images(self.blob_store.as_ref(), &mut input_for_recovery).await
-            {
-                self.inner.restore_rollback_snapshot(checkpoint);
+            if input_id != &staged_input_id {
                 return Err(RuntimeDriverError::Internal(format!(
-                    "failed to externalize runtime input images: {err}"
+                    "staged accepted input {staged_input_id} differed from committed input {input_id}"
                 )));
             }
+            self.inner
+                .machine_apply_accept_with_completion_signal(input_id, flags)?;
+            let Some(mut bundle) = self.inner.stored_input_state(input_id) else {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "generated input lifecycle phase missing for accepted input {input_id}"
+                )));
+            };
             bundle.state.persisted_input = Some(input_for_recovery);
             self.inner.ledger_mut().accept(bundle.state.clone());
-            if let Err(err) = self.persist_state(&bundle).await {
-                self.inner.restore_rollback_snapshot(checkpoint);
-                return Err(err);
-            }
             *state = bundle.state;
             *seed = bundle.seed;
         }
@@ -370,7 +397,7 @@ impl PersistentRuntimeDriver {
                 return Err(err);
             }
         };
-        let input_states = self.inner.stored_input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot()?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(
@@ -404,7 +431,7 @@ impl PersistentRuntimeDriver {
                 return Err(err);
             }
         };
-        let input_states = self.inner.stored_input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot()?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(
@@ -532,7 +559,7 @@ impl PersistentRuntimeDriver {
         receipt: &RunBoundaryReceipt,
         session_snapshot: Option<&Vec<u8>>,
     ) -> Result<(), RuntimeDriverError> {
-        let input_updates = self.inner.stored_input_states_snapshot();
+        let input_updates = self.inner.stored_input_states_snapshot()?;
         self.store
             .atomic_apply(
                 &self.runtime_id,
@@ -575,7 +602,7 @@ impl PersistentRuntimeDriver {
             failure_cause = ?failure_cause,
             "persistent driver realized machine-owned failed-run replay"
         );
-        let input_states = self.inner.stored_input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot()?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(
@@ -606,7 +633,7 @@ impl PersistentRuntimeDriver {
             contributors = contributing_input_ids.len(),
             "persistent driver realized machine-owned cancelled run"
         );
-        let input_states = self.inner.stored_input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot()?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(
@@ -641,25 +668,31 @@ impl RuntimeDriver for PersistentRuntimeDriver {
     }
 
     async fn recover(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
-        let checkpoint = self.inner.rollback_snapshot();
-        let report = match crate::meerkat_machine::machine_recover_persistent_driver(
+        let mut staged = self.inner.clone_with_isolated_dsl_authority();
+        let report = crate::meerkat_machine::machine_recover_persistent_driver(
+            self.store.as_ref(),
+            &self.runtime_id,
+            &mut staged,
+        )
+        .await?;
+
+        let input_states = staged.stored_input_states_snapshot()?;
+        self.store
+            .commit_machine_lifecycle(
+                &self.runtime_id,
+                MachineLifecycleCommit::new(self.runtime_state_for_persistence()),
+                &input_states,
+            )
+            .await
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!("recovery persist failed: {err}"))
+            })?;
+        let _ = crate::meerkat_machine::machine_recover_persistent_driver(
             self.store.as_ref(),
             &self.runtime_id,
             &mut self.inner,
         )
-        .await
-        {
-            Ok(report) => report,
-            Err(err) => {
-                self.inner.restore_rollback_snapshot(checkpoint.clone());
-                return Err(err);
-            }
-        };
-
-        // Persist recovered state atomically
-        let runtime_state_for_persistence = self.runtime_state_for_persistence();
-        self.commit_lifecycle_with_rollback(checkpoint, runtime_state_for_persistence, "recovery")
-            .await?;
+        .await?;
         Ok(report)
     }
 

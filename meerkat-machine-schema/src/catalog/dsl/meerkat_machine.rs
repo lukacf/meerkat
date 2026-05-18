@@ -2232,6 +2232,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 run_id: Option<String>,
                 boundary_sequence: Option<u64>,
                 admission_sequence: Option<u64>,
+                admission_sequence_recovery: Option<Enum<RecoveredInputNormalizationReasonKind>>,
                 lane: Option<Enum<InputLane>>,
             },
             QueueAccepted { input_id: String },
@@ -9104,6 +9105,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 run_id,
                 boundary_sequence,
                 admission_sequence,
+                admission_sequence_recovery,
                 lane
             }
             guard "recovered_lifecycle_has_admission_witness" {
@@ -9120,7 +9122,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && lane == Some(self.recovered_admitted_lanes.get_cloned(input_id).get("value")))
             }
             guard "recovered_queued_order_has_witness" {
-                phase != InputPhase::Queued || admission_sequence != None
+                phase != InputPhase::Queued
+                || admission_sequence != None
+                || (
+                    admission_sequence_recovery != None
+                    && (
+                        admission_sequence_recovery.get("value") == RecoveredInputNormalizationReasonKind::QueueAccepted
+                        || admission_sequence_recovery.get("value") == RecoveredInputNormalizationReasonKind::RollbackStaged
+                        || admission_sequence_recovery.get("value") == RecoveredInputNormalizationReasonKind::MissingBoundaryReceipt
+                    )
+                )
+            }
+            guard "recovered_order_recovery_matches_missing_sequence" {
+                admission_sequence_recovery == None
+                || (phase == InputPhase::Queued && admission_sequence == None)
             }
             guard "recovered_terminal_payload_matches_phase" {
                 (
@@ -9211,7 +9226,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                         self.next_admission_seq = admission_sequence.get("value") + 1;
                     }
                 } else {
-                    self.input_admission_seq.remove(input_id);
+                    if admission_sequence_recovery != None {
+                        self.input_admission_seq.insert(input_id, self.next_admission_seq);
+                        self.next_admission_seq += 1;
+                    } else {
+                        self.input_admission_seq.remove(input_id);
+                    }
                 }
 
                 if lane != None {

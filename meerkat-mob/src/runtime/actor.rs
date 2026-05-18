@@ -1717,6 +1717,30 @@ impl MobActor {
             .and_then(|session_id| SessionId::parse(&session_id.0).ok())
     }
 
+    fn project_member_ref_session_binding(
+        member_ref: &MemberRef,
+        current_bridge_session_id: Option<SessionId>,
+    ) -> Option<MemberRef> {
+        match member_ref {
+            MemberRef::Session { .. } => {
+                current_bridge_session_id.map(MemberRef::from_bridge_session_id)
+            }
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                pubkey,
+                bootstrap_token,
+                ..
+            } => Some(MemberRef::BackendPeer {
+                peer_id: peer_id.clone(),
+                address: address.clone(),
+                pubkey: *pubkey,
+                bootstrap_token: bootstrap_token.clone(),
+                session_id: current_bridge_session_id,
+            }),
+        }
+    }
+
     async fn machine_member_material(
         &self,
         agent_identity: &MeerkatId,
@@ -2171,9 +2195,15 @@ impl MobActor {
         }
 
         let provisioner = self.provisioner.clone();
-        let member_ref = orchestrator_entry.member_ref;
         let runtime_mode = orchestrator_entry.runtime_mode;
         let agent_identity = orchestrator_entry.agent_identity;
+        let bridge_session_id = self.machine_bridge_session_id_for_identity(&agent_identity);
+        let Some(member_ref) = Self::project_member_ref_session_binding(
+            &orchestrator_entry.member_ref,
+            bridge_session_id,
+        ) else {
+            return;
+        };
         self.lifecycle_tasks.spawn(async move {
             let result = match runtime_mode {
                 crate::MobRuntimeMode::AutonomousHost => {

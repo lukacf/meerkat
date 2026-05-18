@@ -214,10 +214,16 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                     .current_run_id
                     .map(|run_id| run_id.to_string())
             });
+        let lifecycle_facts =
+            meerkat_runtime::classify_runtime_lifecycle_state(state).map_err(|error| {
+                MobError::Internal(format!(
+                    "observe_member lifecycle classification failed: {error}"
+                ))
+            })?;
 
         Ok(BridgeObservationResponse::new(
             runtime_state_to_bridge(state)?,
-            Some(state.can_accept_input()),
+            Some(lifecycle_facts.can_accept_input()),
             current_run_id,
             Some(BridgePeerConnectivity::Reachable),
             None,

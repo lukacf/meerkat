@@ -678,6 +678,38 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["CancelAfterBoundary", "StopRuntimeExecutor"],
             ),
             NamedTypeBinding::string_enum(
+                "RuntimeLifecycleObservedState",
+                &[
+                    "Initializing",
+                    "Idle",
+                    "Attached",
+                    "Running",
+                    "Retired",
+                    "Stopped",
+                    "Destroyed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeLifecycleTerminality",
+                &["NonTerminal", "Terminal"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeInputAdmission",
+                &["RejectsInput", "AcceptsInput"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeQueueAdmission",
+                &["BlocksQueue", "ProcessesQueue"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimePrepareAdmission",
+                &["NotReady", "Ready", "Destroyed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeIngressAdmission",
+                &["Open", "NotReady", "Destroyed"],
+            ),
+            NamedTypeBinding::string_enum(
                 "RecoveredInputKind",
                 &[
                     "Prompt",

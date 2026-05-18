@@ -26,36 +26,6 @@ pub enum RuntimeState {
     Destroyed,
 }
 
-impl RuntimeState {
-    /// Check if this is a terminal state.
-    ///
-    /// Only `Destroyed` is terminal. `Stopped` allows transitions like
-    /// `RegisterSession`, `UnregisterSession`, `PrepareBindings`, and `Destroy`.
-    pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Destroyed)
-    }
-
-    /// Check if the runtime can accept new input in this state.
-    pub fn can_accept_input(&self) -> bool {
-        matches!(self, Self::Idle | Self::Attached | Self::Running)
-    }
-
-    /// Check if the runtime can process queued inputs in this state.
-    pub fn can_process_queue(&self) -> bool {
-        matches!(self, Self::Idle | Self::Attached | Self::Retired)
-    }
-
-    /// Check if the runtime is in the Attached state.
-    pub fn is_attached(&self) -> bool {
-        matches!(self, Self::Attached)
-    }
-
-    /// Check if the runtime is Idle or Attached.
-    pub fn is_idle_or_attached(&self) -> bool {
-        matches!(self, Self::Idle | Self::Attached)
-    }
-}
-
 impl std::fmt::Display for RuntimeState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -82,37 +52,43 @@ pub struct RuntimeStateTransitionError {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::meerkat_machine::{self, dsl};
 
     #[test]
-    fn terminal_states() {
-        assert!(!RuntimeState::Stopped.is_terminal());
-        assert!(RuntimeState::Destroyed.is_terminal());
-        assert!(!RuntimeState::Initializing.is_terminal());
-        assert!(!RuntimeState::Idle.is_terminal());
-        assert!(!RuntimeState::Attached.is_terminal());
-        assert!(!RuntimeState::Running.is_terminal());
-        assert!(!RuntimeState::Retired.is_terminal());
-    }
+    fn lifecycle_facts_come_from_machine_authority() {
+        let stopped = meerkat_machine::classify_runtime_lifecycle_state(RuntimeState::Stopped)
+            .expect("stopped classification");
+        assert_eq!(
+            stopped.terminality,
+            dsl::RuntimeLifecycleTerminality::NonTerminal
+        );
+        assert_eq!(
+            stopped.ingress_admission,
+            dsl::RuntimeIngressAdmission::NotReady
+        );
 
-    #[test]
-    fn input_and_queue_capabilities() {
-        assert!(RuntimeState::Idle.can_accept_input());
-        assert!(RuntimeState::Attached.can_accept_input());
-        assert!(RuntimeState::Running.can_accept_input());
-        assert!(!RuntimeState::Retired.can_accept_input());
+        let destroyed = meerkat_machine::classify_runtime_lifecycle_state(RuntimeState::Destroyed)
+            .expect("destroyed classification");
+        assert_eq!(
+            destroyed.terminality,
+            dsl::RuntimeLifecycleTerminality::Terminal
+        );
+        assert_eq!(
+            destroyed.ingress_admission,
+            dsl::RuntimeIngressAdmission::Destroyed
+        );
 
-        assert!(RuntimeState::Idle.can_process_queue());
-        assert!(RuntimeState::Attached.can_process_queue());
-        assert!(RuntimeState::Retired.can_process_queue());
-        assert!(!RuntimeState::Running.can_process_queue());
-    }
+        let idle = meerkat_machine::classify_runtime_lifecycle_state(RuntimeState::Idle)
+            .expect("idle classification");
+        assert!(idle.can_accept_input());
+        assert!(idle.can_process_queue());
+        assert!(idle.can_prepare_run());
 
-    #[test]
-    fn attachment_predicates() {
-        assert!(RuntimeState::Attached.is_attached());
-        assert!(RuntimeState::Idle.is_idle_or_attached());
-        assert!(RuntimeState::Attached.is_idle_or_attached());
-        assert!(!RuntimeState::Running.is_idle_or_attached());
+        let running = meerkat_machine::classify_runtime_lifecycle_state(RuntimeState::Running)
+            .expect("running classification");
+        assert!(running.can_accept_input());
+        assert!(!running.can_process_queue());
+        assert!(!running.can_prepare_run());
     }
 
     #[test]

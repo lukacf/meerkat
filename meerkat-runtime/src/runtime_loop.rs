@@ -751,7 +751,17 @@ async fn process_queue(
             } else {
                 None
             };
-            if !d.can_process_queue() && prebound_run_id.is_none() {
+            let can_process_queue = match d.can_process_queue() {
+                Ok(can_process_queue) => can_process_queue,
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        "failed closed while classifying runtime queue admission"
+                    );
+                    return false;
+                }
+            };
+            if !can_process_queue && prebound_run_id.is_none() {
                 return false;
             }
 

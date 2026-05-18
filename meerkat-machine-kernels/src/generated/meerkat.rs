@@ -4916,6 +4916,234 @@ impl std::fmt::Display for RuntimeEffectKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RuntimeIngressAdmission {
+    #[default]
+    #[serde(rename = "Open")]
+    Open,
+    #[serde(rename = "NotReady")]
+    NotReady,
+    #[serde(rename = "Destroyed")]
+    Destroyed,
+}
+impl RuntimeIngressAdmission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::NotReady => "NotReady",
+            Self::Destroyed => "Destroyed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeIngressAdmission {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Open" => Ok(Self::Open),
+            "NotReady" => Ok(Self::NotReady),
+            "Destroyed" => Ok(Self::Destroyed),
+            other => Err(format!("invalid RuntimeIngressAdmission value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeIngressAdmission {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeIngressAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeInputAdmission {
+    #[default]
+    #[serde(rename = "RejectsInput")]
+    RejectsInput,
+    #[serde(rename = "AcceptsInput")]
+    AcceptsInput,
+}
+impl RuntimeInputAdmission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RejectsInput => "RejectsInput",
+            Self::AcceptsInput => "AcceptsInput",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeInputAdmission {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RejectsInput" => Ok(Self::RejectsInput),
+            "AcceptsInput" => Ok(Self::AcceptsInput),
+            other => Err(format!("invalid RuntimeInputAdmission value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeInputAdmission {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeInputAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeLifecycleObservedState {
+    #[default]
+    #[serde(rename = "Initializing")]
+    Initializing,
+    #[serde(rename = "Idle")]
+    Idle,
+    #[serde(rename = "Attached")]
+    Attached,
+    #[serde(rename = "Running")]
+    Running,
+    #[serde(rename = "Retired")]
+    Retired,
+    #[serde(rename = "Stopped")]
+    Stopped,
+    #[serde(rename = "Destroyed")]
+    Destroyed,
+}
+impl RuntimeLifecycleObservedState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Initializing => "Initializing",
+            Self::Idle => "Idle",
+            Self::Attached => "Attached",
+            Self::Running => "Running",
+            Self::Retired => "Retired",
+            Self::Stopped => "Stopped",
+            Self::Destroyed => "Destroyed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeLifecycleObservedState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Initializing" => Ok(Self::Initializing),
+            "Idle" => Ok(Self::Idle),
+            "Attached" => Ok(Self::Attached),
+            "Running" => Ok(Self::Running),
+            "Retired" => Ok(Self::Retired),
+            "Stopped" => Ok(Self::Stopped),
+            "Destroyed" => Ok(Self::Destroyed),
+            other => Err(format!(
+                "invalid RuntimeLifecycleObservedState value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeLifecycleObservedState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeLifecycleObservedState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeLifecycleTerminality {
+    #[default]
+    #[serde(rename = "NonTerminal")]
+    NonTerminal,
+    #[serde(rename = "Terminal")]
+    Terminal,
+}
+impl RuntimeLifecycleTerminality {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NonTerminal => "NonTerminal",
+            Self::Terminal => "Terminal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeLifecycleTerminality {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NonTerminal" => Ok(Self::NonTerminal),
+            "Terminal" => Ok(Self::Terminal),
+            other => Err(format!(
+                "invalid RuntimeLifecycleTerminality value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeLifecycleTerminality {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeLifecycleTerminality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RuntimeNoticeKind {
     #[default]
     #[serde(rename = "Drain")]
@@ -4960,6 +5188,110 @@ impl std::convert::TryFrom<String> for RuntimeNoticeKind {
     }
 }
 impl std::fmt::Display for RuntimeNoticeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimePrepareAdmission {
+    #[default]
+    #[serde(rename = "NotReady")]
+    NotReady,
+    #[serde(rename = "Ready")]
+    Ready,
+    #[serde(rename = "Destroyed")]
+    Destroyed,
+}
+impl RuntimePrepareAdmission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotReady => "NotReady",
+            Self::Ready => "Ready",
+            Self::Destroyed => "Destroyed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimePrepareAdmission {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotReady" => Ok(Self::NotReady),
+            "Ready" => Ok(Self::Ready),
+            "Destroyed" => Ok(Self::Destroyed),
+            other => Err(format!("invalid RuntimePrepareAdmission value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimePrepareAdmission {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimePrepareAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeQueueAdmission {
+    #[default]
+    #[serde(rename = "BlocksQueue")]
+    BlocksQueue,
+    #[serde(rename = "ProcessesQueue")]
+    ProcessesQueue,
+}
+impl RuntimeQueueAdmission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BlocksQueue => "BlocksQueue",
+            Self::ProcessesQueue => "ProcessesQueue",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeQueueAdmission {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "BlocksQueue" => Ok(Self::BlocksQueue),
+            "ProcessesQueue" => Ok(Self::ProcessesQueue),
+            other => Err(format!("invalid RuntimeQueueAdmission value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeQueueAdmission {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeQueueAdmission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -6413,6 +6745,10 @@ pub mod inputs {
         pub abandon_reason: Option<InputAbandonReason>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyRuntimeLifecycleState {
+        pub state: RuntimeLifecycleObservedState,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Prepare {
         pub session_id: SessionId,
         pub run_id: RunId,
@@ -7073,6 +7409,7 @@ pub enum Input {
     ResolveInputPublicLifecycle(inputs::ResolveInputPublicLifecycle),
     ResolveInputPublicTerminalOutcome(inputs::ResolveInputPublicTerminalOutcome),
     ClassifyInputTerminality(inputs::ClassifyInputTerminality),
+    ClassifyRuntimeLifecycleState(inputs::ClassifyRuntimeLifecycleState),
     Prepare(inputs::Prepare),
     Commit(inputs::Commit),
     Fail(inputs::Fail),
@@ -7270,6 +7607,7 @@ impl Input {
                 InputKind::ResolveInputPublicTerminalOutcome
             }
             Self::ClassifyInputTerminality(_) => InputKind::ClassifyInputTerminality,
+            Self::ClassifyRuntimeLifecycleState(_) => InputKind::ClassifyRuntimeLifecycleState,
             Self::Prepare(_) => InputKind::Prepare,
             Self::Commit(_) => InputKind::Commit,
             Self::Fail(_) => InputKind::Fail,
@@ -7466,6 +7804,7 @@ pub enum InputKind {
     ResolveInputPublicLifecycle,
     ResolveInputPublicTerminalOutcome,
     ClassifyInputTerminality,
+    ClassifyRuntimeLifecycleState,
     Prepare,
     Commit,
     Fail,
@@ -7852,6 +8191,15 @@ pub mod effects {
         pub terminal: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeLifecycleStateClassified {
+        pub state: RuntimeLifecycleObservedState,
+        pub terminality: RuntimeLifecycleTerminality,
+        pub input_admission: RuntimeInputAdmission,
+        pub queue_admission: RuntimeQueueAdmission,
+        pub prepare_admission: RuntimePrepareAdmission,
+        pub ingress_admission: RuntimeIngressAdmission,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PostAdmissionSignal {
         pub signal: PostAdmissionSignalKind,
     }
@@ -8098,6 +8446,7 @@ pub enum Effect {
     InputPublicLifecycleResolved(effects::InputPublicLifecycleResolved),
     InputPublicTerminalOutcomeResolved(effects::InputPublicTerminalOutcomeResolved),
     InputBehavioralTerminalityResolved(effects::InputBehavioralTerminalityResolved),
+    RuntimeLifecycleStateClassified(effects::RuntimeLifecycleStateClassified),
     PostAdmissionSignal(effects::PostAdmissionSignal),
     ReadyForRun(effects::ReadyForRun),
     InputLifecycleNotice(effects::InputLifecycleNotice),
@@ -8186,6 +8535,7 @@ pub enum EffectKind {
     InputPublicLifecycleResolved,
     InputPublicTerminalOutcomeResolved,
     InputBehavioralTerminalityResolved,
+    RuntimeLifecycleStateClassified,
     PostAdmissionSignal,
     ReadyForRun,
     InputLifecycleNotice,
@@ -8562,6 +8912,13 @@ pub enum TransitionId {
     ClassifyInputTerminalitySupersededIdle,
     ClassifyInputTerminalityCoalescedIdle,
     ClassifyInputTerminalityAbandonedIdle,
+    ClassifyRuntimeLifecycleInitializingIdle,
+    ClassifyRuntimeLifecycleIdleIdle,
+    ClassifyRuntimeLifecycleAttachedIdle,
+    ClassifyRuntimeLifecycleRunningIdle,
+    ClassifyRuntimeLifecycleRetiredIdle,
+    ClassifyRuntimeLifecycleStoppedIdle,
+    ClassifyRuntimeLifecycleDestroyedIdle,
     ResolveAdmissionIdempotencyNoKeyIdle,
     ResolveAdmissionIdempotencyNoKeyAttached,
     ResolveAdmissionIdempotencyNoKeyRunning,

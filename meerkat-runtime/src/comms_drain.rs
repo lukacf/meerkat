@@ -1716,13 +1716,27 @@ async fn try_handle_supervisor_bridge_command(
                                 .map(|run_id| run_id.to_string())
                         });
                     let bridge_state = runtime_state_to_bridge(state);
+                    let lifecycle_facts =
+                        match crate::meerkat_machine::classify_runtime_lifecycle_state(state) {
+                            Ok(facts) => facts,
+                            Err(error) => {
+                                send_bridge_failure(
+                                    comms_runtime,
+                                    candidate,
+                                    BridgeRejectionCause::Internal,
+                                    format!("runtime lifecycle classification failed: {error}"),
+                                )
+                                .await;
+                                return true;
+                            }
+                        };
                     send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
                         BridgeReply::Observation(BridgeObservationResponse::new(
                             bridge_state,
-                            Some(state.can_accept_input()),
+                            Some(lifecycle_facts.can_accept_input()),
                             current_run_id,
                             Some(BridgePeerConnectivity::Reachable),
                             None,

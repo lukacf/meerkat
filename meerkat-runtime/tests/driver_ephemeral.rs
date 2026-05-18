@@ -9,6 +9,7 @@ use meerkat_runtime::{
     MeerkatMachine, PeerConvention, PeerInput, PostAdmissionSignal, PromptInput,
     ResponseProgressPhase, ResponseTerminalStatus, RuntimeControlPlane, RuntimeDriver,
     RuntimeDriverError, RuntimeEvent, RuntimeState, SessionServiceRuntimeExt,
+    classify_runtime_lifecycle_state,
 };
 
 fn make_prompt_input(text: &str) -> Input {
@@ -28,6 +29,13 @@ fn make_prompt_input(text: &str) -> Input {
         typed_turn_appends: Vec::new(),
         turn_metadata: None,
     })
+}
+
+fn runtime_state_is_terminal_by_authority(state: RuntimeState) -> bool {
+    match classify_runtime_lifecycle_state(state) {
+        Ok(facts) => facts.is_terminal(),
+        Err(error) => panic!("generated runtime lifecycle classification failed: {error}"),
+    }
 }
 
 fn make_peer_terminal(body: &str) -> Input {
@@ -310,12 +318,10 @@ async fn destroy_transitions_to_terminal() {
         .await
         .unwrap();
     assert_eq!(report.inputs_abandoned, 1);
-    assert!(
-        RuntimeControlPlane::runtime_state(&machine, &runtime_id)
-            .await
-            .unwrap()
-            .is_terminal()
-    );
+    let state = RuntimeControlPlane::runtime_state(&machine, &runtime_id)
+        .await
+        .unwrap();
+    assert!(runtime_state_is_terminal_by_authority(state));
 }
 
 #[tokio::test]
@@ -588,12 +594,10 @@ async fn destroy_with_queued_inputs_abandons_all() {
         .await
         .unwrap();
     assert_eq!(report.inputs_abandoned, 2);
-    assert!(
-        RuntimeControlPlane::runtime_state(&machine, &runtime_id)
-            .await
-            .unwrap()
-            .is_terminal()
-    );
+    let state = RuntimeControlPlane::runtime_state(&machine, &runtime_id)
+        .await
+        .unwrap();
+    assert!(runtime_state_is_terminal_by_authority(state));
     assert!(
         SessionServiceRuntimeExt::list_active_inputs(&machine, &session_id)
             .await

@@ -769,6 +769,59 @@ pub enum RuntimeEffectKind {
     StopRuntimeExecutor,
 }
 
+/// Typed mirror of the public runtime lifecycle projection. The shell passes
+/// only the observed variant; generated transitions own the semantic facts
+/// derived from it (terminality, input admission, queue admission, and ingress
+/// rejection class).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeLifecycleObservedState {
+    #[default]
+    Initializing,
+    Idle,
+    Attached,
+    Running,
+    Retired,
+    Stopped,
+    Destroyed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeLifecycleTerminality {
+    #[default]
+    NonTerminal,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeInputAdmission {
+    #[default]
+    RejectsInput,
+    AcceptsInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeQueueAdmission {
+    #[default]
+    BlocksQueue,
+    ProcessesQueue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimePrepareAdmission {
+    #[default]
+    NotReady,
+    Ready,
+    Destroyed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeIngressAdmission {
+    #[default]
+    Open,
+    NotReady,
+    Destroyed,
+}
+
 /// Typed reason classifier for the `TurnRunCancelled` effect. Closed set of
 /// cancellation-observation origins emitted when a turn's cancellation
 /// request lands at an observable boundary. Replaces the former literal-
@@ -2148,6 +2201,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 terminal_kind: Option<Enum<InputTerminalKind>>,
                 abandon_reason: Option<Enum<InputAbandonReason>>,
             },
+            ClassifyRuntimeLifecycleState {
+                state: Enum<RuntimeLifecycleObservedState>,
+            },
             Prepare { session_id: SessionId, run_id: RunId },
             Commit { input_id: InputId, run_id: RunId },
             Fail { run_id: RunId },
@@ -2632,6 +2688,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 terminal_outcome: Option<Enum<InputPublicTerminalOutcome>>,
             },
             InputBehavioralTerminalityResolved { input_id: String, terminal: bool },
+            RuntimeLifecycleStateClassified {
+                state: Enum<RuntimeLifecycleObservedState>,
+                terminality: Enum<RuntimeLifecycleTerminality>,
+                input_admission: Enum<RuntimeInputAdmission>,
+                queue_admission: Enum<RuntimeQueueAdmission>,
+                prepare_admission: Enum<RuntimePrepareAdmission>,
+                ingress_admission: Enum<RuntimeIngressAdmission>,
+            },
             PostAdmissionSignal { signal: Enum<PostAdmissionSignalKind> },
             ReadyForRun,
             InputLifecycleNotice,
@@ -2798,6 +2862,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InputPublicLifecycleResolved => local,
         disposition InputPublicTerminalOutcomeResolved => local,
         disposition InputBehavioralTerminalityResolved => local,
+        disposition RuntimeLifecycleStateClassified => local,
         disposition PostAdmissionSignal => local,
         disposition ReadyForRun => local,
         disposition InputLifecycleNotice => external,
@@ -5214,6 +5279,123 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {}
             to Idle
             emit InputBehavioralTerminalityResolved { input_id: input_id, terminal: true }
+        }
+
+        // ClassifyRuntimeLifecycleState: generated lifecycle/admission fact
+        // authority for behavior that only receives the runtime's public
+        // projection. The shell may mirror the state variant into the DSL, but
+        // the terminality, input admission, queue-processing, prepare, and
+        // ingress rejection classes below are generated feedback.
+        transition ClassifyRuntimeLifecycleInitializing {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "initializing_state" { state == RuntimeLifecycleObservedState::Initializing }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::NonTerminal,
+                input_admission: RuntimeInputAdmission::RejectsInput,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                prepare_admission: RuntimePrepareAdmission::NotReady,
+                ingress_admission: RuntimeIngressAdmission::Open
+            }
+        }
+
+        transition ClassifyRuntimeLifecycleIdle {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "idle_state" { state == RuntimeLifecycleObservedState::Idle }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::NonTerminal,
+                input_admission: RuntimeInputAdmission::AcceptsInput,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                prepare_admission: RuntimePrepareAdmission::Ready,
+                ingress_admission: RuntimeIngressAdmission::Open
+            }
+        }
+
+        transition ClassifyRuntimeLifecycleAttached {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "attached_state" { state == RuntimeLifecycleObservedState::Attached }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::NonTerminal,
+                input_admission: RuntimeInputAdmission::AcceptsInput,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                prepare_admission: RuntimePrepareAdmission::Ready,
+                ingress_admission: RuntimeIngressAdmission::Open
+            }
+        }
+
+        transition ClassifyRuntimeLifecycleRunning {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "running_state" { state == RuntimeLifecycleObservedState::Running }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::NonTerminal,
+                input_admission: RuntimeInputAdmission::AcceptsInput,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                prepare_admission: RuntimePrepareAdmission::NotReady,
+                ingress_admission: RuntimeIngressAdmission::Open
+            }
+        }
+
+        transition ClassifyRuntimeLifecycleRetired {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "retired_state" { state == RuntimeLifecycleObservedState::Retired }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::NonTerminal,
+                input_admission: RuntimeInputAdmission::RejectsInput,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                prepare_admission: RuntimePrepareAdmission::NotReady,
+                ingress_admission: RuntimeIngressAdmission::NotReady
+            }
+        }
+
+        transition ClassifyRuntimeLifecycleStopped {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "stopped_state" { state == RuntimeLifecycleObservedState::Stopped }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::NonTerminal,
+                input_admission: RuntimeInputAdmission::RejectsInput,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                prepare_admission: RuntimePrepareAdmission::NotReady,
+                ingress_admission: RuntimeIngressAdmission::NotReady
+            }
+        }
+
+        transition ClassifyRuntimeLifecycleDestroyed {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "destroyed_state" { state == RuntimeLifecycleObservedState::Destroyed }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::Terminal,
+                input_admission: RuntimeInputAdmission::RejectsInput,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                prepare_admission: RuntimePrepareAdmission::Destroyed,
+                ingress_admission: RuntimeIngressAdmission::Destroyed
+            }
         }
 
         // 26d. ResolveAdmissionIdempotency: generated idempotency admission

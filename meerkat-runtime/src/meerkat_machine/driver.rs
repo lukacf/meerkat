@@ -228,9 +228,15 @@ impl DriverEntry {
         }
     }
 
-    /// Check if the runtime is idle or attached (quiescent with or without executor).
-    pub(crate) fn is_idle_or_attached(&self) -> bool {
-        self.runtime_state().is_idle_or_attached()
+    pub(crate) fn runtime_lifecycle_facts(
+        &self,
+    ) -> Result<crate::meerkat_machine::RuntimeLifecycleFacts, RuntimeDriverError> {
+        let state = self.runtime_state();
+        crate::meerkat_machine::classify_runtime_lifecycle_state(state).map_err(|reason| {
+            RuntimeDriverError::Internal(format!(
+                "generated runtime lifecycle classification failed for {state}: {reason}"
+            ))
+        })
     }
 
     /// Whether this session is quiescent for detached-wake purposes.
@@ -240,12 +246,22 @@ impl DriverEntry {
     /// block quiescence — `accept_input_without_wake` stages work without
     /// waking, so detached-wake must not race with pending queue processing.
     pub(crate) fn is_quiescent_for_detached_wake(&self) -> bool {
-        self.is_idle_or_attached() && self.as_driver().active_input_ids().is_empty()
+        match self.runtime_lifecycle_facts() {
+            Ok(facts) => facts.can_prepare_run() && self.as_driver().active_input_ids().is_empty(),
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "failed closed while classifying runtime quiescence"
+                );
+                false
+            }
+        }
     }
 
-    /// Check if the runtime can process queued inputs (Idle, Attached, or Retired).
-    pub(crate) fn can_process_queue(&self) -> bool {
-        self.runtime_state().can_process_queue()
+    /// Check through generated authority if the runtime can process queued inputs.
+    pub(crate) fn can_process_queue(&self) -> Result<bool, RuntimeDriverError> {
+        self.runtime_lifecycle_facts()
+            .map(crate::meerkat_machine::RuntimeLifecycleFacts::can_process_queue)
     }
 
     /// Inspect the current typed post-admission signal without draining it.

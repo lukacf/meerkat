@@ -90,6 +90,82 @@ pub struct InputPublicStateProjection {
     pub terminal_outcome: Option<dsl::InputPublicTerminalOutcome>,
 }
 
+/// Runtime lifecycle/admission facts emitted by generated MeerkatMachine
+/// authority for a public runtime-state projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeLifecycleFacts {
+    pub terminality: dsl::RuntimeLifecycleTerminality,
+    pub input_admission: dsl::RuntimeInputAdmission,
+    pub queue_admission: dsl::RuntimeQueueAdmission,
+    pub prepare_admission: dsl::RuntimePrepareAdmission,
+    pub ingress_admission: dsl::RuntimeIngressAdmission,
+}
+
+impl RuntimeLifecycleFacts {
+    #[must_use]
+    pub fn can_accept_input(self) -> bool {
+        self.input_admission == dsl::RuntimeInputAdmission::AcceptsInput
+    }
+
+    #[must_use]
+    pub fn can_process_queue(self) -> bool {
+        self.queue_admission == dsl::RuntimeQueueAdmission::ProcessesQueue
+    }
+
+    #[must_use]
+    pub fn can_prepare_run(self) -> bool {
+        self.prepare_admission == dsl::RuntimePrepareAdmission::Ready
+    }
+
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        self.terminality == dsl::RuntimeLifecycleTerminality::Terminal
+    }
+}
+
+/// Classify runtime lifecycle/admission facts through generated
+/// MeerkatMachine authority. Callers provide only the observed state variant;
+/// all behavior-affecting facts come back as generated typed feedback.
+pub fn classify_runtime_lifecycle_state(
+    state: RuntimeState,
+) -> Result<RuntimeLifecycleFacts, String> {
+    let observed_state = observed_runtime_lifecycle_state(state);
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ClassifyRuntimeLifecycleState {
+            state: observed_state,
+        },
+    )
+    .map_err(|err| {
+        format!("MeerkatMachine rejected runtime lifecycle classification for {state}: {err}")
+    })?;
+
+    transition
+        .effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::RuntimeLifecycleStateClassified {
+                state,
+                terminality,
+                input_admission,
+                queue_admission,
+                prepare_admission,
+                ingress_admission,
+            } if state == observed_state => Some(RuntimeLifecycleFacts {
+                terminality,
+                input_admission,
+                queue_admission,
+                prepare_admission,
+                ingress_admission,
+            }),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!("MeerkatMachine emitted no runtime lifecycle classification for {state}")
+        })
+}
+
 /// Resolve the public lifecycle class for a machine-derived input phase
 /// through generated MeerkatMachine authority.
 pub fn resolve_input_public_lifecycle_projection(
@@ -237,6 +313,18 @@ fn projection_authority() -> dsl::MeerkatMachineAuthority {
         },
         "projected MeerkatMachine state must be recoverable",
     )
+}
+
+fn observed_runtime_lifecycle_state(state: RuntimeState) -> dsl::RuntimeLifecycleObservedState {
+    match state {
+        RuntimeState::Initializing => dsl::RuntimeLifecycleObservedState::Initializing,
+        RuntimeState::Idle => dsl::RuntimeLifecycleObservedState::Idle,
+        RuntimeState::Attached => dsl::RuntimeLifecycleObservedState::Attached,
+        RuntimeState::Running => dsl::RuntimeLifecycleObservedState::Running,
+        RuntimeState::Retired => dsl::RuntimeLifecycleObservedState::Retired,
+        RuntimeState::Stopped => dsl::RuntimeLifecycleObservedState::Stopped,
+        RuntimeState::Destroyed => dsl::RuntimeLifecycleObservedState::Destroyed,
+    }
 }
 
 fn observed_input_phase(phase: InputLifecycleState) -> dsl::RecoveredInputObservedPhase {

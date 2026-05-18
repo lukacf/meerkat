@@ -2,20 +2,37 @@ use super::*;
 
 impl MeerkatMachine {
     fn classify_ingress_dsl_rejection(state: RuntimeState, reason: String) -> RuntimeDriverError {
-        match state {
-            RuntimeState::Destroyed => RuntimeDriverError::Destroyed,
-            RuntimeState::Retired | RuntimeState::Stopped => RuntimeDriverError::NotReady { state },
-            _ => RuntimeDriverError::ValidationFailed { reason },
+        match crate::meerkat_machine::classify_runtime_lifecycle_state(state) {
+            Ok(facts) => match facts.ingress_admission {
+                crate::meerkat_machine::dsl::RuntimeIngressAdmission::Destroyed => {
+                    RuntimeDriverError::Destroyed
+                }
+                crate::meerkat_machine::dsl::RuntimeIngressAdmission::NotReady => {
+                    RuntimeDriverError::NotReady { state }
+                }
+                crate::meerkat_machine::dsl::RuntimeIngressAdmission::Open => {
+                    RuntimeDriverError::ValidationFailed { reason }
+                }
+            },
+            Err(error) => RuntimeDriverError::Internal(error),
         }
     }
 
     fn reject_visible_terminal_ingress(state: RuntimeState) -> Result<(), RuntimeDriverError> {
-        match state {
-            RuntimeState::Destroyed => Err(RuntimeDriverError::Destroyed),
-            RuntimeState::Retired | RuntimeState::Stopped => {
+        let facts =
+            crate::meerkat_machine::classify_runtime_lifecycle_state(state).map_err(|reason| {
+                RuntimeDriverError::Internal(format!(
+                    "generated runtime ingress admission classification failed for {state}: {reason}"
+                ))
+            })?;
+        match facts.ingress_admission {
+            crate::meerkat_machine::dsl::RuntimeIngressAdmission::Destroyed => {
+                Err(RuntimeDriverError::Destroyed)
+            }
+            crate::meerkat_machine::dsl::RuntimeIngressAdmission::NotReady => {
                 Err(RuntimeDriverError::NotReady { state })
             }
-            _ => Ok(()),
+            crate::meerkat_machine::dsl::RuntimeIngressAdmission::Open => Ok(()),
         }
     }
 
@@ -384,7 +401,8 @@ impl MeerkatMachine {
                 let prepare_precheck_error = {
                     let driver = driver.lock().await;
                     let state = driver.runtime_state();
-                    if !driver.is_idle_or_attached() {
+                    let facts = driver.runtime_lifecycle_facts()?;
+                    if !facts.can_prepare_run() {
                         Some(Self::normalize_destroyed_error(
                             RuntimeDriverError::NotReady { state },
                         ))

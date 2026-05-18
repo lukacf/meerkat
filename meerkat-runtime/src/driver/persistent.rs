@@ -99,11 +99,6 @@ impl PersistentRuntimeDriver {
         self.inner.is_idle()
     }
 
-    /// Check if the runtime is idle or attached (delegates to inner).
-    pub fn is_idle_or_attached(&self) -> bool {
-        self.inner.is_idle_or_attached()
-    }
-
     /// Map runtime state for persistence.
     ///
     /// Attached must never be persisted — on recovery, the executor is

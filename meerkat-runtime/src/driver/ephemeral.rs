@@ -1267,9 +1267,6 @@ impl EphemeralRuntimeDriver {
     pub fn is_idle(&self) -> bool {
         self.runtime_phase_snapshot() == RuntimeState::Idle
     }
-    pub fn is_idle_or_attached(&self) -> bool {
-        self.runtime_phase_snapshot().is_idle_or_attached()
-    }
 
     pub fn phase(&self) -> RuntimeState {
         self.runtime_phase_snapshot()
@@ -1297,10 +1294,6 @@ impl EphemeralRuntimeDriver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::meerkat_machine::dsl_authority::pre_run_phase_from_authority(&authority)
-    }
-
-    pub fn can_process_queue(&self) -> bool {
-        self.runtime_phase_snapshot().can_process_queue()
     }
 
     fn contract_session_authority_id(&self) -> mm_dsl::SessionId {

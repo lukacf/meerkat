@@ -997,6 +997,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyInputTerminalityAbandonedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `ClassifyRuntimeLifecycleInitializingIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+- `ClassifyRuntimeLifecycleIdleIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `recycle_and_compaction`
+- `ClassifyRuntimeLifecycleAttachedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+- `ClassifyRuntimeLifecycleRunningIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+- `ClassifyRuntimeLifecycleRetiredIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `recycle_and_compaction`
+- `ClassifyRuntimeLifecycleStoppedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+- `ClassifyRuntimeLifecycleDestroyedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
 - `ResolveAdmissionIdempotencyNoKeyIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -3024,6 +3045,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `InputBehavioralTerminalityResolved`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `RuntimeLifecycleStateClassified`
+  - anchors: `meerkat_machine`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
 - `PostAdmissionSignal`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`

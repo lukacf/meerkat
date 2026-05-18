@@ -207,6 +207,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveInputPublicLifecycle`(input_id: String, phase: RecoveredInputObservedPhase)
 - `ResolveInputPublicTerminalOutcome`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `ClassifyInputTerminality`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
+- `ClassifyRuntimeLifecycleState`(state: RuntimeLifecycleObservedState)
 - `Prepare`(session_id: SessionId, run_id: RunId)
 - `Commit`(input_id: InputId, run_id: RunId)
 - `Fail`(run_id: RunId)
@@ -396,6 +397,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InputPublicLifecycleResolved`(input_id: String, phase: InputPublicLifecycleState)
 - `InputPublicTerminalOutcomeResolved`(input_id: String, terminal_outcome: Option<InputPublicTerminalOutcome>)
 - `InputBehavioralTerminalityResolved`(input_id: String, terminal: Bool)
+- `RuntimeLifecycleStateClassified`(state: RuntimeLifecycleObservedState, terminality: RuntimeLifecycleTerminality, input_admission: RuntimeInputAdmission, queue_admission: RuntimeQueueAdmission, prepare_admission: RuntimePrepareAdmission, ingress_admission: RuntimeIngressAdmission)
 - `PostAdmissionSignal`(signal: PostAdmissionSignalKind)
 - `ReadyForRun`
 - `InputLifecycleNotice`
@@ -3283,6 +3285,62 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `abandoned_phase`
   - `abandoned_terminal`
 - Emits: `InputBehavioralTerminalityResolved`
+- To: `Idle`
+
+### `ClassifyRuntimeLifecycleInitializingIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLifecycleState`(state)
+- Guards:
+  - `initializing_state`
+- Emits: `RuntimeLifecycleStateClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLifecycleIdleIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLifecycleState`(state)
+- Guards:
+  - `idle_state`
+- Emits: `RuntimeLifecycleStateClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLifecycleAttachedIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLifecycleState`(state)
+- Guards:
+  - `attached_state`
+- Emits: `RuntimeLifecycleStateClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLifecycleRunningIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLifecycleState`(state)
+- Guards:
+  - `running_state`
+- Emits: `RuntimeLifecycleStateClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLifecycleRetiredIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLifecycleState`(state)
+- Guards:
+  - `retired_state`
+- Emits: `RuntimeLifecycleStateClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLifecycleStoppedIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLifecycleState`(state)
+- Guards:
+  - `stopped_state`
+- Emits: `RuntimeLifecycleStateClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLifecycleDestroyedIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLifecycleState`(state)
+- Guards:
+  - `destroyed_state`
+- Emits: `RuntimeLifecycleStateClassified`
 - To: `Idle`
 
 ### `ResolveAdmissionIdempotencyNoKeyIdle`

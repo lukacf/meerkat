@@ -1652,6 +1652,58 @@ pub enum RuntimeEffectKind {
     StopRuntimeExecutor,
 }
 
+/// Typed mirror of the public runtime lifecycle projection. The shell passes
+/// only the observed variant; generated transitions own the semantic facts
+/// derived from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeLifecycleObservedState {
+    #[default]
+    Initializing,
+    Idle,
+    Attached,
+    Running,
+    Retired,
+    Stopped,
+    Destroyed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeLifecycleTerminality {
+    #[default]
+    NonTerminal,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeInputAdmission {
+    #[default]
+    RejectsInput,
+    AcceptsInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeQueueAdmission {
+    #[default]
+    BlocksQueue,
+    ProcessesQueue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimePrepareAdmission {
+    #[default]
+    NotReady,
+    Ready,
+    Destroyed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeIngressAdmission {
+    #[default]
+    Open,
+    NotReady,
+    Destroyed,
+}
+
 /// Typed reason classifier for the `TurnRunCancelled` effect. Closed set of
 /// cancellation-observation origins emitted when a turn's cancellation
 /// request lands at an observable boundary. Replaces the former literal-

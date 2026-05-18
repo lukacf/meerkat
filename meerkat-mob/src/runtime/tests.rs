@@ -3344,9 +3344,10 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                         responder_runtime
                             .peer_interaction_handle()
                             .expect("live external peer semantic authority")
-                            .request_received(PeerCorrelationId::from_uuid(
-                                candidate.interaction.id.0,
-                            ))
+                            .request_received(
+                                PeerCorrelationId::from_uuid(candidate.interaction.id.0),
+                                candidate.interaction.handling_mode,
+                            )
                             .expect("record inbound peer request before response");
                         let to = trust_candidate_sender_for_reply(
                             responder_runtime.as_ref(),

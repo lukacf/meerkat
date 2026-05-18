@@ -5,7 +5,7 @@ use meerkat_core::types::RenderMetadata;
 use meerkat_core::{
     ContentInput, OutputSchema, PeerMeta, Provider, SessionId, ToolVisibilityWitness,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as DeError};
 use serde_json::value::RawValue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -886,15 +886,13 @@ impl DeliveryReceipt {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ScheduleConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default = "default_planning_horizon_days")]
     pub planning_horizon_days: u32,
-    #[serde(default = "default_planning_horizon_occurrences")]
     pub planning_horizon_occurrences: u32,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
@@ -902,6 +900,59 @@ pub struct ScheduleConfig {
     pub updated_at_utc: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at_utc: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize)]
+struct ScheduleConfigWire {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    planning_horizon_days: Option<u64>,
+    #[serde(default)]
+    planning_horizon_occurrences: Option<u64>,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+    created_at_utc: DateTime<Utc>,
+    updated_at_utc: DateTime<Utc>,
+    #[serde(default)]
+    deleted_at_utc: Option<DateTime<Utc>>,
+}
+
+impl<'de> Deserialize<'de> for ScheduleConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ScheduleConfigWire::deserialize(deserializer)?;
+        let defaults =
+            crate::machines::schedule_lifecycle::ScheduleLifecycleMachineState::default();
+        Ok(Self {
+            name: wire.name,
+            description: wire.description,
+            planning_horizon_days: planning_horizon_u32(
+                "planning_horizon_days",
+                wire.planning_horizon_days
+                    .unwrap_or(defaults.planning_horizon_days),
+            )
+            .map_err(D::Error::custom)?,
+            planning_horizon_occurrences: planning_horizon_u32(
+                "planning_horizon_occurrences",
+                wire.planning_horizon_occurrences
+                    .unwrap_or(defaults.planning_horizon_occurrences),
+            )
+            .map_err(D::Error::custom)?,
+            labels: wire.labels,
+            created_at_utc: wire.created_at_utc,
+            updated_at_utc: wire.updated_at_utc,
+            deleted_at_utc: wire.deleted_at_utc,
+        })
+    }
+}
+
+fn planning_horizon_u32(field: &'static str, value: u64) -> Result<u32, String> {
+    u32::try_from(value).map_err(|error| format!("{field} value {value} exceeds u32: {error}"))
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1083,24 +1134,6 @@ impl UpdateScheduleRequest {
             target.validate_public_api()?;
         }
         Ok(())
-    }
-}
-
-pub fn default_planning_horizon_days() -> u32 {
-    let value = crate::machines::schedule_lifecycle::ScheduleLifecycleMachineState::default()
-        .planning_horizon_days;
-    match u32::try_from(value) {
-        Ok(value) => value,
-        Err(_) => panic!("generated planning_horizon_days default exceeds u32: {value}"),
-    }
-}
-
-pub fn default_planning_horizon_occurrences() -> u32 {
-    let value = crate::machines::schedule_lifecycle::ScheduleLifecycleMachineState::default()
-        .planning_horizon_occurrences;
-    match u32::try_from(value) {
-        Ok(value) => value,
-        Err(_) => panic!("generated planning_horizon_occurrences default exceeds u32: {value}"),
     }
 }
 

@@ -110,20 +110,18 @@ impl MeerkatMachine {
         let durable_runtime_state = self
             .durable_runtime_state_for_registration(&runtime_id)
             .await?;
-        let dsl_authority = Arc::new(std::sync::Mutex::new(
-            super::dsl::MeerkatMachineAuthority::recover_from_state(
-                super::dsl_authority::project_state(
-                    &session_id,
-                    durable_runtime_state.unwrap_or(RuntimeState::Idle),
-                    None,
-                    None,
-                    None,
-                    std::collections::BTreeSet::new(),
-                    None,
-                ),
-            )
-            .expect("session registration DSL state must be recoverable"),
-        ));
+        let dsl_authority = Arc::new(std::sync::Mutex::new(super::recover_projected_authority(
+            super::dsl_authority::project_state(
+                &session_id,
+                durable_runtime_state.unwrap_or(RuntimeState::Idle),
+                None,
+                None,
+                None,
+                std::collections::BTreeSet::new(),
+                None,
+            ),
+            "session registration DSL state must be recoverable",
+        )));
         let initial_runtime_state = durable_runtime_state.unwrap_or(RuntimeState::Idle);
         let mut entry = self.make_driver(
             runtime_id.clone(),
@@ -352,8 +350,8 @@ impl MeerkatMachine {
                     }
                 };
                 let initial_runtime_state = durable_runtime_state.unwrap_or(RuntimeState::Idle);
-                let dsl_authority = Arc::new(std::sync::Mutex::new(
-                    super::dsl::MeerkatMachineAuthority::recover_from_state(
+                let dsl_authority =
+                    Arc::new(std::sync::Mutex::new(super::recover_projected_authority(
                         super::dsl_authority::project_state(
                             &session_id,
                             initial_runtime_state,
@@ -363,9 +361,8 @@ impl MeerkatMachine {
                             std::collections::BTreeSet::new(),
                             None,
                         ),
-                    )
-                    .expect("session recovery DSL state must be recoverable"),
-                ));
+                        "session recovery DSL state must be recoverable",
+                    )));
                 let mut recovered_entry = self.make_driver(
                     runtime_id.clone(),
                     Arc::clone(&dsl_authority),

@@ -376,10 +376,10 @@ fn new_ops_dsl_authority() -> DslAuthority {
         lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
         ..mm_dsl::MeerkatMachineState::default()
     };
-    DslAuthority(
-        mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
-            .expect("ops lifecycle DSL state must be recoverable"),
-    )
+    DslAuthority(crate::meerkat_machine::recover_projected_authority(
+        state,
+        "ops lifecycle DSL state must be recoverable",
+    ))
 }
 
 impl ShellState {
@@ -1030,12 +1030,12 @@ impl ShellState {
                 mm_dsl::MeerkatMachineEffect::OperationTerminal { operation_id }
                     if operation_id == operation_id_key =>
                 {
-                    terminal = Some(true)
+                    terminal = Some(true);
                 }
                 mm_dsl::MeerkatMachineEffect::OperationNonTerminal { operation_id }
                     if operation_id == operation_id_key =>
                 {
-                    terminal = Some(false)
+                    terminal = Some(false);
                 }
                 other => {
                     return Err(OpsLifecycleError::Internal(format!(
@@ -1075,12 +1075,12 @@ impl ShellState {
                 mm_dsl::MeerkatMachineEffect::RetainTerminalRecord { operation_id }
                     if operation_id == operation_id_key =>
                 {
-                    disposition = Some(RecoveredOperationRecordDisposition::Retain)
+                    disposition = Some(RecoveredOperationRecordDisposition::Retain);
                 }
                 mm_dsl::MeerkatMachineEffect::DiscardRecoveredOperationRecord { operation_id }
                     if operation_id == operation_id_key =>
                 {
-                    disposition = Some(RecoveredOperationRecordDisposition::Discard)
+                    disposition = Some(RecoveredOperationRecordDisposition::Discard);
                 }
                 other => {
                     return Err(OpsLifecycleError::Internal(format!(
@@ -1723,17 +1723,16 @@ impl Future for WaitAllFuture<'_> {
 
 impl Drop for WaitAllFuture<'_> {
     fn drop(&mut self) {
-        if matches!(self.state, WaitAllFutureState::Waiting(_)) {
-            if let Err(err) = self
+        if matches!(self.state, WaitAllFutureState::Waiting(_))
+            && let Err(err) = self
                 .registry
                 .cancel_wait_all_internal(&self.wait_request_id)
-            {
-                tracing::error!(
-                    wait_request_id = %self.wait_request_id,
-                    error = %err,
-                    "generated wait_all authority rejected cancellation during drop"
-                );
-            }
+        {
+            tracing::error!(
+                wait_request_id = %self.wait_request_id,
+                error = %err,
+                "generated wait_all authority rejected cancellation during drop"
+            );
         }
     }
 }

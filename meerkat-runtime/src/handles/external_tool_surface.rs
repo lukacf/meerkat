@@ -36,8 +36,10 @@ impl RuntimeExternalToolSurfaceHandle {
             ..Default::default()
         };
         let shared = Arc::new(std::sync::Mutex::new(
-            mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
-                .expect("ephemeral external tool surface state must be recoverable"),
+            crate::meerkat_machine::recover_projected_authority(
+                state,
+                "ephemeral external tool surface state must be recoverable",
+            ),
         ));
         Self::new(Arc::new(HandleDslAuthority::from_shared(shared)))
     }

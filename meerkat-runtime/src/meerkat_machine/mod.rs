@@ -64,6 +64,14 @@ use crate::traits::{
     RuntimeControlPlaneError, RuntimeDriverError,
 };
 
+#[allow(clippy::expect_used)]
+pub(crate) fn recover_projected_authority(
+    state: dsl::MeerkatMachineState,
+    context: &'static str,
+) -> dsl::MeerkatMachineAuthority {
+    dsl::MeerkatMachineAuthority::recover_from_state(state).expect(context)
+}
+
 /// Error type for [`MeerkatMachine::prepare_bindings`].
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeBindingsError {
@@ -222,11 +230,13 @@ fn resolve_input_public_terminal_projection(
 }
 
 fn projection_authority() -> dsl::MeerkatMachineAuthority {
-    dsl::MeerkatMachineAuthority::recover_from_state(dsl::MeerkatMachineState {
-        lifecycle_phase: dsl::MeerkatPhase::Idle,
-        ..dsl::MeerkatMachineState::default()
-    })
-    .expect("projected MeerkatMachine state must be recoverable")
+    recover_projected_authority(
+        dsl::MeerkatMachineState {
+            lifecycle_phase: dsl::MeerkatPhase::Idle,
+            ..dsl::MeerkatMachineState::default()
+        },
+        "projected MeerkatMachine state must be recoverable",
+    )
 }
 
 fn observed_input_phase(phase: InputLifecycleState) -> dsl::RecoveredInputObservedPhase {

@@ -605,9 +605,9 @@ impl MeerkatMachine {
                                     ));
                                 }
                             };
-                            if let Err(err) = self
-                                .execute_meerkat_machine_session_command(reconfigure)
-                                .await
+                            if let Err(err) =
+                                Box::pin(self.execute_meerkat_machine_session_command(reconfigure))
+                                    .await
                             {
                                 self.restore_session_dsl_state(&session_id, previous_dsl_state)
                                     .await;

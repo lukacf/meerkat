@@ -526,20 +526,13 @@ impl RuntimeAuthLeaseHandle {
             guard.authorities.insert(lease_key.clone(), authority);
         }
         let (from_phase, to_phase) = {
-            let entry = if create_if_missing {
-                guard
-                    .authorities
-                    .get_mut(&lease_key)
-                    .expect("create_if_missing inserted auth authority")
-            } else {
-                match guard.authorities.get_mut(&lease_key) {
-                    Some(m) => m,
-                    None => {
-                        return Err(DslTransitionError::new(
-                            context,
-                            format!("no auth machine registered for lease_key `{lease_key}`"),
-                        ));
-                    }
+            let entry = match guard.authorities.get_mut(&lease_key) {
+                Some(m) => m,
+                None => {
+                    return Err(DslTransitionError::new(
+                        context,
+                        format!("no auth machine registered for lease_key `{lease_key}`"),
+                    ));
                 }
             };
             let from_phase = map_phase(entry.state().lifecycle_phase);

@@ -445,17 +445,17 @@ impl MeerkatMachine {
                 ))
             }
             MeerkatMachineCommand::PrepareBindings { session_id } => {
-                self.prepare_session_runtime_bindings(
+                Box::pin(self.prepare_session_runtime_bindings(
                     session_id,
                     SessionBindingPreparation::AuthoritativeRuntimeBinding,
-                )
+                ))
                 .await
             }
             MeerkatMachineCommand::PrepareLocalSessionBindings { session_id } => {
-                self.prepare_session_runtime_bindings(
+                Box::pin(self.prepare_session_runtime_bindings(
                     session_id,
                     SessionBindingPreparation::LocalSessionResources,
-                )
+                ))
                 .await
             }
             MeerkatMachineCommand::InputState {

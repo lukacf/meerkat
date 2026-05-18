@@ -176,6 +176,7 @@ pub fn test_peer_comms_handle() -> Arc<dyn meerkat_core::handles::PeerCommsHandl
 
 #[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
+#[allow(clippy::expect_used)]
 pub fn test_peer_comms_handle_with_silent<I, S>(
     silent_intents: I,
 ) -> Arc<dyn meerkat_core::handles::PeerCommsHandle>
@@ -213,6 +214,7 @@ where
 
 #[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
+#[allow(clippy::expect_used)]
 pub fn test_peer_input_candidate_from_interaction(
     interaction: meerkat_core::interaction::InboxInteraction,
     peer_id: meerkat_core::comms::PeerId,
@@ -319,14 +321,15 @@ pub fn runtime_stamped_prompt_turn_metadata(
     runtime_loop::for_input(&input, semantics)
 }
 
+#[allow(clippy::expect_used)]
 fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::RuntimeInputSemantics {
-    let mut authority = meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(
+    let mut authority = meerkat_machine::recover_projected_authority(
         meerkat_machine::dsl::MeerkatMachineState {
             lifecycle_phase: meerkat_machine::dsl::MeerkatPhase::Idle,
             ..meerkat_machine::dsl::MeerkatMachineState::default()
         },
-    )
-    .expect("projected runtime prompt machine state must be recoverable");
+        "projected runtime prompt machine state must be recoverable",
+    );
     let transition = meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut authority,
         meerkat_machine::dsl::MeerkatMachineInput::ResolveAdmissionPlan {

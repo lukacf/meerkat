@@ -102,6 +102,15 @@ impl Default for RuntimeControlProjection {
     }
 }
 
+struct AdmissionValidationFacts<'a> {
+    input_kind: crate::identifiers::InputKind,
+    input_origin: &'a crate::input::InputOrigin,
+    durability: crate::input::InputDurability,
+    peer_handling_mode_valid: bool,
+    peer_response_terminal_structurally_valid: bool,
+    peer_response_terminal_observed_status: mm_dsl::PeerResponseTerminalObservedStatus,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ReplayQueuedContributorsPlan {
     pub queue_work_ids: Vec<InputId>,
@@ -202,8 +211,10 @@ pub(crate) fn new_ingress_dsl_authority() -> SharedIngressDslAuthority {
 fn recover_ingress_dsl_authority(
     state: mm_dsl::MeerkatMachineState,
 ) -> mm_dsl::MeerkatMachineAuthority {
-    mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
-        .expect("projected ingress DSL state must be recoverable")
+    crate::meerkat_machine::recover_projected_authority(
+        state,
+        "projected ingress DSL state must be recoverable",
+    )
 }
 
 impl EphemeralRuntimeDriver {
@@ -2157,22 +2168,19 @@ impl EphemeralRuntimeDriver {
     fn resolve_admission_validation(
         &self,
         input_id: &InputId,
-        input_kind: crate::identifiers::InputKind,
-        input_origin: &crate::input::InputOrigin,
-        durability: crate::input::InputDurability,
-        peer_handling_mode_valid: bool,
-        peer_response_terminal_structurally_valid: bool,
-        peer_response_terminal_observed_status: mm_dsl::PeerResponseTerminalObservedStatus,
+        facts: AdmissionValidationFacts<'_>,
     ) -> Result<Option<mm_dsl::AdmissionRejectReasonKind>, RuntimeDriverError> {
         let effects = self.dsl_preview(
             mm_dsl::MeerkatMachineInput::ResolveAdmissionValidation {
                 input_id: Self::dsl_key(input_id),
-                input_kind: mm_dsl::AdmissionInputKind::from(input_kind),
-                input_origin: mm_dsl::AdmissionInputOriginKind::from(input_origin),
-                durability: mm_dsl::InputDurabilityKind::from(durability),
-                peer_handling_mode_valid,
-                peer_response_terminal_structurally_valid,
-                peer_response_terminal_observed_status,
+                input_kind: mm_dsl::AdmissionInputKind::from(facts.input_kind),
+                input_origin: mm_dsl::AdmissionInputOriginKind::from(facts.input_origin),
+                durability: mm_dsl::InputDurabilityKind::from(facts.durability),
+                peer_handling_mode_valid: facts.peer_handling_mode_valid,
+                peer_response_terminal_structurally_valid: facts
+                    .peer_response_terminal_structurally_valid,
+                peer_response_terminal_observed_status: facts
+                    .peer_response_terminal_observed_status,
             },
             "ResolveAdmissionValidation",
         )?;
@@ -2536,12 +2544,15 @@ impl EphemeralRuntimeDriver {
             .or_else(|| Self::peer_response_terminal_generated_rejection_detail(&input));
         if let Some(reason) = self.resolve_admission_validation(
             &input_id,
-            input.kind(),
-            &input.header().source,
-            input.header().durability,
-            peer_handling_mode_error.is_none(),
-            peer_response_terminal_structural_error.is_none(),
-            peer_response_terminal_observed_status,
+            AdmissionValidationFacts {
+                input_kind: input.kind(),
+                input_origin: &input.header().source,
+                durability: input.header().durability,
+                peer_handling_mode_valid: peer_handling_mode_error.is_none(),
+                peer_response_terminal_structurally_valid: peer_response_terminal_structural_error
+                    .is_none(),
+                peer_response_terminal_observed_status,
+            },
         )? {
             if matches!(
                 reason,
@@ -2663,7 +2674,7 @@ impl EphemeralRuntimeDriver {
                     &content_shape,
                     handling_mode,
                     runtime_semantics,
-                    primitive_projection.clone(),
+                    primitive_projection,
                     is_prompt,
                     &policy,
                     None,
@@ -2966,11 +2977,11 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 return Err(err);
             }
         };
-        if let AcceptOutcome::Accepted { input_id, .. } = &outcome {
-            if let Err(err) = self.machine_apply_accept_with_completion_signal(input_id, flags) {
-                self.restore_rollback_snapshot(checkpoint);
-                return Err(err);
-            }
+        if let AcceptOutcome::Accepted { input_id, .. } = &outcome
+            && let Err(err) = self.machine_apply_accept_with_completion_signal(input_id, flags)
+        {
+            self.restore_rollback_snapshot(checkpoint);
+            return Err(err);
         }
         Ok(outcome)
     }
@@ -3006,17 +3017,15 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     fn active_input_ids(&self) -> Vec<InputId> {
         self.ledger
             .iter()
-            .filter_map(|(id, _)| {
-                self.input_is_non_terminal_by_authority(id)
-                    .then(|| id.clone())
-            })
+            .filter(|(id, _)| self.input_is_non_terminal_by_authority(id))
+            .map(|(id, _)| id.clone())
             .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::EphemeralRuntimeDriver;
+    use super::{AdmissionValidationFacts, EphemeralRuntimeDriver};
     use crate::identifiers::{IdempotencyKey, LogicalRuntimeId, SupersessionKey};
     use crate::input::{
         Input, InputDurability, InputHeader, InputOrigin, InputVisibility, OperationInput,
@@ -3361,12 +3370,15 @@ mod tests {
         let generated_reason = driver
             .resolve_admission_validation(
                 &input_id,
-                input.kind(),
-                &input.header().source,
-                input.header().durability,
-                true,
-                true,
-                mm_dsl::PeerResponseTerminalObservedStatus::NotPeerTerminal,
+                AdmissionValidationFacts {
+                    input_kind: input.kind(),
+                    input_origin: &input.header().source,
+                    durability: input.header().durability,
+                    peer_handling_mode_valid: true,
+                    peer_response_terminal_structurally_valid: true,
+                    peer_response_terminal_observed_status:
+                        mm_dsl::PeerResponseTerminalObservedStatus::NotPeerTerminal,
+                },
             )
             .expect("generated validation feedback should resolve");
         assert_eq!(

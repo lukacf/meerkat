@@ -634,6 +634,7 @@ pub enum OutboundPeerRequestState {
 }
 
 impl From<meerkat_core::OutboundPeerRequestState> for OutboundPeerRequestState {
+    #[allow(clippy::panic)]
     fn from(s: meerkat_core::OutboundPeerRequestState) -> Self {
         match s {
             meerkat_core::OutboundPeerRequestState::Sent => Self::Sent,
@@ -670,6 +671,7 @@ pub enum InboundPeerRequestState {
 }
 
 impl From<meerkat_core::InboundPeerRequestState> for InboundPeerRequestState {
+    #[allow(clippy::panic)]
     fn from(s: meerkat_core::InboundPeerRequestState) -> Self {
         match s {
             meerkat_core::InboundPeerRequestState::Received => Self::Received,
@@ -700,6 +702,7 @@ pub enum PeerTerminalDisposition {
 }
 
 impl From<meerkat_core::handles::PeerTerminalDisposition> for PeerTerminalDisposition {
+    #[allow(clippy::panic)]
     fn from(d: meerkat_core::handles::PeerTerminalDisposition) -> Self {
         match d {
             meerkat_core::handles::PeerTerminalDisposition::Completed => Self::Completed,
@@ -729,6 +732,7 @@ pub enum InteractionStreamState {
 }
 
 impl From<meerkat_core::InteractionStreamState> for InteractionStreamState {
+    #[allow(clippy::panic)]
     fn from(s: meerkat_core::InteractionStreamState) -> Self {
         match s {
             meerkat_core::InteractionStreamState::Reserved => Self::Reserved,
@@ -1575,6 +1579,7 @@ pub enum RuntimeApplyFailureCause {
 }
 
 impl From<meerkat_core::lifecycle::CoreApplyFailureCauseKind> for RuntimeApplyFailureCause {
+    #[allow(clippy::panic)]
     fn from(kind: meerkat_core::lifecycle::CoreApplyFailureCauseKind) -> Self {
         match kind {
             meerkat_core::lifecycle::CoreApplyFailureCauseKind::PrimitiveRejected => {

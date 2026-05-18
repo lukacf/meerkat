@@ -109,8 +109,10 @@ impl HandleDslAuthority {
         let state = mm_dsl::MeerkatMachineState::default();
         Self {
             inner: Arc::new(Mutex::new(
-                mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
-                    .expect("default MeerkatMachine state must be recoverable"),
+                crate::meerkat_machine::recover_projected_authority(
+                    state,
+                    "default MeerkatMachine state must be recoverable",
+                ),
             )),
         }
     }

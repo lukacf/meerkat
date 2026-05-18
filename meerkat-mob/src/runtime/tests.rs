@@ -15131,6 +15131,69 @@ async fn test_rewire_external_repairs_trust_for_existing_machine_edge() {
 }
 
 #[tokio::test]
+async fn test_rewire_external_machine_edge_without_roster_projection_repairs_trust_only() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let sid_l = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-machine-repair"),
+            None,
+        )
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    let external = test_trusted_peer_descriptor(
+        "remote-mob/worker/repair-agent",
+        "inproc://remote-mob/worker/repair-agent",
+    );
+    let machine_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from("l-machine-repair"),
+        crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
+    );
+    handle
+        .project_machine_input(
+            crate::machines::mob_machine::MobMachineInput::WireExternalPeer { edge: machine_edge },
+        )
+        .await
+        .expect("seed machine-owned external edge without roster projection");
+
+    handle
+        .wire(
+            AgentIdentity::from("l-machine-repair"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("machine-edge rewire should repair trust only");
+
+    let trusted = service.trusted_peer_names(&sid_l).await;
+    assert!(
+        trusted.iter().any(|name| name == external.name.as_str()),
+        "machine-edge rewire should install external trust from generated repair authority"
+    );
+    let entry = handle
+        .get_member(&AgentIdentity::from("l-machine-repair"))
+        .await
+        .expect("member should exist");
+    assert!(
+        !entry
+            .external_peer_specs
+            .contains_key(&AgentIdentity::from(external.name.as_str())),
+        "trust repair must not synthesize external peer roster projection"
+    );
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::ExternalPeerWired { .. })),
+        "trust repair must not append ExternalPeerWired without a generated graph-change effect"
+    );
+}
+
+#[tokio::test]
 async fn test_respawn_restores_external_wiring_from_roster_spec() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let old_sid = handle
@@ -15945,6 +16008,88 @@ async fn test_rewire_repairs_local_trust_for_existing_machine_edge() {
     assert_eq!(
         pair_wired_events, 1,
         "trust repair for an existing machine edge must not duplicate the logical wire event"
+    );
+}
+
+#[tokio::test]
+async fn test_rewire_local_machine_edge_without_roster_projection_repairs_trust_only() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let left = MeerkatId::from("machine-repair-left");
+    let right = MeerkatId::from("machine-repair-right");
+    let sid_left = handle
+        .spawn(ProfileName::from("lead"), left.clone(), None)
+        .await
+        .expect("spawn left")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_right = handle
+        .spawn(ProfileName::from("worker"), right.clone(), None)
+        .await
+        .expect("spawn right")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    let edge = crate::machines::mob_machine::WiringEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from(left.as_str()),
+        crate::machines::mob_machine::AgentIdentity::from(right.as_str()),
+    );
+    handle
+        .project_machine_input(crate::machines::mob_machine::MobMachineInput::WireMembers { edge })
+        .await
+        .expect("seed machine-owned edge without roster projection");
+
+    handle
+        .wire(
+            AgentIdentity::from(left.as_str()),
+            PeerTarget::Local(AgentIdentity::from(right.as_str())),
+        )
+        .await
+        .expect("machine-edge rewire should repair trust only");
+
+    let trusted_by_left = service.trusted_peer_names(&sid_left).await;
+    let trusted_by_right = service.trusted_peer_names(&sid_right).await;
+    assert!(
+        trusted_by_left
+            .iter()
+            .any(|name| name.as_str() == test_comms_name("worker", right.as_str())),
+        "machine-edge rewire should install right trust from generated repair authority"
+    );
+    assert!(
+        trusted_by_right
+            .iter()
+            .any(|name| name.as_str() == test_comms_name("lead", left.as_str())),
+        "machine-edge rewire should install left trust from generated repair authority"
+    );
+
+    let left_entry = handle
+        .get_member(&AgentIdentity::from(left.as_str()))
+        .await
+        .expect("left member");
+    let right_entry = handle
+        .get_member(&AgentIdentity::from(right.as_str()))
+        .await
+        .expect("right member");
+    assert!(
+        !left_entry
+            .wired_to
+            .contains(&AgentIdentity::from(right.as_str())),
+        "trust repair must not synthesize left roster projection"
+    );
+    assert!(
+        !right_entry
+            .wired_to
+            .contains(&AgentIdentity::from(left.as_str())),
+        "trust repair must not synthesize right roster projection"
+    );
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MembersWired { .. })),
+        "trust repair must not append MembersWired without a generated graph-change effect"
     );
 }
 

@@ -6219,24 +6219,23 @@ impl MobActor {
             )
         };
 
-        // Idempotent repair path when DSL AND roster both already reflect
-        // the edge. The DSL still emits a local repair effect; without that
-        // generated authority, live trust is not reinstalled.
+        // Idempotent repair path when the MobMachine already owns the edge.
+        // The DSL emits a local repair effect; without a graph-change effect,
+        // this path may reinstall live trust but must not synthesize a public
+        // roster/event projection.
         let dsl_has_edge = self
             .dsl_authority
             .state()
             .wiring_edges
             .iter()
             .any(|existing| existing == &edge);
-        let roster_has_edge = local_entry.wired_to.contains(&peer_entry.agent_identity)
-            && peer_entry.wired_to.contains(&local_entry.agent_identity);
 
         // Resolve both endpoints' comms runtimes + specs BEFORE mutating
         // any authority state. Missing comms / missing public key yields
         // WiringError with zero side effects.
         let local_endpoint = self.resolve_wiring_endpoint(&local_entry, "wire").await?;
         let peer_endpoint = self.resolve_wiring_endpoint(&peer_entry, "wire").await?;
-        if dsl_has_edge && roster_has_edge {
+        if dsl_has_edge {
             let authority = self.apply_wire_members_idempotent(&edge)?;
             if !authority.is_repair() {
                 return Err(MobError::WiringError(
@@ -7701,18 +7700,18 @@ impl MobActor {
         })?;
 
         let authority = self.apply_wire_external_peer_idempotent(&edge)?;
-
-        if already_wired_with_same_spec {
-            if !authority.is_repair() {
-                if authority.dsl_added() {
-                    self.rollback_external_wire_dsl(&edge, true).await;
-                }
-                return Err(MobError::WiringError(format!(
-                    "idempotent external wire repair for '{local}' did not produce generated repair authority"
-                )));
-            }
+        if authority.is_repair() {
             comms.add_trusted_peer(spec.clone()).await?;
             return Ok(());
+        }
+
+        if already_wired_with_same_spec {
+            if authority.dsl_added() {
+                self.rollback_external_wire_dsl(&edge, true).await;
+            }
+            return Err(MobError::WiringError(format!(
+                "idempotent external wire repair for '{local}' did not produce generated repair authority"
+            )));
         }
         let dsl_added = authority.dsl_added();
 

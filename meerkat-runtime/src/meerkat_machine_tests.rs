@@ -5733,6 +5733,172 @@ async fn service_peer_admission_wakes_without_live_cancel_after_boundary() {
 }
 
 #[tokio::test]
+async fn explicit_running_steer_admission_does_not_emit_boundary_cancel_effect() {
+    struct LiveBoundaryHandle {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorBoundaryHandle for LiveBoundaryHandle {
+        async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct BlockingExecutor {
+        apply_calls: Arc<AtomicUsize>,
+        queued_boundary_cancel_calls: Arc<AtomicUsize>,
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
+        apply_started: Arc<Notify>,
+        allow_finish: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingExecutor {
+        fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(LiveBoundaryHandle {
+                calls: Arc::clone(&self.live_boundary_cancel_calls),
+            }))
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            self.apply_started.notify_waiters();
+            self.allow_finish.notified().await;
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: primitive.apply_boundary(),
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.queued_boundary_cancel_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_calls = Arc::new(AtomicUsize::new(0));
+    let queued_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+    let live_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+    let apply_started = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
+
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                apply_calls: Arc::clone(&apply_calls),
+                queued_boundary_cancel_calls: Arc::clone(&queued_boundary_cancel_calls),
+                live_boundary_cancel_calls: Arc::clone(&live_boundary_cancel_calls),
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Arc::clone(&allow_finish),
+            }),
+        )
+        .await;
+
+    let first_input = Input::Prompt(crate::input::PromptInput::new(
+        "first turn keeps the runtime busy",
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                ..Default::default()
+            },
+        ),
+    ));
+    let (outcome, _completion_handle) = adapter
+        .accept_input_with_completion(&session_id, first_input)
+        .await
+        .expect("initial steer prompt should be accepted");
+    assert!(outcome.is_accepted());
+
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("first apply should start");
+
+    live_boundary_cancel_calls.store(0, Ordering::SeqCst);
+    queued_boundary_cancel_calls.store(0, Ordering::SeqCst);
+
+    let steered_peer_input = Input::Peer(crate::input::PeerInput {
+        header: crate::input::InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::Peer {
+                peer_id: "explicit-steer-peer".into(),
+                display_identity: None,
+                runtime_id: None,
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(crate::input::PeerConvention::Message),
+        body: "explicit steer should not cancel the active run".into(),
+        payload: None,
+        blocks: None,
+        handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+    });
+
+    let result = adapter
+        .accept_input_with_completion(&session_id, steered_peer_input)
+        .await
+        .expect("running explicit steer should be accepted");
+    assert!(result.0.is_accepted());
+    assert_eq!(
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
+        0,
+        "running steer admission must not call the live boundary-cancel handle"
+    );
+    assert_eq!(
+        queued_boundary_cancel_calls.load(Ordering::SeqCst),
+        0,
+        "running steer admission must not enqueue a cancel-after-boundary effect"
+    );
+
+    allow_finish.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if apply_calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("steered peer input should still be processed after the active apply returns");
+    assert_eq!(live_boundary_cancel_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(queued_boundary_cancel_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_until_apply_finishes() {
     struct BlockingExecutor {
         apply_calls: Arc<AtomicUsize>,

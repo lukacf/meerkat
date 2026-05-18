@@ -38,6 +38,10 @@ mark_path() {
       mark_all
       return
       ;;
+    meerkat-machine-schema/*|meerkat-machine-kernels/*|meerkat-runtime/*|specs/machines/*|specs/compositions/*)
+      mark_all
+      return
+      ;;
     deny.toml)
       audit_changed=true
       ;;

@@ -3815,6 +3815,12 @@ impl MobRun {
             .into_iter()
             .map(FlowAuthorityInputRecord::from_machine_input)
             .collect::<Result<Vec<_>, _>>()?;
+        if records.is_empty() {
+            return Err(MobError::Internal(format!(
+                "run '{}' store mutation missing MobMachine authority input",
+                self.run_id
+            )));
+        }
         self.flow_authority_inputs.extend(records);
         Ok(())
     }

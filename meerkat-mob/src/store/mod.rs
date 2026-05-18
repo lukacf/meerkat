@@ -438,32 +438,12 @@ pub trait MobRunStore: Send + Sync {
         mob_id: &MobId,
         flow_id: Option<&FlowId>,
     ) -> Result<Vec<MobRun>, MobStoreError>;
-    async fn cas_run_status(
-        &self,
-        run_id: &RunId,
-        expected: MobRunStatus,
-        next: MobRunStatus,
-    ) -> Result<bool, MobStoreError>;
-    async fn cas_flow_state(
-        &self,
-        run_id: &RunId,
-        expected: &flow_run::State,
-        next: &flow_run::State,
-    ) -> Result<bool, MobStoreError>;
     async fn cas_flow_state_with_authority(
         &self,
         run_id: &RunId,
         expected: &flow_run::State,
         next: &flow_run::State,
         authority_inputs: Vec<mob_dsl::MobMachineInput>,
-    ) -> Result<bool, MobStoreError>;
-    async fn cas_run_snapshot(
-        &self,
-        run_id: &RunId,
-        expected_status: MobRunStatus,
-        expected_flow_state: &flow_run::State,
-        next_status: MobRunStatus,
-        next_flow_state: &flow_run::State,
     ) -> Result<bool, MobStoreError>;
     async fn cas_run_snapshot_with_authority(
         &self,

@@ -1195,90 +1195,6 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
-    async fn cas_run_status(
-        &self,
-        run_id: &RunId,
-        expected: MobRunStatus,
-        next: MobRunStatus,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT run_json FROM mob_runs WHERE run_id = ?1",
-                    params![key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(se)?;
-            let Some(bytes) = bytes else {
-                return Ok(false);
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.status != expected || run.status.is_terminal() {
-                return Ok(false);
-            }
-            let terminal = next.is_terminal();
-            run.status = next;
-            if terminal && run.completed_at.is_none() {
-                run.completed_at = Some(Utc::now());
-            }
-            let encoded = encode_json(&run)?;
-            tx.execute(
-                "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
-                params![encoded, key],
-            )
-            .map_err(se)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
-        .await
-    }
-
-    async fn cas_flow_state(
-        &self,
-        run_id: &RunId,
-        expected: &flow_run::State,
-        next: &flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let expected = expected.clone();
-        let next = next.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT run_json FROM mob_runs WHERE run_id = ?1",
-                    params![key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(se)?;
-            let Some(bytes) = bytes else {
-                return Ok(false);
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected {
-                return Ok(false);
-            }
-            run.flow_state = next;
-            let encoded = encode_json(&run)?;
-            tx.execute(
-                "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
-                params![encoded, key],
-            )
-            .map_err(se)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
-        .await
-    }
-
     async fn cas_flow_state_with_authority(
         &self,
         run_id: &RunId,
@@ -1300,57 +1216,6 @@ impl MobRunStore for SqliteMobRunStore {
                 Ok(true)
             },
         )
-        .await
-    }
-
-    async fn cas_run_snapshot(
-        &self,
-        run_id: &RunId,
-        expected_status: MobRunStatus,
-        expected_flow_state: &flow_run::State,
-        next_status: MobRunStatus,
-        next_flow_state: &flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let expected_flow_state = expected_flow_state.clone();
-        let next_flow_state = next_flow_state.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT run_json FROM mob_runs WHERE run_id = ?1",
-                    params![key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(se)?;
-            let Some(bytes) = bytes else {
-                return Ok(false);
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.status != expected_status
-                || run.status.is_terminal()
-                || run.flow_state != expected_flow_state
-            {
-                return Ok(false);
-            }
-            let terminal = next_status.is_terminal();
-            run.status = next_status;
-            run.flow_state = next_flow_state;
-            if terminal && run.completed_at.is_none() {
-                run.completed_at = Some(Utc::now());
-            }
-            let encoded = encode_json(&run)?;
-            tx.execute(
-                "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
-                params![encoded, key],
-            )
-            .map_err(se)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
         .await
     }
 
@@ -2808,6 +2673,24 @@ mod tests {
         }
     }
 
+    fn sample_run_store_authority_input(
+        run_id: &RunId,
+        command: mob_dsl::FlowRunReducerCommandKind,
+    ) -> mob_dsl::MobMachineInput {
+        mob_dsl::MobMachineInput::AuthorizeFlowRunReducerCommand {
+            run_id: mob_dsl::RunId::from(run_id.to_string()),
+            command,
+            step_id: None,
+            run_step_key: None,
+            step_status: None,
+            target_count: None,
+            frame_id: None,
+            node_id: None,
+            loop_instance_id: None,
+            retry_key: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_sqlite_event_store_append_poll_replay_prune() {
         let (_dir, path) = temp_db_path();
@@ -2992,23 +2875,46 @@ mod tests {
         let store = SqliteMobStores::open(&path).unwrap().run_store();
         let run = sample_run(MobRunStatus::Running);
         let run_id = run.run_id.clone();
+        let expected_flow_state = run.flow_state.clone();
 
         store.create_run(run).await.unwrap();
 
         let s1 = store.clone();
         let rid1 = run_id.clone();
+        let state1 = expected_flow_state.clone();
         let s2 = store.clone();
         let rid2 = run_id.clone();
+        let state2 = expected_flow_state.clone();
         let outcomes = join_all(vec![
             tokio::spawn(async move {
-                s1.cas_run_status(&rid1, MobRunStatus::Running, MobRunStatus::Completed)
-                    .await
-                    .unwrap()
+                s1.cas_run_snapshot_with_authority(
+                    &rid1,
+                    MobRunStatus::Running,
+                    &state1,
+                    MobRunStatus::Completed,
+                    &state1,
+                    vec![sample_run_store_authority_input(
+                        &rid1,
+                        mob_dsl::FlowRunReducerCommandKind::TerminalizeCompleted,
+                    )],
+                )
+                .await
+                .unwrap()
             }),
             tokio::spawn(async move {
-                s2.cas_run_status(&rid2, MobRunStatus::Running, MobRunStatus::Failed)
-                    .await
-                    .unwrap()
+                s2.cas_run_snapshot_with_authority(
+                    &rid2,
+                    MobRunStatus::Running,
+                    &state2,
+                    MobRunStatus::Failed,
+                    &state2,
+                    vec![sample_run_store_authority_input(
+                        &rid2,
+                        mob_dsl::FlowRunReducerCommandKind::TerminalizeFailed,
+                    )],
+                )
+                .await
+                .unwrap()
             }),
         ])
         .await;
@@ -3040,6 +2946,38 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_run_store_snapshot_rejects_missing_authority_without_mutation() {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path).unwrap().run_store();
+        let run = sample_run(MobRunStatus::Running);
+        let run_id = run.run_id.clone();
+        let expected_flow_state = run.flow_state.clone();
+        store.create_run(run).await.unwrap();
+
+        let error = store
+            .cas_run_snapshot_with_authority(
+                &run_id,
+                MobRunStatus::Running,
+                &expected_flow_state,
+                MobRunStatus::Completed,
+                &expected_flow_state,
+                Vec::new(),
+            )
+            .await
+            .expect_err("missing machine authority must reject snapshot CAS");
+        assert!(
+            error
+                .to_string()
+                .contains("store mutation missing MobMachine authority input")
+        );
+
+        let stored = store.get_run(&run_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, MobRunStatus::Running);
+        assert!(stored.completed_at.is_none());
+        assert!(stored.flow_authority_inputs.is_empty());
     }
 
     #[tokio::test]

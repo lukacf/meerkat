@@ -2049,7 +2049,6 @@ impl MobEventStore for FaultInjectedMobEventStore {
 struct RecordingRunStore {
     inner: InMemoryMobRunStore,
     fail_create_run_once: AtomicBool,
-    cas_history: RwLock<Vec<(RunId, MobRunStatus, MobRunStatus)>>,
     snapshot_cas_history: RwLock<Vec<(RunId, MobRunStatus, MobRunStatus)>>,
 }
 
@@ -2058,7 +2057,6 @@ impl RecordingRunStore {
         Self {
             inner: InMemoryMobRunStore::new(),
             fail_create_run_once: AtomicBool::new(false),
-            cas_history: RwLock::new(Vec::new()),
             snapshot_cas_history: RwLock::new(Vec::new()),
         }
     }
@@ -2093,52 +2091,6 @@ impl MobRunStore for RecordingRunStore {
         flow_id: Option<&crate::FlowId>,
     ) -> Result<Vec<MobRun>, MobStoreError> {
         self.inner.list_runs(mob_id, flow_id).await
-    }
-
-    async fn cas_run_status(
-        &self,
-        run_id: &RunId,
-        expected: MobRunStatus,
-        next: MobRunStatus,
-    ) -> Result<bool, MobStoreError> {
-        self.cas_history
-            .write()
-            .await
-            .push((run_id.clone(), expected.clone(), next.clone()));
-        self.inner.cas_run_status(run_id, expected, next).await
-    }
-
-    async fn cas_flow_state(
-        &self,
-        run_id: &RunId,
-        expected: &crate::run::flow_run::State,
-        next: &crate::run::flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        self.inner.cas_flow_state(run_id, expected, next).await
-    }
-
-    async fn cas_run_snapshot(
-        &self,
-        run_id: &RunId,
-        expected_status: MobRunStatus,
-        expected_flow_state: &crate::run::flow_run::State,
-        next_status: MobRunStatus,
-        next_flow_state: &crate::run::flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        self.snapshot_cas_history.write().await.push((
-            run_id.clone(),
-            expected_status.clone(),
-            next_status.clone(),
-        ));
-        self.inner
-            .cas_run_snapshot(
-                run_id,
-                expected_status,
-                expected_flow_state,
-                next_status,
-                next_flow_state,
-            )
-            .await
     }
 
     async fn append_step_entry(
@@ -21905,11 +21857,6 @@ async fn test_cancel_fallback_uses_direct_pending_to_terminal_cas_attempts() {
                 )
         }),
         "terminalization authority must use direct active->terminal snapshot CAS semantics"
-    );
-    let legacy_status_history = run_store.cas_history.read().await.clone();
-    assert!(
-        legacy_status_history.is_empty(),
-        "fallback terminalization should use snapshot CAS, not legacy status-only CAS"
     );
 }
 

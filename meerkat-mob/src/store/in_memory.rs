@@ -14,8 +14,8 @@ use crate::machines::mob_machine as mob_dsl;
 use crate::profile::Profile;
 use crate::run::flow_run;
 use crate::run::{
-    FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
-    MobRunStatus, StepLedgerEntry,
+    FailureLedgerEntry, FlowAuthorityInputRecord, FrameSnapshot, LoopIterationLedgerEntry,
+    LoopSnapshot, MobRun, MobRunStatus, StepLedgerEntry,
 };
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -34,6 +34,22 @@ fn append_flow_authority_inputs(
 ) -> Result<(), MobStoreError> {
     run.append_flow_authority_inputs(authority_inputs)
         .map_err(|error| MobStoreError::Internal(error.to_string()))
+}
+
+fn validate_flow_authority_inputs(
+    run_id: &RunId,
+    authority_inputs: &[mob_dsl::MobMachineInput],
+) -> Result<(), MobStoreError> {
+    if authority_inputs.is_empty() {
+        return Err(MobStoreError::Internal(format!(
+            "run '{run_id}' store mutation missing MobMachine authority input"
+        )));
+    }
+    for input in authority_inputs.iter().cloned() {
+        FlowAuthorityInputRecord::from_machine_input(input)
+            .map_err(|error| MobStoreError::Internal(error.to_string()))?;
+    }
+    Ok(())
 }
 
 /// In-memory event store for tests and ephemeral mobs.
@@ -369,44 +385,6 @@ impl MobRunStore for InMemoryMobRunStore {
             .collect())
     }
 
-    async fn cas_run_status(
-        &self,
-        run_id: &RunId,
-        expected: MobRunStatus,
-        next: MobRunStatus,
-    ) -> Result<bool, MobStoreError> {
-        let mut runs = self.runs.write().await;
-        let Some(run) = runs.get_mut(run_id) else {
-            return Ok(false);
-        };
-        if run.status != expected || run.status.is_terminal() {
-            return Ok(false);
-        }
-        let terminal = next.is_terminal();
-        run.status = next;
-        if terminal && run.completed_at.is_none() {
-            run.completed_at = Some(Utc::now());
-        }
-        Ok(true)
-    }
-
-    async fn cas_flow_state(
-        &self,
-        run_id: &RunId,
-        expected: &flow_run::State,
-        next: &flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let mut runs = self.runs.write().await;
-        let Some(run) = runs.get_mut(run_id) else {
-            return Ok(false);
-        };
-        if &run.flow_state != expected {
-            return Ok(false);
-        }
-        run.flow_state = next.clone();
-        Ok(true)
-    }
-
     async fn cas_flow_state_with_authority(
         &self,
         run_id: &RunId,
@@ -421,35 +399,9 @@ impl MobRunStore for InMemoryMobRunStore {
         if &run.flow_state != expected {
             return Ok(false);
         }
+        validate_flow_authority_inputs(run_id, &authority_inputs)?;
         run.flow_state = next.clone();
         append_flow_authority_inputs(run, authority_inputs)?;
-        Ok(true)
-    }
-
-    async fn cas_run_snapshot(
-        &self,
-        run_id: &RunId,
-        expected_status: MobRunStatus,
-        expected_flow_state: &flow_run::State,
-        next_status: MobRunStatus,
-        next_flow_state: &flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let mut runs = self.runs.write().await;
-        let Some(run) = runs.get_mut(run_id) else {
-            return Ok(false);
-        };
-        if run.status != expected_status
-            || run.status.is_terminal()
-            || &run.flow_state != expected_flow_state
-        {
-            return Ok(false);
-        }
-        let terminal = next_status.is_terminal();
-        run.status = next_status;
-        run.flow_state = next_flow_state.clone();
-        if terminal && run.completed_at.is_none() {
-            run.completed_at = Some(Utc::now());
-        }
         Ok(true)
     }
 
@@ -472,6 +424,7 @@ impl MobRunStore for InMemoryMobRunStore {
         {
             return Ok(false);
         }
+        validate_flow_authority_inputs(run_id, &authority_inputs)?;
         let terminal = next_status.is_terminal();
         run.status = next_status;
         run.flow_state = next_flow_state.clone();
@@ -618,11 +571,13 @@ impl MobRunStore for InMemoryMobRunStore {
         let current = run.frames.get(frame_id);
         match (expected, current) {
             (None, None) => {
+                validate_flow_authority_inputs(run_id, &authority_inputs)?;
                 run.frames.insert(frame_id.clone(), next);
                 append_flow_authority_inputs(run, authority_inputs)?;
                 Ok(true)
             }
             (Some(exp), Some(cur)) if exp == cur => {
+                validate_flow_authority_inputs(run_id, &authority_inputs)?;
                 run.frames.insert(frame_id.clone(), next);
                 append_flow_authority_inputs(run, authority_inputs)?;
                 Ok(true)
@@ -678,6 +633,7 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.frames.get(frame_id) != Some(expected_frame) {
             return Ok(false);
         }
+        validate_flow_authority_inputs(run_id, &authority_inputs)?;
         run.flow_state = next_run_state;
         run.frames.insert(frame_id.clone(), next_frame);
         append_flow_authority_inputs(run, authority_inputs)?;
@@ -750,6 +706,7 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.frames.get(frame_id) != Some(expected_frame) {
             return Ok(false);
         }
+        validate_flow_authority_inputs(run_id, &authority_inputs)?;
         run.frames.insert(frame_id.clone(), next_frame);
         match loop_context {
             None => {
@@ -839,6 +796,7 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.loops.contains_key(loop_instance_id) {
             return Ok(false);
         }
+        validate_flow_authority_inputs(run_id, &authority_inputs)?;
         run.flow_state = next_run_state;
         run.frames.insert(frame_id.clone(), next_frame);
         run.loops.insert(loop_instance_id.clone(), initial_loop);
@@ -891,6 +849,7 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.loops.get(loop_instance_id) != Some(expected_loop) {
             return Ok(false);
         }
+        validate_flow_authority_inputs(run_id, &authority_inputs)?;
         run.flow_state = next_run_state;
         run.loops.insert(loop_instance_id.clone(), next_loop);
         append_flow_authority_inputs(run, authority_inputs)?;
@@ -964,6 +923,7 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.frames.contains_key(frame_id) {
             return Ok(false);
         }
+        validate_flow_authority_inputs(run_id, &authority_inputs)?;
         run.flow_state = next_run_state;
         run.loops.insert(loop_instance_id.clone(), next_loop);
         run.frames.insert(frame_id.clone(), initial_frame);
@@ -1103,6 +1063,7 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.frames.get(frame_id) != Some(expected_frame) {
             return Ok(false);
         }
+        validate_flow_authority_inputs(run_id, &authority_inputs)?;
         run.flow_state = next_run_state;
         run.loops.insert(loop_instance_id.clone(), next_loop);
         run.frames.insert(frame_id.clone(), next_frame);
@@ -1349,6 +1310,24 @@ mod tests {
         }
     }
 
+    fn sample_run_store_authority_input(
+        run_id: &RunId,
+        command: mob_dsl::FlowRunReducerCommandKind,
+    ) -> mob_dsl::MobMachineInput {
+        mob_dsl::MobMachineInput::AuthorizeFlowRunReducerCommand {
+            run_id: mob_dsl::RunId::from(run_id.to_string()),
+            command,
+            step_id: None,
+            run_step_key: None,
+            step_status: None,
+            target_count: None,
+            frame_id: None,
+            node_id: None,
+            loop_instance_id: None,
+            retry_key: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_event_store_prune() {
         let store = InMemoryMobEventStore::new();
@@ -1407,14 +1386,26 @@ mod tests {
         let store = Arc::new(InMemoryMobRunStore::new());
         let run = sample_run(MobRunStatus::Running);
         let run_id = run.run_id.clone();
+        let expected_flow_state = run.flow_state.clone();
         store.create_run(run).await.unwrap();
 
         let tasks = (0..10).map(|_| {
             let store = Arc::clone(&store);
             let run_id = run_id.clone();
+            let expected_flow_state = expected_flow_state.clone();
             tokio::spawn(async move {
                 store
-                    .cas_run_status(&run_id, MobRunStatus::Running, MobRunStatus::Completed)
+                    .cas_run_snapshot_with_authority(
+                        &run_id,
+                        MobRunStatus::Running,
+                        &expected_flow_state,
+                        MobRunStatus::Completed,
+                        &expected_flow_state,
+                        vec![sample_run_store_authority_input(
+                            &run_id,
+                            mob_dsl::FlowRunReducerCommandKind::TerminalizeCompleted,
+                        )],
+                    )
                     .await
                     .unwrap()
             })
@@ -1430,6 +1421,37 @@ mod tests {
         let stored = store.get_run(&run_id).await.unwrap().unwrap();
         assert_eq!(stored.status, MobRunStatus::Completed);
         assert!(stored.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_run_store_snapshot_rejects_missing_authority_without_mutation() {
+        let store = InMemoryMobRunStore::new();
+        let run = sample_run(MobRunStatus::Running);
+        let run_id = run.run_id.clone();
+        let expected_flow_state = run.flow_state.clone();
+        store.create_run(run).await.unwrap();
+
+        let error = store
+            .cas_run_snapshot_with_authority(
+                &run_id,
+                MobRunStatus::Running,
+                &expected_flow_state,
+                MobRunStatus::Completed,
+                &expected_flow_state,
+                Vec::new(),
+            )
+            .await
+            .expect_err("missing machine authority must reject snapshot CAS");
+        assert!(
+            error
+                .to_string()
+                .contains("store mutation missing MobMachine authority input")
+        );
+
+        let stored = store.get_run(&run_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, MobRunStatus::Running);
+        assert!(stored.completed_at.is_none());
+        assert!(stored.flow_authority_inputs.is_empty());
     }
 
     #[tokio::test]

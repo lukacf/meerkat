@@ -54,6 +54,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `Release`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
+- `RestoreAuthoritySnapshotValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `RestoreAuthoritySnapshotExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `RestoreAuthoritySnapshotRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `RestoreAuthoritySnapshotReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `RestoreAuthoritySnapshotReleased`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
 - `AdmitOAuthBrowserFlowValid`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`

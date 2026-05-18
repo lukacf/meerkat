@@ -4104,64 +4104,6 @@ impl std::fmt::Display for RecoveredPeerResponseTerminalApplyIntent {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum RecoveredPolicyApplyMode {
-    #[default]
-    #[serde(rename = "StageRunStart")]
-    StageRunStart,
-    #[serde(rename = "StageRunBoundary")]
-    StageRunBoundary,
-    #[serde(rename = "InjectNow")]
-    InjectNow,
-    #[serde(rename = "Ignore")]
-    Ignore,
-}
-impl RecoveredPolicyApplyMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::StageRunStart => "StageRunStart",
-            Self::StageRunBoundary => "StageRunBoundary",
-            Self::InjectNow => "InjectNow",
-            Self::Ignore => "Ignore",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for RecoveredPolicyApplyMode {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "StageRunStart" => Ok(Self::StageRunStart),
-            "StageRunBoundary" => Ok(Self::StageRunBoundary),
-            "InjectNow" => Ok(Self::InjectNow),
-            "Ignore" => Ok(Self::Ignore),
-            other => Err(format!("invalid RecoveredPolicyApplyMode value `{other}`")),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for RecoveredPolicyApplyMode {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for RecoveredPolicyApplyMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
 pub enum RecoveredRoutingDisposition {
     #[default]
     #[serde(rename = "Queue")]
@@ -6609,7 +6551,6 @@ pub mod inputs {
     pub struct RecoverAdmittedInput {
         pub input_id: String,
         pub input_kind: RecoveredInputKind,
-        pub policy_apply_mode: RecoveredPolicyApplyMode,
         pub policy_routing_disposition: RecoveredRoutingDisposition,
         pub runtime_boundary: RecoveredRunApplyBoundary,
         pub runtime_execution_kind: RecoveredRuntimeExecutionKind,
@@ -6630,6 +6571,7 @@ pub mod inputs {
         pub run_id: Option<String>,
         pub boundary_sequence: Option<u64>,
         pub admission_sequence: Option<u64>,
+        pub admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>,
         pub lane: Option<InputLane>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

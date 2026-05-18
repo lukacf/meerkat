@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for AuthMachine.
 
-CONSTANTS BooleanValues, NatValues, SetOfStringValues, StringValues
+CONSTANTS AuthLifecyclePhaseValues, BooleanValues, NatValues, SetOfStringValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -154,6 +154,106 @@ Release ==
     /\ oauth_device_poll_ids' = {}
     /\ oauth_outstanding_flow_count' = 0
     /\ UNCHANGED << expires_at, last_refresh, refresh_attempt >>
+
+
+RestoreAuthoritySnapshotValid(lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count) ==
+    /\ phase = "Valid" \/ phase = "Expiring" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released"
+    /\ ((lifecycle_phase = "Valid") /\ arg_credential_present)
+    /\ phase' = "Valid"
+    /\ model_step_count' = model_step_count + 1
+    /\ expires_at' = arg_expires_at
+    /\ last_refresh' = arg_last_refresh
+    /\ refresh_attempt' = arg_refresh_attempt
+    /\ credential_present' = arg_credential_present
+    /\ oauth_browser_flow_ids' = arg_oauth_browser_flow_ids
+    /\ oauth_browser_flow_providers' = arg_oauth_browser_flow_providers
+    /\ oauth_browser_flow_redirect_uris' = arg_oauth_browser_flow_redirect_uris
+    /\ oauth_browser_flow_expires_at_millis' = arg_oauth_browser_flow_expires_at_millis
+    /\ oauth_device_flow_ids' = arg_oauth_device_flow_ids
+    /\ oauth_device_flow_providers' = arg_oauth_device_flow_providers
+    /\ oauth_device_flow_expires_at_millis' = arg_oauth_device_flow_expires_at_millis
+    /\ oauth_device_poll_ids' = arg_oauth_device_poll_ids
+    /\ oauth_outstanding_flow_count' = arg_oauth_outstanding_flow_count
+
+
+RestoreAuthoritySnapshotExpiring(lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count) ==
+    /\ phase = "Valid" \/ phase = "Expiring" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released"
+    /\ ((lifecycle_phase = "Expiring") /\ arg_credential_present)
+    /\ phase' = "Expiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ expires_at' = arg_expires_at
+    /\ last_refresh' = arg_last_refresh
+    /\ refresh_attempt' = arg_refresh_attempt
+    /\ credential_present' = arg_credential_present
+    /\ oauth_browser_flow_ids' = arg_oauth_browser_flow_ids
+    /\ oauth_browser_flow_providers' = arg_oauth_browser_flow_providers
+    /\ oauth_browser_flow_redirect_uris' = arg_oauth_browser_flow_redirect_uris
+    /\ oauth_browser_flow_expires_at_millis' = arg_oauth_browser_flow_expires_at_millis
+    /\ oauth_device_flow_ids' = arg_oauth_device_flow_ids
+    /\ oauth_device_flow_providers' = arg_oauth_device_flow_providers
+    /\ oauth_device_flow_expires_at_millis' = arg_oauth_device_flow_expires_at_millis
+    /\ oauth_device_poll_ids' = arg_oauth_device_poll_ids
+    /\ oauth_outstanding_flow_count' = arg_oauth_outstanding_flow_count
+
+
+RestoreAuthoritySnapshotRefreshing(lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count) ==
+    /\ phase = "Valid" \/ phase = "Expiring" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released"
+    /\ ((lifecycle_phase = "Refreshing") /\ arg_credential_present)
+    /\ phase' = "Refreshing"
+    /\ model_step_count' = model_step_count + 1
+    /\ expires_at' = arg_expires_at
+    /\ last_refresh' = arg_last_refresh
+    /\ refresh_attempt' = arg_refresh_attempt
+    /\ credential_present' = arg_credential_present
+    /\ oauth_browser_flow_ids' = arg_oauth_browser_flow_ids
+    /\ oauth_browser_flow_providers' = arg_oauth_browser_flow_providers
+    /\ oauth_browser_flow_redirect_uris' = arg_oauth_browser_flow_redirect_uris
+    /\ oauth_browser_flow_expires_at_millis' = arg_oauth_browser_flow_expires_at_millis
+    /\ oauth_device_flow_ids' = arg_oauth_device_flow_ids
+    /\ oauth_device_flow_providers' = arg_oauth_device_flow_providers
+    /\ oauth_device_flow_expires_at_millis' = arg_oauth_device_flow_expires_at_millis
+    /\ oauth_device_poll_ids' = arg_oauth_device_poll_ids
+    /\ oauth_outstanding_flow_count' = arg_oauth_outstanding_flow_count
+
+
+RestoreAuthoritySnapshotReauthRequired(lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count) ==
+    /\ phase = "Valid" \/ phase = "Expiring" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released"
+    /\ (lifecycle_phase = "ReauthRequired")
+    /\ phase' = "ReauthRequired"
+    /\ model_step_count' = model_step_count + 1
+    /\ expires_at' = arg_expires_at
+    /\ last_refresh' = arg_last_refresh
+    /\ refresh_attempt' = arg_refresh_attempt
+    /\ credential_present' = arg_credential_present
+    /\ oauth_browser_flow_ids' = arg_oauth_browser_flow_ids
+    /\ oauth_browser_flow_providers' = arg_oauth_browser_flow_providers
+    /\ oauth_browser_flow_redirect_uris' = arg_oauth_browser_flow_redirect_uris
+    /\ oauth_browser_flow_expires_at_millis' = arg_oauth_browser_flow_expires_at_millis
+    /\ oauth_device_flow_ids' = arg_oauth_device_flow_ids
+    /\ oauth_device_flow_providers' = arg_oauth_device_flow_providers
+    /\ oauth_device_flow_expires_at_millis' = arg_oauth_device_flow_expires_at_millis
+    /\ oauth_device_poll_ids' = arg_oauth_device_poll_ids
+    /\ oauth_outstanding_flow_count' = arg_oauth_outstanding_flow_count
+
+
+RestoreAuthoritySnapshotReleased(lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count) ==
+    /\ phase = "Valid" \/ phase = "Expiring" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released"
+    /\ ((lifecycle_phase = "Released") /\ (arg_credential_present = FALSE) /\ (arg_oauth_outstanding_flow_count = 0))
+    /\ phase' = "Released"
+    /\ model_step_count' = model_step_count + 1
+    /\ expires_at' = arg_expires_at
+    /\ last_refresh' = arg_last_refresh
+    /\ refresh_attempt' = arg_refresh_attempt
+    /\ credential_present' = arg_credential_present
+    /\ oauth_browser_flow_ids' = arg_oauth_browser_flow_ids
+    /\ oauth_browser_flow_providers' = arg_oauth_browser_flow_providers
+    /\ oauth_browser_flow_redirect_uris' = arg_oauth_browser_flow_redirect_uris
+    /\ oauth_browser_flow_expires_at_millis' = arg_oauth_browser_flow_expires_at_millis
+    /\ oauth_device_flow_ids' = arg_oauth_device_flow_ids
+    /\ oauth_device_flow_providers' = arg_oauth_device_flow_providers
+    /\ oauth_device_flow_expires_at_millis' = arg_oauth_device_flow_expires_at_millis
+    /\ oauth_device_poll_ids' = arg_oauth_device_poll_ids
+    /\ oauth_outstanding_flow_count' = arg_oauth_outstanding_flow_count
 
 
 AdmitOAuthBrowserFlowValid(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows) ==
@@ -677,6 +777,11 @@ Next ==
     \/ MarkReauthRequiredFromRefreshing
     \/ ClearCredentialLifecycle
     \/ Release
+    \/ \E lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_oauth_browser_flow_ids \in SetOfStringValues : \E arg_oauth_browser_flow_providers \in MapStringStringValues : \E arg_oauth_browser_flow_redirect_uris \in MapStringStringValues : \E arg_oauth_browser_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_flow_ids \in SetOfStringValues : \E arg_oauth_device_flow_providers \in MapStringStringValues : \E arg_oauth_device_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_poll_ids \in SetOfStringValues : \E arg_oauth_outstanding_flow_count \in 0..2 : RestoreAuthoritySnapshotValid(lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count)
+    \/ \E lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_oauth_browser_flow_ids \in SetOfStringValues : \E arg_oauth_browser_flow_providers \in MapStringStringValues : \E arg_oauth_browser_flow_redirect_uris \in MapStringStringValues : \E arg_oauth_browser_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_flow_ids \in SetOfStringValues : \E arg_oauth_device_flow_providers \in MapStringStringValues : \E arg_oauth_device_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_poll_ids \in SetOfStringValues : \E arg_oauth_outstanding_flow_count \in 0..2 : RestoreAuthoritySnapshotExpiring(lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count)
+    \/ \E lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_oauth_browser_flow_ids \in SetOfStringValues : \E arg_oauth_browser_flow_providers \in MapStringStringValues : \E arg_oauth_browser_flow_redirect_uris \in MapStringStringValues : \E arg_oauth_browser_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_flow_ids \in SetOfStringValues : \E arg_oauth_device_flow_providers \in MapStringStringValues : \E arg_oauth_device_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_poll_ids \in SetOfStringValues : \E arg_oauth_outstanding_flow_count \in 0..2 : RestoreAuthoritySnapshotRefreshing(lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count)
+    \/ \E lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_oauth_browser_flow_ids \in SetOfStringValues : \E arg_oauth_browser_flow_providers \in MapStringStringValues : \E arg_oauth_browser_flow_redirect_uris \in MapStringStringValues : \E arg_oauth_browser_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_flow_ids \in SetOfStringValues : \E arg_oauth_device_flow_providers \in MapStringStringValues : \E arg_oauth_device_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_poll_ids \in SetOfStringValues : \E arg_oauth_outstanding_flow_count \in 0..2 : RestoreAuthoritySnapshotReauthRequired(lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count)
+    \/ \E lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_oauth_browser_flow_ids \in SetOfStringValues : \E arg_oauth_browser_flow_providers \in MapStringStringValues : \E arg_oauth_browser_flow_redirect_uris \in MapStringStringValues : \E arg_oauth_browser_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_flow_ids \in SetOfStringValues : \E arg_oauth_device_flow_providers \in MapStringStringValues : \E arg_oauth_device_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_poll_ids \in SetOfStringValues : \E arg_oauth_outstanding_flow_count \in 0..2 : RestoreAuthoritySnapshotReleased(lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count)
     \/ \E flow_id \in StringValues : \E provider \in StringValues : \E redirect_uri \in StringValues : \E expires_at_millis \in 0..2 : \E max_outstanding_flows \in 0..2 : AdmitOAuthBrowserFlowValid(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows)
     \/ \E flow_id \in StringValues : \E provider \in StringValues : \E redirect_uri \in StringValues : \E expires_at_millis \in 0..2 : \E max_outstanding_flows \in 0..2 : AdmitOAuthBrowserFlowExpiring(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows)
     \/ \E flow_id \in StringValues : \E provider \in StringValues : \E redirect_uri \in StringValues : \E expires_at_millis \in 0..2 : \E max_outstanding_flows \in 0..2 : AdmitOAuthBrowserFlowRefreshing(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows)

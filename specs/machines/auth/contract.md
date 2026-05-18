@@ -31,6 +31,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MarkReauthRequired`
 - `ClearCredentialLifecycle`
 - `Release`
+- `RestoreAuthoritySnapshot`(lifecycle_phase: AuthLifecyclePhase, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, oauth_browser_flow_ids: Set<String>, oauth_browser_flow_providers: Map<String, String>, oauth_browser_flow_redirect_uris: Map<String, String>, oauth_browser_flow_expires_at_millis: Map<String, u64>, oauth_device_flow_ids: Set<String>, oauth_device_flow_providers: Map<String, String>, oauth_device_flow_expires_at_millis: Map<String, u64>, oauth_device_poll_ids: Set<String>, oauth_outstanding_flow_count: u64)
 - `AdmitOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64)
 - `VerifyOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
 - `ConsumeOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
@@ -120,6 +121,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `Release`
 - From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
 - On: `Release`()
+- Emits: `EmitLifecycleEvent`
+- To: `Released`
+
+### `RestoreAuthoritySnapshotValid`
+- From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
+- Guards:
+  - ``
+- Emits: `EmitLifecycleEvent`
+- To: `Valid`
+
+### `RestoreAuthoritySnapshotExpiring`
+- From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
+- Guards:
+  - ``
+- Emits: `EmitLifecycleEvent`
+- To: `Expiring`
+
+### `RestoreAuthoritySnapshotRefreshing`
+- From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
+- Guards:
+  - ``
+- Emits: `EmitLifecycleEvent`
+- To: `Refreshing`
+
+### `RestoreAuthoritySnapshotReauthRequired`
+- From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
+- Guards:
+  - ``
+- Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
+### `RestoreAuthoritySnapshotReleased`
+- From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
+- Guards:
+  - ``
 - Emits: `EmitLifecycleEvent`
 - To: `Released`
 

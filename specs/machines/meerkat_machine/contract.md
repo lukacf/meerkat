@@ -243,8 +243,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ServiceTurnCommitted`(run_id: RunId)
 - `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, terminal_outcome: TurnTerminalOutcome, terminal_cause_kind: TurnTerminalCauseKind, error: String)
 - `RunCancelled`(run_id: RunId)
-- `RecoverAdmittedInput`(input_id: String, input_kind: RecoveredInputKind, policy_apply_mode: RecoveredPolicyApplyMode, policy_routing_disposition: RecoveredRoutingDisposition, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, lane: InputLane)
-- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, lane: Option<InputLane>)
+- `RecoverAdmittedInput`(input_id: String, input_kind: RecoveredInputKind, policy_routing_disposition: RecoveredRoutingDisposition, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, lane: InputLane)
+- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>, lane: Option<InputLane>)
 - `QueueAccepted`(input_id: String)
 - `SteerAccepted`(input_id: String)
 - `ChangeLane`(input_id: String, new_lane: InputLane)
@@ -4480,6 +4480,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `run_matches_binding`
   - `terminal_cause_known`
+- Emits: `PostAdmissionSignal`
 - To: `Running`
 
 ### `RunCancelled`
@@ -4939,9 +4940,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverAdmittedInputIdle`
 - From: `Idle`
-- On: `RecoverAdmittedInput`(input_id, input_kind, policy_apply_mode, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- On: `RecoverAdmittedInput`(input_id, input_kind, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
 - Guards:
-  - `recovered_boundary_matches_policy`
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
   - `recovered_lane_matches_policy`
@@ -4949,9 +4949,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverAdmittedInputAttached`
 - From: `Attached`
-- On: `RecoverAdmittedInput`(input_id, input_kind, policy_apply_mode, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- On: `RecoverAdmittedInput`(input_id, input_kind, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
 - Guards:
-  - `recovered_boundary_matches_policy`
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
   - `recovered_lane_matches_policy`
@@ -4959,9 +4958,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverAdmittedInputRunning`
 - From: `Running`
-- On: `RecoverAdmittedInput`(input_id, input_kind, policy_apply_mode, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- On: `RecoverAdmittedInput`(input_id, input_kind, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
 - Guards:
-  - `recovered_boundary_matches_policy`
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
   - `recovered_lane_matches_policy`
@@ -4969,9 +4967,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverAdmittedInputRetired`
 - From: `Retired`
-- On: `RecoverAdmittedInput`(input_id, input_kind, policy_apply_mode, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- On: `RecoverAdmittedInput`(input_id, input_kind, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
 - Guards:
-  - `recovered_boundary_matches_policy`
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
   - `recovered_lane_matches_policy`
@@ -4979,9 +4976,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverAdmittedInputStopped`
 - From: `Stopped`
-- On: `RecoverAdmittedInput`(input_id, input_kind, policy_apply_mode, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- On: `RecoverAdmittedInput`(input_id, input_kind, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
 - Guards:
-  - `recovered_boundary_matches_policy`
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
   - `recovered_lane_matches_policy`
@@ -4989,55 +4985,60 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleIdle`
 - From: `Idle`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
   - `recovered_queued_order_has_witness`
+  - `recovered_order_recovery_matches_missing_sequence`
   - `recovered_terminal_payload_matches_phase`
 - Emits: `InputLifecycleNotice`
 - To: `Idle`
 
 ### `RecoverInputLifecycleAttached`
 - From: `Attached`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
   - `recovered_queued_order_has_witness`
+  - `recovered_order_recovery_matches_missing_sequence`
   - `recovered_terminal_payload_matches_phase`
 - Emits: `InputLifecycleNotice`
 - To: `Attached`
 
 ### `RecoverInputLifecycleRunning`
 - From: `Running`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
   - `recovered_queued_order_has_witness`
+  - `recovered_order_recovery_matches_missing_sequence`
   - `recovered_terminal_payload_matches_phase`
 - Emits: `InputLifecycleNotice`
 - To: `Running`
 
 ### `RecoverInputLifecycleRetired`
 - From: `Retired`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
   - `recovered_queued_order_has_witness`
+  - `recovered_order_recovery_matches_missing_sequence`
   - `recovered_terminal_payload_matches_phase`
 - Emits: `InputLifecycleNotice`
 - To: `Retired`
 
 ### `RecoverInputLifecycleStopped`
 - From: `Stopped`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
   - `recovered_queued_order_has_witness`
+  - `recovered_order_recovery_matches_missing_sequence`
   - `recovered_terminal_payload_matches_phase`
 - Emits: `InputLifecycleNotice`
 - To: `Stopped`

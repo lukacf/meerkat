@@ -118,8 +118,7 @@ else
   bad "Release workflow does not publish @rkat/web from a prebuilt package artifact"
 fi
 
-if ! grep -Fq 'BUILDBUDDY_ENDPOINT' .github/workflows/release.yml &&
-  awk '
+if awk '
     /^  build_binaries_buildbuddy:/ { in_job = 1; next }
     in_job && /^  [[:alnum:]_-]+:/ { in_job = 0 }
     in_job && /release-build-windows-x86/ { found = 1 }
@@ -131,13 +130,15 @@ else
   bad "Release workflow should build Linux/macOS/Windows assets on BuildBuddy for owner releases"
 fi
 
-if grep -Fq 'Use BuildBuddy Windows hosted executors' .github/workflows/release.yml &&
-  grep -Fq '/--remote_default_exec_properties=use-self-hosted-executors=true/d' .github/workflows/release.yml &&
+if grep -Fq 'Use BuildBuddy Windows release endpoint' .github/workflows/release.yml &&
+  grep -Fq 'BUILDBUDDY_ENDPOINT:' .github/workflows/release.yml &&
+  grep -Fq 'secrets.BUILDBUDDY_ENDPOINT' .github/workflows/release.yml &&
   grep -Fq -- '--remote_default_exec_properties=Pool=%s' .github/workflows/release.yml &&
-  grep -Fq '"use-self-hosted-executors": "true"' .github/workflows/release.yml; then
-  pass "Release workflow strips self-hosted Windows executor routing for recovery builds"
+  grep -Fq 'build:buildbuddy-windows-rbe --remote_default_exec_properties=use-self-hosted-executors=true' .bazelrc &&
+  grep -Fq '"use-self-hosted-executors": "true"' platforms/BUILD.bazel; then
+  pass "Release workflow routes Windows recovery builds to the private BuildBuddy endpoint"
 else
-  bad "Release workflow should strip self-hosted Windows executor routing before BuildBuddy Windows recovery builds"
+  bad "Release workflow should route Windows recovery builds to the private BuildBuddy endpoint"
 fi
 
 web_build_timeout="$(

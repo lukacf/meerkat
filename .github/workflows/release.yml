@@ -454,6 +454,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     env:
       BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+      BUILDBUDDY_ENDPOINT: ${{ matrix.target == 'x86_64-pc-windows-msvc' && secrets.BUILDBUDDY_ENDPOINT || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -484,23 +485,14 @@ jobs:
         with:
           profile: native
 
-      - name: Use BuildBuddy Windows hosted executors
+      - name: Use BuildBuddy Windows release endpoint
         if: ${{ matrix.target == 'x86_64-pc-windows-msvc' }}
         shell: bash
         env:
           BUILDBUDDY_EXECUTOR_POOL: ${{ vars.MEERKAT_BUILDBUDDY_EXECUTOR_POOL || 'meerkat-ci' }}
         run: |
           set -euo pipefail
-          sed -i '/--remote_default_exec_properties=use-self-hosted-executors=true/d' .bazelrc
           printf 'build:buildbuddy-windows-rbe --remote_default_exec_properties=Pool=%s\n' "${BUILDBUDDY_EXECUTOR_POOL}" >> .bazelrc
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("platforms/BUILD.bazel")
-          text = path.read_text(encoding="utf-8")
-          text = text.replace('        "use-self-hosted-executors": "true",\n', "")
-          path.write_text(text, encoding="utf-8")
-          PY
 
       - name: Build release binaries via BuildBuddy
         shell: bash

@@ -213,13 +213,28 @@ fn restore_input_from_oauth_membership(
     }
 }
 
+fn map_auth_machine_error(
+    err: auth_dsl::AuthMachineTransitionError,
+    context: &'static str,
+) -> DslTransitionError {
+    let reason = err.to_string();
+    match err {
+        auth_dsl::AuthMachineTransitionError::GuardRejected { .. } => {
+            DslTransitionError::guard_rejected(context, reason)
+        }
+        auth_dsl::AuthMachineTransitionError::NoMatchingTransition { .. } => {
+            DslTransitionError::no_matching(context, reason)
+        }
+    }
+}
+
 fn apply_restore_input(
     authority: &mut auth_dsl::AuthMachineAuthority,
     input: auth_dsl::AuthMachineInput,
     context: &'static str,
 ) -> Result<AuthLeasePhase, DslTransitionError> {
     auth_dsl::AuthMachineMutator::apply(authority, input)
-        .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
+        .map_err(|err| map_auth_machine_error(err, context))?;
     Ok(map_phase(authority.state().lifecycle_phase))
 }
 
@@ -448,7 +463,7 @@ impl RuntimeAuthLeaseHandle {
             };
             let from_phase = map_phase(entry.state().lifecycle_phase);
             auth_dsl::AuthMachineMutator::apply(entry, input)
-                .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
+                .map_err(|err| map_auth_machine_error(err, context))?;
             let to_phase = map_phase(entry.state().lifecycle_phase);
             (from_phase, to_phase)
         };
@@ -478,6 +493,53 @@ impl RuntimeAuthLeaseHandle {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    fn oauth_global_outstanding_flow_count(registry: &AuthLeaseRegistry) -> u64 {
+        registry
+            .authorities
+            .values()
+            .map(|authority| authority.state().oauth_outstanding_flow_count)
+            .fold(0u64, u64::saturating_add)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn attach_oauth_global_observation(
+        input: auth_dsl::AuthMachineInput,
+        observed_global_outstanding_flows: u64,
+    ) -> auth_dsl::AuthMachineInput {
+        match input {
+            auth_dsl::AuthMachineInput::AdmitOAuthBrowserFlow {
+                flow_id,
+                provider,
+                redirect_uri,
+                expires_at_millis,
+                max_outstanding_flows,
+                ..
+            } => auth_dsl::AuthMachineInput::AdmitOAuthBrowserFlow {
+                flow_id,
+                provider,
+                redirect_uri,
+                expires_at_millis,
+                max_outstanding_flows,
+                observed_global_outstanding_flows,
+            },
+            auth_dsl::AuthMachineInput::AdmitOAuthDeviceFlow {
+                flow_id,
+                provider,
+                expires_at_millis,
+                max_outstanding_flows,
+                ..
+            } => auth_dsl::AuthMachineInput::AdmitOAuthDeviceFlow {
+                flow_id,
+                provider,
+                expires_at_millis,
+                max_outstanding_flows,
+                observed_global_outstanding_flows,
+            },
+            other => other,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn apply_oauth_input(
         &self,
         target: &AuthBindingRef,
@@ -486,43 +548,22 @@ impl RuntimeAuthLeaseHandle {
         create_if_missing: bool,
     ) -> Result<(), DslTransitionError> {
         let lease_key = LeaseKey::from_auth_binding(target);
-        let action = Self::audit_action_for(&input);
         let mut guard = self
             .machines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((transition, max_outstanding_flows)) = match &input {
-            auth_dsl::AuthMachineInput::AdmitOAuthBrowserFlow {
-                max_outstanding_flows,
-                ..
-            } => Some(("AdmitOAuthBrowserFlow", *max_outstanding_flows)),
-            auth_dsl::AuthMachineInput::AdmitOAuthDeviceFlow {
-                max_outstanding_flows,
-                ..
-            } => Some(("AdmitOAuthDeviceFlow", *max_outstanding_flows)),
-            _ => None,
-        } {
-            let outstanding = guard
-                .authorities
-                .values()
-                .map(|authority| authority.state().oauth_outstanding_flow_count)
-                .fold(0u64, u64::saturating_add);
-            if outstanding >= max_outstanding_flows {
-                return Err(DslTransitionError::guard_rejected(
-                    context,
-                    format!(
-                        "transition {transition} guard oauth_global_capacity_available failed: {outstanding} outstanding OAuth flows >= {max_outstanding_flows} max"
-                    ),
-                ));
-            }
-        }
+        let input = Self::attach_oauth_global_observation(
+            input,
+            Self::oauth_global_outstanding_flow_count(&guard),
+        );
+        let action = Self::audit_action_for(&input);
         if create_if_missing && !guard.authorities.contains_key(&lease_key) {
             let mut authority = auth_dsl::AuthMachineAuthority::new();
             auth_dsl::AuthMachineMutator::apply(
                 &mut authority,
                 auth_dsl::AuthMachineInput::MarkReauthRequired,
             )
-            .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
+            .map_err(|err| map_auth_machine_error(err, context))?;
             guard.authorities.insert(lease_key.clone(), authority);
         }
         let (from_phase, to_phase) = {
@@ -537,7 +578,7 @@ impl RuntimeAuthLeaseHandle {
             };
             let from_phase = map_phase(entry.state().lifecycle_phase);
             auth_dsl::AuthMachineMutator::apply(entry, input)
-                .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
+                .map_err(|err| map_auth_machine_error(err, context))?;
             let to_phase = map_phase(entry.state().lifecycle_phase);
             (from_phase, to_phase)
         };
@@ -938,7 +979,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             }
             let from_phase = map_phase(entry.state().lifecycle_phase);
             auth_dsl::AuthMachineMutator::apply(entry, auth_dsl::AuthMachineInput::Release)
-                .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
+                .map_err(|err| map_auth_machine_error(err, context))?;
             let to_phase = map_phase(entry.state().lifecycle_phase);
             guard.generations.entry(lease_key.clone()).or_insert(0);
             guard.authorities.remove(lease_key);
@@ -981,7 +1022,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             let remove_after_accept = matches!(&input, auth_dsl::AuthMachineInput::Release);
             let from_phase = map_phase(entry.state().lifecycle_phase);
             auth_dsl::AuthMachineMutator::apply(entry, input.clone())
-                .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
+                .map_err(|err| map_auth_machine_error(err, context))?;
             let to_phase = map_phase(entry.state().lifecycle_phase);
             (input, remove_after_accept, from_phase, to_phase)
         };
@@ -1154,6 +1195,15 @@ mod tests {
             BindingId::parse(binding).expect("valid binding"),
             None,
         )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn auth_binding(realm: &str, binding: &str) -> AuthBindingRef {
+        AuthBindingRef {
+            realm: RealmId::parse(realm).expect("valid realm"),
+            binding: BindingId::parse(binding).expect("valid binding"),
+            profile: None,
+        }
     }
 
     #[test]
@@ -1403,6 +1453,57 @@ mod tests {
         assert_eq!(snap.expires_at, None);
         assert_eq!(snap.generation, acquired_transition.generation);
         assert_eq!(snap.credential_published_at_millis, None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn oauth_global_capacity_rejection_comes_from_generated_authority() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let first = auth_binding("dev", "oauth_a");
+        let second = auth_binding("dev", "oauth_b");
+
+        h.apply_oauth_input(
+            &first,
+            auth_dsl::AuthMachineInput::AdmitOAuthBrowserFlow {
+                flow_id: "first".to_string(),
+                provider: "provider".to_string(),
+                redirect_uri: "http://localhost/first".to_string(),
+                expires_at_millis: 1_900_000_000,
+                max_outstanding_flows: 1,
+                observed_global_outstanding_flows: u64::MAX,
+            },
+            "test_admit_oauth_browser_flow",
+            true,
+        )
+        .unwrap();
+
+        let err = h
+            .apply_oauth_input(
+                &second,
+                auth_dsl::AuthMachineInput::AdmitOAuthBrowserFlow {
+                    flow_id: "second".to_string(),
+                    provider: "provider".to_string(),
+                    redirect_uri: "http://localhost/second".to_string(),
+                    expires_at_millis: 1_900_000_000,
+                    max_outstanding_flows: 1,
+                    observed_global_outstanding_flows: 0,
+                },
+                "test_admit_oauth_browser_flow",
+                true,
+            )
+            .unwrap_err();
+
+        assert!(
+            err.is_guard_rejected(),
+            "expected generated guard rejection: {err:?}"
+        );
+        assert_eq!(err.context, "test_admit_oauth_browser_flow");
+        assert!(
+            err.reason.contains("AdmitOAuthBrowserFlow"),
+            "guard rejection should come from the generated AuthMachine transition: {err:?}"
+        );
+        assert!(h.has_oauth_browser_flow_for_test(&first, "first"));
+        assert!(!h.has_oauth_browser_flow_for_test(&second, "second"));
     }
 
     #[test]

@@ -52,6 +52,22 @@ fn auth_machine_declares_oauth_flow_lifecycle_inputs() {
             .field_named("flow_id")
             .unwrap_or_else(|_| panic!("`{input}` must carry flow_id"));
     }
+    for input in ["AdmitOAuthBrowserFlow", "AdmitOAuthDeviceFlow"] {
+        let variant = schema
+            .inputs
+            .variant_named(input)
+            .unwrap_or_else(|_| panic!("AuthMachine must declare input `{input}`"));
+        assert_eq!(
+            variant
+                .field_named("observed_global_outstanding_flows")
+                .unwrap_or_else(|_| {
+                    panic!("`{input}` must carry typed global OAuth capacity observation")
+                })
+                .ty,
+            TypeRef::U64,
+            "`{input}` should carry global capacity observation as u64"
+        );
+    }
 }
 
 #[test]
@@ -76,6 +92,25 @@ fn auth_machine_routes_oauth_flow_lifecycle_transitions() {
                 .iter()
                 .any(|transition| transition.name.as_str().starts_with(transition_prefix)),
             "AuthMachine must route OAuth lifecycle transition `{transition_prefix}`"
+        );
+    }
+}
+
+#[test]
+fn auth_machine_oauth_admission_has_generated_global_capacity_guard() {
+    let schema = dsl_auth_machine();
+    for transition in schema.transitions.iter().filter(|transition| {
+        ["AdmitOAuthBrowserFlow", "AdmitOAuthDeviceFlow"]
+            .iter()
+            .any(|prefix| transition.name.as_str().starts_with(prefix))
+    }) {
+        assert!(
+            transition
+                .guards
+                .iter()
+                .any(|guard| guard.name == "oauth_global_capacity_available"),
+            "{} must guard global OAuth capacity in generated authority",
+            transition.name
         );
     }
 }

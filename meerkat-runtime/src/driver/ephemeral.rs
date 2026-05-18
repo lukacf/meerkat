@@ -1458,7 +1458,7 @@ impl EphemeralRuntimeDriver {
             let silent_intent_overrides = authority.state().silent_intent_overrides.clone();
             *authority = recover_ingress_dsl_authority(
                 crate::meerkat_machine::dsl_authority::project_state(
-                    &session_id.unwrap_or_else(SessionId::new),
+                    &session_id.unwrap_or_default(),
                     next_phase,
                     Some(&self.runtime_id),
                     current_run_id.as_ref(),

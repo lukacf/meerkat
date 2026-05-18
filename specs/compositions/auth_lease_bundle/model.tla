@@ -580,7 +580,7 @@ auth_machine_RestoreAuthoritySnapshotReleased(arg_lifecycle_phase, arg_expires_a
        /\ model_step_count' = model_step_count + 1
 
 
-auth_machine_AdmitOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows) ==
+auth_machine_AdmitOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
        /\ packet.variant = "AdmitOAuthBrowserFlow"
@@ -589,10 +589,12 @@ auth_machine_AdmitOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_
        /\ packet.payload.redirect_uri = arg_redirect_uri
        /\ packet.payload.expires_at_millis = arg_expires_at_millis
        /\ packet.payload.max_outstanding_flows = arg_max_outstanding_flows
+       /\ packet.payload.observed_global_outstanding_flows = arg_observed_global_outstanding_flows
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Valid"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE)
        /\ (auth_machine_oauth_outstanding_flow_count < packet.payload.max_outstanding_flows)
+       /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
        /\ auth_machine_phase' = "Valid"
        /\ auth_machine_oauth_browser_flow_ids' = (auth_machine_oauth_browser_flow_ids \cup {packet.payload.flow_id})
        /\ auth_machine_oauth_browser_flow_providers' = MapSet(auth_machine_oauth_browser_flow_providers, packet.payload.flow_id, packet.payload.provider)
@@ -610,7 +612,7 @@ auth_machine_AdmitOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_
        /\ model_step_count' = model_step_count + 1
 
 
-auth_machine_AdmitOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows) ==
+auth_machine_AdmitOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
        /\ packet.variant = "AdmitOAuthBrowserFlow"
@@ -619,10 +621,12 @@ auth_machine_AdmitOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redire
        /\ packet.payload.redirect_uri = arg_redirect_uri
        /\ packet.payload.expires_at_millis = arg_expires_at_millis
        /\ packet.payload.max_outstanding_flows = arg_max_outstanding_flows
+       /\ packet.payload.observed_global_outstanding_flows = arg_observed_global_outstanding_flows
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Expiring"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE)
        /\ (auth_machine_oauth_outstanding_flow_count < packet.payload.max_outstanding_flows)
+       /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
        /\ auth_machine_phase' = "Expiring"
        /\ auth_machine_oauth_browser_flow_ids' = (auth_machine_oauth_browser_flow_ids \cup {packet.payload.flow_id})
        /\ auth_machine_oauth_browser_flow_providers' = MapSet(auth_machine_oauth_browser_flow_providers, packet.payload.flow_id, packet.payload.provider)
@@ -640,7 +644,7 @@ auth_machine_AdmitOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redire
        /\ model_step_count' = model_step_count + 1
 
 
-auth_machine_AdmitOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows) ==
+auth_machine_AdmitOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
        /\ packet.variant = "AdmitOAuthBrowserFlow"
@@ -649,10 +653,12 @@ auth_machine_AdmitOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redi
        /\ packet.payload.redirect_uri = arg_redirect_uri
        /\ packet.payload.expires_at_millis = arg_expires_at_millis
        /\ packet.payload.max_outstanding_flows = arg_max_outstanding_flows
+       /\ packet.payload.observed_global_outstanding_flows = arg_observed_global_outstanding_flows
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Refreshing"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE)
        /\ (auth_machine_oauth_outstanding_flow_count < packet.payload.max_outstanding_flows)
+       /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
        /\ auth_machine_phase' = "Refreshing"
        /\ auth_machine_oauth_browser_flow_ids' = (auth_machine_oauth_browser_flow_ids \cup {packet.payload.flow_id})
        /\ auth_machine_oauth_browser_flow_providers' = MapSet(auth_machine_oauth_browser_flow_providers, packet.payload.flow_id, packet.payload.provider)
@@ -670,7 +676,7 @@ auth_machine_AdmitOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redi
        /\ model_step_count' = model_step_count + 1
 
 
-auth_machine_AdmitOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows) ==
+auth_machine_AdmitOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
        /\ packet.variant = "AdmitOAuthBrowserFlow"
@@ -679,10 +685,12 @@ auth_machine_AdmitOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_
        /\ packet.payload.redirect_uri = arg_redirect_uri
        /\ packet.payload.expires_at_millis = arg_expires_at_millis
        /\ packet.payload.max_outstanding_flows = arg_max_outstanding_flows
+       /\ packet.payload.observed_global_outstanding_flows = arg_observed_global_outstanding_flows
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "ReauthRequired"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE)
        /\ (auth_machine_oauth_outstanding_flow_count < packet.payload.max_outstanding_flows)
+       /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_oauth_browser_flow_ids' = (auth_machine_oauth_browser_flow_ids \cup {packet.payload.flow_id})
        /\ auth_machine_oauth_browser_flow_providers' = MapSet(auth_machine_oauth_browser_flow_providers, packet.payload.flow_id, packet.payload.provider)
@@ -1028,7 +1036,7 @@ auth_machine_ExpireOAuthBrowserFlowReauthRequired(arg_flow_id) ==
        /\ model_step_count' = model_step_count + 1
 
 
-auth_machine_AdmitOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows) ==
+auth_machine_AdmitOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
        /\ packet.variant = "AdmitOAuthDeviceFlow"
@@ -1036,10 +1044,12 @@ auth_machine_AdmitOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_at
        /\ packet.payload.provider = arg_provider
        /\ packet.payload.expires_at_millis = arg_expires_at_millis
        /\ packet.payload.max_outstanding_flows = arg_max_outstanding_flows
+       /\ packet.payload.observed_global_outstanding_flows = arg_observed_global_outstanding_flows
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Valid"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE)
        /\ (auth_machine_oauth_outstanding_flow_count < packet.payload.max_outstanding_flows)
+       /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
        /\ auth_machine_phase' = "Valid"
        /\ auth_machine_oauth_device_flow_ids' = (auth_machine_oauth_device_flow_ids \cup {packet.payload.flow_id})
        /\ auth_machine_oauth_device_flow_providers' = MapSet(auth_machine_oauth_device_flow_providers, packet.payload.flow_id, packet.payload.provider)
@@ -1057,7 +1067,7 @@ auth_machine_AdmitOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_at
        /\ model_step_count' = model_step_count + 1
 
 
-auth_machine_AdmitOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows) ==
+auth_machine_AdmitOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
        /\ packet.variant = "AdmitOAuthDeviceFlow"
@@ -1065,10 +1075,12 @@ auth_machine_AdmitOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires
        /\ packet.payload.provider = arg_provider
        /\ packet.payload.expires_at_millis = arg_expires_at_millis
        /\ packet.payload.max_outstanding_flows = arg_max_outstanding_flows
+       /\ packet.payload.observed_global_outstanding_flows = arg_observed_global_outstanding_flows
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Expiring"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE)
        /\ (auth_machine_oauth_outstanding_flow_count < packet.payload.max_outstanding_flows)
+       /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
        /\ auth_machine_phase' = "Expiring"
        /\ auth_machine_oauth_device_flow_ids' = (auth_machine_oauth_device_flow_ids \cup {packet.payload.flow_id})
        /\ auth_machine_oauth_device_flow_providers' = MapSet(auth_machine_oauth_device_flow_providers, packet.payload.flow_id, packet.payload.provider)
@@ -1086,7 +1098,7 @@ auth_machine_AdmitOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires
        /\ model_step_count' = model_step_count + 1
 
 
-auth_machine_AdmitOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows) ==
+auth_machine_AdmitOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
        /\ packet.variant = "AdmitOAuthDeviceFlow"
@@ -1094,10 +1106,12 @@ auth_machine_AdmitOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_expir
        /\ packet.payload.provider = arg_provider
        /\ packet.payload.expires_at_millis = arg_expires_at_millis
        /\ packet.payload.max_outstanding_flows = arg_max_outstanding_flows
+       /\ packet.payload.observed_global_outstanding_flows = arg_observed_global_outstanding_flows
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Refreshing"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE)
        /\ (auth_machine_oauth_outstanding_flow_count < packet.payload.max_outstanding_flows)
+       /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
        /\ auth_machine_phase' = "Refreshing"
        /\ auth_machine_oauth_device_flow_ids' = (auth_machine_oauth_device_flow_ids \cup {packet.payload.flow_id})
        /\ auth_machine_oauth_device_flow_providers' = MapSet(auth_machine_oauth_device_flow_providers, packet.payload.flow_id, packet.payload.provider)
@@ -1115,7 +1129,7 @@ auth_machine_AdmitOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_expir
        /\ model_step_count' = model_step_count + 1
 
 
-auth_machine_AdmitOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows) ==
+auth_machine_AdmitOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
        /\ packet.variant = "AdmitOAuthDeviceFlow"
@@ -1123,10 +1137,12 @@ auth_machine_AdmitOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_e
        /\ packet.payload.provider = arg_provider
        /\ packet.payload.expires_at_millis = arg_expires_at_millis
        /\ packet.payload.max_outstanding_flows = arg_max_outstanding_flows
+       /\ packet.payload.observed_global_outstanding_flows = arg_observed_global_outstanding_flows
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "ReauthRequired"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE)
        /\ (auth_machine_oauth_outstanding_flow_count < packet.payload.max_outstanding_flows)
+       /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_oauth_device_flow_ids' = (auth_machine_oauth_device_flow_ids \cup {packet.payload.flow_id})
        /\ auth_machine_oauth_device_flow_providers' = MapSet(auth_machine_oauth_device_flow_providers, packet.payload.flow_id, packet.payload.provider)
@@ -1680,10 +1696,10 @@ CoreNext ==
     \/ \E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_oauth_browser_flow_ids \in SetOfStringValues : \E arg_oauth_browser_flow_providers \in MapStringStringValues : \E arg_oauth_browser_flow_redirect_uris \in MapStringStringValues : \E arg_oauth_browser_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_flow_ids \in SetOfStringValues : \E arg_oauth_device_flow_providers \in MapStringStringValues : \E arg_oauth_device_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_poll_ids \in SetOfStringValues : \E arg_oauth_outstanding_flow_count \in 0..2 : auth_machine_RestoreAuthoritySnapshotRefreshing(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count)
     \/ \E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_oauth_browser_flow_ids \in SetOfStringValues : \E arg_oauth_browser_flow_providers \in MapStringStringValues : \E arg_oauth_browser_flow_redirect_uris \in MapStringStringValues : \E arg_oauth_browser_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_flow_ids \in SetOfStringValues : \E arg_oauth_device_flow_providers \in MapStringStringValues : \E arg_oauth_device_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_poll_ids \in SetOfStringValues : \E arg_oauth_outstanding_flow_count \in 0..2 : auth_machine_RestoreAuthoritySnapshotReauthRequired(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count)
     \/ \E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_oauth_browser_flow_ids \in SetOfStringValues : \E arg_oauth_browser_flow_providers \in MapStringStringValues : \E arg_oauth_browser_flow_redirect_uris \in MapStringStringValues : \E arg_oauth_browser_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_flow_ids \in SetOfStringValues : \E arg_oauth_device_flow_providers \in MapStringStringValues : \E arg_oauth_device_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_poll_ids \in SetOfStringValues : \E arg_oauth_outstanding_flow_count \in 0..2 : auth_machine_RestoreAuthoritySnapshotReleased(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count)
-    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows)
-    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows)
-    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows)
-    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis)
@@ -1696,10 +1712,10 @@ CoreNext ==
     \/ \E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowExpiring(arg_flow_id)
     \/ \E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowRefreshing(arg_flow_id)
     \/ \E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowReauthRequired(arg_flow_id)
-    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows)
-    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows)
-    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows)
-    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_now_millis)
@@ -1765,10 +1781,10 @@ WitnessFairness_auth_lease_lifecycle_publication_round_trip_1 ==
     /\ WF_vars(\E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_oauth_browser_flow_ids \in SetOfStringValues : \E arg_oauth_browser_flow_providers \in MapStringStringValues : \E arg_oauth_browser_flow_redirect_uris \in MapStringStringValues : \E arg_oauth_browser_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_flow_ids \in SetOfStringValues : \E arg_oauth_device_flow_providers \in MapStringStringValues : \E arg_oauth_device_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_poll_ids \in SetOfStringValues : \E arg_oauth_outstanding_flow_count \in 0..2 : auth_machine_RestoreAuthoritySnapshotRefreshing(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count))
     /\ WF_vars(\E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_oauth_browser_flow_ids \in SetOfStringValues : \E arg_oauth_browser_flow_providers \in MapStringStringValues : \E arg_oauth_browser_flow_redirect_uris \in MapStringStringValues : \E arg_oauth_browser_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_flow_ids \in SetOfStringValues : \E arg_oauth_device_flow_providers \in MapStringStringValues : \E arg_oauth_device_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_poll_ids \in SetOfStringValues : \E arg_oauth_outstanding_flow_count \in 0..2 : auth_machine_RestoreAuthoritySnapshotReauthRequired(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count))
     /\ WF_vars(\E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_oauth_browser_flow_ids \in SetOfStringValues : \E arg_oauth_browser_flow_providers \in MapStringStringValues : \E arg_oauth_browser_flow_redirect_uris \in MapStringStringValues : \E arg_oauth_browser_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_flow_ids \in SetOfStringValues : \E arg_oauth_device_flow_providers \in MapStringStringValues : \E arg_oauth_device_flow_expires_at_millis \in MapStringU64Values : \E arg_oauth_device_poll_ids \in SetOfStringValues : \E arg_oauth_outstanding_flow_count \in 0..2 : auth_machine_RestoreAuthoritySnapshotReleased(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_oauth_browser_flow_ids, arg_oauth_browser_flow_providers, arg_oauth_browser_flow_redirect_uris, arg_oauth_browser_flow_expires_at_millis, arg_oauth_device_flow_ids, arg_oauth_device_flow_providers, arg_oauth_device_flow_expires_at_millis, arg_oauth_device_poll_ids, arg_oauth_outstanding_flow_count))
-    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows))
-    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows))
-    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows))
-    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis))
@@ -1783,10 +1799,10 @@ WitnessFairness_auth_lease_lifecycle_publication_round_trip_2 ==
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowExpiring(arg_flow_id))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowRefreshing(arg_flow_id))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowReauthRequired(arg_flow_id))
-    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows))
-    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows))
-    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows))
-    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_now_millis))

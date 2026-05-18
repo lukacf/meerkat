@@ -162,6 +162,7 @@ pub mod inputs {
         pub redirect_uri: String,
         pub expires_at_millis: u64,
         pub max_outstanding_flows: u64,
+        pub observed_global_outstanding_flows: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct VerifyOAuthBrowserFlow {
@@ -187,6 +188,7 @@ pub mod inputs {
         pub provider: String,
         pub expires_at_millis: u64,
         pub max_outstanding_flows: u64,
+        pub observed_global_outstanding_flows: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct VerifyOAuthDeviceFlow {

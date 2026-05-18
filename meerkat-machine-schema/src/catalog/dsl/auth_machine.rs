@@ -100,11 +100,24 @@ macro_rules! auth_catalog_machine_dsl {
                     oauth_device_poll_ids: Set<String>,
                     oauth_outstanding_flow_count: u64,
                 },
-                AdmitOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64 },
+                AdmitOAuthBrowserFlow {
+                    flow_id: String,
+                    provider: String,
+                    redirect_uri: String,
+                    expires_at_millis: u64,
+                    max_outstanding_flows: u64,
+                    observed_global_outstanding_flows: u64,
+                },
                 VerifyOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, now_millis: u64 },
                 ConsumeOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, now_millis: u64 },
                 ExpireOAuthBrowserFlow { flow_id: String },
-                AdmitOAuthDeviceFlow { flow_id: String, provider: String, expires_at_millis: u64, max_outstanding_flows: u64 },
+                AdmitOAuthDeviceFlow {
+                    flow_id: String,
+                    provider: String,
+                    expires_at_millis: u64,
+                    max_outstanding_flows: u64,
+                    observed_global_outstanding_flows: u64,
+                },
                 VerifyOAuthDeviceFlow { flow_id: String, provider: String, now_millis: u64 },
                 BeginOAuthDevicePoll { flow_id: String, provider: String, now_millis: u64 },
                 FinishOAuthDevicePoll { flow_id: String },
@@ -431,9 +444,10 @@ macro_rules! auth_catalog_machine_dsl {
             // credential-valid lease.
             transition AdmitOAuthBrowserFlow {
                 per_phase [Valid, Expiring, Refreshing, ReauthRequired]
-                on input AdmitOAuthBrowserFlow { flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows }
+                on input AdmitOAuthBrowserFlow { flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows }
                 guard "browser_flow_absent" { self.oauth_browser_flow_ids.contains(flow_id) == false }
                 guard "oauth_capacity_available" { self.oauth_outstanding_flow_count < max_outstanding_flows }
+                guard "oauth_global_capacity_available" { observed_global_outstanding_flows < max_outstanding_flows }
                 update {
                     self.oauth_browser_flow_ids.insert(flow_id);
                     self.oauth_browser_flow_providers.insert(flow_id, provider);
@@ -492,9 +506,10 @@ macro_rules! auth_catalog_machine_dsl {
 
             transition AdmitOAuthDeviceFlow {
                 per_phase [Valid, Expiring, Refreshing, ReauthRequired]
-                on input AdmitOAuthDeviceFlow { flow_id, provider, expires_at_millis, max_outstanding_flows }
+                on input AdmitOAuthDeviceFlow { flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows }
                 guard "device_flow_absent" { self.oauth_device_flow_ids.contains(flow_id) == false }
                 guard "oauth_capacity_available" { self.oauth_outstanding_flow_count < max_outstanding_flows }
+                guard "oauth_global_capacity_available" { observed_global_outstanding_flows < max_outstanding_flows }
                 update {
                     self.oauth_device_flow_ids.insert(flow_id);
                     self.oauth_device_flow_providers.insert(flow_id, provider);

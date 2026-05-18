@@ -32,11 +32,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClearCredentialLifecycle`
 - `Release`
 - `RestoreAuthoritySnapshot`(lifecycle_phase: AuthLifecyclePhase, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, oauth_browser_flow_ids: Set<String>, oauth_browser_flow_providers: Map<String, String>, oauth_browser_flow_redirect_uris: Map<String, String>, oauth_browser_flow_expires_at_millis: Map<String, u64>, oauth_device_flow_ids: Set<String>, oauth_device_flow_providers: Map<String, String>, oauth_device_flow_expires_at_millis: Map<String, u64>, oauth_device_poll_ids: Set<String>, oauth_outstanding_flow_count: u64)
-- `AdmitOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64)
+- `AdmitOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64, observed_global_outstanding_flows: u64)
 - `VerifyOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
 - `ConsumeOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
 - `ExpireOAuthBrowserFlow`(flow_id: String)
-- `AdmitOAuthDeviceFlow`(flow_id: String, provider: String, expires_at_millis: u64, max_outstanding_flows: u64)
+- `AdmitOAuthDeviceFlow`(flow_id: String, provider: String, expires_at_millis: u64, max_outstanding_flows: u64, observed_global_outstanding_flows: u64)
 - `VerifyOAuthDeviceFlow`(flow_id: String, provider: String, now_millis: u64)
 - `BeginOAuthDevicePoll`(flow_id: String, provider: String, now_millis: u64)
 - `FinishOAuthDevicePoll`(flow_id: String)
@@ -166,37 +166,41 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdmitOAuthBrowserFlowValid`
 - From: `Valid`
-- On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows)
+- On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
   - `browser_flow_absent`
   - `oauth_capacity_available`
+  - `oauth_global_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
 ### `AdmitOAuthBrowserFlowExpiring`
 - From: `Expiring`
-- On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows)
+- On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
   - `browser_flow_absent`
   - `oauth_capacity_available`
+  - `oauth_global_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
 
 ### `AdmitOAuthBrowserFlowRefreshing`
 - From: `Refreshing`
-- On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows)
+- On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
   - `browser_flow_absent`
   - `oauth_capacity_available`
+  - `oauth_global_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `Refreshing`
 
 ### `AdmitOAuthBrowserFlowReauthRequired`
 - From: `ReauthRequired`
-- On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows)
+- On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
   - `browser_flow_absent`
   - `oauth_capacity_available`
+  - `oauth_global_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 
@@ -322,37 +326,41 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdmitOAuthDeviceFlowValid`
 - From: `Valid`
-- On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows)
+- On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
   - `device_flow_absent`
   - `oauth_capacity_available`
+  - `oauth_global_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
 ### `AdmitOAuthDeviceFlowExpiring`
 - From: `Expiring`
-- On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows)
+- On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
   - `device_flow_absent`
   - `oauth_capacity_available`
+  - `oauth_global_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
 
 ### `AdmitOAuthDeviceFlowRefreshing`
 - From: `Refreshing`
-- On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows)
+- On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
   - `device_flow_absent`
   - `oauth_capacity_available`
+  - `oauth_global_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `Refreshing`
 
 ### `AdmitOAuthDeviceFlowReauthRequired`
 - From: `ReauthRequired`
-- On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows)
+- On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
   - `device_flow_absent`
   - `oauth_capacity_available`
+  - `oauth_global_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 

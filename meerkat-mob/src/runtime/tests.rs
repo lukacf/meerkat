@@ -3991,6 +3991,18 @@ async fn seed_test_run_in_mob_machine(handle: &MobHandle, run_id: &RunId) {
         .expect("seed run in MobMachine");
 }
 
+fn authority_backed_empty_test_run(mob_id: &str, flow_id: &str) -> MobRun {
+    MobRun::authority_backed_for_steps(
+        crate::ids::RunId::new(),
+        crate::ids::MobId::from(mob_id),
+        FlowId::from(flow_id),
+        std::iter::empty::<crate::ids::StepId>(),
+        MobRunStatus::Pending,
+        serde_json::json!({}),
+    )
+    .expect("authority-backed empty flow run")
+}
+
 async fn seed_test_loop_in_mob_machine(
     handle: &MobHandle,
     loop_instance_id: &crate::ids::LoopInstanceId,
@@ -21053,12 +21065,7 @@ async fn test_flow_frame_store_plan_persists_authority_input_with_projection() {
     use crate::runtime::flow_frame_engine::{FlowFrameKernel, FlowFrameMutator};
 
     let store = Arc::new(InMemoryMobRunStore::new());
-    let run = MobRun::pending(
-        crate::ids::MobId::from("test-mob"),
-        FlowId::from("test-flow"),
-        crate::run::flow_run::initial_state(),
-        serde_json::json!({}),
-    );
+    let run = authority_backed_empty_test_run("test-mob", "test-flow");
     let run_id = run.run_id.clone();
     store.create_run(run).await.expect("create run");
 
@@ -21108,12 +21115,7 @@ async fn test_flow_frame_store_plan_persists_authority_input_with_projection() {
 #[tokio::test]
 async fn test_flow_run_start_and_completion_persist_authority_inputs_with_projection() {
     let store = Arc::new(InMemoryMobRunStore::new());
-    let run = MobRun::pending(
-        crate::ids::MobId::from("test-mob"),
-        FlowId::from("test-flow"),
-        crate::run::flow_run::initial_state(),
-        serde_json::json!({}),
-    );
+    let run = authority_backed_empty_test_run("test-mob", "test-flow");
     let run_id = run.run_id.clone();
     store.create_run(run).await.expect("create run");
 
@@ -21172,31 +21174,13 @@ async fn test_flow_run_start_and_completion_persist_authority_inputs_with_projec
 #[tokio::test]
 async fn test_recovery_rejects_flow_authority_log_projection_divergence() {
     let store = Arc::new(InMemoryMobRunStore::new());
-    let mut run = MobRun::pending(
-        crate::ids::MobId::from("test-mob"),
-        FlowId::from("test-flow"),
-        crate::run::flow_run::initial_state(),
-        serde_json::json!({}),
-    );
+    let run = authority_backed_empty_test_run("test-mob", "test-flow");
     let run_id = run.run_id.clone();
-    let seed_input = crate::machines::mob_machine::MobMachineInput::CreateRunSeed {
-        run_id: crate::machines::mob_machine::RunId::from(run_id.to_string()),
-        step_ids: Default::default(),
-        ordered_steps: Vec::new(),
-        step_has_conditions: Default::default(),
-        step_dependencies: Default::default(),
-        step_dependency_modes: Default::default(),
-        step_branches: Default::default(),
-        step_collection_policies: Default::default(),
-        step_quorum_thresholds: Default::default(),
-        escalation_threshold: 0,
-        max_step_retries: 0,
-        max_active_nodes: 0,
-        max_active_frames: 0,
-        max_frame_depth: 0,
-    };
-    run.append_flow_authority_inputs(vec![seed_input.clone()])
-        .expect("append seed authority input");
+    let seed_input = run
+        .flow_authority_inputs
+        .first()
+        .expect("seed authority record")
+        .to_machine_input();
     store.create_run(run).await.expect("create run");
 
     let (handle, _) = create_test_mob_with_run_store(sample_definition(), store.clone()).await;
@@ -21383,12 +21367,7 @@ async fn test_stale_flow_frame_store_plan_loses_cas_before_authority_prepare() {
     use crate::runtime::flow_frame_engine::{FlowFrameKernel, FlowFrameLoopStorePlan};
 
     let store = Arc::new(InMemoryMobRunStore::new());
-    let run = MobRun::pending(
-        crate::ids::MobId::from("test-mob"),
-        FlowId::from("test-flow"),
-        crate::run::flow_run::initial_state(),
-        serde_json::json!({}),
-    );
+    let run = authority_backed_empty_test_run("test-mob", "test-flow");
     let run_id = run.run_id.clone();
     store.create_run(run).await.expect("create run");
 
@@ -26529,19 +26508,25 @@ async fn test_mob_handle_list_runs_reads_public_run_listing() {
     let mob_id = definition.id.clone();
     let alpha_flow = FlowId::from("alpha");
     let beta_flow = FlowId::from("beta");
-    let alpha_run = MobRun::pending(
+    let alpha_run = MobRun::authority_backed_for_steps(
+        crate::ids::RunId::new(),
         mob_id.clone(),
         alpha_flow.clone(),
-        crate::run::flow_run::initial_state(),
+        std::iter::empty::<crate::ids::StepId>(),
+        MobRunStatus::Pending,
         serde_json::json!({"flow": "alpha"}),
-    );
+    )
+    .expect("authority-backed alpha run");
     let alpha_run_id = alpha_run.run_id.clone();
-    let beta_run = MobRun::pending(
+    let beta_run = MobRun::authority_backed_for_steps(
+        crate::ids::RunId::new(),
         mob_id,
         beta_flow,
-        crate::run::flow_run::initial_state(),
+        std::iter::empty::<crate::ids::StepId>(),
+        MobRunStatus::Pending,
         serde_json::json!({"flow": "beta"}),
-    );
+    )
+    .expect("authority-backed beta run");
 
     store.create_run(alpha_run).await.expect("create alpha run");
     store.create_run(beta_run).await.expect("create beta run");
@@ -28004,12 +27989,7 @@ async fn test_flow_with_root_frame_spec_executes_frame_nodes() {
 
     // Build store + run.
     let store = Arc::new(InMemoryMobRunStore::new());
-    let run = MobRun::pending(
-        crate::ids::MobId::from("test-mob"),
-        FlowId::from("test-flow"),
-        crate::run::flow_run::initial_state(),
-        serde_json::json!({}),
-    );
+    let run = authority_backed_empty_test_run("test-mob", "test-flow");
     let run_id = run.run_id.clone();
     store.create_run(run).await.expect("create_run");
 
@@ -28439,12 +28419,7 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
     }
 
     let store = Arc::new(InMemoryMobRunStore::new());
-    let run = MobRun::pending(
-        crate::ids::MobId::from("test-mob"),
-        FlowId::from("test-flow"),
-        crate::run::flow_run::initial_state(),
-        serde_json::json!({}),
-    );
+    let run = authority_backed_empty_test_run("test-mob", "test-flow");
     let run_id = run.run_id.clone();
     store.create_run(run).await.expect("create_run");
 
@@ -28633,12 +28608,7 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
     }
 
     let store = Arc::new(InMemoryMobRunStore::new());
-    let run = MobRun::pending(
-        crate::ids::MobId::from("test-mob"),
-        FlowId::from("test-flow"),
-        crate::run::flow_run::initial_state(),
-        serde_json::json!({}),
-    );
+    let run = authority_backed_empty_test_run("test-mob", "test-flow");
     let run_id = run.run_id.clone();
     store.create_run(run).await.expect("create_run");
 
@@ -28828,18 +28798,6 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
             node_condition_results: [(body_node_id, None)].into_iter().collect(),
         },
     };
-    let body_frame_started_input =
-        crate::machines::mob_machine::MobMachineInput::AuthorizeLoopIterationReducerCommand {
-            loop_instance_id: crate::machines::mob_machine::LoopInstanceId::from(
-                loop_instance_id.as_str(),
-            ),
-            command:
-                crate::machines::mob_machine::LoopIterationReducerCommandKind::BodyFrameStarted,
-            body_frame_id: Some(crate::machines::mob_machine::FrameId::from(
-                body_frame_id.as_str(),
-            )),
-            body_frame_iteration: Some(0),
-        };
     assert!(
         store
             .cas_grant_body_frame_start_with_authority(
@@ -28852,7 +28810,7 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
                 ledger_entry,
                 &current_run.flow_state,
                 current_run.flow_state.clone(),
-                vec![body_frame_seed_input, body_frame_started_input],
+                vec![body_frame_seed_input],
             )
             .await
             .expect("seed running loop snapshot with ledger entry"),

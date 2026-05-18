@@ -205,28 +205,20 @@ mod tests {
     use crate::run::{MobRun, MobRunStatus};
     use std::collections::BTreeMap;
 
+    fn minimal_authority_backed_run(status: MobRunStatus) -> MobRun {
+        MobRun::authority_backed_for_steps(
+            RunId::new(),
+            crate::MobId::from("test-mob"),
+            crate::FlowId::from("test-flow"),
+            std::iter::empty::<crate::ids::StepId>(),
+            status,
+            serde_json::json!({}),
+        )
+        .expect("authority-backed recovery run")
+    }
+
     fn minimal_v2_run_running() -> MobRun {
-        use crate::run::flow_run;
-        let flow_state = flow_run::initial_state();
-        MobRun {
-            run_id: RunId::new(),
-            mob_id: crate::MobId::from("test-mob"),
-            flow_id: crate::FlowId::from("test-flow"),
-            status: MobRunStatus::Running,
-            flow_state,
-            activation_params: serde_json::json!({}),
-            created_at: chrono::Utc::now(),
-            completed_at: None,
-            step_ledger: vec![],
-            failure_ledger: vec![],
-            frames: BTreeMap::new(),
-            loops: BTreeMap::new(),
-            loop_iteration_ledger: vec![],
-            schema_version: 4,
-            root_step_outputs: indexmap::IndexMap::new(),
-            loop_iteration_outputs: std::collections::BTreeMap::new(),
-            flow_authority_inputs: Vec::new(),
-        }
+        minimal_authority_backed_run(MobRunStatus::Running)
     }
 
     fn frame_snapshot_with_ready_queue(
@@ -256,9 +248,8 @@ mod tests {
 
     #[test]
     fn test_pre_v3_pending_run_is_accepted() {
-        let mut run = minimal_v2_run_running();
+        let mut run = minimal_authority_backed_run(MobRunStatus::Pending);
         run.schema_version = 2;
-        run.status = MobRunStatus::Pending;
         assert!(reconcile_run_state(&mut run).is_ok());
     }
 
@@ -281,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn test_active_counts_reconcile_from_frames_and_loops() {
+    fn test_active_counts_without_frame_authority_rejects() {
         let mut run = minimal_v2_run_running();
         let mut root = crate::run::flow_frame::initial_state();
         root.phase = crate::run::flow_frame::Phase::Running;
@@ -323,9 +314,11 @@ mod tests {
 
         run.flow_state.active_node_count = 1;
         run.flow_state.active_frame_count = 1;
-        reconcile_run_state(&mut run).expect("validate");
-        assert_eq!(run.flow_state.active_node_count, 1);
-        assert_eq!(run.flow_state.active_frame_count, 1);
+        let result = reconcile_run_state(&mut run);
+        assert!(matches!(
+            result,
+            Err(RestoreIncompatible::FlowAuthorityProjectionMismatch { .. })
+        ));
     }
 
     #[test]

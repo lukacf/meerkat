@@ -147,9 +147,8 @@ impl std::fmt::Debug for MobStorage {
 mod tests {
     use super::*;
     use crate::event::{MobEventKind, NewMobEvent};
-    use crate::ids::{MobId, RunId};
+    use crate::ids::{MobId, RunId, StepId};
     use crate::run::{MobRun, MobRunStatus};
-    use chrono::Utc;
 
     #[tokio::test]
     async fn test_in_memory_storage_creates_working_stores() {
@@ -171,25 +170,15 @@ mod tests {
     #[tokio::test]
     async fn test_in_memory_flow_stores_create_working_run_and_spec_stores() {
         let (runs, specs) = MobStorage::in_memory_flow_stores();
-        let run = MobRun {
-            run_id: RunId::new(),
-            mob_id: MobId::from("mob"),
-            flow_id: crate::FlowId::from("flow"),
-            status: MobRunStatus::Pending,
-            flow_state: MobRun::flow_state_for_steps([crate::ids::StepId::from("step-1")]).unwrap(),
-            activation_params: serde_json::json!({}),
-            created_at: Utc::now(),
-            completed_at: None,
-            step_ledger: Vec::new(),
-            failure_ledger: Vec::new(),
-            frames: std::collections::BTreeMap::new(),
-            loops: std::collections::BTreeMap::new(),
-            loop_iteration_ledger: Vec::new(),
-            schema_version: 4,
-            root_step_outputs: indexmap::IndexMap::new(),
-            loop_iteration_outputs: std::collections::BTreeMap::new(),
-            flow_authority_inputs: Vec::new(),
-        };
+        let run = MobRun::authority_backed_for_steps(
+            RunId::new(),
+            MobId::from("mob"),
+            crate::FlowId::from("flow"),
+            [StepId::from("step-1")],
+            MobRunStatus::Pending,
+            serde_json::json!({}),
+        )
+        .expect("authority-backed run");
         runs.create_run(run.clone()).await.unwrap();
         assert!(runs.get_run(&run.run_id).await.unwrap().is_some());
 
@@ -222,25 +211,15 @@ model = "test"
         };
         storage.events.append(event).await.unwrap();
 
-        let run = MobRun {
-            run_id: RunId::new(),
-            mob_id: MobId::from("mob"),
-            flow_id: crate::FlowId::from("flow"),
-            status: MobRunStatus::Pending,
-            flow_state: MobRun::flow_state_for_steps([crate::ids::StepId::from("step-1")]).unwrap(),
-            activation_params: serde_json::json!({}),
-            created_at: Utc::now(),
-            completed_at: None,
-            step_ledger: Vec::new(),
-            failure_ledger: Vec::new(),
-            frames: std::collections::BTreeMap::new(),
-            loops: std::collections::BTreeMap::new(),
-            loop_iteration_ledger: Vec::new(),
-            schema_version: 4,
-            root_step_outputs: indexmap::IndexMap::new(),
-            loop_iteration_outputs: std::collections::BTreeMap::new(),
-            flow_authority_inputs: Vec::new(),
-        };
+        let run = MobRun::authority_backed_for_steps(
+            RunId::new(),
+            MobId::from("mob"),
+            crate::FlowId::from("flow"),
+            [StepId::from("step-1")],
+            MobRunStatus::Pending,
+            serde_json::json!({}),
+        )
+        .expect("authority-backed run");
         storage.runs.create_run(run.clone()).await.unwrap();
         assert!(storage.runs.get_run(&run.run_id).await.unwrap().is_some());
 

@@ -3847,7 +3847,10 @@ impl MobRun {
 
     pub(crate) fn validate_flow_authority_projection(&self) -> Result<(), MobError> {
         if self.flow_authority_inputs.is_empty() {
-            return Ok(());
+            return Err(MobError::Internal(format!(
+                "flow authority log projection mismatch for run '{}': missing MobMachine authority inputs",
+                self.run_id
+            )));
         }
 
         let mut authority = mob_dsl::MobMachineAuthority::new();
@@ -3945,6 +3948,133 @@ impl MobRun {
         mob_dsl::MobMachineMutator::apply(&mut authority, seed_input)
             .map_err(|error| MobError::Internal(format!("test CreateRunSeed rejected: {error}")))?;
         Self::flow_state_for_config_with_authority(&run_id, config, &authority.state)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authority_backed_for_steps<I>(
+        run_id: RunId,
+        mob_id: MobId,
+        flow_id: FlowId,
+        step_ids: I,
+        status: MobRunStatus,
+        activation_params: serde_json::Value,
+    ) -> Result<Self, MobError>
+    where
+        I: IntoIterator<Item = StepId>,
+    {
+        let mut steps = IndexMap::new();
+        for step_id in step_ids {
+            steps.insert(
+                step_id,
+                crate::definition::FlowStepSpec {
+                    role: ProfileName::from("worker"),
+                    message: meerkat_core::types::ContentInput::from("placeholder"),
+                    depends_on: Vec::new(),
+                    dispatch_mode: crate::definition::DispatchMode::FanOut,
+                    collection_policy: crate::definition::CollectionPolicy::All,
+                    condition: None,
+                    timeout_ms: None,
+                    expected_schema_ref: None,
+                    branch: None,
+                    depends_on_mode: crate::definition::DependencyMode::All,
+                    allowed_tools: None,
+                    blocked_tools: None,
+                    output_format: crate::definition::StepOutputFormat::Json,
+                },
+            );
+        }
+        let config = FlowRunConfig {
+            flow_id: flow_id.clone(),
+            flow_spec: FlowSpec {
+                description: None,
+                steps,
+                root: None,
+            },
+            topology: None,
+            supervisor: None,
+            limits: None,
+            orchestrator_role: None,
+        };
+
+        let seed_input = Self::create_run_seed_input(&run_id, &config)?;
+        let mut authority = mob_dsl::MobMachineAuthority::new();
+        mob_dsl::MobMachineMutator::apply(&mut authority, seed_input.clone())
+            .map_err(|error| MobError::Internal(format!("test CreateRunSeed rejected: {error}")))?;
+        let flow_state =
+            Self::flow_state_for_config_with_authority(&run_id, &config, &authority.state)?;
+        let mut run =
+            Self::pending_with_run_id(run_id, mob_id, flow_id, flow_state, activation_params);
+        run.append_flow_authority_inputs(vec![seed_input])?;
+
+        if status != MobRunStatus::Pending {
+            let start_input = run.apply_flow_run_command_for_test(
+                &mut authority,
+                MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {}),
+            )?;
+            run.status = MobRunStatus::Running;
+            run.append_flow_authority_inputs(vec![start_input])?;
+        }
+
+        let terminal_command = match status {
+            MobRunStatus::Pending | MobRunStatus::Running => None,
+            MobRunStatus::Completed => Some(MobMachineFlowRunCommand::TerminalizeCompleted(
+                flow_run::inputs::TerminalizeCompleted {},
+            )),
+            MobRunStatus::Failed => Some(MobMachineFlowRunCommand::TerminalizeFailed(
+                flow_run::inputs::TerminalizeFailed {},
+            )),
+            MobRunStatus::Canceled => Some(MobMachineFlowRunCommand::TerminalizeCanceled(
+                flow_run::inputs::TerminalizeCanceled {},
+            )),
+        };
+        if let Some(command) = terminal_command {
+            let terminal_input = run.apply_flow_run_command_for_test(&mut authority, command)?;
+            run.status = status;
+            run.completed_at = Some(Utc::now());
+            run.append_flow_authority_inputs(vec![terminal_input])?;
+        }
+
+        run.validate_flow_authority_projection()?;
+        Ok(run)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flow_run_command_projection_for_test(
+        &self,
+        command: MobMachineFlowRunCommand,
+    ) -> Result<(flow_run::State, mob_dsl::MobMachineInput), MobError> {
+        let mut authority = mob_dsl::MobMachineAuthority::new();
+        Self::replay_flow_authority_inputs_into(
+            &mut authority,
+            &self.flow_authority_inputs,
+            "test_project_flow_run_command",
+        )?;
+        let mut run = self.clone();
+        let input = run.apply_flow_run_command_for_test(&mut authority, command)?;
+        Ok((run.flow_state, input))
+    }
+
+    #[cfg(test)]
+    fn apply_flow_run_command_for_test(
+        &mut self,
+        authority: &mut mob_dsl::MobMachineAuthority,
+        command: MobMachineFlowRunCommand,
+    ) -> Result<mob_dsl::MobMachineInput, MobError> {
+        let input = command.authority_input(&self.run_id);
+        mob_dsl::MobMachineMutator::apply(authority, input.clone()).map_err(|error| {
+            MobError::Internal(format!("test flow run authority input rejected: {error}"))
+        })?;
+        let authority_token =
+            MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&input)?;
+        let outcome = apply_mob_machine_flow_run_command(
+            &self.flow_state,
+            &authority.state,
+            &self.run_id,
+            command,
+            authority_token,
+        )?;
+        self.flow_state = outcome.next_state;
+        Ok(input)
     }
 
     pub(crate) fn flow_state_for_config_with_authority(

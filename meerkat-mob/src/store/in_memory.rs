@@ -33,6 +33,12 @@ fn append_flow_authority_inputs(
     authority_inputs: Vec<mob_dsl::MobMachineInput>,
 ) -> Result<(), MobStoreError> {
     run.append_flow_authority_inputs(authority_inputs)
+        .map_err(|error| MobStoreError::Internal(error.to_string()))?;
+    validate_authorized_run_projection(run)
+}
+
+fn validate_authorized_run_projection(run: &MobRun) -> Result<(), MobStoreError> {
+    run.validate_flow_authority_projection()
         .map_err(|error| MobStoreError::Internal(error.to_string()))
 }
 
@@ -50,6 +56,21 @@ fn validate_flow_authority_inputs(
             .map_err(|error| MobStoreError::Internal(error.to_string()))?;
     }
     Ok(())
+}
+
+fn apply_flow_authority_update<F>(
+    run: &MobRun,
+    authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    update: F,
+) -> Result<MobRun, MobStoreError>
+where
+    F: FnOnce(&mut MobRun) -> Result<(), MobStoreError>,
+{
+    validate_flow_authority_inputs(&run.run_id, &authority_inputs)?;
+    let mut next_run = run.clone();
+    update(&mut next_run)?;
+    append_flow_authority_inputs(&mut next_run, authority_inputs)?;
+    Ok(next_run)
 }
 
 /// In-memory event store for tests and ephemeral mobs.
@@ -359,6 +380,7 @@ impl MobRunStore for InMemoryMobRunStore {
                 run.run_id
             )));
         }
+        validate_authorized_run_projection(&run)?;
         runs.insert(run.run_id.clone(), run);
         Ok(())
     }
@@ -399,9 +421,12 @@ impl MobRunStore for InMemoryMobRunStore {
         if &run.flow_state != expected {
             return Ok(false);
         }
-        validate_flow_authority_inputs(run_id, &authority_inputs)?;
-        run.flow_state = next.clone();
-        append_flow_authority_inputs(run, authority_inputs)?;
+        let next_state = next.clone();
+        let next_run = apply_flow_authority_update(run, authority_inputs, move |candidate| {
+            candidate.flow_state = next_state;
+            Ok(())
+        })?;
+        *run = next_run;
         Ok(true)
     }
 
@@ -424,14 +449,17 @@ impl MobRunStore for InMemoryMobRunStore {
         {
             return Ok(false);
         }
-        validate_flow_authority_inputs(run_id, &authority_inputs)?;
-        let terminal = next_status.is_terminal();
-        run.status = next_status;
-        run.flow_state = next_flow_state.clone();
-        if terminal && run.completed_at.is_none() {
-            run.completed_at = Some(Utc::now());
-        }
-        append_flow_authority_inputs(run, authority_inputs)?;
+        let next_flow_state = next_flow_state.clone();
+        let next_run = apply_flow_authority_update(run, authority_inputs, move |candidate| {
+            let terminal = next_status.is_terminal();
+            candidate.status = next_status;
+            candidate.flow_state = next_flow_state;
+            if terminal && candidate.completed_at.is_none() {
+                candidate.completed_at = Some(Utc::now());
+            }
+            Ok(())
+        })?;
+        *run = next_run;
         Ok(true)
     }
 
@@ -521,15 +549,23 @@ impl MobRunStore for InMemoryMobRunStore {
         let current = run.frames.get(frame_id);
         match (expected, current) {
             (None, None) => {
-                validate_flow_authority_inputs(run_id, &authority_inputs)?;
-                run.frames.insert(frame_id.clone(), next);
-                append_flow_authority_inputs(run, authority_inputs)?;
+                let frame_id = frame_id.clone();
+                let next_run =
+                    apply_flow_authority_update(run, authority_inputs, move |candidate| {
+                        candidate.frames.insert(frame_id, next);
+                        Ok(())
+                    })?;
+                *run = next_run;
                 Ok(true)
             }
             (Some(exp), Some(cur)) if exp == cur => {
-                validate_flow_authority_inputs(run_id, &authority_inputs)?;
-                run.frames.insert(frame_id.clone(), next);
-                append_flow_authority_inputs(run, authority_inputs)?;
+                let frame_id = frame_id.clone();
+                let next_run =
+                    apply_flow_authority_update(run, authority_inputs, move |candidate| {
+                        candidate.frames.insert(frame_id, next);
+                        Ok(())
+                    })?;
+                *run = next_run;
                 Ok(true)
             }
             _ => Ok(false),
@@ -557,10 +593,13 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.frames.get(frame_id) != Some(expected_frame) {
             return Ok(false);
         }
-        validate_flow_authority_inputs(run_id, &authority_inputs)?;
-        run.flow_state = next_run_state;
-        run.frames.insert(frame_id.clone(), next_frame);
-        append_flow_authority_inputs(run, authority_inputs)?;
+        let frame_id = frame_id.clone();
+        let next_run = apply_flow_authority_update(run, authority_inputs, move |candidate| {
+            candidate.flow_state = next_run_state;
+            candidate.frames.insert(frame_id, next_frame);
+            Ok(())
+        })?;
+        *run = next_run;
         Ok(true)
     }
 
@@ -583,35 +622,39 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.frames.get(frame_id) != Some(expected_frame) {
             return Ok(false);
         }
-        validate_flow_authority_inputs(run_id, &authority_inputs)?;
-        run.frames.insert(frame_id.clone(), next_frame);
-        match loop_context {
-            None => {
-                run.root_step_outputs.insert(
-                    crate::ids::StepId::from(step_output_key.as_str()),
-                    step_output,
-                );
-            }
-            Some((loop_id, iteration)) => {
-                let iteration_index = usize::try_from(iteration).map_err(|_| {
-                    MobStoreError::Internal(format!(
-                        "loop iteration index {iteration} exceeds usize::MAX on this target"
-                    ))
-                })?;
-                let vec = run
-                    .loop_iteration_outputs
-                    .entry(loop_id.clone())
-                    .or_default();
-                while vec.len() <= iteration_index {
-                    vec.push(IndexMap::new());
+        let frame_id = frame_id.clone();
+        let loop_context = loop_context.map(|(loop_id, iteration)| (loop_id.clone(), iteration));
+        let next_run = apply_flow_authority_update(run, authority_inputs, move |candidate| {
+            candidate.frames.insert(frame_id, next_frame);
+            match loop_context {
+                None => {
+                    candidate.root_step_outputs.insert(
+                        crate::ids::StepId::from(step_output_key.as_str()),
+                        step_output,
+                    );
                 }
-                vec[iteration_index].insert(
-                    crate::ids::StepId::from(step_output_key.as_str()),
-                    step_output,
-                );
+                Some((loop_id, iteration)) => {
+                    let iteration_index = usize::try_from(iteration).map_err(|_| {
+                        MobStoreError::Internal(format!(
+                            "loop iteration index {iteration} exceeds usize::MAX on this target"
+                        ))
+                    })?;
+                    let vec = candidate
+                        .loop_iteration_outputs
+                        .entry(loop_id.clone())
+                        .or_default();
+                    while vec.len() <= iteration_index {
+                        vec.push(IndexMap::new());
+                    }
+                    vec[iteration_index].insert(
+                        crate::ids::StepId::from(step_output_key.as_str()),
+                        step_output,
+                    );
+                }
             }
-        }
-        append_flow_authority_inputs(run, authority_inputs)?;
+            Ok(())
+        })?;
+        *run = next_run;
         Ok(true)
     }
 
@@ -641,11 +684,15 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.loops.contains_key(loop_instance_id) {
             return Ok(false);
         }
-        validate_flow_authority_inputs(run_id, &authority_inputs)?;
-        run.flow_state = next_run_state;
-        run.frames.insert(frame_id.clone(), next_frame);
-        run.loops.insert(loop_instance_id.clone(), initial_loop);
-        append_flow_authority_inputs(run, authority_inputs)?;
+        let frame_id = frame_id.clone();
+        let loop_instance_id = loop_instance_id.clone();
+        let next_run = apply_flow_authority_update(run, authority_inputs, move |candidate| {
+            candidate.flow_state = next_run_state;
+            candidate.frames.insert(frame_id, next_frame);
+            candidate.loops.insert(loop_instance_id, initial_loop);
+            Ok(())
+        })?;
+        *run = next_run;
         Ok(true)
     }
 
@@ -670,10 +717,13 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.loops.get(loop_instance_id) != Some(expected_loop) {
             return Ok(false);
         }
-        validate_flow_authority_inputs(run_id, &authority_inputs)?;
-        run.flow_state = next_run_state;
-        run.loops.insert(loop_instance_id.clone(), next_loop);
-        append_flow_authority_inputs(run, authority_inputs)?;
+        let loop_instance_id = loop_instance_id.clone();
+        let next_run = apply_flow_authority_update(run, authority_inputs, move |candidate| {
+            candidate.flow_state = next_run_state;
+            candidate.loops.insert(loop_instance_id, next_loop);
+            Ok(())
+        })?;
+        *run = next_run;
         Ok(true)
     }
 
@@ -704,18 +754,22 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.frames.contains_key(frame_id) {
             return Ok(false);
         }
-        validate_flow_authority_inputs(run_id, &authority_inputs)?;
-        run.flow_state = next_run_state;
-        run.loops.insert(loop_instance_id.clone(), next_loop);
-        run.frames.insert(frame_id.clone(), initial_frame);
-        if !run.loop_iteration_ledger.iter().any(|existing| {
-            existing.loop_instance_id == ledger_entry.loop_instance_id
-                && existing.iteration == ledger_entry.iteration
-                && existing.frame_id == ledger_entry.frame_id
-        }) {
-            run.loop_iteration_ledger.push(ledger_entry);
-        }
-        append_flow_authority_inputs(run, authority_inputs)?;
+        let frame_id = frame_id.clone();
+        let loop_instance_id = loop_instance_id.clone();
+        let next_run = apply_flow_authority_update(run, authority_inputs, move |candidate| {
+            candidate.flow_state = next_run_state;
+            candidate.loops.insert(loop_instance_id, next_loop);
+            candidate.frames.insert(frame_id, initial_frame);
+            if !candidate.loop_iteration_ledger.iter().any(|existing| {
+                existing.loop_instance_id == ledger_entry.loop_instance_id
+                    && existing.iteration == ledger_entry.iteration
+                    && existing.frame_id == ledger_entry.frame_id
+            }) {
+                candidate.loop_iteration_ledger.push(ledger_entry);
+            }
+            Ok(())
+        })?;
+        *run = next_run;
         Ok(true)
     }
 
@@ -746,11 +800,15 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.frames.get(frame_id) != Some(expected_frame) {
             return Ok(false);
         }
-        validate_flow_authority_inputs(run_id, &authority_inputs)?;
-        run.flow_state = next_run_state;
-        run.loops.insert(loop_instance_id.clone(), next_loop);
-        run.frames.insert(frame_id.clone(), next_frame);
-        append_flow_authority_inputs(run, authority_inputs)?;
+        let frame_id = frame_id.clone();
+        let loop_instance_id = loop_instance_id.clone();
+        let next_run = apply_flow_authority_update(run, authority_inputs, move |candidate| {
+            candidate.flow_state = next_run_state;
+            candidate.loops.insert(loop_instance_id, next_loop);
+            candidate.frames.insert(frame_id, next_frame);
+            Ok(())
+        })?;
+        *run = next_run;
         Ok(true)
     }
 
@@ -781,11 +839,15 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.frames.get(frame_id) != Some(expected_frame) {
             return Ok(false);
         }
-        validate_flow_authority_inputs(run_id, &authority_inputs)?;
-        run.flow_state = next_run_state;
-        run.loops.insert(loop_instance_id.clone(), next_loop);
-        run.frames.insert(frame_id.clone(), next_frame);
-        append_flow_authority_inputs(run, authority_inputs)?;
+        let frame_id = frame_id.clone();
+        let loop_instance_id = loop_instance_id.clone();
+        let next_run = apply_flow_authority_update(run, authority_inputs, move |candidate| {
+            candidate.flow_state = next_run_state;
+            candidate.loops.insert(loop_instance_id, next_loop);
+            candidate.frames.insert(frame_id, next_frame);
+            Ok(())
+        })?;
+        *run = next_run;
         Ok(true)
     }
 }
@@ -1007,43 +1069,15 @@ mod tests {
     }
 
     fn sample_run(status: MobRunStatus) -> MobRun {
-        MobRun {
-            run_id: RunId::new(),
-            mob_id: MobId::from("mob"),
-            flow_id: FlowId::from("flow-a"),
+        MobRun::authority_backed_for_steps(
+            RunId::new(),
+            MobId::from("mob"),
+            FlowId::from("flow-a"),
+            [StepId::from("step-1")],
             status,
-            flow_state: MobRun::flow_state_for_steps([StepId::from("step-1")]).unwrap(),
-            activation_params: serde_json::json!({"a":1}),
-            created_at: Utc::now(),
-            completed_at: None,
-            step_ledger: Vec::new(),
-            failure_ledger: Vec::new(),
-            frames: std::collections::BTreeMap::new(),
-            loops: std::collections::BTreeMap::new(),
-            loop_iteration_ledger: Vec::new(),
-            schema_version: 4,
-            root_step_outputs: IndexMap::new(),
-            loop_iteration_outputs: BTreeMap::new(),
-            flow_authority_inputs: Vec::new(),
-        }
-    }
-
-    fn sample_run_store_authority_input(
-        run_id: &RunId,
-        command: mob_dsl::FlowRunReducerCommandKind,
-    ) -> mob_dsl::MobMachineInput {
-        mob_dsl::MobMachineInput::AuthorizeFlowRunReducerCommand {
-            run_id: mob_dsl::RunId::from(run_id.to_string()),
-            command,
-            step_id: None,
-            run_step_key: None,
-            step_status: None,
-            target_count: None,
-            frame_id: None,
-            node_id: None,
-            loop_instance_id: None,
-            retry_key: None,
-        }
+            serde_json::json!({"a":1}),
+        )
+        .expect("authority-backed sample run")
     }
 
     #[tokio::test]
@@ -1105,12 +1139,21 @@ mod tests {
         let run = sample_run(MobRunStatus::Running);
         let run_id = run.run_id.clone();
         let expected_flow_state = run.flow_state.clone();
+        let (completed_flow_state, completed_authority_input) = run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::TerminalizeCompleted(
+                    crate::run::flow_run::inputs::TerminalizeCompleted {},
+                ),
+            )
+            .expect("project completed run state");
         store.create_run(run).await.unwrap();
 
         let tasks = (0..10).map(|_| {
             let store = Arc::clone(&store);
             let run_id = run_id.clone();
             let expected_flow_state = expected_flow_state.clone();
+            let completed_flow_state = completed_flow_state.clone();
+            let completed_authority_input = completed_authority_input.clone();
             tokio::spawn(async move {
                 store
                     .cas_run_snapshot_with_authority(
@@ -1118,11 +1161,8 @@ mod tests {
                         MobRunStatus::Running,
                         &expected_flow_state,
                         MobRunStatus::Completed,
-                        &expected_flow_state,
-                        vec![sample_run_store_authority_input(
-                            &run_id,
-                            mob_dsl::FlowRunReducerCommandKind::TerminalizeCompleted,
-                        )],
+                        &completed_flow_state,
+                        vec![completed_authority_input],
                     )
                     .await
                     .unwrap()
@@ -1147,6 +1187,7 @@ mod tests {
         let run = sample_run(MobRunStatus::Running);
         let run_id = run.run_id.clone();
         let expected_flow_state = run.flow_state.clone();
+        let authority_input_count = run.flow_authority_inputs.len();
         store.create_run(run).await.unwrap();
 
         let error = store
@@ -1169,7 +1210,7 @@ mod tests {
         let stored = store.get_run(&run_id).await.unwrap().unwrap();
         assert_eq!(stored.status, MobRunStatus::Running);
         assert!(stored.completed_at.is_none());
-        assert!(stored.flow_authority_inputs.is_empty());
+        assert_eq!(stored.flow_authority_inputs.len(), authority_input_count);
     }
 
     #[tokio::test]

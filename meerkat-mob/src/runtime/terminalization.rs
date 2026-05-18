@@ -700,25 +700,15 @@ mod tests {
     }
 
     fn sample_run(run_id: RunId, status: MobRunStatus) -> MobRun {
-        MobRun {
+        MobRun::authority_backed_for_steps(
             run_id,
-            mob_id: MobId::from("mob"),
-            flow_id: FlowId::from("flow"),
+            MobId::from("mob"),
+            FlowId::from("flow"),
+            [StepId::from("step-1")],
             status,
-            flow_state: MobRun::flow_state_for_steps([crate::ids::StepId::from("step-1")]).unwrap(),
-            activation_params: serde_json::json!({}),
-            created_at: Utc::now(),
-            completed_at: None,
-            step_ledger: Vec::new(),
-            failure_ledger: Vec::new(),
-            frames: std::collections::BTreeMap::new(),
-            loops: std::collections::BTreeMap::new(),
-            loop_iteration_ledger: Vec::new(),
-            schema_version: 4,
-            root_step_outputs: indexmap::IndexMap::new(),
-            loop_iteration_outputs: std::collections::BTreeMap::new(),
-            flow_authority_inputs: Vec::new(),
-        }
+            serde_json::json!({}),
+        )
+        .expect("authority-backed sample run")
     }
 
     #[tokio::test]

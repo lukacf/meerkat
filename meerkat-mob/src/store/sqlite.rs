@@ -1102,6 +1102,8 @@ impl SqliteMobRunStore {
             }
             run.append_flow_authority_inputs(authority_inputs)
                 .map_err(|error| MobStoreError::Internal(error.to_string()))?;
+            run.validate_flow_authority_projection()
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             write_run_json(&tx, &key, &run)?;
             tx.commit().map_err(se)?;
             Ok(true)
@@ -1134,6 +1136,8 @@ impl MobRunStore for SqliteMobRunStore {
                     run.run_id
                 )));
             }
+            run.validate_flow_authority_projection()
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
 
             let encoded = encode_json(&run)?;
             tx.execute(
@@ -2264,43 +2268,15 @@ mod tests {
     }
 
     fn sample_run(status: MobRunStatus) -> MobRun {
-        MobRun {
-            run_id: RunId::new(),
-            mob_id: MobId::from("mob"),
-            flow_id: FlowId::from("flow-a"),
+        MobRun::authority_backed_for_steps(
+            RunId::new(),
+            MobId::from("mob"),
+            FlowId::from("flow-a"),
+            [crate::ids::StepId::from("step-1")],
             status,
-            flow_state: MobRun::flow_state_for_steps([crate::ids::StepId::from("step-1")]).unwrap(),
-            activation_params: serde_json::json!({"a":1}),
-            created_at: Utc::now(),
-            completed_at: None,
-            step_ledger: Vec::new(),
-            failure_ledger: Vec::new(),
-            frames: std::collections::BTreeMap::new(),
-            loops: std::collections::BTreeMap::new(),
-            loop_iteration_ledger: Vec::new(),
-            schema_version: 4,
-            root_step_outputs: IndexMap::new(),
-            loop_iteration_outputs: std::collections::BTreeMap::new(),
-            flow_authority_inputs: Vec::new(),
-        }
-    }
-
-    fn sample_run_store_authority_input(
-        run_id: &RunId,
-        command: mob_dsl::FlowRunReducerCommandKind,
-    ) -> mob_dsl::MobMachineInput {
-        mob_dsl::MobMachineInput::AuthorizeFlowRunReducerCommand {
-            run_id: mob_dsl::RunId::from(run_id.to_string()),
-            command,
-            step_id: None,
-            run_step_key: None,
-            step_status: None,
-            target_count: None,
-            frame_id: None,
-            node_id: None,
-            loop_instance_id: None,
-            retry_key: None,
-        }
+            serde_json::json!({"a":1}),
+        )
+        .expect("authority-backed sample run")
     }
 
     #[tokio::test]
@@ -2488,15 +2464,33 @@ mod tests {
         let run = sample_run(MobRunStatus::Running);
         let run_id = run.run_id.clone();
         let expected_flow_state = run.flow_state.clone();
+        let (completed_flow_state, completed_authority_input) = run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::TerminalizeCompleted(
+                    crate::run::flow_run::inputs::TerminalizeCompleted {},
+                ),
+            )
+            .expect("project completed run state");
+        let (failed_flow_state, failed_authority_input) = run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::TerminalizeFailed(
+                    crate::run::flow_run::inputs::TerminalizeFailed {},
+                ),
+            )
+            .expect("project failed run state");
 
         store.create_run(run).await.unwrap();
 
         let s1 = store.clone();
         let rid1 = run_id.clone();
         let state1 = expected_flow_state.clone();
+        let completed_state = completed_flow_state.clone();
+        let completed_input = completed_authority_input.clone();
         let s2 = store.clone();
         let rid2 = run_id.clone();
         let state2 = expected_flow_state.clone();
+        let failed_state = failed_flow_state.clone();
+        let failed_input = failed_authority_input.clone();
         let outcomes = join_all(vec![
             tokio::spawn(async move {
                 s1.cas_run_snapshot_with_authority(
@@ -2504,11 +2498,8 @@ mod tests {
                     MobRunStatus::Running,
                     &state1,
                     MobRunStatus::Completed,
-                    &state1,
-                    vec![sample_run_store_authority_input(
-                        &rid1,
-                        mob_dsl::FlowRunReducerCommandKind::TerminalizeCompleted,
-                    )],
+                    &completed_state,
+                    vec![completed_input],
                 )
                 .await
                 .unwrap()
@@ -2519,11 +2510,8 @@ mod tests {
                     MobRunStatus::Running,
                     &state2,
                     MobRunStatus::Failed,
-                    &state2,
-                    vec![sample_run_store_authority_input(
-                        &rid2,
-                        mob_dsl::FlowRunReducerCommandKind::TerminalizeFailed,
-                    )],
+                    &failed_state,
+                    vec![failed_input],
                 )
                 .await
                 .unwrap()
@@ -2567,6 +2555,7 @@ mod tests {
         let run = sample_run(MobRunStatus::Running);
         let run_id = run.run_id.clone();
         let expected_flow_state = run.flow_state.clone();
+        let authority_input_count = run.flow_authority_inputs.len();
         store.create_run(run).await.unwrap();
 
         let error = store
@@ -2589,7 +2578,7 @@ mod tests {
         let stored = store.get_run(&run_id).await.unwrap().unwrap();
         assert_eq!(stored.status, MobRunStatus::Running);
         assert!(stored.completed_at.is_none());
-        assert!(stored.flow_authority_inputs.is_empty());
+        assert_eq!(stored.flow_authority_inputs.len(), authority_input_count);
     }
 
     #[tokio::test]

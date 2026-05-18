@@ -8,7 +8,10 @@ use crate::types::{
     ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkGraphSnapshotFilter,
     WorkItemFilter, WorkItemId, WorkNamespace,
 };
-use crate::{CreateWorkItemRequest, WorkGraphError, WorkGraphService};
+use crate::{
+    CreateWorkItemRequest, WorkGraphError, WorkGraphMachine, WorkGraphPublicErrorClass,
+    WorkGraphService,
+};
 
 pub const INVALID_ARGUMENTS: &str = "invalid_arguments";
 pub const NOT_FOUND: &str = "not_found";
@@ -307,17 +310,23 @@ fn parse<T: DeserializeOwned>(arguments: &Value) -> Result<T, WorkGraphToolError
 }
 
 fn map_error(error: WorkGraphError) -> WorkGraphToolError {
-    let code = match error {
-        WorkGraphError::NotFound { .. } => NOT_FOUND,
-        WorkGraphError::StaleRevision { .. } | WorkGraphError::Conflict(_) => "conflict",
-        WorkGraphError::InvalidTransition(_) => "invalid_transition",
-        WorkGraphError::InvalidInput(_) | WorkGraphError::InvalidTimestampMillis { .. } => {
-            INVALID_ARGUMENTS
-        }
-        WorkGraphError::UnsupportedBackend(_) => CAPABILITY_UNAVAILABLE,
-        WorkGraphError::Store(_) => "store_error",
+    let message = error.to_string();
+    let code = match WorkGraphMachine::public_error_class(&error) {
+        Ok(public_class) => workgraph_tool_code(public_class),
+        Err(_) => "store_error",
     };
-    WorkGraphToolError::new(code, error.to_string())
+    WorkGraphToolError::new(code, message)
+}
+
+fn workgraph_tool_code(public_class: WorkGraphPublicErrorClass) -> &'static str {
+    match public_class {
+        WorkGraphPublicErrorClass::NotFound => NOT_FOUND,
+        WorkGraphPublicErrorClass::Conflict => "conflict",
+        WorkGraphPublicErrorClass::InvalidTransition => "invalid_transition",
+        WorkGraphPublicErrorClass::InvalidArguments => INVALID_ARGUMENTS,
+        WorkGraphPublicErrorClass::CapabilityUnavailable => CAPABILITY_UNAVAILABLE,
+        WorkGraphPublicErrorClass::StoreError => "store_error",
+    }
 }
 
 fn tool(name: &str, description: &str, schema: Value) -> Value {

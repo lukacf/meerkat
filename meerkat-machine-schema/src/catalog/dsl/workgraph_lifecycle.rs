@@ -124,6 +124,56 @@ pub enum WorkEdgeKind {
     DerivedFrom,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGraphErrorKind {
+    #[default]
+    NotFound,
+    StaleRevision,
+    Conflict,
+    InvalidTransition,
+    InvalidInput,
+    InvalidTimestampMillis,
+    UnsupportedBackend,
+    Store,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGraphPublicErrorClass {
+    #[default]
+    NotFound,
+    Conflict,
+    InvalidTransition,
+    InvalidArguments,
+    CapabilityUnavailable,
+    StoreError,
+}
+
 machine! {
     machine WorkGraphLifecycleMachine {
         version: 1,
@@ -226,6 +276,7 @@ machine! {
             CloseCancelled { expected_revision: u64, at_utc_ms: u64 },
             CloseFailed { expected_revision: u64, at_utc_ms: u64 },
             AddEvidence { expected_revision: u64 },
+            ClassifyPublicError { error_kind: Enum<WorkGraphErrorKind> },
         }
 
         effect WorkGraphLifecycleEffect {
@@ -241,6 +292,7 @@ machine! {
             LinkValidated,
             Closed { terminal_state: WorkLifecycleState },
             EvidenceAdded,
+            PublicErrorClassified { public_class: Enum<WorkGraphPublicErrorClass> },
         }
 
         invariant absent_has_zero_revision {
@@ -287,6 +339,7 @@ machine! {
         disposition LinkValidated => local,
         disposition Closed => local,
         disposition EvidenceAdded => local,
+        disposition PublicErrorClassified => local,
 
         transition CreateDefaultOrOpen {
             on input Create { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status }
@@ -947,6 +1000,68 @@ machine! {
             }
             to Failed
             emit EvidenceAdded
+        }
+
+        // --- Public error class ---
+        //
+        // WorkGraph owns the semantic public result class for WorkGraph
+        // domain errors. Surfaces translate this generated class into
+        // transport status/tool codes without reclassifying the error.
+
+        transition ClassifyPublicErrorNotFound {
+            on input ClassifyPublicError { error_kind }
+            guard { self.lifecycle_phase == Phase::Absent && error_kind == WorkGraphErrorKind::NotFound }
+            to Absent
+            emit PublicErrorClassified { public_class: WorkGraphPublicErrorClass::NotFound }
+        }
+
+        transition ClassifyPublicErrorStaleRevision {
+            on input ClassifyPublicError { error_kind }
+            guard { self.lifecycle_phase == Phase::Absent && error_kind == WorkGraphErrorKind::StaleRevision }
+            to Absent
+            emit PublicErrorClassified { public_class: WorkGraphPublicErrorClass::Conflict }
+        }
+
+        transition ClassifyPublicErrorConflict {
+            on input ClassifyPublicError { error_kind }
+            guard { self.lifecycle_phase == Phase::Absent && error_kind == WorkGraphErrorKind::Conflict }
+            to Absent
+            emit PublicErrorClassified { public_class: WorkGraphPublicErrorClass::Conflict }
+        }
+
+        transition ClassifyPublicErrorInvalidTransition {
+            on input ClassifyPublicError { error_kind }
+            guard { self.lifecycle_phase == Phase::Absent && error_kind == WorkGraphErrorKind::InvalidTransition }
+            to Absent
+            emit PublicErrorClassified { public_class: WorkGraphPublicErrorClass::InvalidTransition }
+        }
+
+        transition ClassifyPublicErrorInvalidInput {
+            on input ClassifyPublicError { error_kind }
+            guard { self.lifecycle_phase == Phase::Absent && error_kind == WorkGraphErrorKind::InvalidInput }
+            to Absent
+            emit PublicErrorClassified { public_class: WorkGraphPublicErrorClass::InvalidArguments }
+        }
+
+        transition ClassifyPublicErrorInvalidTimestampMillis {
+            on input ClassifyPublicError { error_kind }
+            guard { self.lifecycle_phase == Phase::Absent && error_kind == WorkGraphErrorKind::InvalidTimestampMillis }
+            to Absent
+            emit PublicErrorClassified { public_class: WorkGraphPublicErrorClass::InvalidArguments }
+        }
+
+        transition ClassifyPublicErrorUnsupportedBackend {
+            on input ClassifyPublicError { error_kind }
+            guard { self.lifecycle_phase == Phase::Absent && error_kind == WorkGraphErrorKind::UnsupportedBackend }
+            to Absent
+            emit PublicErrorClassified { public_class: WorkGraphPublicErrorClass::CapabilityUnavailable }
+        }
+
+        transition ClassifyPublicErrorStore {
+            on input ClassifyPublicError { error_kind }
+            guard { self.lifecycle_phase == Phase::Absent && error_kind == WorkGraphErrorKind::Store }
+            to Absent
+            emit PublicErrorClassified { public_class: WorkGraphPublicErrorClass::StoreError }
         }
     }
 }

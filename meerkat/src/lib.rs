@@ -195,11 +195,11 @@ pub use meerkat_workgraph::{
     ReleaseWorkItemRequest, UpdateWorkItemRequest, WORKGRAPH_TOOL_INVALID_ARGUMENTS,
     WORKGRAPH_TOOL_NOT_FOUND, WorkClaim, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphError,
     WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind, WorkGraphEventsResponse,
-    WorkGraphItemsResponse, WorkGraphMachine, WorkGraphRestRoute, WorkGraphService,
-    WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkGraphStore, WorkGraphStoreKind,
-    WorkGraphToolError, WorkGraphToolSurface, WorkItem, WorkItemFilter, WorkItemId, WorkNamespace,
-    WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus, handle_workgraph_tools_call,
-    workgraph_rest_path_catalog, workgraph_tools_list,
+    WorkGraphItemsResponse, WorkGraphMachine, WorkGraphPublicErrorClass, WorkGraphRestRoute,
+    WorkGraphService, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkGraphStore,
+    WorkGraphStoreKind, WorkGraphToolError, WorkGraphToolSurface, WorkItem, WorkItemFilter,
+    WorkItemId, WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus,
+    handle_workgraph_tools_call, workgraph_rest_path_catalog, workgraph_tools_list,
 };
 
 // AgentFactory and build_agent types

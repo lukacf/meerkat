@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for WorkGraphLifecycleMachine.
 
-CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
+CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkGraphErrorKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
 
 WorkOwnerKeyValuesCi == {}
 
@@ -665,6 +665,70 @@ AddEvidenceFailed(expected_revision) ==
     /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
 
 
+ClassifyPublicErrorNotFound(error_kind) ==
+    /\ phase = "Absent"
+    /\ (error_kind = "NotFound")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyPublicErrorStaleRevision(error_kind) ==
+    /\ phase = "Absent"
+    /\ (error_kind = "StaleRevision")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyPublicErrorConflict(error_kind) ==
+    /\ phase = "Absent"
+    /\ (error_kind = "Conflict")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyPublicErrorInvalidTransition(error_kind) ==
+    /\ phase = "Absent"
+    /\ (error_kind = "InvalidTransition")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyPublicErrorInvalidInput(error_kind) ==
+    /\ phase = "Absent"
+    /\ (error_kind = "InvalidInput")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyPublicErrorInvalidTimestampMillis(error_kind) ==
+    /\ phase = "Absent"
+    /\ (error_kind = "InvalidTimestampMillis")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyPublicErrorUnsupportedBackend(error_kind) ==
+    /\ phase = "Absent"
+    /\ (error_kind = "UnsupportedBackend")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyPublicErrorStore(error_kind) ==
+    /\ phase = "Absent"
+    /\ (error_kind = "Store")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
 Next ==
     \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CreateDefaultOrOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status)
     \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CreateRequestedBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status)
@@ -721,6 +785,14 @@ Next ==
     \/ \E expected_revision \in 0..2 : AddEvidenceCompleted(expected_revision)
     \/ \E expected_revision \in 0..2 : AddEvidenceCancelled(expected_revision)
     \/ \E expected_revision \in 0..2 : AddEvidenceFailed(expected_revision)
+    \/ \E error_kind \in WorkGraphErrorKindValues : ClassifyPublicErrorNotFound(error_kind)
+    \/ \E error_kind \in WorkGraphErrorKindValues : ClassifyPublicErrorStaleRevision(error_kind)
+    \/ \E error_kind \in WorkGraphErrorKindValues : ClassifyPublicErrorConflict(error_kind)
+    \/ \E error_kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidTransition(error_kind)
+    \/ \E error_kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidInput(error_kind)
+    \/ \E error_kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidTimestampMillis(error_kind)
+    \/ \E error_kind \in WorkGraphErrorKindValues : ClassifyPublicErrorUnsupportedBackend(error_kind)
+    \/ \E error_kind \in WorkGraphErrorKindValues : ClassifyPublicErrorStore(error_kind)
     \/ TerminalStutter
 
 absent_has_zero_revision == ((phase # "Absent") \/ (revision = 0))

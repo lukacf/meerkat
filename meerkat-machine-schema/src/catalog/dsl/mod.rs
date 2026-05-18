@@ -1361,6 +1361,30 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 "WorkOwnerKind",
                 &["Principal", "Agent", "Session", "Mob", "Label"],
             ),
+            NamedTypeBinding::string_enum(
+                "WorkGraphErrorKind",
+                &[
+                    "NotFound",
+                    "StaleRevision",
+                    "Conflict",
+                    "InvalidTransition",
+                    "InvalidInput",
+                    "InvalidTimestampMillis",
+                    "UnsupportedBackend",
+                    "Store",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "WorkGraphPublicErrorClass",
+                &[
+                    "NotFound",
+                    "Conflict",
+                    "InvalidTransition",
+                    "InvalidArguments",
+                    "CapabilityUnavailable",
+                    "StoreError",
+                ],
+            ),
             NamedTypeBinding::type_path_struct(
                 "WorkOwnerKey",
                 "crate::catalog::dsl::workgraph_lifecycle::WorkOwnerKey",

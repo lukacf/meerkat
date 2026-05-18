@@ -39,6 +39,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CloseCancelled`(expected_revision: u64, at_utc_ms: u64)
 - `CloseFailed`(expected_revision: u64, at_utc_ms: u64)
 - `AddEvidence`(expected_revision: u64)
+- `ClassifyPublicError`(error_kind: WorkGraphErrorKind)
 
 ## Signals
 
@@ -55,6 +56,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LinkValidated`
 - `Closed`(terminal_state: WorkLifecycleState)
 - `EvidenceAdded`
+- `PublicErrorClassified`(public_class: WorkGraphPublicErrorClass)
 
 ## Invariants
 - `absent_has_zero_revision`
@@ -492,6 +494,70 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - ``
 - Emits: `EvidenceAdded`
 - To: `Failed`
+
+### `ClassifyPublicErrorNotFound`
+- From: `Absent`
+- On: `ClassifyPublicError`(error_kind)
+- Guards:
+  - ``
+- Emits: `PublicErrorClassified`
+- To: `Absent`
+
+### `ClassifyPublicErrorStaleRevision`
+- From: `Absent`
+- On: `ClassifyPublicError`(error_kind)
+- Guards:
+  - ``
+- Emits: `PublicErrorClassified`
+- To: `Absent`
+
+### `ClassifyPublicErrorConflict`
+- From: `Absent`
+- On: `ClassifyPublicError`(error_kind)
+- Guards:
+  - ``
+- Emits: `PublicErrorClassified`
+- To: `Absent`
+
+### `ClassifyPublicErrorInvalidTransition`
+- From: `Absent`
+- On: `ClassifyPublicError`(error_kind)
+- Guards:
+  - ``
+- Emits: `PublicErrorClassified`
+- To: `Absent`
+
+### `ClassifyPublicErrorInvalidInput`
+- From: `Absent`
+- On: `ClassifyPublicError`(error_kind)
+- Guards:
+  - ``
+- Emits: `PublicErrorClassified`
+- To: `Absent`
+
+### `ClassifyPublicErrorInvalidTimestampMillis`
+- From: `Absent`
+- On: `ClassifyPublicError`(error_kind)
+- Guards:
+  - ``
+- Emits: `PublicErrorClassified`
+- To: `Absent`
+
+### `ClassifyPublicErrorUnsupportedBackend`
+- From: `Absent`
+- On: `ClassifyPublicError`(error_kind)
+- Guards:
+  - ``
+- Emits: `PublicErrorClassified`
+- To: `Absent`
+
+### `ClassifyPublicErrorStore`
+- From: `Absent`
+- On: `ClassifyPublicError`(error_kind)
+- Guards:
+  - ``
+- Emits: `PublicErrorClassified`
+- To: `Absent`
 
 ## Coverage
 ### Code Anchors

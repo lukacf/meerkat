@@ -182,6 +182,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AddEvidenceFailed`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
+- `ClassifyPublicErrorNotFound`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorStaleRevision`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+- `ClassifyPublicErrorConflict`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidTransition`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidInput`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidTimestampMillis`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorUnsupportedBackend`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorStore`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
 
 ### Effects
 - `Created`
@@ -220,6 +244,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EvidenceAdded`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
+- `PublicErrorClassified`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
 
 ### Invariants
 - `absent_has_zero_revision`

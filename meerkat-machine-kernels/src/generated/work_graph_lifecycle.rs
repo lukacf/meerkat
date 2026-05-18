@@ -130,6 +130,146 @@ impl std::fmt::Display for WorkEdgeKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WorkGraphErrorKind {
+    #[default]
+    #[serde(rename = "NotFound")]
+    NotFound,
+    #[serde(rename = "StaleRevision")]
+    StaleRevision,
+    #[serde(rename = "Conflict")]
+    Conflict,
+    #[serde(rename = "InvalidTransition")]
+    InvalidTransition,
+    #[serde(rename = "InvalidInput")]
+    InvalidInput,
+    #[serde(rename = "InvalidTimestampMillis")]
+    InvalidTimestampMillis,
+    #[serde(rename = "UnsupportedBackend")]
+    UnsupportedBackend,
+    #[serde(rename = "Store")]
+    Store,
+}
+impl WorkGraphErrorKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotFound => "NotFound",
+            Self::StaleRevision => "StaleRevision",
+            Self::Conflict => "Conflict",
+            Self::InvalidTransition => "InvalidTransition",
+            Self::InvalidInput => "InvalidInput",
+            Self::InvalidTimestampMillis => "InvalidTimestampMillis",
+            Self::UnsupportedBackend => "UnsupportedBackend",
+            Self::Store => "Store",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkGraphErrorKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotFound" => Ok(Self::NotFound),
+            "StaleRevision" => Ok(Self::StaleRevision),
+            "Conflict" => Ok(Self::Conflict),
+            "InvalidTransition" => Ok(Self::InvalidTransition),
+            "InvalidInput" => Ok(Self::InvalidInput),
+            "InvalidTimestampMillis" => Ok(Self::InvalidTimestampMillis),
+            "UnsupportedBackend" => Ok(Self::UnsupportedBackend),
+            "Store" => Ok(Self::Store),
+            other => Err(format!("invalid WorkGraphErrorKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkGraphErrorKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkGraphErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WorkGraphPublicErrorClass {
+    #[default]
+    #[serde(rename = "NotFound")]
+    NotFound,
+    #[serde(rename = "Conflict")]
+    Conflict,
+    #[serde(rename = "InvalidTransition")]
+    InvalidTransition,
+    #[serde(rename = "InvalidArguments")]
+    InvalidArguments,
+    #[serde(rename = "CapabilityUnavailable")]
+    CapabilityUnavailable,
+    #[serde(rename = "StoreError")]
+    StoreError,
+}
+impl WorkGraphPublicErrorClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotFound => "NotFound",
+            Self::Conflict => "Conflict",
+            Self::InvalidTransition => "InvalidTransition",
+            Self::InvalidArguments => "InvalidArguments",
+            Self::CapabilityUnavailable => "CapabilityUnavailable",
+            Self::StoreError => "StoreError",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkGraphPublicErrorClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotFound" => Ok(Self::NotFound),
+            "Conflict" => Ok(Self::Conflict),
+            "InvalidTransition" => Ok(Self::InvalidTransition),
+            "InvalidArguments" => Ok(Self::InvalidArguments),
+            "CapabilityUnavailable" => Ok(Self::CapabilityUnavailable),
+            "StoreError" => Ok(Self::StoreError),
+            other => Err(format!("invalid WorkGraphPublicErrorClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkGraphPublicErrorClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkGraphPublicErrorClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -359,6 +499,10 @@ pub mod inputs {
     pub struct AddEvidence {
         pub expected_revision: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyPublicError {
+        pub error_kind: WorkGraphErrorKind,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -379,6 +523,7 @@ pub enum Input {
     CloseCancelled(inputs::CloseCancelled),
     CloseFailed(inputs::CloseFailed),
     AddEvidence(inputs::AddEvidence),
+    ClassifyPublicError(inputs::ClassifyPublicError),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -399,6 +544,7 @@ impl Input {
             Self::CloseCancelled(_) => InputKind::CloseCancelled,
             Self::CloseFailed(_) => InputKind::CloseFailed,
             Self::AddEvidence(_) => InputKind::AddEvidence,
+            Self::ClassifyPublicError(_) => InputKind::ClassifyPublicError,
         }
     }
 }
@@ -420,6 +566,7 @@ pub enum InputKind {
     CloseCancelled,
     CloseFailed,
     AddEvidence,
+    ClassifyPublicError,
 }
 
 pub mod effects {
@@ -453,6 +600,10 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EvidenceAdded {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PublicErrorClassified {
+        pub public_class: WorkGraphPublicErrorClass,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -469,6 +620,7 @@ pub enum Effect {
     LinkValidated(effects::LinkValidated),
     Closed(effects::Closed),
     EvidenceAdded(effects::EvidenceAdded),
+    PublicErrorClassified(effects::PublicErrorClassified),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -484,6 +636,7 @@ pub enum EffectKind {
     LinkValidated,
     Closed,
     EvidenceAdded,
+    PublicErrorClassified,
 }
 
 #[allow(non_camel_case_types)]
@@ -544,6 +697,14 @@ pub enum TransitionId {
     AddEvidenceCompleted,
     AddEvidenceCancelled,
     AddEvidenceFailed,
+    ClassifyPublicErrorNotFound,
+    ClassifyPublicErrorStaleRevision,
+    ClassifyPublicErrorConflict,
+    ClassifyPublicErrorInvalidTransition,
+    ClassifyPublicErrorInvalidInput,
+    ClassifyPublicErrorInvalidTimestampMillis,
+    ClassifyPublicErrorUnsupportedBackend,
+    ClassifyPublicErrorStore,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

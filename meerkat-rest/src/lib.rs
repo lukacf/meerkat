@@ -3739,19 +3739,28 @@ fn schedule_tool_error_to_api(error: meerkat::ScheduleToolError) -> ApiError {
 }
 
 fn workgraph_error_to_api(error: meerkat::WorkGraphError) -> ApiError {
-    match error {
-        meerkat::WorkGraphError::NotFound { .. } => ApiError::NotFound(error.to_string()),
-        meerkat::WorkGraphError::StaleRevision { .. }
-        | meerkat::WorkGraphError::Conflict(_)
-        | meerkat::WorkGraphError::InvalidTransition(_)
-        | meerkat::WorkGraphError::InvalidInput(_)
-        | meerkat::WorkGraphError::InvalidTimestampMillis { .. } => {
-            ApiError::BadRequest(error.to_string())
+    let message = error.to_string();
+    match meerkat::WorkGraphMachine::public_error_class(&error) {
+        Ok(public_class) => workgraph_public_error_class_to_api(public_class, message),
+        Err(classification_error) => ApiError::Internal(format!(
+            "generated WorkGraph error classification failed: {classification_error}; original error: {message}"
+        )),
+    }
+}
+
+fn workgraph_public_error_class_to_api(
+    public_class: meerkat::WorkGraphPublicErrorClass,
+    message: String,
+) -> ApiError {
+    match public_class {
+        meerkat::WorkGraphPublicErrorClass::NotFound => ApiError::NotFound(message),
+        meerkat::WorkGraphPublicErrorClass::Conflict
+        | meerkat::WorkGraphPublicErrorClass::InvalidTransition
+        | meerkat::WorkGraphPublicErrorClass::InvalidArguments => ApiError::BadRequest(message),
+        meerkat::WorkGraphPublicErrorClass::CapabilityUnavailable => {
+            ApiError::ServiceUnavailable(message)
         }
-        meerkat::WorkGraphError::UnsupportedBackend(_) => {
-            ApiError::ServiceUnavailable(error.to_string())
-        }
-        meerkat::WorkGraphError::Store(_) => ApiError::Internal(error.to_string()),
+        meerkat::WorkGraphPublicErrorClass::StoreError => ApiError::Internal(message),
     }
 }
 

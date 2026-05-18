@@ -12,6 +12,8 @@ use crate::types::{
     WorkStatus,
 };
 
+pub type WorkGraphPublicErrorClass = wg_dsl::WorkGraphPublicErrorClass;
+
 #[derive(Debug, Clone)]
 pub struct WorkGraphEventAuthority {
     pub(crate) kind: WorkGraphEventKind,
@@ -30,6 +32,20 @@ pub struct WorkGraphMachine;
 impl WorkGraphMachine {
     pub fn validate_item_projection(item: &WorkItem) -> Result<(), WorkGraphError> {
         validate_item_machine_projection(item)
+    }
+
+    pub fn public_error_class(
+        error: &WorkGraphError,
+    ) -> Result<WorkGraphPublicErrorClass, WorkGraphError> {
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyPublicError {
+                error_kind: workgraph_error_kind(error),
+            },
+        )
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+        public_error_class_from_effects(&transition.effects)
     }
 
     pub fn create_item(
@@ -380,6 +396,21 @@ fn validate_title(title: String) -> Result<String, WorkGraphError> {
         ));
     }
     Ok(title.to_string())
+}
+
+fn workgraph_error_kind(error: &WorkGraphError) -> wg_dsl::WorkGraphErrorKind {
+    match error {
+        WorkGraphError::NotFound { .. } => wg_dsl::WorkGraphErrorKind::NotFound,
+        WorkGraphError::StaleRevision { .. } => wg_dsl::WorkGraphErrorKind::StaleRevision,
+        WorkGraphError::Conflict(_) => wg_dsl::WorkGraphErrorKind::Conflict,
+        WorkGraphError::InvalidTransition(_) => wg_dsl::WorkGraphErrorKind::InvalidTransition,
+        WorkGraphError::InvalidInput(_) => wg_dsl::WorkGraphErrorKind::InvalidInput,
+        WorkGraphError::InvalidTimestampMillis { .. } => {
+            wg_dsl::WorkGraphErrorKind::InvalidTimestampMillis
+        }
+        WorkGraphError::UnsupportedBackend(_) => wg_dsl::WorkGraphErrorKind::UnsupportedBackend,
+        WorkGraphError::Store(_) => wg_dsl::WorkGraphErrorKind::Store,
+    }
 }
 
 fn normalize_labels(labels: BTreeSet<String>) -> Result<BTreeSet<String>, WorkGraphError> {
@@ -756,7 +787,8 @@ fn event_kind_from_effects(
             wg_dsl::WorkGraphLifecycleEffect::BlockerSatisfied
             | wg_dsl::WorkGraphLifecycleEffect::BlockerUnsatisfied
             | wg_dsl::WorkGraphLifecycleEffect::LifecycleTerminal
-            | wg_dsl::WorkGraphLifecycleEffect::LifecycleNonTerminal => None,
+            | wg_dsl::WorkGraphLifecycleEffect::LifecycleNonTerminal
+            | wg_dsl::WorkGraphLifecycleEffect::PublicErrorClassified { .. } => None,
             wg_dsl::WorkGraphLifecycleEffect::LinkValidated => Some(WorkGraphEventKind::Linked),
             wg_dsl::WorkGraphLifecycleEffect::Closed { .. } => Some(WorkGraphEventKind::Closed),
             wg_dsl::WorkGraphLifecycleEffect::EvidenceAdded => {
@@ -792,7 +824,34 @@ fn effect_label(effect: &wg_dsl::WorkGraphLifecycleEffect) -> &'static str {
         wg_dsl::WorkGraphLifecycleEffect::LinkValidated => "LinkValidated",
         wg_dsl::WorkGraphLifecycleEffect::Closed { .. } => "Closed",
         wg_dsl::WorkGraphLifecycleEffect::EvidenceAdded => "EvidenceAdded",
+        wg_dsl::WorkGraphLifecycleEffect::PublicErrorClassified { .. } => "PublicErrorClassified",
     }
+}
+
+fn public_error_class_from_effects(
+    effects: &[wg_dsl::WorkGraphLifecycleEffect],
+) -> Result<WorkGraphPublicErrorClass, WorkGraphError> {
+    let mut public_class = None;
+    for effect in effects {
+        match effect {
+            wg_dsl::WorkGraphLifecycleEffect::PublicErrorClassified {
+                public_class: class,
+            } => {
+                public_class = Some(*class);
+            }
+            other => {
+                return Err(WorkGraphError::InvalidTransition(format!(
+                    "unexpected public-error-class effect: {other:?}"
+                )));
+            }
+        }
+    }
+    public_class.ok_or_else(|| {
+        WorkGraphError::InvalidTransition(
+            "generated WorkGraphLifecycle transition produced no public-error-class effect"
+                .to_string(),
+        )
+    })
 }
 
 fn terminality_from_effects(
@@ -883,6 +942,26 @@ mod tests {
 
     fn owner(id: &str) -> WorkOwner {
         WorkOwner::new(WorkOwnerKey::label(id).expect("owner key"))
+    }
+
+    #[test]
+    fn public_error_classification_comes_from_generated_machine() {
+        let timestamp_error = WorkGraphError::InvalidTimestampMillis {
+            field: "now",
+            millis: -1,
+        };
+        assert_eq!(
+            WorkGraphMachine::public_error_class(&timestamp_error)
+                .expect("timestamp error should classify"),
+            WorkGraphPublicErrorClass::InvalidArguments
+        );
+
+        let store_error = WorkGraphError::Store("sqlite unavailable".to_string());
+        assert_eq!(
+            WorkGraphMachine::public_error_class(&store_error)
+                .expect("store error should classify"),
+            WorkGraphPublicErrorClass::StoreError
+        );
     }
 
     #[test]

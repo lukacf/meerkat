@@ -492,7 +492,6 @@ impl FlowEngine {
                 max_retries,
                 cancel,
                 flow_deadline_timeout_reason,
-                TimeoutRejectionPolicy::AbortStep,
             )
             .await?
         {
@@ -583,7 +582,6 @@ impl FlowEngine {
                         max_retries,
                         cancel,
                         flow_deadline_timeout_reason,
-                        TimeoutRejectionPolicy::RecordTargetFailure,
                     )
                     .await;
                 (target, result)
@@ -665,7 +663,6 @@ impl FlowEngine {
         max_retries: usize,
         cancel: Option<&CancellationToken>,
         flow_deadline_timeout_reason: Option<String>,
-        timeout_rejection_policy: TimeoutRejectionPolicy,
     ) -> Result<Result<Value, StepTargetFailure>, MobError> {
         let mut attempt = 0usize;
         loop {
@@ -698,12 +695,6 @@ impl FlowEngine {
                             match self.executor.on_timeout(ticket.clone()).await {
                                 Ok(TimeoutDisposition::Detached | TimeoutDisposition::Canceled) => {
                                     return Err(MobError::RunCanceled(run_id.clone()));
-                                }
-                                Ok(TimeoutDisposition::Rejected(rejection)) => {
-                                    return Err(MobError::FlowFailed {
-                                        run_id: run_id.clone(),
-                                        reason: rejection.to_string(),
-                                    });
                                 }
                                 Err(e) => {
                                     return Err(MobError::FlowFailed {
@@ -824,17 +815,6 @@ impl FlowEngine {
                         }
                         Ok(TimeoutDisposition::Canceled) => {
                             format!("timeout + canceled after {}ms", step_timeout.as_millis())
-                        }
-                        Ok(TimeoutDisposition::Rejected(rejection)) => {
-                            let reason = rejection.to_string();
-                            if matches!(timeout_rejection_policy, TimeoutRejectionPolicy::AbortStep)
-                            {
-                                return Err(MobError::FlowFailed {
-                                    run_id: run_id.clone(),
-                                    reason,
-                                });
-                            }
-                            reason
                         }
                         Err(e) => {
                             return Err(MobError::FlowFailed {
@@ -1734,12 +1714,6 @@ impl StepTargetFailure {
     fn unrecorded(reason: String) -> Self {
         Self { reason }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TimeoutRejectionPolicy {
-    AbortStep,
-    RecordTargetFailure,
 }
 
 pub(crate) struct StepExecutionRequest<'a> {

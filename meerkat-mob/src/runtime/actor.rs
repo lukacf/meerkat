@@ -1741,6 +1741,22 @@ impl MobActor {
         }
     }
 
+    fn machine_member_ref_for_behavior(
+        &self,
+        entry: &RosterEntry,
+        context: &str,
+    ) -> Result<MemberRef, MobError> {
+        let bridge_session_id = self.machine_bridge_session_id_for_identity(&entry.agent_identity);
+        Self::project_member_ref_session_binding(&entry.member_ref, bridge_session_id).ok_or_else(
+            || {
+                MobError::Internal(format!(
+                    "{context} requires MobMachine session binding for '{}'",
+                    entry.agent_identity
+                ))
+            },
+        )
+    }
+
     async fn machine_member_material(
         &self,
         agent_identity: &MeerkatId,
@@ -10805,7 +10821,9 @@ impl MobActor {
         self.commit_prepared_dsl_input(prepared);
 
         // Dispatch the interrupt now that the machine has authorized.
-        self.provisioner.interrupt_member(&entry.member_ref).await
+        let machine_member_ref =
+            self.machine_member_ref_for_behavior(&entry, "cancel all work interrupt")?;
+        self.provisioner.interrupt_member(&machine_member_ref).await
     }
 
     async fn dispatch_member_turn(
@@ -10881,6 +10899,8 @@ impl MobActor {
                 Ok(())
             }
             crate::MobRuntimeMode::TurnDriven => {
+                let machine_member_ref = self
+                    .machine_member_ref_for_behavior(entry, "turn-driven direct turn delivery")?;
                 let req = meerkat_core::service::StartTurnRequest {
                     prompt: content,
                     system_prompt: None,
@@ -10896,10 +10916,14 @@ impl MobActor {
                 };
                 match ack_mode {
                     crate::mob_machine::SubmitWorkAckMode::IngressAccepted => {
-                        self.provisioner.admit_turn(&entry.member_ref, req).await?;
+                        self.provisioner
+                            .admit_turn(&machine_member_ref, req)
+                            .await?;
                     }
                     crate::mob_machine::SubmitWorkAckMode::TurnCompleted => {
-                        self.provisioner.start_turn(&entry.member_ref, req).await?;
+                        self.provisioner
+                            .start_turn(&machine_member_ref, req)
+                            .await?;
                     }
                 }
                 Ok(())

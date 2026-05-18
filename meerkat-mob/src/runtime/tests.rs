@@ -18263,6 +18263,58 @@ async fn test_flow_dispatch_autonomous_mode_uses_injector_and_avoids_non_host_st
 }
 
 #[tokio::test]
+async fn test_flow_dispatch_turn_driven_mode_uses_machine_bound_session() {
+    let mut definition = sample_definition_with_dispatch_mode(DispatchMode::OneToOne);
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(|profile| profile.as_inline_mut())
+        .expect("worker profile")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let machine_session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
+        .await
+        .expect("machine binding for turn-driven worker");
+    let baseline_start_turn = service.start_turn_call_count();
+    let baseline_prompt_count = service.recorded_start_turn_prompts().await.len();
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(
+        terminal.status,
+        MobRunStatus::Completed,
+        "turn-driven flow dispatch failed: failures={:?} steps={:?}",
+        terminal.failure_ledger,
+        terminal.step_ledger
+    );
+    assert_eq!(
+        service.start_turn_call_count(),
+        baseline_start_turn + 1,
+        "turn-driven flow dispatch should issue one start_turn"
+    );
+    let prompts = service.recorded_start_turn_prompts().await;
+    assert_eq!(
+        prompts
+            .get(baseline_prompt_count)
+            .map(|(session_id, _)| session_id),
+        Some(&machine_session),
+        "turn-driven flow dispatch must realize through the MobMachine session binding"
+    );
+}
+
+#[tokio::test]
 async fn test_flow_dispatch_autonomous_mode_with_overlay_rejects() {
     let mut definition = sample_definition_with_dispatch_mode(DispatchMode::OneToOne);
     let flow = definition
@@ -21833,17 +21885,12 @@ async fn test_timeout_budget_exhaustion_fails_run() {
         .expect("run flow");
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
     assert_eq!(terminal.status, MobRunStatus::Failed);
-
-    let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        events.iter().any(|event| {
-            matches!(
-                &event.kind,
-                MobEventKind::FlowFailed { run_id: id, reason, .. }
-                    if id == &run_id && reason.contains("orphan budget")
-            )
-        }),
-        "expected FlowFailed reason from orphan budget exhaustion"
+        terminal
+            .failure_ledger
+            .iter()
+            .any(|entry| entry.reason.contains("timeout + canceled after")),
+        "budget exhaustion should abort the timed-out turn and persist the machine-projected step failure"
     );
 }
 

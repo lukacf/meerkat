@@ -2,9 +2,9 @@ use super::handle::MobHandle;
 use super::provisioner::MobProvisioner;
 use super::turn_executor::{
     ActorTurnTicket, FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition,
-    TimeoutRejection,
 };
 use crate::error::MobError;
+use crate::event::MemberRef;
 use crate::ids::{AgentIdentity, MeerkatId, RunId, StepId};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -13,7 +13,7 @@ use futures::FutureExt;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame, TurnErrorMetadata};
 use meerkat_core::service::{StartTurnRequest, TurnToolOverlay};
-use meerkat_core::types::ContentInput;
+use meerkat_core::types::{ContentInput, SessionId};
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -105,6 +105,30 @@ impl ActorFlowTurnExecutor {
     fn actor_ticket(ticket: FlowTurnTicket) -> Arc<ActorTurnTicket> {
         match ticket {
             FlowTurnTicket::Actor(ticket) => ticket,
+        }
+    }
+
+    fn project_member_ref_session_binding(
+        member_ref: &MemberRef,
+        current_bridge_session_id: Option<SessionId>,
+    ) -> Option<MemberRef> {
+        match member_ref {
+            MemberRef::Session { .. } => {
+                current_bridge_session_id.map(MemberRef::from_bridge_session_id)
+            }
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                pubkey,
+                bootstrap_token,
+                ..
+            } => Some(MemberRef::BackendPeer {
+                peer_id: peer_id.clone(),
+                address: address.clone(),
+                pubkey: *pubkey,
+                bootstrap_token: bootstrap_token.clone(),
+                session_id: current_bridge_session_id,
+            }),
         }
     }
 
@@ -438,6 +462,21 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                 )
             }
             crate::MobRuntimeMode::TurnDriven => {
+                let bridge_session_id = self
+                    .handle
+                    .resolve_bridge_session_id(&AgentIdentity::from(target.as_str()))
+                    .await;
+                let member_ref = match Self::project_member_ref_session_binding(
+                    &entry.member_ref,
+                    bridge_session_id,
+                ) {
+                    Some(member_ref) => member_ref,
+                    None => {
+                        return Err(MobError::Internal(format!(
+                            "turn-driven flow dispatch requires MobMachine session binding for '{target}'"
+                        )));
+                    }
+                };
                 let (event_tx, event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(8);
                 let bridge_handle = Self::spawn_subscription_bridge_enveloped(
                     event_rx,
@@ -449,7 +488,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                 if let Err(error) = self
                     .provisioner
                     .start_flow_step(
-                        &entry.member_ref,
+                        &member_ref,
                         run_id,
                         step_id,
                         StartTurnRequest {
@@ -540,9 +579,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
             Ok(TimeoutDisposition::Detached)
         } else {
             bridge_handle.abort();
-            Ok(TimeoutDisposition::Rejected(
-                TimeoutRejection::OrphanBudgetExhausted,
-            ))
+            Ok(TimeoutDisposition::Canceled)
         }
     }
 }

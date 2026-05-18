@@ -208,6 +208,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveInputPublicTerminalOutcome`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `ClassifyInputTerminality`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `ClassifyRuntimeLifecycleState`(state: RuntimeLifecycleObservedState)
+- `ClassifyRuntimeLoopQueueAdmission`(state: RuntimeLifecycleObservedState, current_run_bound: Bool)
 - `Prepare`(session_id: SessionId, run_id: RunId)
 - `Commit`(input_id: InputId, run_id: RunId)
 - `Fail`(run_id: RunId)
@@ -398,6 +399,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InputPublicTerminalOutcomeResolved`(input_id: String, terminal_outcome: Option<InputPublicTerminalOutcome>)
 - `InputBehavioralTerminalityResolved`(input_id: String, terminal: Bool)
 - `RuntimeLifecycleStateClassified`(state: RuntimeLifecycleObservedState, terminality: RuntimeLifecycleTerminality, input_admission: RuntimeInputAdmission, queue_admission: RuntimeQueueAdmission, prepare_admission: RuntimePrepareAdmission, ingress_admission: RuntimeIngressAdmission)
+- `RuntimeLoopQueueAdmissionClassified`(state: RuntimeLifecycleObservedState, current_run_bound: Bool, queue_admission: RuntimeQueueAdmission, run_binding: RuntimeLoopRunBinding)
 - `PostAdmissionSignal`(signal: PostAdmissionSignalKind)
 - `ReadyForRun`
 - `InputLifecycleNotice`
@@ -3341,6 +3343,78 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `destroyed_state`
 - Emits: `RuntimeLifecycleStateClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLoopQueueInitializingIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLoopQueueAdmission`(state, current_run_bound)
+- Guards:
+  - `initializing_state`
+  - `no_current_run`
+- Emits: `RuntimeLoopQueueAdmissionClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLoopQueueIdleIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLoopQueueAdmission`(state, current_run_bound)
+- Guards:
+  - `idle_state`
+  - `no_current_run`
+- Emits: `RuntimeLoopQueueAdmissionClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLoopQueueAttachedIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLoopQueueAdmission`(state, current_run_bound)
+- Guards:
+  - `attached_state`
+  - `no_current_run`
+- Emits: `RuntimeLoopQueueAdmissionClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLoopQueueRunningWithoutBindingIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLoopQueueAdmission`(state, current_run_bound)
+- Guards:
+  - `running_state`
+  - `no_current_run`
+- Emits: `RuntimeLoopQueueAdmissionClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLoopQueueRunningWithBindingIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLoopQueueAdmission`(state, current_run_bound)
+- Guards:
+  - `running_state`
+  - `has_current_run`
+- Emits: `RuntimeLoopQueueAdmissionClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLoopQueueRetiredIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLoopQueueAdmission`(state, current_run_bound)
+- Guards:
+  - `retired_state`
+  - `no_current_run`
+- Emits: `RuntimeLoopQueueAdmissionClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLoopQueueStoppedIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLoopQueueAdmission`(state, current_run_bound)
+- Guards:
+  - `stopped_state`
+  - `no_current_run`
+- Emits: `RuntimeLoopQueueAdmissionClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeLoopQueueDestroyedIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLoopQueueAdmission`(state, current_run_bound)
+- Guards:
+  - `destroyed_state`
+  - `no_current_run`
+- Emits: `RuntimeLoopQueueAdmissionClassified`
 - To: `Idle`
 
 ### `ResolveAdmissionIdempotencyNoKeyIdle`

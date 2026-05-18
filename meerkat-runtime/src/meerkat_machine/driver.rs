@@ -258,10 +258,17 @@ impl DriverEntry {
         }
     }
 
-    /// Check through generated authority if the runtime can process queued inputs.
-    pub(crate) fn can_process_queue(&self) -> Result<bool, RuntimeDriverError> {
-        self.runtime_lifecycle_facts()
-            .map(crate::meerkat_machine::RuntimeLifecycleFacts::can_process_queue)
+    pub(crate) fn runtime_loop_queue_admission(
+        &self,
+        current_run_bound: bool,
+    ) -> Result<crate::meerkat_machine::RuntimeLoopQueueAdmissionPlan, RuntimeDriverError> {
+        let state = self.runtime_state();
+        crate::meerkat_machine::classify_runtime_loop_queue_admission(state, current_run_bound)
+            .map_err(|reason| {
+                RuntimeDriverError::Internal(format!(
+                    "generated runtime-loop queue admission failed for {state}: {reason}"
+                ))
+            })
     }
 
     /// Inspect the current typed post-admission signal without draining it.

@@ -18,7 +18,6 @@ use crate::input::Input;
 use crate::input::input_prompt_text;
 #[cfg(test)]
 use crate::input::runtime_input_projection_for_machine_batch;
-use crate::runtime_state::RuntimeState;
 use crate::tokio;
 
 /// Extract a prompt string from an `Input`.
@@ -743,16 +742,12 @@ async fn process_queue(
         let dequeued = {
             let mut d = driver.lock().await;
 
-            // Immediate attached steer pre-binds the DSL run before waking the
-            // loop. Honor that Running/current_run_id pair as a queued batch
-            // that is already prepared by the checked-in machine.
-            let prebound_run_id = if d.runtime_state() == RuntimeState::Running {
-                d.current_run_id()
-            } else {
-                None
-            };
-            let can_process_queue = match d.can_process_queue() {
-                Ok(can_process_queue) => can_process_queue,
+            // Immediate attached steer can pre-bind the DSL run before waking
+            // the loop. The generated classifier owns whether that binding
+            // admits queue processing and whether the loop must reuse it.
+            let current_run_id = d.current_run_id();
+            let queue_plan = match d.runtime_loop_queue_admission(current_run_id.is_some()) {
+                Ok(queue_plan) => queue_plan,
                 Err(error) => {
                     tracing::error!(
                         error = %error,
@@ -761,9 +756,14 @@ async fn process_queue(
                     return false;
                 }
             };
-            if !can_process_queue && prebound_run_id.is_none() {
+            if !queue_plan.can_process_queue() {
                 return false;
             }
+            let prebound_run_id = if queue_plan.uses_prebound_run() {
+                current_run_id
+            } else {
+                None
+            };
 
             // Ask the ingress authority for the next batch of input IDs.
             // The authority implements steer-first priority and same-boundary

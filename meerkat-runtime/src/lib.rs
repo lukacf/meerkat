@@ -138,7 +138,8 @@ pub use meerkat_core::types::HandlingMode;
 pub use meerkat_machine::{
     CommsDrainMode, CommsDrainPhase, DrainExitReason, MachineSessionControlAuthority,
     MeerkatConsumerSurface, MeerkatMachine, PeerIngressOwner, RuntimeBindingsError,
-    RuntimeLifecycleFacts, classify_runtime_lifecycle_state,
+    RuntimeLifecycleFacts, RuntimeLoopQueueAdmissionPlan, classify_runtime_lifecycle_state,
+    classify_runtime_loop_queue_admission,
 };
 pub use meerkat_machine_types::{
     HydratedSessionLlmState, ImageOperationRoutingRequest, ImageOperationRoutingResult,

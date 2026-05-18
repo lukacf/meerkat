@@ -1018,6 +1018,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyRuntimeLifecycleDestroyedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+- `ClassifyRuntimeLoopQueueInitializingIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+- `ClassifyRuntimeLoopQueueIdleIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `recycle_and_compaction`
+- `ClassifyRuntimeLoopQueueAttachedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`
+- `ClassifyRuntimeLoopQueueRunningWithoutBindingIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`
+- `ClassifyRuntimeLoopQueueRunningWithBindingIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`
+- `ClassifyRuntimeLoopQueueRetiredIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `recycle_and_compaction`
+- `ClassifyRuntimeLoopQueueStoppedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`
+- `ClassifyRuntimeLoopQueueDestroyedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
 - `ResolveAdmissionIdempotencyNoKeyIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -3048,6 +3072,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RuntimeLifecycleStateClassified`
   - anchors: `meerkat_machine`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
+- `RuntimeLoopQueueAdmissionClassified`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `PostAdmissionSignal`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`

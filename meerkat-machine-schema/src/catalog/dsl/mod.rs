@@ -710,6 +710,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Open", "NotReady", "Destroyed"],
             ),
             NamedTypeBinding::string_enum(
+                "RuntimeLoopRunBinding",
+                &["Blocked", "AllocateNew", "UsePrebound"],
+            ),
+            NamedTypeBinding::string_enum(
                 "RecoveredInputKind",
                 &[
                     "Prompt",

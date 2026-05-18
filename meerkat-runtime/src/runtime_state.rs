@@ -89,6 +89,33 @@ mod tests {
         assert!(running.can_accept_input());
         assert!(!running.can_process_queue());
         assert!(!running.can_prepare_run());
+
+        let running_without_binding =
+            meerkat_machine::classify_runtime_loop_queue_admission(RuntimeState::Running, false)
+                .expect("running without binding queue admission");
+        assert!(!running_without_binding.can_process_queue());
+        assert_eq!(
+            running_without_binding.run_binding,
+            dsl::RuntimeLoopRunBinding::Blocked
+        );
+
+        let running_with_binding =
+            meerkat_machine::classify_runtime_loop_queue_admission(RuntimeState::Running, true)
+                .expect("running with binding queue admission");
+        assert!(running_with_binding.can_process_queue());
+        assert_eq!(
+            running_with_binding.run_binding,
+            dsl::RuntimeLoopRunBinding::UsePrebound
+        );
+
+        let idle_queue =
+            meerkat_machine::classify_runtime_loop_queue_admission(RuntimeState::Idle, false)
+                .expect("idle queue admission");
+        assert!(idle_queue.can_process_queue());
+        assert_eq!(
+            idle_queue.run_binding,
+            dsl::RuntimeLoopRunBinding::AllocateNew
+        );
     }
 
     #[test]

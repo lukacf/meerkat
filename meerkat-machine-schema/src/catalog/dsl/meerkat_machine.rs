@@ -822,6 +822,14 @@ pub enum RuntimeIngressAdmission {
     Destroyed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeLoopRunBinding {
+    #[default]
+    Blocked,
+    AllocateNew,
+    UsePrebound,
+}
+
 /// Typed reason classifier for the `TurnRunCancelled` effect. Closed set of
 /// cancellation-observation origins emitted when a turn's cancellation
 /// request lands at an observable boundary. Replaces the former literal-
@@ -2204,6 +2212,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             ClassifyRuntimeLifecycleState {
                 state: Enum<RuntimeLifecycleObservedState>,
             },
+            ClassifyRuntimeLoopQueueAdmission {
+                state: Enum<RuntimeLifecycleObservedState>,
+                current_run_bound: bool,
+            },
             Prepare { session_id: SessionId, run_id: RunId },
             Commit { input_id: InputId, run_id: RunId },
             Fail { run_id: RunId },
@@ -2696,6 +2708,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 prepare_admission: Enum<RuntimePrepareAdmission>,
                 ingress_admission: Enum<RuntimeIngressAdmission>,
             },
+            RuntimeLoopQueueAdmissionClassified {
+                state: Enum<RuntimeLifecycleObservedState>,
+                current_run_bound: bool,
+                queue_admission: Enum<RuntimeQueueAdmission>,
+                run_binding: Enum<RuntimeLoopRunBinding>,
+            },
             PostAdmissionSignal { signal: Enum<PostAdmissionSignalKind> },
             ReadyForRun,
             InputLifecycleNotice,
@@ -2863,6 +2881,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InputPublicTerminalOutcomeResolved => local,
         disposition InputBehavioralTerminalityResolved => local,
         disposition RuntimeLifecycleStateClassified => local,
+        disposition RuntimeLoopQueueAdmissionClassified => local,
         disposition PostAdmissionSignal => local,
         disposition ReadyForRun => local,
         disposition InputLifecycleNotice => external,
@@ -5395,6 +5414,131 @@ macro_rules! meerkat_catalog_machine_dsl {
                 queue_admission: RuntimeQueueAdmission::BlocksQueue,
                 prepare_admission: RuntimePrepareAdmission::Destroyed,
                 ingress_admission: RuntimeIngressAdmission::Destroyed
+            }
+        }
+
+        // ClassifyRuntimeLoopQueueAdmission: generated authority for the
+        // runtime loop's queue-drain admission. The shell provides only the
+        // observed lifecycle variant and whether a generated run binding is
+        // present; the generated feedback owns both queue admission and
+        // whether to reuse that prebound run id.
+        transition ClassifyRuntimeLoopQueueInitializing {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "initializing_state" { state == RuntimeLifecycleObservedState::Initializing }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                run_binding: RuntimeLoopRunBinding::Blocked
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueIdle {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "idle_state" { state == RuntimeLifecycleObservedState::Idle }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                run_binding: RuntimeLoopRunBinding::AllocateNew
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueAttached {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "attached_state" { state == RuntimeLifecycleObservedState::Attached }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                run_binding: RuntimeLoopRunBinding::AllocateNew
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueRunningWithoutBinding {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "running_state" { state == RuntimeLifecycleObservedState::Running }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                run_binding: RuntimeLoopRunBinding::Blocked
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueRunningWithBinding {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "running_state" { state == RuntimeLifecycleObservedState::Running }
+            guard "has_current_run" { current_run_bound == true }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                run_binding: RuntimeLoopRunBinding::UsePrebound
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueRetired {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "retired_state" { state == RuntimeLifecycleObservedState::Retired }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                run_binding: RuntimeLoopRunBinding::AllocateNew
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueStopped {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "stopped_state" { state == RuntimeLifecycleObservedState::Stopped }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                run_binding: RuntimeLoopRunBinding::Blocked
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueDestroyed {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "destroyed_state" { state == RuntimeLifecycleObservedState::Destroyed }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                run_binding: RuntimeLoopRunBinding::Blocked
             }
         }
 

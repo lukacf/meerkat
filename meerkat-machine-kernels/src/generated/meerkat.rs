@@ -5144,6 +5144,60 @@ impl std::fmt::Display for RuntimeLifecycleTerminality {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RuntimeLoopRunBinding {
+    #[default]
+    #[serde(rename = "Blocked")]
+    Blocked,
+    #[serde(rename = "AllocateNew")]
+    AllocateNew,
+    #[serde(rename = "UsePrebound")]
+    UsePrebound,
+}
+impl RuntimeLoopRunBinding {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Blocked => "Blocked",
+            Self::AllocateNew => "AllocateNew",
+            Self::UsePrebound => "UsePrebound",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeLoopRunBinding {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Blocked" => Ok(Self::Blocked),
+            "AllocateNew" => Ok(Self::AllocateNew),
+            "UsePrebound" => Ok(Self::UsePrebound),
+            other => Err(format!("invalid RuntimeLoopRunBinding value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeLoopRunBinding {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeLoopRunBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RuntimeNoticeKind {
     #[default]
     #[serde(rename = "Drain")]
@@ -6749,6 +6803,11 @@ pub mod inputs {
         pub state: RuntimeLifecycleObservedState,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyRuntimeLoopQueueAdmission {
+        pub state: RuntimeLifecycleObservedState,
+        pub current_run_bound: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Prepare {
         pub session_id: SessionId,
         pub run_id: RunId,
@@ -7410,6 +7469,7 @@ pub enum Input {
     ResolveInputPublicTerminalOutcome(inputs::ResolveInputPublicTerminalOutcome),
     ClassifyInputTerminality(inputs::ClassifyInputTerminality),
     ClassifyRuntimeLifecycleState(inputs::ClassifyRuntimeLifecycleState),
+    ClassifyRuntimeLoopQueueAdmission(inputs::ClassifyRuntimeLoopQueueAdmission),
     Prepare(inputs::Prepare),
     Commit(inputs::Commit),
     Fail(inputs::Fail),
@@ -7608,6 +7668,9 @@ impl Input {
             }
             Self::ClassifyInputTerminality(_) => InputKind::ClassifyInputTerminality,
             Self::ClassifyRuntimeLifecycleState(_) => InputKind::ClassifyRuntimeLifecycleState,
+            Self::ClassifyRuntimeLoopQueueAdmission(_) => {
+                InputKind::ClassifyRuntimeLoopQueueAdmission
+            }
             Self::Prepare(_) => InputKind::Prepare,
             Self::Commit(_) => InputKind::Commit,
             Self::Fail(_) => InputKind::Fail,
@@ -7805,6 +7868,7 @@ pub enum InputKind {
     ResolveInputPublicTerminalOutcome,
     ClassifyInputTerminality,
     ClassifyRuntimeLifecycleState,
+    ClassifyRuntimeLoopQueueAdmission,
     Prepare,
     Commit,
     Fail,
@@ -8200,6 +8264,13 @@ pub mod effects {
         pub ingress_admission: RuntimeIngressAdmission,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeLoopQueueAdmissionClassified {
+        pub state: RuntimeLifecycleObservedState,
+        pub current_run_bound: bool,
+        pub queue_admission: RuntimeQueueAdmission,
+        pub run_binding: RuntimeLoopRunBinding,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PostAdmissionSignal {
         pub signal: PostAdmissionSignalKind,
     }
@@ -8447,6 +8518,7 @@ pub enum Effect {
     InputPublicTerminalOutcomeResolved(effects::InputPublicTerminalOutcomeResolved),
     InputBehavioralTerminalityResolved(effects::InputBehavioralTerminalityResolved),
     RuntimeLifecycleStateClassified(effects::RuntimeLifecycleStateClassified),
+    RuntimeLoopQueueAdmissionClassified(effects::RuntimeLoopQueueAdmissionClassified),
     PostAdmissionSignal(effects::PostAdmissionSignal),
     ReadyForRun(effects::ReadyForRun),
     InputLifecycleNotice(effects::InputLifecycleNotice),
@@ -8536,6 +8608,7 @@ pub enum EffectKind {
     InputPublicTerminalOutcomeResolved,
     InputBehavioralTerminalityResolved,
     RuntimeLifecycleStateClassified,
+    RuntimeLoopQueueAdmissionClassified,
     PostAdmissionSignal,
     ReadyForRun,
     InputLifecycleNotice,
@@ -8919,6 +8992,14 @@ pub enum TransitionId {
     ClassifyRuntimeLifecycleRetiredIdle,
     ClassifyRuntimeLifecycleStoppedIdle,
     ClassifyRuntimeLifecycleDestroyedIdle,
+    ClassifyRuntimeLoopQueueInitializingIdle,
+    ClassifyRuntimeLoopQueueIdleIdle,
+    ClassifyRuntimeLoopQueueAttachedIdle,
+    ClassifyRuntimeLoopQueueRunningWithoutBindingIdle,
+    ClassifyRuntimeLoopQueueRunningWithBindingIdle,
+    ClassifyRuntimeLoopQueueRetiredIdle,
+    ClassifyRuntimeLoopQueueStoppedIdle,
+    ClassifyRuntimeLoopQueueDestroyedIdle,
     ResolveAdmissionIdempotencyNoKeyIdle,
     ResolveAdmissionIdempotencyNoKeyAttached,
     ResolveAdmissionIdempotencyNoKeyRunning,

@@ -1704,6 +1704,14 @@ pub enum RuntimeIngressAdmission {
     Destroyed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeLoopRunBinding {
+    #[default]
+    Blocked,
+    AllocateNew,
+    UsePrebound,
+}
+
 /// Typed reason classifier for the `TurnRunCancelled` effect. Closed set of
 /// cancellation-observation origins emitted when a turn's cancellation
 /// request lands at an observable boundary. Replaces the former literal-

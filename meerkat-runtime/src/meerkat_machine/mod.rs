@@ -123,6 +123,26 @@ impl RuntimeLifecycleFacts {
     }
 }
 
+/// Runtime-loop queue-drain admission feedback emitted by generated
+/// MeerkatMachine authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeLoopQueueAdmissionPlan {
+    pub queue_admission: dsl::RuntimeQueueAdmission,
+    pub run_binding: dsl::RuntimeLoopRunBinding,
+}
+
+impl RuntimeLoopQueueAdmissionPlan {
+    #[must_use]
+    pub fn can_process_queue(self) -> bool {
+        self.queue_admission == dsl::RuntimeQueueAdmission::ProcessesQueue
+    }
+
+    #[must_use]
+    pub fn uses_prebound_run(self) -> bool {
+        self.run_binding == dsl::RuntimeLoopRunBinding::UsePrebound
+    }
+}
+
 /// Classify runtime lifecycle/admission facts through generated
 /// MeerkatMachine authority. Callers provide only the observed state variant;
 /// all behavior-affecting facts come back as generated typed feedback.
@@ -163,6 +183,53 @@ pub fn classify_runtime_lifecycle_state(
         })
         .ok_or_else(|| {
             format!("MeerkatMachine emitted no runtime lifecycle classification for {state}")
+        })
+}
+
+/// Classify runtime-loop queue admission through generated MeerkatMachine
+/// authority. The caller provides the observed runtime state and the structural
+/// fact that a current run id is bound; generated feedback decides whether the
+/// queue may drain and whether that bound run id must be reused.
+pub fn classify_runtime_loop_queue_admission(
+    state: RuntimeState,
+    current_run_bound: bool,
+) -> Result<RuntimeLoopQueueAdmissionPlan, String> {
+    let observed_state = observed_runtime_lifecycle_state(state);
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ClassifyRuntimeLoopQueueAdmission {
+            state: observed_state,
+            current_run_bound,
+        },
+    )
+    .map_err(|err| {
+        format!(
+            "MeerkatMachine rejected runtime-loop queue admission for {state} with current_run_bound={current_run_bound}: {err}"
+        )
+    })?;
+
+    transition
+        .effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::RuntimeLoopQueueAdmissionClassified {
+                state,
+                current_run_bound: observed_current_run_bound,
+                queue_admission,
+                run_binding,
+            } if state == observed_state && observed_current_run_bound == current_run_bound => {
+                Some(RuntimeLoopQueueAdmissionPlan {
+                    queue_admission,
+                    run_binding,
+                })
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!(
+                "MeerkatMachine emitted no runtime-loop queue admission for {state} with current_run_bound={current_run_bound}"
+            )
         })
 }
 

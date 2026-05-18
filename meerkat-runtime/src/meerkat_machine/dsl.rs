@@ -2234,6 +2234,17 @@ impl From<AdmissionPolicyApplyMode> for crate::policy::ApplyMode {
     }
 }
 
+impl From<crate::policy::ApplyMode> for AdmissionPolicyApplyMode {
+    fn from(mode: crate::policy::ApplyMode) -> Self {
+        match mode {
+            crate::policy::ApplyMode::StageRunStart => Self::StageRunStart,
+            crate::policy::ApplyMode::StageRunBoundary => Self::StageRunBoundary,
+            crate::policy::ApplyMode::InjectNow => Self::InjectNow,
+            crate::policy::ApplyMode::Ignore => Self::Ignore,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum AdmissionPolicyWakeMode {
     #[default]

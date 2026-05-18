@@ -1841,17 +1841,8 @@ impl MobHandle {
     /// For low-level structural roster visibility without runtime projection,
     /// use [`list_all_members`](Self::list_all_members).
     pub async fn list_members(&self) -> Vec<MobMemberListEntry> {
-        match self
-            .execute_machine_command(MobMachineCommand::ListMembers)
+        self.project_member_list_entries_from_current_machine_state(false)
             .await
-        {
-            Ok(MobMachineCommandResult::ListMembers(entries)) => entries,
-            Ok(_) => {
-                tracing::error!("unexpected command result variant");
-                Default::default()
-            }
-            Err(_) => Vec::new(),
-        }
     }
 
     /// List all members including those in `Retiring` state, with canonical
@@ -1861,16 +1852,27 @@ impl MobHandle {
     /// live peer-connectivity fanout. Use [`member_status`](Self::member_status)
     /// for deep per-member inspection including live comms reachability.
     pub async fn list_members_including_retiring(&self) -> Vec<MobMemberListEntry> {
-        match self
-            .execute_machine_command(MobMachineCommand::ListMembersIncludingRetiring)
+        self.project_member_list_entries_from_current_machine_state(true)
             .await
-        {
-            Ok(MobMachineCommandResult::ListMembersIncludingRetiring(entries)) => entries,
-            Ok(_) => {
-                tracing::error!("unexpected command result variant");
-                Default::default()
-            }
-            Err(_) => Vec::new(),
+    }
+
+    async fn project_member_list_entries_from_current_machine_state(
+        &self,
+        include_retiring: bool,
+    ) -> Vec<MobMemberListEntry> {
+        let entries = {
+            let roster = self.roster.read().await;
+            roster.list_all().cloned().collect()
+        };
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let entries = self.project_member_list_entries_from_machine_state(entries, &machine_state);
+        if include_retiring {
+            entries
+        } else {
+            entries
+                .into_iter()
+                .filter(|entry| entry.state != crate::roster::MemberState::Retiring)
+                .collect()
         }
     }
 
@@ -1984,6 +1986,61 @@ impl MobHandle {
             .into_iter()
             .map(|entry| Self::project_roster_entry_from_machine_state(entry, machine_state))
             .collect()
+    }
+
+    async fn project_member_status_from_machine_state(
+        &self,
+        identity: &AgentIdentity,
+        include_session_details: bool,
+    ) -> MobMemberSnapshot {
+        let domain_identity = crate::ids::AgentIdentity::from(identity.as_str());
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let roster_entry = {
+            let roster = self.roster.read().await;
+            roster.get(&MeerkatId::from(identity)).cloned()
+        };
+        let machine_bridge_session_id = machine_state
+            .member_session_bindings
+            .get(&dsl_identity)
+            .and_then(|dsl_session_id| SessionId::parse(&dsl_session_id.0).ok());
+        let current_bridge_session_id = roster_entry
+            .as_ref()
+            .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
+            .or(machine_bridge_session_id);
+        let (output_preview, tokens_used) =
+            match (include_session_details, current_bridge_session_id.as_ref()) {
+                (true, Some(bridge_session_id)) => {
+                    match self.session_service.read(bridge_session_id).await {
+                        Ok(view) => (
+                            view.state.last_assistant_text.clone(),
+                            view.billing.total_tokens,
+                        ),
+                        Err(_) => (None, 0),
+                    }
+                }
+                _ => (None, 0),
+            };
+        MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
+            member_present: roster_entry.is_some(),
+            machine_lifecycle: machine_state.member_lifecycle_for_identity(&dsl_identity),
+            output_preview,
+            tokens_used,
+            agent_runtime_id: roster_entry
+                .as_ref()
+                .map(|entry| entry.agent_runtime_id.clone())
+                .unwrap_or_else(|| AgentRuntimeId::initial(identity.clone())),
+            fence_token: roster_entry
+                .as_ref()
+                .map(|entry| entry.fence_token)
+                .unwrap_or(FenceToken::new(0)),
+            current_bridge_session_id,
+            peer_connectivity: None,
+            kickoff: roster_entry
+                .as_ref()
+                .and_then(|entry| entry.kickoff.clone()),
+        })
+        .to_snapshot()
     }
 
     /// List members currently eligible for runtime work dispatch.
@@ -3439,19 +3496,9 @@ impl MobHandle {
         &self,
         identity: &AgentIdentity,
     ) -> Result<MobMemberSnapshot, MobError> {
-        let mut snapshot = match self
-            .execute_machine_command(MobMachineCommand::MemberStatus {
-                agent_identity: MeerkatId::from(identity),
-            })
-            .await?
-        {
-            MobMachineCommandResult::MemberStatus(snapshot) => snapshot,
-            _ => {
-                return Err(MobError::Internal(
-                    "unexpected command result variant".into(),
-                ));
-            }
-        };
+        let mut snapshot = self
+            .project_member_status_from_machine_state(identity, true)
+            .await;
         snapshot.peer_connectivity = match tokio::time::timeout(
             Duration::from_secs(2),
             self.project_member_peer_connectivity(identity, &snapshot),

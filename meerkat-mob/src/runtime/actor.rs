@@ -8311,6 +8311,12 @@ impl MobActor {
             }
         }
 
+        if report.completed.contains(&DisposalStep::ArchiveSession)
+            && let Err(error) = self.observe_member_retirement_archived(ctx)
+        {
+            report.aborted_at = Some((DisposalStep::ArchiveSession, error));
+        }
+
         // Finally: unconditional, outside policy control.
         self.dispose_prune_edge_locks(ctx).await;
         self.dispose_remove_from_roster(ctx).await;
@@ -8531,6 +8537,20 @@ impl MobActor {
             return Err(error);
         }
         Ok(())
+    }
+
+    fn observe_member_retirement_archived(
+        &mut self,
+        ctx: &DisposalContext,
+    ) -> Result<(), MobError> {
+        self.apply_dsl_signal(
+            mob_dsl::MobMachineSignal::ObserveMemberRetirementArchived {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&ctx.agent_identity),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&ctx.entry.agent_runtime_id),
+                fence_token: mob_dsl::FenceToken::from_domain(ctx.entry.fence_token),
+            },
+            "dispose_member_archive_completed",
+        )
     }
 
     /// Prune edge locks for the member. Infallible.

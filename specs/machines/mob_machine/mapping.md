@@ -165,6 +165,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ObserveRuntimeRetired`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ObserveMemberRetirementArchivedLive`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ObserveMemberRetirementArchivedRetired`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ObserveMemberRetirementArchivedStaleRuntime`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ObserveMemberRetirementArchivedAlreadyCleared`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `ResetMember`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`

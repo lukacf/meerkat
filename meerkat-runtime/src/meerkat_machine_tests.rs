@@ -13556,11 +13556,9 @@ async fn persistent_staged_run_driver(
         .expect("persistent input should be accepted");
 
     let run_id = RunId::new();
-    driver.contract_force_runtime_authority(
-        RuntimeState::Running,
-        Some(run_id.clone()),
-        Some(RuntimeState::Idle),
-    );
+    driver
+        .contract_begin_run_authority(run_id.clone())
+        .expect("runtime run authority should begin through generated DSL");
     driver
         .stage_input(&input_id, &run_id)
         .expect("input should stage for the run");

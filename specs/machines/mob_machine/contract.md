@@ -179,6 +179,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `RetireMember`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId)
 - `ObserveRuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `ObserveMemberRetirementArchived`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `ResetMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, session_id: SessionId)
 - `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, session_id: SessionId)
 - `DestroyMob`(session_id: SessionId)
@@ -630,6 +631,42 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `current_binding_matches`
   - `fence_token_matches`
 - Emits: `EmitMemberLifecycleNotice`
+- To: `Running`
+
+### `ObserveMemberRetirementArchivedLive`
+- From: `Running`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+- Emits: `EmitMemberLifecycleNotice`
+- To: `Running`
+
+### `ObserveMemberRetirementArchivedRetired`
+- From: `Running`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_not_live`
+  - `member_retiring`
+- To: `Running`
+
+### `ObserveMemberRetirementArchivedStaleRuntime`
+- From: `Running`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_remapped`
+  - `runtime_not_live`
+  - `member_retiring`
+- To: `Running`
+
+### `ObserveMemberRetirementArchivedAlreadyCleared`
+- From: `Running`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `runtime_not_live`
+  - `member_not_retiring`
 - To: `Running`
 
 ### `ResetMember`

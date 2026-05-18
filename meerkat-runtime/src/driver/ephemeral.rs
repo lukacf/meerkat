@@ -829,6 +829,7 @@ impl EphemeralRuntimeDriver {
                 policy_routing_disposition: mm_dsl::RecoveredRoutingDisposition::from(
                     policy.routing_disposition,
                 ),
+                policy_apply_mode: mm_dsl::AdmissionPolicyApplyMode::from(policy.apply_mode),
                 runtime_boundary,
                 runtime_execution_kind: mm_dsl::RecoveredRuntimeExecutionKind::from(
                     runtime_semantics.execution_kind,

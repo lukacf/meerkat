@@ -63,6 +63,7 @@ fn install_ephemeral_peer_request_response_authority(runtime: &Arc<CommsRuntime>
     )
     .expect("RegisterSession");
 
+    runtime.install_peer_comms_handle(meerkat_runtime::test_peer_comms_handle());
     runtime.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
         Arc::new(meerkat_runtime::RuntimePeerInteractionHandle::new(
             Arc::clone(&dsl),
@@ -225,7 +226,9 @@ async fn contract_mob_002_peer_request_response_round_trip() {
 async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effect() {
     use meerkat_core::comms::InputStreamMode;
     use meerkat_core::handles::{PeerInteractionHandle, PeerTerminalDisposition};
-    use meerkat_runtime::{RuntimeInteractionStreamHandle, RuntimePeerInteractionHandle};
+    use meerkat_runtime::{
+        RuntimeInteractionStreamHandle, RuntimePeerCommsHandle, RuntimePeerInteractionHandle,
+    };
 
     let suffix = Uuid::new_v4().simple().to_string();
     let sender_name = format!("c002b-sender-{suffix}");
@@ -255,12 +258,14 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
     .expect("RegisterSession");
     let handle: Arc<dyn PeerInteractionHandle> =
         Arc::new(RuntimePeerInteractionHandle::new(Arc::clone(&dsl)));
+    sender.install_peer_comms_handle(Arc::new(RuntimePeerCommsHandle::new(Arc::clone(&dsl))));
     sender.install_peer_request_response_authority(
         meerkat_comms::PeerRequestResponseAuthority::new(
             Arc::clone(&handle),
             Arc::new(RuntimeInteractionStreamHandle::new(Arc::clone(&dsl))),
         ),
     );
+    receiver.install_peer_comms_handle(meerkat_runtime::test_peer_comms_handle());
 
     // Establish bidirectional trust.
     CoreCommsRuntime::add_trusted_peer(
@@ -386,12 +391,16 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
     let handle: Arc<dyn PeerInteractionHandle> = Arc::new(
         meerkat_runtime::RuntimePeerInteractionHandle::new(Arc::clone(&dsl)),
     );
+    sender.install_peer_comms_handle(Arc::new(meerkat_runtime::RuntimePeerCommsHandle::new(
+        Arc::clone(&dsl),
+    )));
     sender.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
         Arc::clone(&handle),
         Arc::new(meerkat_runtime::RuntimeInteractionStreamHandle::new(
             Arc::clone(&dsl),
         )),
     ));
+    receiver.install_peer_comms_handle(meerkat_runtime::test_peer_comms_handle());
 
     CoreCommsRuntime::add_trusted_peer(
         sender.as_ref(),
@@ -497,12 +506,16 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
     let handle: Arc<dyn PeerInteractionHandle> = Arc::new(
         meerkat_runtime::RuntimePeerInteractionHandle::new(Arc::clone(&dsl)),
     );
+    responder.install_peer_comms_handle(Arc::new(meerkat_runtime::RuntimePeerCommsHandle::new(
+        Arc::clone(&dsl),
+    )));
     responder.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
         Arc::clone(&handle),
         Arc::new(meerkat_runtime::RuntimeInteractionStreamHandle::new(
             Arc::clone(&dsl),
         )),
     ));
+    originator.install_peer_comms_handle(meerkat_runtime::test_peer_comms_handle());
 
     CoreCommsRuntime::add_trusted_peer(
         responder.as_ref(),

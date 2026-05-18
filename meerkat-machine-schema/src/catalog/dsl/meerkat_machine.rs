@@ -2202,6 +2202,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 input_id: String,
                 input_kind: Enum<RecoveredInputKind>,
                 policy_routing_disposition: Enum<RecoveredRoutingDisposition>,
+                policy_apply_mode: Enum<AdmissionPolicyApplyMode>,
                 runtime_boundary: Enum<RecoveredRunApplyBoundary>,
                 runtime_execution_kind: Enum<RecoveredRuntimeExecutionKind>,
                 runtime_peer_response_terminal_apply_intent: Option<Enum<RecoveredPeerResponseTerminalApplyIntent>>,
@@ -9042,6 +9043,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 input_id,
                 input_kind,
                 policy_routing_disposition,
+                policy_apply_mode,
                 runtime_boundary,
                 runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent,
@@ -9066,6 +9068,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || ((policy_routing_disposition == RecoveredRoutingDisposition::Queue
                     || policy_routing_disposition == RecoveredRoutingDisposition::Drop)
                     && lane == InputLane::Queue)
+            }
+            guard "recovered_boundary_matches_policy_apply_mode" {
+                (policy_apply_mode == AdmissionPolicyApplyMode::StageRunStart
+                    && runtime_boundary == RecoveredRunApplyBoundary::RunStart)
+                || (policy_apply_mode == AdmissionPolicyApplyMode::StageRunBoundary
+                    && runtime_boundary == RecoveredRunApplyBoundary::RunCheckpoint)
+                || (policy_apply_mode == AdmissionPolicyApplyMode::InjectNow
+                    && runtime_boundary == RecoveredRunApplyBoundary::Immediate)
+                || (policy_apply_mode == AdmissionPolicyApplyMode::Ignore
+                    && runtime_boundary == RecoveredRunApplyBoundary::RunStart)
             }
             update {
                 self.recovered_admitted_inputs.insert(input_id);

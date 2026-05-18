@@ -1504,11 +1504,15 @@ mod tests {
     }
 
     #[test]
-    fn observe_runtime_retired_clears_member_binding_without_stopping_mob() {
+    fn observe_runtime_retired_keeps_retiring_marker_until_archive_completion() {
         let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("worker");
         let runtime_id = AgentRuntimeId::from("worker:1");
         let fence_token = FenceToken(7);
         mutate_authority_state(&mut authority, |state| {
+            state
+                .identity_to_runtime
+                .insert(identity.clone(), runtime_id.clone());
             state.live_runtime_ids.insert(runtime_id.clone());
             state
                 .externally_addressable_runtime_ids
@@ -1545,12 +1549,42 @@ mod tests {
                 .contains_key(&runtime_id)
         );
         assert!(
+            authority
+                .state()
+                .member_state_markers
+                .contains_key(&runtime_id)
+        );
+        assert_eq!(
+            authority.state().member_lifecycle_for_identity(&identity),
+            MobMemberLifecycleMaterial {
+                status: MobMemberLifecycleStatus::Retiring,
+                terminal_class: MobMemberTerminalClass::Running,
+                error: None,
+            }
+        );
+        assert_eq!(authority.state().active_run_count, 0);
+
+        authority
+            .apply_signal(MobMachineSignal::ObserveMemberRetirementArchived {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token,
+            })
+            .expect("archive completion should clear the retiring marker");
+        assert!(
             !authority
                 .state()
                 .member_state_markers
                 .contains_key(&runtime_id)
         );
-        assert_eq!(authority.state().active_run_count, 0);
+        assert_eq!(
+            authority.state().member_lifecycle_for_identity(&identity),
+            MobMemberLifecycleMaterial {
+                status: MobMemberLifecycleStatus::Completed,
+                terminal_class: MobMemberTerminalClass::TerminalCompleted,
+                error: None,
+            }
+        );
     }
 
     #[test]

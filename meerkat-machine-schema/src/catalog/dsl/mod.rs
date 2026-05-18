@@ -1232,6 +1232,8 @@ runtime_internal_inputs!(
         RecordLoopBodyFrameCompleted,
         RecordLoopUntilConditionFailed,
         RecordLoopUntilConditionMet,
+        ResolveCancelAllWorkRejection,
+        ResolveSubmitWorkRejection,
         StartupMarkReady,
         SessionIngressDetachFailedForMobDestroy,
         SessionIngressDetachedForMobDestroy,

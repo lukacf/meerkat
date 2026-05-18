@@ -1828,8 +1828,8 @@ mod tests {
         let transition = schema
             .transitions
             .iter_mut()
-            .find(|transition| transition.name.as_str() == "RegisterOpIdle")
-            .expect("RegisterOpIdle transition");
+            .find(|transition| transition.name.as_str() == "RegisterOpAcceptedIdle")
+            .expect("RegisterOpAcceptedIdle transition");
         let update = transition
             .updates
             .iter_mut()
@@ -1941,7 +1941,7 @@ mod tests {
 
         assert_eq!(
             schema.validate(),
-            Err(MachineSchemaError::MissingStringEnumBinding {
+            Err(MachineSchemaError::MissingNamedTypeBinding {
                 name: "OperationStatus".into(),
             })
         );

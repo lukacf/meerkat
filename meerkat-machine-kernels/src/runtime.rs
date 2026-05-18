@@ -1944,8 +1944,8 @@ mod tests {
         let transition = schema
             .transitions
             .iter_mut()
-            .find(|transition| transition.name.as_str() == "RegisterOpIdle")
-            .expect("RegisterOpIdle transition");
+            .find(|transition| transition.name.as_str() == "RegisterOpAcceptedIdle")
+            .expect("RegisterOpAcceptedIdle transition");
         let update = transition
             .updates
             .iter_mut()
@@ -1983,8 +1983,8 @@ mod tests {
         let transition = schema
             .transitions
             .iter_mut()
-            .find(|transition| transition.name.as_str() == "RegisterOpIdle")
-            .expect("RegisterOpIdle transition");
+            .find(|transition| transition.name.as_str() == "RegisterOpAcceptedIdle")
+            .expect("RegisterOpAcceptedIdle transition");
         let effect = transition
             .emit
             .iter_mut()
@@ -2016,8 +2016,8 @@ mod tests {
         let transition = schema
             .transitions
             .iter_mut()
-            .find(|transition| transition.name.as_str() == "RegisterOpIdle")
-            .expect("RegisterOpIdle transition");
+            .find(|transition| transition.name.as_str() == "RegisterOpAcceptedIdle")
+            .expect("RegisterOpAcceptedIdle transition");
         let effect = transition
             .emit
             .iter_mut()
@@ -2506,6 +2506,7 @@ mod tests {
                                 variant: enum_variant_id("BackgroundToolOp"),
                             },
                         ),
+                        (field_id("max_concurrent"), KernelValue::None),
                     ]),
                 },
             )
@@ -2584,6 +2585,7 @@ mod tests {
                                 variant: enum_variant_id("BackgroundToolOp"),
                             },
                         ),
+                        (field_id("max_concurrent"), KernelValue::None),
                     ]),
                 },
             )
@@ -2622,6 +2624,7 @@ mod tests {
                                 variant: enum_variant_id("BackgroundToolOp"),
                             },
                         ),
+                        (field_id("max_concurrent"), KernelValue::None),
                     ]),
                 },
             )
@@ -2678,6 +2681,7 @@ mod tests {
                                 variant: enum_variant_id("BackgroundToolOp"),
                             },
                         ),
+                        (field_id("max_concurrent"), KernelValue::None),
                     ]),
                 },
             )
@@ -2895,6 +2899,10 @@ mod tests {
                 &KernelInput {
                     variant: input_id("SubmitWork"),
                     fields: BTreeMap::from([
+                        (
+                            field_id("agent_identity"),
+                            named_string("AgentIdentity", "agent.worker"),
+                        ),
                         (
                             field_id("agent_runtime_id"),
                             named_string("AgentRuntimeId", "runtime.worker.1"),

@@ -2472,6 +2472,12 @@ pub mod signals {
         pub fence_token: FenceToken,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveMemberRetirementArchived {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResetMember {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
@@ -2595,6 +2601,7 @@ pub enum Signal {
     ObserveRuntimeReady(signals::ObserveRuntimeReady),
     RetireMember(signals::RetireMember),
     ObserveRuntimeRetired(signals::ObserveRuntimeRetired),
+    ObserveMemberRetirementArchived(signals::ObserveMemberRetirementArchived),
     ResetMember(signals::ResetMember),
     RespawnMember(signals::RespawnMember),
     DestroyMob(signals::DestroyMob),
@@ -2636,6 +2643,7 @@ impl Signal {
             Self::ObserveRuntimeReady(_) => SignalKind::ObserveRuntimeReady,
             Self::RetireMember(_) => SignalKind::RetireMember,
             Self::ObserveRuntimeRetired(_) => SignalKind::ObserveRuntimeRetired,
+            Self::ObserveMemberRetirementArchived(_) => SignalKind::ObserveMemberRetirementArchived,
             Self::ResetMember(_) => SignalKind::ResetMember,
             Self::RespawnMember(_) => SignalKind::RespawnMember,
             Self::DestroyMob(_) => SignalKind::DestroyMob,
@@ -2678,6 +2686,7 @@ pub enum SignalKind {
     ObserveRuntimeReady,
     RetireMember,
     ObserveRuntimeRetired,
+    ObserveMemberRetirementArchived,
     ResetMember,
     RespawnMember,
     DestroyMob,
@@ -2931,6 +2940,10 @@ pub enum TransitionId {
     ResolveSubmitWorkRejectionNotExternallyAddressable,
     RetireMember,
     ObserveRuntimeRetired,
+    ObserveMemberRetirementArchivedLive,
+    ObserveMemberRetirementArchivedRetired,
+    ObserveMemberRetirementArchivedStaleRuntime,
+    ObserveMemberRetirementArchivedAlreadyCleared,
     ResetMember,
     RespawnMember,
     RecoverMemberRestoreFailureRunning,

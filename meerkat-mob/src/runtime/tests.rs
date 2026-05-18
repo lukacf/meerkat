@@ -125,6 +125,7 @@ fn install_ephemeral_peer_request_response_authority(
     )
     .expect("RegisterSession");
 
+    runtime.install_peer_comms_handle(meerkat_runtime::test_peer_comms_handle());
     runtime.install_peer_request_response_authority(
         meerkat_comms::PeerRequestResponseAuthority::new(
             Arc::new(meerkat_runtime::RuntimePeerInteractionHandle::new(
@@ -166,6 +167,7 @@ async fn install_machine_peer_request_response_authority(
                 "failed to prepare comms lifecycle authority: {err}"
             )))
         })?;
+    runtime.install_peer_comms_handle(Arc::clone(bindings.peer_comms()));
     runtime.install_peer_request_response_authority(
         meerkat_comms::PeerRequestResponseAuthority::new(
             Arc::clone(bindings.peer_interaction()),

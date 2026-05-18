@@ -2883,12 +2883,14 @@ mod tests {
             meerkat_comms::CommsRuntime::inproc_only(&supervisor_name).expect("supervisor"),
         );
         let peer_handle = Arc::new(CountingPeerInteractionHandle::default());
+        member_runtime.install_peer_comms_handle(crate::test_peer_comms_handle());
         member_runtime.install_peer_request_response_authority(
             meerkat_comms::PeerRequestResponseAuthority::new(
                 peer_handle.clone(),
                 Arc::new(crate::handles::RuntimeInteractionStreamHandle::ephemeral()),
             ),
         );
+        supervisor_runtime.install_peer_comms_handle(crate::test_peer_comms_handle());
 
         let supervisor_pubkey = supervisor_runtime.public_key();
         let supervisor_spec = TrustedPeerDescriptor::unsigned_with_pubkey(

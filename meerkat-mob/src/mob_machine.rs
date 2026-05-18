@@ -309,8 +309,10 @@ pub enum MobMachineCatalogInput {
     WireExternalPeer,
     UnwireExternalPeer,
     SubmitWork,
+    ResolveSubmitWorkRejection,
     CancelWork,
     CancelAllWork,
+    ResolveCancelAllWorkRejection,
     Stop,
     Resume,
     Complete,
@@ -368,8 +370,10 @@ impl MobMachineCatalogInput {
         Self::WireExternalPeer,
         Self::UnwireExternalPeer,
         Self::SubmitWork,
+        Self::ResolveSubmitWorkRejection,
         Self::CancelWork,
         Self::CancelAllWork,
+        Self::ResolveCancelAllWorkRejection,
         Self::Stop,
         Self::Resume,
         Self::Complete,
@@ -428,8 +432,12 @@ impl MobMachineCatalogInput {
             Self::WireExternalPeer => MobMachineInputVariant::WireExternalPeer,
             Self::UnwireExternalPeer => MobMachineInputVariant::UnwireExternalPeer,
             Self::SubmitWork => MobMachineInputVariant::SubmitWork,
+            Self::ResolveSubmitWorkRejection => MobMachineInputVariant::ResolveSubmitWorkRejection,
             Self::CancelWork => MobMachineInputVariant::CancelWork,
             Self::CancelAllWork => MobMachineInputVariant::CancelAllWork,
+            Self::ResolveCancelAllWorkRejection => {
+                MobMachineInputVariant::ResolveCancelAllWorkRejection
+            }
             Self::Stop => MobMachineInputVariant::Stop,
             Self::Resume => MobMachineInputVariant::Resume,
             Self::Complete => MobMachineInputVariant::Complete,
@@ -511,8 +519,10 @@ impl MobMachineCatalogInput {
             Self::WireExternalPeer => "WireExternalPeer",
             Self::UnwireExternalPeer => "UnwireExternalPeer",
             Self::SubmitWork => "SubmitWork",
+            Self::ResolveSubmitWorkRejection => "ResolveSubmitWorkRejection",
             Self::CancelWork => "CancelWork",
             Self::CancelAllWork => "CancelAllWork",
+            Self::ResolveCancelAllWorkRejection => "ResolveCancelAllWorkRejection",
             Self::Stop => "Stop",
             Self::Resume => "Resume",
             Self::Complete => "Complete",
@@ -638,6 +648,7 @@ pub enum MobMachineShellMechanicReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MobMachineRuntimeInternalReason {
     FlowProjectionAuthority,
+    RuntimeRejectionFeedback,
     SessionIngressDetachFeedback,
     StartupKickoffLifecycle,
 }
@@ -691,6 +702,14 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::RecordLoopUntilConditionMet,
         reason: MobMachineRuntimeInternalReason::FlowProjectionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveSubmitWorkRejection,
+        reason: MobMachineRuntimeInternalReason::RuntimeRejectionFeedback,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveCancelAllWorkRejection,
+        reason: MobMachineRuntimeInternalReason::RuntimeRejectionFeedback,
     },
     MobMachineRuntimeInternalClassificationRecord {
         input: session_ingress_detached_for_mob_destroy_catalog_input(),

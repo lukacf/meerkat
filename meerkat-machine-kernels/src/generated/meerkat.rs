@@ -6552,6 +6552,7 @@ pub mod inputs {
         pub input_id: String,
         pub input_kind: RecoveredInputKind,
         pub policy_routing_disposition: RecoveredRoutingDisposition,
+        pub policy_apply_mode: AdmissionPolicyApplyMode,
         pub runtime_boundary: RecoveredRunApplyBoundary,
         pub runtime_execution_kind: RecoveredRuntimeExecutionKind,
         pub runtime_peer_response_terminal_apply_intent:

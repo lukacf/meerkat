@@ -13733,7 +13733,7 @@ async fn test_resume_reestablishes_missing_trust() {
 }
 
 #[tokio::test]
-async fn test_resume_prunes_stale_trust_not_present_in_roster() {
+async fn test_resume_leaves_stale_trust_without_machine_revoke_authority() {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
@@ -13782,8 +13782,8 @@ async fn test_resume_prunes_stale_trust_not_present_in_roster() {
         .expect("session-backed member");
     let trusted = service.trusted_peer_names(&resumed_sid_1).await;
     assert!(
-        !trusted.iter().any(|n| n == stale.name.as_str()),
-        "resume should prune stale trust that is not present in the roster projection"
+        trusted.iter().any(|n| n == stale.name.as_str()),
+        "resume must not prune stale trust without generated revoke authority"
     );
 }
 
@@ -25947,7 +25947,7 @@ async fn test_unwire_updates_peers_and_sends_retired_notifications() {
 }
 
 #[tokio::test]
-async fn test_unwire_prunes_stale_local_trust_when_projection_is_already_absent() {
+async fn test_unwire_fails_closed_on_stale_local_trust_when_machine_edge_absent() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
 
@@ -26005,25 +26005,30 @@ async fn test_unwire_prunes_stale_local_trust_when_projection_is_already_absent(
         .await
         .expect("re-add stale trust on worker");
 
-    handle
+    let result = handle
         .unwire(AgentIdentity::from("l-1"), MeerkatId::from("w-1"))
-        .await
-        .expect("idempotent stale-trust cleanup unwire");
+        .await;
+    match result {
+        Err(MobError::WiringError(reason)) => {
+            assert!(reason.contains("requires MobMachine wiring authority"));
+        }
+        other => panic!("expected MobMachine authority error, got {other:?}"),
+    }
 
     let peers_a = CoreCommsRuntime::peers(&*comms_a).await;
     let peers_b = CoreCommsRuntime::peers(&*comms_b).await;
     assert!(
-        !peers_a.iter().any(|entry| entry.name.as_str() == name_b),
-        "idempotent unwire should prune stale trust from lead"
+        peers_a.iter().any(|entry| entry.name.as_str() == name_b),
+        "idempotent unwire must not prune stale trust without machine authority"
     );
     assert!(
-        !peers_b.iter().any(|entry| entry.name.as_str() == name_a),
-        "idempotent unwire should prune stale trust from worker"
+        peers_b.iter().any(|entry| entry.name.as_str() == name_a),
+        "idempotent unwire must not prune stale trust without machine authority"
     );
 }
 
 #[tokio::test]
-async fn test_unwire_external_prunes_stale_trust_when_projection_is_already_absent() {
+async fn test_unwire_external_fails_closed_on_stale_trust_when_machine_edge_absent() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
 
@@ -26064,20 +26069,25 @@ async fn test_unwire_external_prunes_stale_trust_when_projection_is_already_abse
         .await
         .expect("re-add stale external trust");
 
-    handle
+    let result = handle
         .unwire(
             AgentIdentity::from("l-1"),
             PeerTarget::External(spec.clone()),
         )
-        .await
-        .expect("idempotent external stale-trust cleanup");
+        .await;
+    match result {
+        Err(MobError::WiringError(reason)) => {
+            assert!(reason.contains("requires MobMachine external peer authority"));
+        }
+        other => panic!("expected MobMachine authority error, got {other:?}"),
+    }
 
     let peers = CoreCommsRuntime::peers(&*comms).await;
     assert!(
-        !peers
+        peers
             .iter()
             .any(|entry| entry.name.as_str() == spec.name.as_str()),
-        "idempotent external unwire should prune stale trust"
+        "idempotent external unwire must not prune stale trust without machine authority"
     );
 }
 

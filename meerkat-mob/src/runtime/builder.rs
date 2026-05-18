@@ -1,6 +1,7 @@
 use super::*;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use meerkat_core::comms::TrustedPeerDescriptor;
 use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
 use std::collections::HashSet;
@@ -187,6 +188,22 @@ fn dsl_wiring_edge(
     let dsl_a = crate::machines::mob_machine::AgentIdentity::from_domain(a);
     let dsl_b = crate::machines::mob_machine::AgentIdentity::from_domain(b);
     crate::machines::mob_machine::WiringEdge::new(dsl_a, dsl_b)
+}
+
+fn trusted_peer_descriptor_from_dsl_external_endpoint(
+    endpoint: &crate::machines::mob_machine::ExternalPeerEndpoint,
+) -> Result<TrustedPeerDescriptor, MobError> {
+    TrustedPeerDescriptor::unsigned_with_pubkey(
+        endpoint.name.0.clone(),
+        endpoint.peer_id.0.clone(),
+        endpoint.signing_key.0,
+        endpoint.address.0.clone(),
+    )
+    .map_err(|error| {
+        MobError::WiringError(format!(
+            "invalid recovered external peer endpoint from MobMachine authority: {error}"
+        ))
+    })
 }
 
 /// Replay typed durable mob events as recovery inputs to generated MobMachine
@@ -1504,9 +1521,12 @@ impl MobBuilder {
                 .remove(&entry.agent_identity);
         }
 
-        // Re-establish trust from projected wiring and prune stale trust so
-        // live comms truth matches the canonical roster projection.
+        // Re-establish trust only from MobMachine-owned wiring. Roster replay
+        // supplies member metadata, but it is not a behavior authority for
+        // adding or pruning live comms trust.
         let entries = roster.list().cloned().collect::<Vec<_>>();
+        let machine_wiring_edges = dsl_authority.state().wiring_edges.clone();
+        let machine_external_peer_edges = dsl_authority.state().external_peer_edges.clone();
         let broken_members = tool_handle
             .restore_diagnostics
             .read()
@@ -1538,60 +1558,24 @@ impl MobBuilder {
                     Some(peer_id_a),
                     Some(key_a.clone()),
                 );
-            } else if entry.wired_to.is_empty() {
-                continue;
             }
             let mut desired_specs = Vec::new();
-            let mut candidate_specs = Vec::new();
 
-            for peer_entry in &entries {
-                if peer_entry.agent_identity == entry.agent_identity
-                    || broken_members.contains(&peer_entry.agent_identity)
-                {
+            let local_dsl_identity =
+                crate::machines::mob_machine::AgentIdentity::from_domain(&entry.agent_identity);
+            for edge in &machine_wiring_edges {
+                let peer_dsl_identity = if edge.a == local_dsl_identity {
+                    &edge.b
+                } else if edge.b == local_dsl_identity {
+                    &edge.a
+                } else {
                     continue;
-                }
-                let name_b = format!(
-                    "{}/{}/{}",
-                    definition.id, peer_entry.role, peer_entry.agent_identity
-                );
-                let fallback_peer_id = match provisioner.comms_runtime(&peer_entry.member_ref).await
-                {
-                    Some(comms_b) => comms_b.public_key().ok_or_else(|| {
-                        MobError::WiringError(format!(
-                            "resume requires public key for '{}' -> '{}'",
-                            entry.agent_identity, peer_entry.agent_identity
-                        ))
-                    })?,
-                    None => match &peer_entry.member_ref {
-                        crate::event::MemberRef::BackendPeer {
-                            peer_id,
-                            session_id: None,
-                            ..
-                        } => peer_id.clone(),
-                        _ => {
-                            return Err(MobError::WiringError(format!(
-                                "resume requires comms runtime for '{}' -> '{}'",
-                                entry.agent_identity, peer_entry.agent_identity
-                            )));
-                        }
-                    },
                 };
-                candidate_specs.push(
-                    provisioner
-                        .trusted_peer_spec(&peer_entry.member_ref, &name_b, &fallback_peer_id)
-                        .await?,
-                );
-            }
-
-            for peer_identity in &entry.wired_to {
+                let peer_identity = AgentIdentity::from(peer_dsl_identity.0.as_str());
                 let peer_meerkat_id = MeerkatId::from(peer_identity.as_str());
-                if let Some(spec) = entry.external_peer_specs.get(&peer_meerkat_id) {
-                    desired_specs.push(spec.clone());
-                    continue;
-                }
                 let peer_entry = roster.get(&peer_meerkat_id).cloned().ok_or_else(|| {
                     MobError::WiringError(format!(
-                        "resume wiring target '{}' missing for '{}'",
+                        "resume machine wiring target '{}' missing for '{}'",
                         peer_identity, entry.agent_identity
                     ))
                 })?;
@@ -1631,15 +1615,22 @@ impl MobBuilder {
                 );
             }
 
-            // D31 resume wire-restoration: install trust for every desired
-            // edge and prune stale trust that matches one of "our own"
-            // candidate peers but is no longer in the wiring projection. The
-            // two-sided diff ensures (a) resumed members re-enter comms trust
-            // sets after restart / manual `force_remove_trust` test scaffolds,
-            // and (b) leftover trust entries from retired members or
-            // orphaned external peers are revoked so `peers()` matches the
-            // canonical roster projection.
+            for edge in &machine_external_peer_edges {
+                if edge.local == local_dsl_identity {
+                    desired_specs.push(trusted_peer_descriptor_from_dsl_external_endpoint(
+                        &edge.endpoint,
+                    )?);
+                }
+            }
+
+            // D31 resume wire-restoration: install trust for every edge still
+            // present in MobMachine authority. Stale trust is not pruned here:
+            // removing live trust requires a generated revoke/unwire
+            // authority path, not a resume-time projection diff.
             let Some(comms_a) = local_comms else {
+                if desired_specs.is_empty() {
+                    continue;
+                }
                 // Peer-only external members have no local comms runtime on
                 // the supervisor side; their trust lives on the remote
                 // process, so resume reconciles it through the supervisor
@@ -1649,37 +1640,7 @@ impl MobBuilder {
                     .await?;
                 continue;
             };
-            let desired_peer_ids: std::collections::HashSet<String> = desired_specs
-                .iter()
-                .map(|spec| spec.peer_id.to_string())
-                .collect();
-            // `candidate_peer_ids` is retained as an explicit signal of the
-            // "our members" set — it currently guides diagnostics, and the
-            // d-external-peer-wire agent's work will extend the diff below
-            // to restrict pruning to the mob's own namespace once external
-            // peer wiring rejoins the canonical seam.
-            let _ = &candidate_specs;
             let current_peers = comms_a.peers().await;
-            for current in &current_peers {
-                let current_peer_id = current.peer_id.to_string();
-                if desired_peer_ids.contains(&current_peer_id) {
-                    continue;
-                }
-                // Prune any trust entry that no longer corresponds to a
-                // desired edge. Resume aligns live comms trust with the
-                // canonical roster projection, so trust left behind from
-                // retired members or test scaffolding (see
-                // `test_resume_prunes_stale_trust_not_present_in_roster`)
-                // must be revoked here.
-                if let Err(error) = comms_a.remove_trusted_peer(&current_peer_id).await {
-                    tracing::warn!(
-                        agent_identity = %entry.agent_identity,
-                        peer = %current.name,
-                        %error,
-                        "resume: failed to prune stale trust"
-                    );
-                }
-            }
             for spec in &desired_specs {
                 let spec_peer_id = spec.peer_id.to_string();
                 if current_peers

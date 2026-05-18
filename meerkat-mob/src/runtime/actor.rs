@@ -6984,27 +6984,18 @@ impl MobActor {
             },
         ) = (&local_endpoint, &peer_endpoint)
         {
-            if !dsl_has_edge && !roster_has_edge {
-                let _ = self
-                    .unwire_peer_only_recipient(
-                        local_spec,
-                        Some(local_binding),
-                        peer_spec,
-                        std::time::Duration::from_secs(10),
-                    )
-                    .await;
-                let _ = self
-                    .unwire_peer_only_recipient(
-                        peer_spec,
-                        Some(peer_binding),
-                        local_spec,
-                        std::time::Duration::from_secs(10),
-                    )
-                    .await;
-                return Ok(());
+            if !dsl_has_edge {
+                return Err(MobError::WiringError(format!(
+                    "peer-only unwire for '{local}' <-> '{peer_identity}' requires MobMachine wiring authority"
+                )));
             }
 
             let dsl_removed = self.apply_unwire_members_idempotent(&edge)?;
+            if !dsl_removed {
+                return Err(MobError::WiringError(format!(
+                    "peer-only unwire for '{local}' <-> '{peer_identity}' was not authorized by MobMachine"
+                )));
+            }
             if let Err(error) = self
                 .unwire_peer_only_recipient(
                     local_spec,
@@ -7107,13 +7098,25 @@ impl MobActor {
         let local_peer_id = Self::trusted_peer_removal_key(&local_spec);
         let peer_peer_id = Self::trusted_peer_removal_key(&peer_spec);
 
-        // Idempotent stale-trust cleanup: if the DSL + roster both show
-        // the edge as already absent, but the comms runtimes still carry
-        // trust (e.g. re-added externally after the first unwire), prune
-        // it without emitting a new event.
-        if !dsl_has_edge && !roster_has_edge {
-            let _ = local_comms.remove_trusted_peer(&peer_peer_id).await;
-            let _ = peer_comms.remove_trusted_peer(&local_peer_id).await;
+        // Idempotent absence stays a no-op only when live comms agrees.
+        // Stale trust cleanup needs MobMachine authority instead of using the
+        // roster projection as a behavior owner.
+        if !dsl_has_edge {
+            let local_has_stale_trust = local_comms
+                .peers()
+                .await
+                .iter()
+                .any(|peer| peer.peer_id.to_string() == peer_peer_id);
+            let peer_has_stale_trust = peer_comms
+                .peers()
+                .await
+                .iter()
+                .any(|peer| peer.peer_id.to_string() == local_peer_id);
+            if local_has_stale_trust || peer_has_stale_trust || roster_has_edge {
+                return Err(MobError::WiringError(format!(
+                    "unwire for '{local}' <-> '{peer_identity}' requires MobMachine wiring authority"
+                )));
+            }
             return Ok(());
         }
 
@@ -7121,6 +7124,11 @@ impl MobActor {
         // no-op transition; only `WiringGraphChanged` means rollback must
         // re-submit the wire.
         let dsl_removed = self.apply_unwire_members_idempotent(&edge)?;
+        if !dsl_removed {
+            return Err(MobError::WiringError(format!(
+                "unwire for '{local}' <-> '{peer_identity}' was not authorized by MobMachine"
+            )));
+        }
 
         let mut removed_local_trust = false;
         let mut removed_peer_trust = false;
@@ -7610,10 +7618,21 @@ impl MobActor {
             if let Some(spec) = stale_cleanup_spec
                 && let Some(comms) = self.provisioner_comms(&member_ref).await
             {
-                if let Err(error) = comms
-                    .remove_trusted_peer(&Self::trusted_peer_removal_key(&spec))
+                let removal_key = Self::trusted_peer_removal_key(&spec);
+                let has_stale_trust = comms
+                    .peers()
                     .await
-                {
+                    .iter()
+                    .any(|peer| peer.peer_id.to_string() == removal_key);
+                if !dsl_removed {
+                    if has_stale_trust {
+                        return Err(MobError::WiringError(format!(
+                            "external unwire for '{local}' -> '{peer_name}' requires MobMachine external peer authority"
+                        )));
+                    }
+                    return Ok(());
+                }
+                if let Err(error) = comms.remove_trusted_peer(&removal_key).await {
                     if dsl_removed
                         && let Some(edge) = authority_edge.as_ref()
                         && let Err(rollback_err) = self.apply_dsl_input(
@@ -7643,6 +7662,11 @@ impl MobActor {
         })?;
 
         let dsl_removed = self.apply_unwire_external_peer_idempotent(&edge)?;
+        if !dsl_removed {
+            return Err(MobError::WiringError(format!(
+                "external unwire for '{local}' -> '{peer_name}' was not authorized by MobMachine"
+            )));
+        }
 
         // Remove trust on the local session runtime.
         if let Err(error) = comms

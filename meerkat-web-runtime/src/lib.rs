@@ -1942,143 +1942,21 @@ pub async fn mob_append_system_context(
     ))
 }
 
-/// Wire bidirectional comms trust between meerkats in DIFFERENT mobs.
+/// Legacy cross-mob bidirectional wire convenience.
 ///
-/// Unlike `mob_wire` (which is intra-mob), this establishes peer trust across
-/// mob boundaries by accessing each member's comms runtime through the shared
-/// session service. Both members must have comms enabled.
+/// No generated composition authority currently owns the two-mob transaction,
+/// so this surface fails closed instead of hand-rolling partial rollback over
+/// two independent MobMachine `WireExternalPeer` commands.
 #[wasm_bindgen]
 pub async fn wire_cross_mob(
-    mob_a: &str,
-    agent_a: &str,
-    mob_b: &str,
-    agent_b: &str,
+    _mob_a: &str,
+    _agent_a: &str,
+    _mob_b: &str,
+    _agent_b: &str,
 ) -> Result<(), JsValue> {
-    let mob_state = with_mob_state(Ok)?;
-
-    // Resolve roster entries and bridge session IDs via mob handles.
-    let identity_a = meerkat_mob::AgentIdentity::from(agent_a);
-    let identity_b = meerkat_mob::AgentIdentity::from(agent_b);
-
-    let handle_a = mob_state
-        .handle_for(&MobId::from(mob_a))
-        .await
-        .map_err(err_mob)?;
-    let entry_a = handle_a
-        .get_member(&identity_a)
-        .await
-        .ok_or_else(|| err_js("no_member", agent_a))?;
-    let sid_a = handle_a
-        .resolve_bridge_session_id(&identity_a)
-        .await
-        .ok_or_else(|| err_js("no_session", agent_a))?;
-
-    let handle_b = mob_state
-        .handle_for(&MobId::from(mob_b))
-        .await
-        .map_err(err_mob)?;
-    let entry_b = handle_b
-        .get_member(&identity_b)
-        .await
-        .ok_or_else(|| err_js("no_member", agent_b))?;
-    let sid_b = handle_b
-        .resolve_bridge_session_id(&identity_b)
-        .await
-        .ok_or_else(|| err_js("no_session", agent_b))?;
-
-    // Get comms runtimes from the shared session service
-    let svc = RUNTIME_STATE.with(|cell| {
-        let borrow = cell.borrow();
-        let state = borrow
-            .as_ref()
-            .ok_or_else(|| err_js("not_initialized", ""))?;
-        Ok::<_, JsValue>(state.session_service.clone())
-    })?;
-
-    let comms_a = svc
-        .comms_runtime(&sid_a)
-        .await
-        .ok_or_else(|| err_js("no_comms", &format!("{agent_a} has no comms runtime")))?;
-    let comms_b = svc
-        .comms_runtime(&sid_b)
-        .await
-        .ok_or_else(|| err_js("no_comms", &format!("{agent_b} has no comms runtime")))?;
-
-    let key_a = comms_a
-        .public_key()
-        .ok_or_else(|| err_js("no_key", agent_a))?;
-    let key_b = comms_b
-        .public_key()
-        .ok_or_else(|| err_js("no_key", agent_b))?;
-
-    // Build peer bindings with full mob/profile/meerkat addressing.
-    let name_a = format!("{mob_a}/{}/{agent_a}", entry_a.role);
-    let name_b = format!("{mob_b}/{}/{agent_b}", entry_b.role);
-
-    let binding_a = build_inproc_external_binding(&name_a, &key_a)?;
-    let binding_b = build_inproc_external_binding(&name_b, &key_b)?;
-
-    mob_state
-        .mob_wire(
-            &MobId::from(mob_a),
-            identity_a.clone(),
-            meerkat_mob::PeerTarget::ExternalBinding(binding_b.clone()),
-        )
-        .await
-        .map_err(err_mob)?;
-    if let Err(error) = mob_state
-        .mob_wire(
-            &MobId::from(mob_b),
-            identity_b,
-            meerkat_mob::PeerTarget::ExternalBinding(binding_a),
-        )
-        .await
-    {
-        if let Err(rollback_error) = mob_state
-            .mob_unwire(
-                &MobId::from(mob_a),
-                identity_a,
-                meerkat_mob::PeerTarget::ExternalBinding(binding_b),
-            )
-            .await
-        {
-            tracing::warn!(
-                %rollback_error,
-                "cross-mob wire rollback failed after reciprocal MobMachine wire rejection"
-            );
-        }
-        return Err(err_mob(error));
-    }
-
-    Ok(())
-}
-
-/// Build an inproc external binding for cross-mob wire in the embedded wasm
-/// runtime.
-///
-/// The mob actor resolves this typed identity into a descriptor immediately
-/// before `MobMachineInput::WireExternalPeer` admits the descriptor-bearing
-/// trust edge.
-fn build_inproc_external_binding(
-    name: &str,
-    public_key: &str,
-) -> Result<meerkat_mob::ExternalPeerBindingSpec, JsValue> {
-    let peer_name = meerkat_core::comms::PeerName::new(name)
-        .map_err(|e| err_str("wire_error", format!("invalid peer name `{name}`: {e}")))?;
-    let identity = meerkat_contracts::WireTrustedPeerIdentity::Ed25519PublicKey {
-        public_key: public_key.to_string(),
-    };
-    identity
-        .resolve()
-        .map_err(|e| err_str("wire_error", format!("invalid pubkey `{public_key}`: {e}")))?;
-    let address = meerkat_core::comms::PeerAddress::new(
-        meerkat_core::comms::PeerTransport::Inproc,
-        peer_name.as_str(),
-    );
-    Ok(meerkat_mob::ExternalPeerBindingSpec::new(
-        peer_name.as_str().to_string(),
-        address.to_string(),
-        identity,
+    Err(err_js(
+        "wire_cross_mob_unsupported",
+        "wire_cross_mob requires generated cross-mob composition authority",
     ))
 }
 

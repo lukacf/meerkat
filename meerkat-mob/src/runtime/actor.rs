@@ -2394,6 +2394,7 @@ impl MobActor {
         .map(|_| ())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_submit_work_rejection_in_authority(
         authority: &mut mob_dsl::MobMachineAuthority,
         dsl_identity: &mob_dsl::AgentIdentity,
@@ -10477,7 +10478,7 @@ impl MobActor {
                                 "auto-spawn failed for '{identity}': {error}"
                             ))
                         })?;
-                    let spawned_entry = {
+                    {
                         let roster = self.roster.read().await;
                         roster.get(&identity).cloned()
                     }
@@ -10485,8 +10486,7 @@ impl MobActor {
                         MobError::Internal(format!(
                             "auto-spawned member '{identity}' missing from roster after completion"
                         ))
-                    })?;
-                    spawned_entry
+                    })?
                 } else {
                     let current_state = self.state();
                     return Err(Self::resolve_submit_work_projection_missing_or_rejection(

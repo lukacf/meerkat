@@ -330,7 +330,7 @@ fn bindings_require_known_identity_invariant_holds_through_spawn_retire_cycle() 
             );
         }
     };
-    check_invariant(&authority.state());
+    check_invariant(authority.state());
 
     let releasing = authority
         .state()
@@ -339,7 +339,7 @@ fn bindings_require_known_identity_invariant_holds_through_spawn_retire_cycle() 
         .cloned();
     MobMachineMutator::apply(&mut authority, retire_input("alpha", 1, releasing))
         .expect("retire must be accepted");
-    check_invariant(&authority.state());
+    check_invariant(authority.state());
 }
 
 // ==========================================================================

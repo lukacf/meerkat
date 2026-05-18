@@ -21025,7 +21025,7 @@ fn authority_backed_root_frame_run(
         run_id.clone(),
         definition.id.clone(),
         FlowId::from("demo"),
-        MobRun::flow_state_for_config_with_authority(&run_id, &config, &authority.state())
+        MobRun::flow_state_for_config_with_authority(&run_id, &config, authority.state())
             .expect("project flow state"),
         serde_json::json!({}),
     );
@@ -21039,7 +21039,7 @@ fn authority_backed_root_frame_run(
         frame_id.clone(),
         crate::run::FrameSnapshot {
             kernel_state: crate::run::project_flow_frame_authority_state_from_machine(
-                &authority.state(),
+                authority.state(),
                 &frame_id,
             )
             .expect("project frame state"),
@@ -21068,7 +21068,7 @@ fn running_authority_backed_run(definition: &MobDefinition) -> MobRun {
         run_id.clone(),
         definition.id.clone(),
         flow_id,
-        MobRun::flow_state_for_config_with_authority(&run_id, &config, &authority.state())
+        MobRun::flow_state_for_config_with_authority(&run_id, &config, authority.state())
             .expect("project admitted flow state"),
         serde_json::json!({}),
     );
@@ -21083,7 +21083,7 @@ fn running_authority_backed_run(definition: &MobDefinition) -> MobRun {
             .expect("start authority token");
     let outcome = apply_mob_machine_flow_run_command(
         &run.flow_state,
-        &authority.state(),
+        authority.state(),
         &run_id,
         start,
         authority_token,

@@ -115,10 +115,6 @@ impl WorkStatus {
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Cancelled | Self::Failed)
     }
-
-    pub fn is_terminal_success(self) -> bool {
-        matches!(self, Self::Completed)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]

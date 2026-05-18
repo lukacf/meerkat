@@ -224,6 +224,55 @@ RefreshEligibilityBlocked(arg_unresolved_blocker_count) ==
     /\ UNCHANGED << revision, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
+ClassifyBlockerSatisfiedCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyBlockerUnsatisfiedAbsent ==
+    /\ phase = "Absent"
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyBlockerUnsatisfiedOpen ==
+    /\ phase = "Open"
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyBlockerUnsatisfiedInProgress ==
+    /\ phase = "InProgress"
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyBlockerUnsatisfiedBlocked ==
+    /\ phase = "Blocked"
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyBlockerUnsatisfiedCancelled ==
+    /\ phase = "Cancelled"
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyBlockerUnsatisfiedFailed ==
+    /\ phase = "Failed"
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
 ValidateLink(kind, from_item_key, to_item_key, edge_key, reverse_path_key) ==
     /\ phase = "Absent"
     /\ (from_item_key \in topology_item_keys)
@@ -429,6 +478,13 @@ Next ==
     \/ \E arg_unresolved_blocker_count \in 0..2 : RefreshEligibilityOpen(arg_unresolved_blocker_count)
     \/ \E arg_unresolved_blocker_count \in 0..2 : RefreshEligibilityInProgress(arg_unresolved_blocker_count)
     \/ \E arg_unresolved_blocker_count \in 0..2 : RefreshEligibilityBlocked(arg_unresolved_blocker_count)
+    \/ ClassifyBlockerSatisfiedCompleted
+    \/ ClassifyBlockerUnsatisfiedAbsent
+    \/ ClassifyBlockerUnsatisfiedOpen
+    \/ ClassifyBlockerUnsatisfiedInProgress
+    \/ ClassifyBlockerUnsatisfiedBlocked
+    \/ ClassifyBlockerUnsatisfiedCancelled
+    \/ ClassifyBlockerUnsatisfiedFailed
     \/ \E kind \in WorkEdgeKindValues : \E from_item_key \in WorkItemKeyValues : \E to_item_key \in WorkItemKeyValues : \E edge_key \in WorkEdgeKeyValues : \E reverse_path_key \in WorkDependencyPathKeyValues : ValidateLink(kind, from_item_key, to_item_key, edge_key, reverse_path_key)
     \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : CloseOpenCompleted(expected_revision, at_utc_ms)
     \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : CloseInProgressCompleted(expected_revision, at_utc_ms)

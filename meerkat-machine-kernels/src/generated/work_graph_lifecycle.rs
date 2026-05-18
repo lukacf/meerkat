@@ -315,6 +315,8 @@ pub mod inputs {
         pub unresolved_blocker_count: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyBlockerSatisfaction {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ValidateLink {
         pub kind: WorkEdgeKind,
         pub from_item_key: WorkItemKey,
@@ -352,6 +354,7 @@ pub enum Input {
     Release(inputs::Release),
     Block(inputs::Block),
     RefreshEligibility(inputs::RefreshEligibility),
+    ClassifyBlockerSatisfaction(inputs::ClassifyBlockerSatisfaction),
     ValidateLink(inputs::ValidateLink),
     CloseCompleted(inputs::CloseCompleted),
     CloseCancelled(inputs::CloseCancelled),
@@ -368,6 +371,7 @@ impl Input {
             Self::Release(_) => InputKind::Release,
             Self::Block(_) => InputKind::Block,
             Self::RefreshEligibility(_) => InputKind::RefreshEligibility,
+            Self::ClassifyBlockerSatisfaction(_) => InputKind::ClassifyBlockerSatisfaction,
             Self::ValidateLink(_) => InputKind::ValidateLink,
             Self::CloseCompleted(_) => InputKind::CloseCompleted,
             Self::CloseCancelled(_) => InputKind::CloseCancelled,
@@ -385,6 +389,7 @@ pub enum InputKind {
     Release,
     Block,
     RefreshEligibility,
+    ClassifyBlockerSatisfaction,
     ValidateLink,
     CloseCompleted,
     CloseCancelled,
@@ -408,6 +413,10 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Blocked {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BlockerSatisfied {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BlockerUnsatisfied {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LinkValidated {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Closed {
@@ -424,6 +433,8 @@ pub enum Effect {
     Claimed(effects::Claimed),
     Released(effects::Released),
     Blocked(effects::Blocked),
+    BlockerSatisfied(effects::BlockerSatisfied),
+    BlockerUnsatisfied(effects::BlockerUnsatisfied),
     LinkValidated(effects::LinkValidated),
     Closed(effects::Closed),
     EvidenceAdded(effects::EvidenceAdded),
@@ -435,6 +446,8 @@ pub enum EffectKind {
     Claimed,
     Released,
     Blocked,
+    BlockerSatisfied,
+    BlockerUnsatisfied,
     LinkValidated,
     Closed,
     EvidenceAdded,
@@ -457,6 +470,13 @@ pub enum TransitionId {
     RefreshEligibilityOpen,
     RefreshEligibilityInProgress,
     RefreshEligibilityBlocked,
+    ClassifyBlockerSatisfiedCompleted,
+    ClassifyBlockerUnsatisfiedAbsent,
+    ClassifyBlockerUnsatisfiedOpen,
+    ClassifyBlockerUnsatisfiedInProgress,
+    ClassifyBlockerUnsatisfiedBlocked,
+    ClassifyBlockerUnsatisfiedCancelled,
+    ClassifyBlockerUnsatisfiedFailed,
     ValidateLink,
     CloseOpenCompleted,
     CloseInProgressCompleted,

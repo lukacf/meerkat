@@ -12,6 +12,18 @@ use crate::types::{
     WorkStatus,
 };
 
+#[derive(Debug, Clone)]
+pub struct WorkGraphEventAuthority {
+    pub(crate) kind: WorkGraphEventKind,
+    pub(crate) effects: Vec<wg_dsl::WorkGraphLifecycleEffect>,
+}
+
+#[derive(Debug, Clone)]
+struct AppliedWorkGraphDsl {
+    state: WorkGraphMachineState,
+    effects: Vec<wg_dsl::WorkGraphLifecycleEffect>,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WorkGraphMachine;
 
@@ -57,7 +69,8 @@ impl WorkGraphMachine {
             | WorkStatus::Cancelled
             | WorkStatus::Failed => unreachable!("invalid create status rejected above"),
         };
-        let dsl_state = apply_new_item_dsl(input)?;
+        let applied = apply_new_item_dsl(input)?;
+        let dsl_state = applied.state.clone();
         let mut item = WorkItem {
             id: WorkItemId::generated(),
             realm_id,
@@ -81,7 +94,7 @@ impl WorkGraphMachine {
             evidence_refs: request.evidence_refs,
         };
         sync_item_from_machine_state(&mut item)?;
-        let event = item_event(&item, WorkGraphEventKind::Created, now)?;
+        let event = item_event_from_effects(&item, &applied.effects, now)?;
         Ok((item, event))
     }
 
@@ -93,7 +106,7 @@ impl WorkGraphMachine {
         let due_at = request.due_at.or(item.due_at);
         let not_before = request.not_before.or(item.not_before);
         let snoozed_until = request.snoozed_until.or(item.snoozed_until);
-        let dsl_state = apply_item_dsl(
+        let applied = apply_item_dsl(
             &item,
             wg_dsl::WorkGraphLifecycleInput::Update {
                 expected_revision: request.expected_revision,
@@ -117,13 +130,13 @@ impl WorkGraphMachine {
         if let Some(labels) = request.labels {
             item.labels = normalize_labels(labels)?;
         }
-        item.machine_state = dsl_state;
+        item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         if !request.external_refs.is_empty() {
             item.external_refs = request.external_refs;
         }
         item.updated_at = now;
-        let event = item_event(&item, WorkGraphEventKind::Updated, now)?;
+        let event = item_event_from_effects(&item, &applied.effects, now)?;
         Ok((item, event))
     }
 
@@ -156,17 +169,17 @@ impl WorkGraphMachine {
         if item.machine_state.unresolved_blocker_count == unresolved_blocker_count {
             return Ok(None);
         }
-        let dsl_state = apply_item_dsl(
+        let applied = apply_item_dsl(
             &item,
             wg_dsl::WorkGraphLifecycleInput::RefreshEligibility {
                 unresolved_blocker_count,
             },
             None,
         )?;
-        item.machine_state = dsl_state;
+        item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
-        let event = item_event(&item, WorkGraphEventKind::Updated, now)?;
+        let event = item_event_from_effects(&item, &applied.effects, now)?;
         Ok(Some((item, event)))
     }
 
@@ -195,7 +208,7 @@ impl WorkGraphMachine {
                 lease_expires_at_utc_ms: lease_expires_at.map(datetime_to_millis),
             }),
         ];
-        let dsl_state = apply_item_dsl_inputs(
+        let applied = apply_item_dsl_inputs(
             &item,
             dsl_inputs.into_iter().flatten(),
             Some(request.expected_revision),
@@ -206,10 +219,10 @@ impl WorkGraphMachine {
             claimed_at: now,
             lease_expires_at,
         });
-        item.machine_state = dsl_state;
+        item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
-        let event = item_event(&item, WorkGraphEventKind::Claimed, now)?;
+        let event = item_event_from_effects(&item, &applied.effects, now)?;
         Ok((item, event))
     }
 
@@ -218,7 +231,7 @@ impl WorkGraphMachine {
         request: ReleaseWorkItemRequest,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
-        let dsl_state = apply_item_dsl(
+        let applied = apply_item_dsl(
             &item,
             wg_dsl::WorkGraphLifecycleInput::Release {
                 expected_revision: request.expected_revision,
@@ -227,10 +240,10 @@ impl WorkGraphMachine {
         )?;
         item.claim = None;
         item.owner = None;
-        item.machine_state = dsl_state;
+        item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
-        let event = item_event(&item, WorkGraphEventKind::Released, now)?;
+        let event = item_event_from_effects(&item, &applied.effects, now)?;
         Ok((item, event))
     }
 
@@ -239,17 +252,17 @@ impl WorkGraphMachine {
         expected_revision: u64,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
-        let dsl_state = apply_item_dsl(
+        let applied = apply_item_dsl(
             &item,
             wg_dsl::WorkGraphLifecycleInput::Block { expected_revision },
             Some(expected_revision),
         )?;
         item.claim = None;
         item.owner = None;
-        item.machine_state = dsl_state;
+        item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
-        let event = item_event(&item, WorkGraphEventKind::Blocked, now)?;
+        let event = item_event_from_effects(&item, &applied.effects, now)?;
         Ok((item, event))
     }
 
@@ -277,13 +290,13 @@ impl WorkGraphMachine {
                 ));
             }
         };
-        let dsl_state = apply_item_dsl(&item, dsl_input, Some(request.expected_revision))?;
+        let applied = apply_item_dsl(&item, dsl_input, Some(request.expected_revision))?;
         item.claim = None;
         item.owner = None;
-        item.machine_state = dsl_state;
+        item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
-        let event = item_event(&item, WorkGraphEventKind::Closed, now)?;
+        let event = item_event_from_effects(&item, &applied.effects, now)?;
         Ok((item, event))
     }
 
@@ -292,7 +305,7 @@ impl WorkGraphMachine {
         request: AddEvidenceRequest,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
-        let dsl_state = apply_item_dsl(
+        let applied = apply_item_dsl(
             &item,
             wg_dsl::WorkGraphLifecycleInput::AddEvidence {
                 expected_revision: request.expected_revision,
@@ -300,10 +313,10 @@ impl WorkGraphMachine {
             Some(request.expected_revision),
         )?;
         item.evidence_refs.push(request.evidence);
-        item.machine_state = dsl_state;
+        item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
-        let event = item_event(&item, WorkGraphEventKind::EvidenceAdded, now)?;
+        let event = item_event_from_effects(&item, &applied.effects, now)?;
         Ok((item, event))
     }
 
@@ -325,6 +338,15 @@ impl WorkGraphMachine {
         .is_ok()
     }
 
+    pub(crate) fn blocker_satisfies_dependency(item: &WorkItem) -> Result<bool, WorkGraphError> {
+        let applied = apply_item_dsl(
+            item,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyBlockerSatisfaction,
+            None,
+        )?;
+        blocker_satisfaction_from_effects(&applied.effects)
+    }
+
     pub fn ready_items(items: Vec<WorkItem>, now: DateTime<Utc>) -> Vec<WorkItem> {
         items
             .into_iter()
@@ -336,9 +358,9 @@ impl WorkGraphMachine {
         edge: &WorkEdge,
         existing_items: &[WorkItem],
         existing_edges: &[WorkEdge],
-    ) -> Result<(), WorkGraphError> {
+    ) -> Result<WorkGraphEventAuthority, WorkGraphError> {
         let topology_state = topology_state(existing_items, existing_edges);
-        apply_link_validation_dsl(
+        let effects = apply_link_validation_dsl(
             topology_state,
             wg_dsl::WorkGraphLifecycleInput::ValidateLink {
                 kind: dsl_edge_kind(edge.kind),
@@ -348,7 +370,10 @@ impl WorkGraphMachine {
                 reverse_path_key: dependency_path_key(edge.kind, &edge.to_id, &edge.from_id),
             },
         )?;
-        Ok(())
+        Ok(WorkGraphEventAuthority {
+            kind: event_kind_from_effects(&effects)?,
+            effects,
+        })
     }
 }
 
@@ -378,28 +403,31 @@ fn normalize_labels(labels: BTreeSet<String>) -> Result<BTreeSet<String>, WorkGr
 
 fn apply_new_item_dsl(
     input: wg_dsl::WorkGraphLifecycleInput,
-) -> Result<wg_dsl::WorkGraphLifecycleMachineState, WorkGraphError> {
+) -> Result<AppliedWorkGraphDsl, WorkGraphError> {
     let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
-    wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
+    let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
-    Ok(dsl_auth.state)
+    Ok(AppliedWorkGraphDsl {
+        state: dsl_auth.state,
+        effects: transition.effects,
+    })
 }
 
 fn apply_link_validation_dsl(
     state: WorkGraphMachineState,
     input: wg_dsl::WorkGraphLifecycleInput,
-) -> Result<(), WorkGraphError> {
+) -> Result<Vec<wg_dsl::WorkGraphLifecycleEffect>, WorkGraphError> {
     let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::from_state(state);
-    wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
+    let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
-    Ok(())
+    Ok(transition.effects)
 }
 
 fn apply_item_dsl(
     item: &WorkItem,
     input: wg_dsl::WorkGraphLifecycleInput,
     expected_revision: Option<u64>,
-) -> Result<WorkGraphMachineState, WorkGraphError> {
+) -> Result<AppliedWorkGraphDsl, WorkGraphError> {
     apply_item_dsl_inputs(item, std::iter::once(input), expected_revision)
 }
 
@@ -407,28 +435,34 @@ fn apply_item_dsl_inputs<I>(
     item: &WorkItem,
     inputs: I,
     expected_revision: Option<u64>,
-) -> Result<WorkGraphMachineState, WorkGraphError>
+) -> Result<AppliedWorkGraphDsl, WorkGraphError>
 where
     I: IntoIterator<Item = wg_dsl::WorkGraphLifecycleInput>,
 {
     validate_item_machine_projection(item)?;
     let mut dsl_auth =
         wg_dsl::WorkGraphLifecycleMachineAuthority::from_state(item.machine_state.clone());
+    let mut effects = Vec::new();
     for input in inputs {
-        wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input).map_err(|error| {
-            if let Some(expected) = expected_revision
-                && item.revision != expected
-            {
-                return WorkGraphError::StaleRevision {
-                    id: item.id.clone(),
-                    expected,
-                    actual: item.revision,
-                };
-            }
-            WorkGraphError::InvalidTransition(format!("{error:?}"))
-        })?;
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
+            .map_err(|error| {
+                if let Some(expected) = expected_revision
+                    && item.revision != expected
+                {
+                    return WorkGraphError::StaleRevision {
+                        id: item.id.clone(),
+                        expected,
+                        actual: item.revision,
+                    };
+                }
+                WorkGraphError::InvalidTransition(format!("{error:?}"))
+            })?;
+        effects.extend(transition.effects);
     }
-    Ok(dsl_auth.state)
+    Ok(AppliedWorkGraphDsl {
+        state: dsl_auth.state,
+        effects,
+    })
 }
 
 fn work_status_from_dsl(status: wg_dsl::WorkLifecycleState) -> Result<WorkStatus, WorkGraphError> {
@@ -663,19 +697,92 @@ fn millis_to_datetime(ms: u64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_millis(i64::try_from(ms).ok()?)
 }
 
-fn item_event(
+fn item_event_from_effects(
     item: &WorkItem,
-    kind: WorkGraphEventKind,
+    effects: &[wg_dsl::WorkGraphLifecycleEffect],
     at: DateTime<Utc>,
 ) -> Result<WorkGraphEvent, WorkGraphError> {
+    let kind = event_kind_from_effects(effects)?;
     Ok(WorkGraphEvent::item(
         item.realm_id.clone(),
         item.namespace.clone(),
         item.id.clone(),
         kind,
         at,
-        json!({ "item": item }),
+        json!({ "item": item, "machine_effects": effect_labels(effects) }),
     ))
+}
+
+fn event_kind_from_effects(
+    effects: &[wg_dsl::WorkGraphLifecycleEffect],
+) -> Result<WorkGraphEventKind, WorkGraphError> {
+    let mut kind = None;
+    for effect in effects {
+        let effect_kind = match effect {
+            wg_dsl::WorkGraphLifecycleEffect::Created => Some(WorkGraphEventKind::Created),
+            wg_dsl::WorkGraphLifecycleEffect::Updated => Some(WorkGraphEventKind::Updated),
+            wg_dsl::WorkGraphLifecycleEffect::Claimed { .. } => Some(WorkGraphEventKind::Claimed),
+            wg_dsl::WorkGraphLifecycleEffect::Released => Some(WorkGraphEventKind::Released),
+            wg_dsl::WorkGraphLifecycleEffect::Blocked => Some(WorkGraphEventKind::Blocked),
+            wg_dsl::WorkGraphLifecycleEffect::BlockerSatisfied
+            | wg_dsl::WorkGraphLifecycleEffect::BlockerUnsatisfied => None,
+            wg_dsl::WorkGraphLifecycleEffect::LinkValidated => Some(WorkGraphEventKind::Linked),
+            wg_dsl::WorkGraphLifecycleEffect::Closed { .. } => Some(WorkGraphEventKind::Closed),
+            wg_dsl::WorkGraphLifecycleEffect::EvidenceAdded => {
+                Some(WorkGraphEventKind::EvidenceAdded)
+            }
+        };
+        if let Some(effect_kind) = effect_kind {
+            kind = Some(effect_kind);
+        }
+    }
+    kind.ok_or_else(|| {
+        WorkGraphError::InvalidTransition(
+            "generated WorkGraphLifecycle transition produced no public event effect".to_string(),
+        )
+    })
+}
+
+pub(crate) fn effect_labels(effects: &[wg_dsl::WorkGraphLifecycleEffect]) -> Vec<&'static str> {
+    effects.iter().map(effect_label).collect()
+}
+
+fn effect_label(effect: &wg_dsl::WorkGraphLifecycleEffect) -> &'static str {
+    match effect {
+        wg_dsl::WorkGraphLifecycleEffect::Created => "Created",
+        wg_dsl::WorkGraphLifecycleEffect::Updated => "Updated",
+        wg_dsl::WorkGraphLifecycleEffect::Claimed { .. } => "Claimed",
+        wg_dsl::WorkGraphLifecycleEffect::Released => "Released",
+        wg_dsl::WorkGraphLifecycleEffect::Blocked => "Blocked",
+        wg_dsl::WorkGraphLifecycleEffect::BlockerSatisfied => "BlockerSatisfied",
+        wg_dsl::WorkGraphLifecycleEffect::BlockerUnsatisfied => "BlockerUnsatisfied",
+        wg_dsl::WorkGraphLifecycleEffect::LinkValidated => "LinkValidated",
+        wg_dsl::WorkGraphLifecycleEffect::Closed { .. } => "Closed",
+        wg_dsl::WorkGraphLifecycleEffect::EvidenceAdded => "EvidenceAdded",
+    }
+}
+
+fn blocker_satisfaction_from_effects(
+    effects: &[wg_dsl::WorkGraphLifecycleEffect],
+) -> Result<bool, WorkGraphError> {
+    let mut satisfied = None;
+    for effect in effects {
+        match effect {
+            wg_dsl::WorkGraphLifecycleEffect::BlockerSatisfied => satisfied = Some(true),
+            wg_dsl::WorkGraphLifecycleEffect::BlockerUnsatisfied => satisfied = Some(false),
+            other => {
+                return Err(WorkGraphError::InvalidTransition(format!(
+                    "unexpected blocker-satisfaction effect: {other:?}"
+                )));
+            }
+        }
+    }
+    satisfied.ok_or_else(|| {
+        WorkGraphError::InvalidTransition(
+            "generated WorkGraphLifecycle transition produced no blocker-satisfaction effect"
+                .to_string(),
+        )
+    })
 }
 
 fn seconds_to_duration(seconds: u64) -> Duration {
@@ -832,6 +939,77 @@ mod tests {
     }
 
     #[test]
+    fn refresh_event_kind_comes_from_generated_effect() {
+        let now = Utc::now();
+        let item = create("refresh", now);
+        let (_, event) = WorkGraphMachine::refresh_eligibility(item, 1, now)
+            .expect("refresh transition")
+            .expect("changed");
+
+        assert_eq!(event.kind, WorkGraphEventKind::Updated);
+        assert_eq!(
+            event.payload["machine_effects"],
+            serde_json::json!(["Updated"])
+        );
+    }
+
+    #[test]
+    fn claim_event_kind_uses_generated_claim_effect_after_refresh() {
+        let now = Utc::now();
+        let item = create("claim after refresh", now);
+        let (blocked_projection, _) = WorkGraphMachine::refresh_eligibility(item, 1, now)
+            .expect("refresh transition")
+            .expect("changed");
+        let (_, event) = WorkGraphMachine::claim_item_with_unresolved_blockers(
+            blocked_projection,
+            0,
+            ClaimWorkItemRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                owner: owner("worker"),
+                lease_seconds: Some(60),
+                lease_expires_at: None,
+            },
+            now,
+        )
+        .expect("claim");
+
+        assert_eq!(event.kind, WorkGraphEventKind::Claimed);
+        assert_eq!(
+            event.payload["machine_effects"],
+            serde_json::json!(["Updated", "Claimed"])
+        );
+    }
+
+    #[test]
+    fn blocker_satisfaction_comes_from_generated_effect() {
+        let now = Utc::now();
+        let item = create("blocker", now);
+        assert!(
+            !WorkGraphMachine::blocker_satisfies_dependency(&item)
+                .expect("open blocker classification")
+        );
+        let (completed, _) = WorkGraphMachine::close_item(
+            item,
+            CloseWorkItemRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect("complete blocker");
+        assert!(
+            WorkGraphMachine::blocker_satisfies_dependency(&completed)
+                .expect("completed blocker classification")
+        );
+    }
+
+    #[test]
     fn item_dsl_application_does_not_prewrite_blocker_count() {
         let source = include_str!("machine.rs");
         let start = source
@@ -849,6 +1027,10 @@ mod tests {
         assert!(
             body.contains("WorkGraphLifecycleMachineMutator::apply"),
             "item DSL application must route through the generated mutator"
+        );
+        assert!(
+            !include_str!("service.rs").contains("is_terminal_success"),
+            "dependency admission must use WorkGraphLifecycleMachine blocker-satisfaction feedback"
         );
     }
 }

@@ -30,6 +30,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Release`(expected_revision: u64)
 - `Block`(expected_revision: u64)
 - `RefreshEligibility`(unresolved_blocker_count: u64)
+- `ClassifyBlockerSatisfaction`
 - `ValidateLink`(kind: WorkEdgeKind, from_item_key: WorkItemKey, to_item_key: WorkItemKey, edge_key: WorkEdgeKey, reverse_path_key: WorkDependencyPathKey)
 - `CloseCompleted`(expected_revision: u64, at_utc_ms: u64)
 - `CloseCancelled`(expected_revision: u64, at_utc_ms: u64)
@@ -44,6 +45,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Claimed`(owner_key: WorkOwnerKey)
 - `Released`
 - `Blocked`
+- `BlockerSatisfied`
+- `BlockerUnsatisfied`
 - `LinkValidated`
 - `Closed`(terminal_state: WorkLifecycleState)
 - `EvidenceAdded`
@@ -156,17 +159,62 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `RefreshEligibilityOpen`
 - From: `Open`
 - On: `RefreshEligibility`(unresolved_blocker_count)
+- Emits: `Updated`
 - To: `Open`
 
 ### `RefreshEligibilityInProgress`
 - From: `InProgress`
 - On: `RefreshEligibility`(unresolved_blocker_count)
+- Emits: `Updated`
 - To: `InProgress`
 
 ### `RefreshEligibilityBlocked`
 - From: `Blocked`
 - On: `RefreshEligibility`(unresolved_blocker_count)
+- Emits: `Updated`
 - To: `Blocked`
+
+### `ClassifyBlockerSatisfiedCompleted`
+- From: `Completed`
+- On: `ClassifyBlockerSatisfaction`()
+- Emits: `BlockerSatisfied`
+- To: `Completed`
+
+### `ClassifyBlockerUnsatisfiedAbsent`
+- From: `Absent`
+- On: `ClassifyBlockerSatisfaction`()
+- Emits: `BlockerUnsatisfied`
+- To: `Absent`
+
+### `ClassifyBlockerUnsatisfiedOpen`
+- From: `Open`
+- On: `ClassifyBlockerSatisfaction`()
+- Emits: `BlockerUnsatisfied`
+- To: `Open`
+
+### `ClassifyBlockerUnsatisfiedInProgress`
+- From: `InProgress`
+- On: `ClassifyBlockerSatisfaction`()
+- Emits: `BlockerUnsatisfied`
+- To: `InProgress`
+
+### `ClassifyBlockerUnsatisfiedBlocked`
+- From: `Blocked`
+- On: `ClassifyBlockerSatisfaction`()
+- Emits: `BlockerUnsatisfied`
+- To: `Blocked`
+
+### `ClassifyBlockerUnsatisfiedCancelled`
+- From: `Cancelled`
+- On: `ClassifyBlockerSatisfaction`()
+- Emits: `BlockerUnsatisfied`
+- To: `Cancelled`
+
+### `ClassifyBlockerUnsatisfiedFailed`
+- From: `Failed`
+- On: `ClassifyBlockerSatisfaction`()
+- Emits: `BlockerUnsatisfied`
+- To: `Failed`
 
 ### `ValidateLink`
 - From: `Absent`
@@ -303,10 +351,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-workgraph/src/machine.rs` — WorkGraphMachine domain-facing lifecycle transition seam over CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ValidateLink, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed; effects Created, Updated, Claimed, Released, Blocked, LinkValidated, Closed, EvidenceAdded; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, and topology legality
+- `meerkat-workgraph/src/machine.rs` — WorkGraphMachine domain-facing lifecycle transition seam over CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ValidateLink, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LinkValidated, Closed, EvidenceAdded; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, and topology legality
 
 ### Scenarios
-- `workgraph_create_update_ready_claim` — CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, and CAS revision
+- `workgraph_create_update_ready_claim` — CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, blocker satisfaction, and CAS revision
 - `workgraph_claim_release_recovery` — only one active claim exists, ReleaseInProgress, Released, expired leases become recoverable through machine-approved claim, claim_only_in_progress, blocked_has_no_claim, and terminal_has_no_claim
 - `workgraph_block_close_evidence` — BlockOpen, BlockInProgress, BlockBlocked, Blocked, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, Closed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, EvidenceAdded, absent_has_zero_revision, live_has_positive_revision, and terminal_has_terminal_time
-- `workgraph_topology_legality` — ValidateLink and LinkValidated reject missing endpoints, self edges, duplicate edges, and dependency cycles without adding a separate topology machine
+- `workgraph_topology_legality` — ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, BlockerSatisfied, BlockerUnsatisfied, ValidateLink, and LinkValidated reject missing endpoints, self edges, duplicate edges, dependency cycles, and unsatisfied blockers without adding a separate topology machine

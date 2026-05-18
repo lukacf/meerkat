@@ -4,13 +4,13 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::WorkGraphError;
-use crate::machine::WorkGraphMachine;
+use crate::machine::{WorkGraphMachine, effect_labels};
 use crate::store::{WorkGraphEventFilter, WorkGraphStore};
 use crate::types::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
     LinkWorkItemsRequest, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkEdge,
-    WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind, WorkGraphSnapshot, WorkGraphSnapshotFilter,
-    WorkItem, WorkItemFilter, WorkItemId, WorkNamespace,
+    WorkEdgeKind, WorkGraphEvent, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem,
+    WorkItemFilter, WorkItemId, WorkNamespace,
 };
 
 const BEST_EFFORT_REFRESH_ATTEMPTS: usize = 3;
@@ -289,13 +289,14 @@ impl WorkGraphService {
                 ..WorkItemFilter::default()
             })
             .await?;
-        WorkGraphMachine::validate_link(&edge, &existing_items, &existing_edges)?;
+        let event_authority =
+            WorkGraphMachine::validate_link(&edge, &existing_items, &existing_edges)?;
         let event = WorkGraphEvent::graph(
             edge.realm_id.clone(),
             edge.namespace.clone(),
-            WorkGraphEventKind::Linked,
+            event_authority.kind,
             now,
-            json!({ "edge": edge }),
+            json!({ "edge": edge, "machine_effects": effect_labels(&event_authority.effects) }),
         );
         let inserted = self.store.insert_edge(edge, event).await?;
         if inserted.kind == WorkEdgeKind::Blocks {
@@ -519,7 +520,7 @@ impl WorkGraphService {
             .map(|item| (item.id.clone(), item))
             .collect::<BTreeMap<_, _>>();
         let edges = self.store.list_edges(realm_id, namespace).await?;
-        let unresolved_blockers = unresolved_blocker_count(&item, &all_items, &edges);
+        let unresolved_blockers = unresolved_blocker_count(&item, &all_items, &edges)?;
         if let Some((item, event)) =
             WorkGraphMachine::refresh_eligibility(item, unresolved_blockers, now)?
         {
@@ -550,7 +551,7 @@ impl WorkGraphService {
             .map(|item| (item.id.clone(), item))
             .collect::<BTreeMap<_, _>>();
         let edges = self.store.list_edges(realm_id, namespace).await?;
-        Ok(unresolved_blocker_count(item, &all_items, &edges))
+        unresolved_blocker_count(item, &all_items, &edges)
     }
 }
 
@@ -558,18 +559,21 @@ fn unresolved_blocker_count(
     item: &WorkItem,
     all_items: &BTreeMap<WorkItemId, WorkItem>,
     edges: &[WorkEdge],
-) -> u64 {
-    edges
+) -> Result<u64, WorkGraphError> {
+    let mut count = 0_u64;
+    for edge in edges
         .iter()
         .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.to_id == item.id)
-        .filter(|edge| {
-            all_items
-                .get(&edge.from_id)
-                .is_none_or(|blocker| !blocker.status.is_terminal_success())
-        })
-        .count()
-        .try_into()
-        .unwrap_or(u64::MAX)
+    {
+        let Some(blocker) = all_items.get(&edge.from_id) else {
+            count = count.saturating_add(1);
+            continue;
+        };
+        if !WorkGraphMachine::blocker_satisfies_dependency(blocker)? {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
 }
 
 #[cfg(test)]

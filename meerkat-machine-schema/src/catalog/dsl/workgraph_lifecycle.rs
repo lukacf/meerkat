@@ -205,6 +205,7 @@ machine! {
             Release { expected_revision: u64 },
             Block { expected_revision: u64 },
             RefreshEligibility { unresolved_blocker_count: u64 },
+            ClassifyBlockerSatisfaction,
             ValidateLink {
                 kind: WorkEdgeKind,
                 from_item_key: WorkItemKey,
@@ -224,6 +225,8 @@ machine! {
             Claimed { owner_key: WorkOwnerKey },
             Released,
             Blocked,
+            BlockerSatisfied,
+            BlockerUnsatisfied,
             LinkValidated,
             Closed { terminal_state: WorkLifecycleState },
             EvidenceAdded,
@@ -266,6 +269,8 @@ machine! {
         disposition Claimed => local,
         disposition Released => local,
         disposition Blocked => local,
+        disposition BlockerSatisfied => local,
+        disposition BlockerUnsatisfied => local,
         disposition LinkValidated => local,
         disposition Closed => local,
         disposition EvidenceAdded => local,
@@ -436,6 +441,7 @@ machine! {
                 self.unresolved_blocker_count = unresolved_blocker_count;
             }
             to Open
+            emit Updated
         }
 
         transition RefreshEligibilityInProgress {
@@ -445,6 +451,7 @@ machine! {
                 self.unresolved_blocker_count = unresolved_blocker_count;
             }
             to InProgress
+            emit Updated
         }
 
         transition RefreshEligibilityBlocked {
@@ -454,6 +461,56 @@ machine! {
                 self.unresolved_blocker_count = unresolved_blocker_count;
             }
             to Blocked
+            emit Updated
+        }
+
+        transition ClassifyBlockerSatisfiedCompleted {
+            on input ClassifyBlockerSatisfaction
+            guard { self.lifecycle_phase == Phase::Completed }
+            to Completed
+            emit BlockerSatisfied
+        }
+
+        transition ClassifyBlockerUnsatisfiedAbsent {
+            on input ClassifyBlockerSatisfaction
+            guard { self.lifecycle_phase == Phase::Absent }
+            to Absent
+            emit BlockerUnsatisfied
+        }
+
+        transition ClassifyBlockerUnsatisfiedOpen {
+            on input ClassifyBlockerSatisfaction
+            guard { self.lifecycle_phase == Phase::Open }
+            to Open
+            emit BlockerUnsatisfied
+        }
+
+        transition ClassifyBlockerUnsatisfiedInProgress {
+            on input ClassifyBlockerSatisfaction
+            guard { self.lifecycle_phase == Phase::InProgress }
+            to InProgress
+            emit BlockerUnsatisfied
+        }
+
+        transition ClassifyBlockerUnsatisfiedBlocked {
+            on input ClassifyBlockerSatisfaction
+            guard { self.lifecycle_phase == Phase::Blocked }
+            to Blocked
+            emit BlockerUnsatisfied
+        }
+
+        transition ClassifyBlockerUnsatisfiedCancelled {
+            on input ClassifyBlockerSatisfaction
+            guard { self.lifecycle_phase == Phase::Cancelled }
+            to Cancelled
+            emit BlockerUnsatisfied
+        }
+
+        transition ClassifyBlockerUnsatisfiedFailed {
+            on input ClassifyBlockerSatisfaction
+            guard { self.lifecycle_phase == Phase::Failed }
+            to Failed
+            emit BlockerUnsatisfied
         }
 
         transition ValidateLink {

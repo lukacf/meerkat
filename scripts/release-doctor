@@ -133,8 +133,9 @@ fi
 if grep -Fq 'Use BuildBuddy Windows release endpoint' .github/workflows/release.yml &&
   grep -Fq 'BUILDBUDDY_ENDPOINT:' .github/workflows/release.yml &&
   grep -Fq 'secrets.BUILDBUDDY_ENDPOINT' .github/workflows/release.yml &&
-  grep -Fq 'remote_default_exec_properties=Pool=' .github/workflows/release.yml &&
+  grep -Fq 'BUILDBUDDY_EXECUTOR_POOL' .github/workflows/release.yml &&
   grep -Fq 'build:buildbuddy-windows-rbe --remote_default_exec_properties=use-self-hosted-executors=true' .bazelrc &&
+  grep -Fq '"Pool": "meerkat-ci"' platforms/BUILD.bazel &&
   grep -Fq '"use-self-hosted-executors": "true"' platforms/BUILD.bazel; then
   pass "Release workflow routes Windows recovery builds to the private BuildBuddy endpoint"
 else

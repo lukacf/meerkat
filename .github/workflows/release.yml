@@ -501,14 +501,21 @@ jobs:
           start = text.index("  release-build-windows-x86)")
           end = text.index("    ;;\n", start)
           block = text[start:end]
-          needle = "      --compilation_mode=opt\n      --remote_download_outputs=toplevel\n"
-          replacement = (
-              "      --compilation_mode=opt\n"
-              "      --remote_download_outputs=toplevel\n"
-              f"      --remote_default_exec_properties=Pool={os.environ['BUILDBUDDY_EXECUTOR_POOL']}\n"
-          )
+          needle = "      --compilation_mode=opt\n"
+          replacement = "      --compilation_mode=opt\n      --verbose_failures\n"
           if replacement not in block:
               block = block.replace(needle, replacement, 1)
+              text = text[:start] + block + text[end:]
+          path.write_text(text, encoding="utf-8")
+
+          path = Path("platforms/BUILD.bazel")
+          text = path.read_text(encoding="utf-8")
+          start = text.index('    name = "windows_x86_64",')
+          end = text.index("    parents =", start)
+          block = text[start:end]
+          pool_line = f'        "Pool": "{os.environ["BUILDBUDDY_EXECUTOR_POOL"]}",\n'
+          if '"Pool":' not in block:
+              block = block.replace('        "OSFamily": "Windows",\n', '        "OSFamily": "Windows",\n' + pool_line, 1)
               text = text[:start] + block + text[end:]
           path.write_text(text, encoding="utf-8")
           PY

@@ -10335,7 +10335,10 @@ mod tests {
         sender
             .peer_interaction_handle()
             .expect("sender peer response authority")
-            .request_received(meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0))
+            .request_received(
+                meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0),
+                meerkat_core::types::HandlingMode::Queue,
+            )
             .expect("seed inbound request before terminal peer response");
 
         CoreCommsRuntime::send(

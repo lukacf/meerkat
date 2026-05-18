@@ -110,6 +110,7 @@ pub struct ReplayQueuedContributorsPlan {
 #[derive(Clone)]
 pub(crate) struct EphemeralDriverRollbackSnapshot {
     control_projection: RuntimeControlProjection,
+    dsl_snapshot: mm_dsl::MeerkatMachineAuthoritySnapshot,
     ledger: InputLedger,
     queue: InputQueue,
     steer_queue: InputQueue,
@@ -268,6 +269,7 @@ impl EphemeralRuntimeDriver {
     pub(crate) fn rollback_snapshot(&self) -> EphemeralDriverRollbackSnapshot {
         EphemeralDriverRollbackSnapshot {
             control_projection: self.read_control_projection().clone(),
+            dsl_snapshot: self.dsl.lock().snapshot(),
             ledger: self.ledger.clone(),
             queue: self.queue.clone(),
             steer_queue: self.steer_queue.clone(),
@@ -300,6 +302,10 @@ impl EphemeralRuntimeDriver {
         {
             let mut control = self.write_control_projection();
             *control = snapshot.control_projection;
+        }
+        {
+            let mut authority = self.dsl.lock();
+            authority.restore_snapshot(snapshot.dsl_snapshot);
         }
         self.ledger = snapshot.ledger;
         self.queue = snapshot.queue;

@@ -990,7 +990,7 @@ async fn provisional_dsl_stage_does_not_emit_routed_signal_until_authoritative_a
     machine.register_session(session_id.clone()).await;
     let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
 
-    let previous_state = machine
+    let previous_snapshot = machine
         .stage_session_dsl_input(
             &session_id,
             prepare_bindings_input(&session_id, "rt-provisional", 7),
@@ -1005,7 +1005,7 @@ async fn provisional_dsl_stage_does_not_emit_routed_signal_until_authoritative_a
     );
 
     machine
-        .restore_session_dsl_state(&session_id, previous_state)
+        .restore_session_dsl_state(&session_id, previous_snapshot)
         .await;
 
     let (_, effects) = machine
@@ -1038,7 +1038,7 @@ async fn provisional_dsl_rollback_after_shell_failure_leaks_no_routed_signal_or_
     machine.register_session(session_id.clone()).await;
     let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
 
-    let previous_state = machine
+    let previous_snapshot = machine
         .stage_session_dsl_input(
             &session_id,
             prepare_bindings_input(&session_id, "rt-rolled-back", 17),
@@ -1047,7 +1047,7 @@ async fn provisional_dsl_rollback_after_shell_failure_leaks_no_routed_signal_or_
         .await
         .expect("provisional stage");
     machine
-        .restore_session_dsl_state(&session_id, previous_state)
+        .restore_session_dsl_state(&session_id, previous_snapshot)
         .await;
 
     assert!(

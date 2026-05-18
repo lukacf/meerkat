@@ -203,7 +203,7 @@ impl MeerkatMachine {
                     Ok(report) => report,
                     Err(err) => {
                         drop(drv);
-                        self.restore_session_dsl_state(&session_id, staged_dsl.previous_state)
+                        self.restore_session_dsl_state(&session_id, staged_dsl.previous_snapshot)
                             .await;
                         return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                     }

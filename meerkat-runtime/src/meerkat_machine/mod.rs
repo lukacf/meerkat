@@ -543,7 +543,7 @@ pub(crate) use dsl_effects::{DslTransitionEffects, apply_dsl_transition_on_autho
 pub(crate) use visibility::MachineToolVisibilityOwner;
 
 struct StagedSessionDslInput {
-    previous_state: Box<dsl::MeerkatMachineState>,
+    previous_snapshot: dsl::MeerkatMachineAuthoritySnapshot,
     effects: DslTransitionEffects,
 }
 
@@ -887,7 +887,7 @@ impl MeerkatMachine {
             match dispatch_failure {
                 CommittedEffectDispatchFailure::PreserveCommittedDslState => {}
                 CommittedEffectDispatchFailure::RestorePreviousDslState => {
-                    self.restore_session_dsl_state(session_id, staged.previous_state)
+                    self.restore_session_dsl_state(session_id, staged.previous_snapshot)
                         .await;
                 }
             }
@@ -969,9 +969,14 @@ impl MeerkatMachine {
     async fn restore_session_dsl_state(
         &self,
         session_id: &SessionId,
-        state: Box<dsl::MeerkatMachineState>,
+        snapshot: dsl::MeerkatMachineAuthoritySnapshot,
     ) {
-        let _ = (session_id, state);
+        if let Ok(authority) = self.session_dsl_authority(session_id).await {
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            authority.restore_snapshot(snapshot);
+        }
     }
 }
 
@@ -1292,18 +1297,18 @@ impl MeerkatMachine {
         let authority = Arc::clone(&entry.dsl_authority);
         drop(sessions);
 
-        let (previous_state, effects) = {
+        let (previous_snapshot, effects) = {
             let mut guard = authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let previous_state = Box::new(guard.state.clone());
+            let previous_snapshot = guard.snapshot();
             let effects = dsl::MeerkatMachineMutator::apply(&mut *guard, input)
                 .map(|transition| transition.effects)
                 .map_err(|err| format!("{err}"))?;
-            (previous_state, effects)
+            (previous_snapshot, effects)
         };
         if let Err(error) = self.dispatch_routed_signals_from_effects(&effects).await {
-            self.restore_session_dsl_state(session_id, previous_state)
+            self.restore_session_dsl_state(session_id, previous_snapshot)
                 .await;
             return Err(format!(
                 "routed MeerkatMachine input committed effect dispatch failed: {error}"

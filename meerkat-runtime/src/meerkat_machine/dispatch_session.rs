@@ -173,7 +173,7 @@ impl MeerkatMachine {
                     let mut driver = driver_handle.lock().await;
                     if let Err(err) = machine_prepare_bindings_projection(&mut driver) {
                         drop(driver);
-                        self.restore_session_dsl_state(&session_id, staged.previous_state)
+                        self.restore_session_dsl_state(&session_id, staged.previous_snapshot)
                             .await;
                         if inserted_by_call {
                             self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
@@ -340,7 +340,7 @@ impl MeerkatMachine {
                     )
                     .await
                     .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-                if previous_dsl_state.lifecycle_phase
+                if previous_dsl_state.state().lifecycle_phase
                     != crate::meerkat_machine::dsl::MeerkatPhase::Stopped
                 {
                     self.set_session_silent_intents_inner(&session_id, intents)

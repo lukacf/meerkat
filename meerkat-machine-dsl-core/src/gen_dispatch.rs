@@ -25,6 +25,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
     let transition_name = format_ident!("{}Transition", machine_name);
     let error_name = format_ident!("{}TransitionError", machine_name);
     let authority_name = format_ident!("{}Authority", machine_name);
+    let authority_snapshot_name = format_ident!("{}AuthoritySnapshot", machine_name);
     let mutator_trait = format_ident!("{}Mutator", machine_name);
 
     let input_transitions: Vec<_> = def
@@ -143,6 +144,17 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             pub state: #state_name,
         }
 
+        #[derive(Clone, Debug)]
+        pub struct #authority_snapshot_name {
+            state: #state_name,
+        }
+
+        impl #authority_snapshot_name {
+            pub fn state(&self) -> &#state_name {
+                &self.state
+            }
+        }
+
         impl sealed::Sealed for #authority_name {}
 
         impl #authority_name {
@@ -152,6 +164,16 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
             pub fn from_state(state: #state_name) -> Self {
                 Self { state }
+            }
+
+            pub fn snapshot(&self) -> #authority_snapshot_name {
+                #authority_snapshot_name {
+                    state: self.state.clone(),
+                }
+            }
+
+            pub fn restore_snapshot(&mut self, snapshot: #authority_snapshot_name) {
+                self.state = snapshot.state;
             }
 
             #(#helpers)*

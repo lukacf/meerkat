@@ -49,7 +49,7 @@ impl MeerkatMachine {
             )
             .await
         {
-            self.restore_session_dsl_state(session_id, staged.previous_state)
+            self.restore_session_dsl_state(session_id, staged.previous_snapshot)
                 .await;
             return Err(err);
         }

@@ -88,46 +88,11 @@ fn make_continuation() -> Input {
     Input::Continuation(ContinuationInput::detached_background_op_completed())
 }
 
-fn test_expected_post_admission_signal(
-    outcome: &meerkat_runtime::AcceptOutcome,
-    request_immediate_processing: bool,
-) -> PostAdmissionSignal {
-    if !outcome.is_accepted() {
-        return PostAdmissionSignal::None;
-    }
-    if request_immediate_processing {
-        return PostAdmissionSignal::RequestImmediateProcessing;
-    }
-
-    match outcome {
-        meerkat_runtime::AcceptOutcome::Accepted { policy, .. } => match policy.wake_mode {
-            meerkat_runtime::WakeMode::InterruptYielding => PostAdmissionSignal::InterruptYielding,
-            meerkat_runtime::WakeMode::WakeIfIdle => PostAdmissionSignal::WakeLoop,
-            meerkat_runtime::WakeMode::None => PostAdmissionSignal::None,
-            _ => PostAdmissionSignal::None,
-        },
-        meerkat_runtime::AcceptOutcome::Deduplicated { .. }
-        | meerkat_runtime::AcceptOutcome::Rejected { .. } => PostAdmissionSignal::None,
-        _ => PostAdmissionSignal::None,
-    }
-}
-
 fn assert_queue_projection_alignment(driver: &EphemeralRuntimeDriver) {
     assert_eq!(driver.queue().input_ids(), driver.queue_lane().as_slice());
     assert_eq!(
         driver.steer_queue().input_ids(),
         driver.steer_lane().as_slice()
-    );
-}
-
-fn assert_machine_owned_admission_signal(
-    outcome: &meerkat_runtime::AcceptOutcome,
-    request_immediate_processing: bool,
-    expected: PostAdmissionSignal,
-) {
-    assert_eq!(
-        test_expected_post_admission_signal(outcome, request_immediate_processing),
-        expected
     );
 }
 
@@ -159,13 +124,6 @@ async fn accept_on_machine(
     input_id
 }
 
-// WIP: the admission seam now emits `PostAdmissionSignal` via the result
-// (machine-owned). The legacy driver-owned `take_post_admission_signal`
-// hasn't been retired yet, so it still returns `WakeLoop` after admission
-// while the result-side contract is already in place. The
-// `codex/machine-dls-completion` rebase is expected to finish retiring
-// the driver-side signal; ignore these tests until then.
-
 #[tokio::test]
 async fn accept_prompt_idle_queues_and_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
@@ -173,10 +131,9 @@ async fn accept_prompt_idle_queues_and_wakes() {
     let result = driver.accept_input(input).await.unwrap();
 
     assert!(result.is_accepted());
-    assert_machine_owned_admission_signal(&result, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
     assert_eq!(driver.queue().len(), 1);
     assert_queue_projection_alignment(&driver);
@@ -196,9 +153,6 @@ async fn accept_prompt_running_queues_and_wakes() {
     assert!(!driver.take_wake_requested());
 }
 
-// WIP: see `accept_prompt_idle_queues_and_wakes` for the shared
-// machine-owned vs driver-owned admission signal transition note.
-
 #[tokio::test]
 async fn accept_peer_terminal_idle_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
@@ -206,19 +160,11 @@ async fn accept_peer_terminal_idle_wakes() {
     let result = driver.accept_input(input).await.unwrap();
 
     assert!(result.is_accepted());
-    assert_machine_owned_admission_signal(&result, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
-
-// WIP: see `accept_prompt_idle_queues_and_wakes` for the shared
-// machine-owned vs driver-owned admission signal transition note. This
-// test also fails because the peer_response_terminal policy became
-// `InjectNow` with `WakeIfIdle` (even while running, it requests a wake
-// so a late terminal does not strand). The test's original assumption
-// that running peer terminals produce no wake is out of date.
 
 #[tokio::test]
 async fn accept_peer_terminal_running_queues_wake_for_next_idle() {
@@ -239,7 +185,7 @@ async fn accept_peer_terminal_running_queues_wake_for_next_idle() {
 }
 
 #[tokio::test]
-async fn accept_progress_no_wake() {
+async fn accept_progress_policy_no_wake_but_idle_admission_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
     let input = make_peer_progress();
     let result = driver.accept_input(input).await.unwrap();
@@ -248,18 +194,11 @@ async fn accept_progress_no_wake() {
     let signal = driver.take_post_admission_signal();
     assert_eq!(
         signal,
-        PostAdmissionSignal::None,
-        "ResponseProgress should stage on the checkpoint lane without requesting immediate processing"
+        PostAdmissionSignal::WakeLoop,
+        "ResponseProgress should stage on the checkpoint lane and use the generated idle admission wake"
     );
-    assert!(!signal.should_wake()); // Progress never wakes
+    assert!(signal.should_wake());
 }
-
-// WIP: the policy refactor that splits `RequestImmediateProcessing` from
-// `WakeLoop` on the admission seam left the continuation-idle path still
-// emitting a residual `WakeLoop` on the driver-owned signal after take.
-// Moving this test's expectation into the machine-owned admission signal
-// seam is tracked by the incoming `codex/machine-dls-completion` rebase;
-// ignore it here so CI stays green until that seam lands.
 
 #[tokio::test]
 async fn accept_continuation_idle_wakes_and_requests_processing() {
@@ -268,14 +207,9 @@ async fn accept_continuation_idle_wakes_and_requests_processing() {
     let result = driver.accept_input(input).await.unwrap();
 
     assert!(result.is_accepted());
-    assert_machine_owned_admission_signal(
-        &result,
-        true,
-        PostAdmissionSignal::RequestImmediateProcessing,
-    );
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::RequestImmediateProcessing
     );
     // Continuations route to steer queue (RoutingDisposition::Steer)
     assert_eq!(driver.steer_queue().len(), 1);
@@ -545,10 +479,10 @@ async fn progress_peer_staged_boundary() {
     let signal = driver.take_post_admission_signal();
     assert_eq!(
         signal,
-        PostAdmissionSignal::None,
-        "ResponseProgress should remain passive even though it uses the checkpoint lane"
+        PostAdmissionSignal::WakeLoop,
+        "ResponseProgress policy remains passive while generated idle admission wakes the loop"
     );
-    assert!(!signal.should_wake()); // Progress never wakes
+    assert!(signal.should_wake());
 }
 
 #[tokio::test]
@@ -870,8 +804,6 @@ fn post_admission_signal_should_process_immediately() {
     assert!(PostAdmissionSignal::RequestImmediateProcessing.should_process_immediately());
 }
 
-// WIP: same machine-owned vs driver-owned admission signal transition.
-
 #[tokio::test]
 async fn post_admission_signal_accumulates_strongest() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
@@ -880,14 +812,12 @@ async fn post_admission_signal_accumulates_strongest() {
     // should not retain a local signal shadow.
     let prompt = make_prompt_input("hello");
     let outcome = driver.accept_input(prompt).await.unwrap();
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
+    assert!(outcome.is_accepted());
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
-
-// WIP: same machine-owned vs driver-owned admission signal transition.
 
 #[tokio::test]
 async fn post_admission_signal_steer_is_request_immediate() {
@@ -916,14 +846,10 @@ async fn post_admission_signal_steer_is_request_immediate() {
         handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
     });
     let outcome = driver.accept_input(steer_input).await.unwrap();
-    assert_machine_owned_admission_signal(
-        &outcome,
-        true,
-        PostAdmissionSignal::RequestImmediateProcessing,
-    );
+    assert!(outcome.is_accepted());
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::RequestImmediateProcessing
     );
 }
 
@@ -962,16 +888,13 @@ async fn post_admission_signal_queue_peer_message_while_running_interrupts_yield
         handling_mode: None,
     });
     let outcome = driver.accept_input(peer).await.unwrap();
-    let signal = test_expected_post_admission_signal(&outcome, false);
+    assert!(outcome.is_accepted());
+    let signal = driver.take_post_admission_signal();
 
     assert_eq!(
         signal,
         PostAdmissionSignal::InterruptYielding,
         "queue-mode peer message while running should request cooperative interrupt, got {signal:?}"
-    );
-    assert_eq!(
-        driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
     );
 }
 

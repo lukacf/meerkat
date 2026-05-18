@@ -26,41 +26,6 @@ use meerkat_runtime::runtime_state::RuntimeState;
 use meerkat_runtime::traits::RuntimeDriver;
 use uuid::Uuid;
 
-fn test_expected_post_admission_signal(
-    outcome: &meerkat_runtime::AcceptOutcome,
-    request_immediate_processing: bool,
-) -> PostAdmissionSignal {
-    if !outcome.is_accepted() {
-        return PostAdmissionSignal::None;
-    }
-    if request_immediate_processing {
-        return PostAdmissionSignal::RequestImmediateProcessing;
-    }
-
-    match outcome {
-        meerkat_runtime::AcceptOutcome::Accepted { policy, .. } => match policy.wake_mode {
-            meerkat_runtime::WakeMode::InterruptYielding => PostAdmissionSignal::InterruptYielding,
-            meerkat_runtime::WakeMode::WakeIfIdle => PostAdmissionSignal::WakeLoop,
-            meerkat_runtime::WakeMode::None => PostAdmissionSignal::None,
-            _ => PostAdmissionSignal::None,
-        },
-        meerkat_runtime::AcceptOutcome::Deduplicated { .. }
-        | meerkat_runtime::AcceptOutcome::Rejected { .. } => PostAdmissionSignal::None,
-        _ => PostAdmissionSignal::None,
-    }
-}
-
-fn assert_machine_owned_admission_signal(
-    outcome: &meerkat_runtime::AcceptOutcome,
-    request_immediate_processing: bool,
-    expected: PostAdmissionSignal,
-) {
-    assert_eq!(
-        test_expected_post_admission_signal(outcome, request_immediate_processing),
-        expected
-    );
-}
-
 fn bind_running(driver: &mut EphemeralRuntimeDriver) -> RunId {
     let run_id = RunId::new();
     assert_eq!(driver.runtime_state(), RuntimeState::Idle);
@@ -191,10 +156,9 @@ async fn completed_response_idle_wakes() {
     // Verify driver behavior
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -240,7 +204,7 @@ async fn completed_response_admission_stamps_apply_intent_without_context_projec
 // §2: Accepted response injects context, no continuation (no wake)
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn accepted_response_no_wake() {
+async fn accepted_response_policy_no_wake_but_idle_admission_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
     let interaction = make_response("peer-1", ResponseStatus::Accepted);
     let input = runtime_input_for_interaction(&interaction, &rid());
@@ -269,13 +233,13 @@ async fn accepted_response_no_wake() {
         meerkat_runtime::ConsumePoint::OnRunComplete
     );
 
-    // Verify driver: accepted but no wake, queued (not immediately consumed)
+    // Verify driver: accepted and queued; the generated idle admission
+    // signal wakes the loop even though progress policy itself is no-wake.
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted(), "unexpected outcome: {outcome:?}");
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::None);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 
     // Input should be queued (StageRunBoundary queues for boundary application)
@@ -313,10 +277,9 @@ async fn failed_response_idle_wakes() {
     // Verify: terminal response + idle → wake
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -340,11 +303,11 @@ async fn response_with_passthrough_message_both_queued() {
 
     // Both should be queued
     assert_eq!(driver.queue().len(), 2);
-    assert_machine_owned_admission_signal(&outcome1, false, PostAdmissionSignal::WakeLoop);
-    assert_machine_owned_admission_signal(&outcome2, false, PostAdmissionSignal::WakeLoop);
+    assert!(outcome1.is_accepted());
+    assert!(outcome2.is_accepted());
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -366,10 +329,9 @@ async fn response_after_completed_turn_wakes() {
     let outcome = driver.accept_input(input).await.unwrap();
 
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -457,10 +419,9 @@ async fn non_silent_intent_triggers_wake() {
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -482,10 +443,9 @@ async fn message_triggers_wake() {
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
     assert_eq!(driver.queue().len(), 1);
 }
@@ -503,10 +463,9 @@ async fn request_triggers_wake() {
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -582,10 +541,6 @@ async fn message_while_running_with_explicit_queue_stays_queued() {
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
     assert_eq!(
-        test_expected_post_admission_signal(&outcome, false),
-        PostAdmissionSignal::None
-    );
-    assert_eq!(
         driver.take_post_admission_signal(),
         PostAdmissionSignal::None
     );
@@ -620,12 +575,8 @@ async fn message_with_steer_while_running_requests_cooperative_interrupt() {
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
     assert_eq!(
-        test_expected_post_admission_signal(&outcome, false),
-        PostAdmissionSignal::InterruptYielding
-    );
-    assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::RequestImmediateProcessing
     );
 }
 
@@ -654,9 +605,9 @@ async fn terminal_response_while_running_requests_idle_wake() {
     assert!(outcome.is_accepted());
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None,
+        PostAdmissionSignal::WakeLoop,
         "terminal peer response accepted while running is queued for the next idle boundary; \
-         it does not fire an immediate driver wake side channel"
+         the generated admission signal wakes the next idle re-check"
     );
 }
 
@@ -746,14 +697,9 @@ async fn terminal_response_with_steer_policy_while_running() {
     bind_running(&mut driver);
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(
-        &outcome,
-        true,
-        PostAdmissionSignal::RequestImmediateProcessing,
-    );
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::RequestImmediateProcessing
     );
 }
 
@@ -795,13 +741,8 @@ async fn terminal_response_with_steer_policy_while_idle() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(
-        &outcome,
-        true,
-        PostAdmissionSignal::RequestImmediateProcessing,
-    );
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::RequestImmediateProcessing
     );
 }

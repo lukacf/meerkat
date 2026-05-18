@@ -942,12 +942,21 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
+        self.ensure_mob_scope_authority(call.name, &mob_id).await?;
+        let audit_handle = self
+            .state
+            .handle_for(&mob_id)
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
+
         let local = AgentIdentity::from(args.member_id.as_str());
         let target = wire_peer_target_from_args(args.peer);
         self.state
             .mob_wire(&mob_id, local, target)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
+        self.record_successful_operator_action(&audit_handle, call.name)
+            .await;
         Self::encode_result(call, json!({ "wired": true }))
     }
 
@@ -959,12 +968,21 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
+        self.ensure_mob_scope_authority(call.name, &mob_id).await?;
+        let audit_handle = self
+            .state
+            .handle_for(&mob_id)
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
+
         let local = AgentIdentity::from(args.member_id.as_str());
         let target = unwire_peer_target_from_args(args.peer)?;
         self.state
             .mob_unwire(&mob_id, local, target)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
+        self.record_successful_operator_action(&audit_handle, call.name)
+            .await;
         Self::encode_result(call, json!({ "unwired": true }))
     }
 

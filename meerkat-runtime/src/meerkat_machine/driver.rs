@@ -1003,7 +1003,7 @@ fn machine_apply_turn_run_failed(
     terminal_outcome: meerkat_core::TurnTerminalOutcome,
     terminal_cause_kind: meerkat_core::TurnTerminalCauseKind,
     runtime_apply_failure: Option<&CoreApplyFailureCause>,
-) -> Result<(), RuntimeDriverError> {
+) -> Result<Vec<crate::meerkat_machine::dsl::MeerkatMachineEffect>, RuntimeDriverError> {
     let authority = driver.shared_dsl_authority();
     let mut auth = authority
         .lock()
@@ -1012,7 +1012,7 @@ fn machine_apply_turn_run_failed(
         || auth.state.current_run_id.as_ref().map(|id| id.0.as_str())
             != Some(run_id.to_string().as_str())
     {
-        return Ok(());
+        return Ok(Vec::new());
     }
     crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut *auth,
@@ -1027,7 +1027,7 @@ fn machine_apply_turn_run_failed(
             error: terminal_error.to_owned(),
         },
     )
-    .map(|_| ())
+    .map(|transition| transition.effects)
     .map_err(|err| {
         RuntimeDriverError::Internal(format!(
             "failed to apply runtime turn failure for run {run_id}: {err}"
@@ -1920,7 +1920,6 @@ pub(crate) fn machine_build_replay_plan(
         }
     }
     crate::driver::ephemeral::ReplayQueuedContributorsPlan {
-        wake_runtime: !(queue_work_ids.is_empty() && steer_work_ids.is_empty()),
         queue_work_ids,
         steer_work_ids,
         notice_kind,
@@ -2800,7 +2799,7 @@ async fn fail_runtime_loop_run_inner(
     machine_validate_run_failed(&driver, &staged_input_ids)
         .map_err(RuntimeLoopRunFailError::Rejected)?;
     let terminal_checkpoint = driver.rollback_snapshot();
-    if let Err(err) = machine_apply_turn_run_failed(
+    let run_failed_effects = match machine_apply_turn_run_failed(
         &mut driver,
         &failed_run_id,
         &terminal_error,
@@ -2808,9 +2807,12 @@ async fn fail_runtime_loop_run_inner(
         terminal_cause_kind,
         runtime_apply_failure.as_ref(),
     ) {
-        driver.restore_rollback_snapshot(terminal_checkpoint);
-        return Err(RuntimeLoopRunFailError::Rejected(err));
-    }
+        Ok(effects) => effects,
+        Err(err) => {
+            driver.restore_rollback_snapshot(terminal_checkpoint);
+            return Err(RuntimeLoopRunFailError::Rejected(err));
+        }
+    };
     let replay_plan = machine_build_replay_plan(&driver, &staged_input_ids, "RunFailed");
     if let Err(err) = machine_apply_run_return_projection(
         &mut driver,
@@ -2841,6 +2843,7 @@ async fn fail_runtime_loop_run_inner(
             RuntimeDriverError::Internal(format!("failed to record run-failed event: {run_err}")),
         ));
     }
+    driver.absorb_post_admission_effects(&run_failed_effects);
     if matches!(&*driver, DriverEntry::Persistent(_)) {
         driver.set_control_projection(next_phase, None, None);
     }

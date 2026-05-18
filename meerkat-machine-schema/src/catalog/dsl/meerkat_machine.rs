@@ -8013,6 +8013,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.last_runtime_apply_failure_message = runtime_apply_failure_message;
             }
             to Running
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::WakeLoop }
         }
 
         transition RunCancelled {

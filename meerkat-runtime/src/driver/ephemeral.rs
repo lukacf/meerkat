@@ -104,7 +104,6 @@ impl Default for RuntimeControlProjection {
 pub struct ReplayQueuedContributorsPlan {
     pub queue_work_ids: Vec<InputId>,
     pub steer_work_ids: Vec<InputId>,
-    pub wake_runtime: bool,
     pub notice_kind: &'static str,
 }
 
@@ -2789,9 +2788,6 @@ impl EphemeralRuntimeDriver {
         contributing_input_ids: &[InputId],
         replay_plan: &ReplayQueuedContributorsPlan,
     ) -> Result<(), RuntimeDriverError> {
-        if replay_plan.wake_runtime && self.post_admission_signal < PostAdmissionSignal::WakeLoop {
-            self.post_admission_signal = PostAdmissionSignal::WakeLoop;
-        }
         tracing::debug!(
             run_id = ?run_id,
             kind = replay_plan.notice_kind,
@@ -2902,7 +2898,31 @@ impl EphemeralRuntimeDriver {
 impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
         let resolved = self.resolve_admission(&input)?;
-        self.accept_resolved_input(input, resolved).await
+        let flags = resolved.coarse_flags();
+        self.ensure_contract_session_authority()?;
+        let checkpoint = self.rollback_snapshot();
+        let outcome = match self.accept_resolved_input(input, resolved).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                self.restore_rollback_snapshot(checkpoint);
+                return Err(err);
+            }
+        };
+        if let AcceptOutcome::Accepted { input_id, .. } = &outcome {
+            if let Err(err) = self.dsl_apply(
+                mm_dsl::MeerkatMachineInput::AcceptWithCompletion {
+                    input_id: mm_dsl::InputId::from_domain(input_id),
+                    request_immediate_processing: flags.request_immediate_processing,
+                    interrupt_yielding: flags.interrupt_yielding,
+                    wake_if_idle: flags.wake_if_idle,
+                },
+                "AcceptWithCompletion(RuntimeDriver)",
+            ) {
+                self.restore_rollback_snapshot(checkpoint);
+                return Err(err);
+            }
+        }
+        Ok(outcome)
     }
 
     async fn on_runtime_event(

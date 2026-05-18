@@ -16,30 +16,6 @@ fn runtime_id() -> LogicalRuntimeId {
     LogicalRuntimeId::new("peer-handling-mode-contract")
 }
 
-fn test_expected_post_admission_signal(
-    outcome: &meerkat_runtime::AcceptOutcome,
-    request_immediate_processing: bool,
-) -> PostAdmissionSignal {
-    if !outcome.is_accepted() {
-        return PostAdmissionSignal::None;
-    }
-    if request_immediate_processing {
-        return PostAdmissionSignal::RequestImmediateProcessing;
-    }
-
-    match outcome {
-        meerkat_runtime::AcceptOutcome::Accepted { policy, .. } => match policy.wake_mode {
-            WakeMode::InterruptYielding => PostAdmissionSignal::InterruptYielding,
-            WakeMode::WakeIfIdle => PostAdmissionSignal::WakeLoop,
-            WakeMode::None => PostAdmissionSignal::None,
-            _ => PostAdmissionSignal::None,
-        },
-        meerkat_runtime::AcceptOutcome::Deduplicated { .. }
-        | meerkat_runtime::AcceptOutcome::Rejected { .. } => PostAdmissionSignal::None,
-        _ => PostAdmissionSignal::None,
-    }
-}
-
 fn bind_running(driver: &mut EphemeralRuntimeDriver) {
     assert_eq!(driver.runtime_state(), meerkat_runtime::RuntimeState::Idle);
     driver.contract_begin_run_authority(RunId::new()).unwrap();
@@ -87,12 +63,8 @@ async fn running_queue_peer_message_interrupts_yielding() {
     let outcome = driver.accept_input(input).await.expect("accept input");
     assert!(outcome.is_accepted());
     assert_eq!(
-        test_expected_post_admission_signal(&outcome, false),
-        PostAdmissionSignal::InterruptYielding
-    );
-    assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::InterruptYielding
     );
 }
 
@@ -109,11 +81,7 @@ async fn running_steer_peer_message_requests_immediate_processing() {
 
     let outcome = driver.accept_input(input).await.expect("accept input");
     assert!(outcome.is_accepted());
-    let signal = test_expected_post_admission_signal(&outcome, true);
+    let signal = driver.take_post_admission_signal();
     assert_eq!(signal, PostAdmissionSignal::RequestImmediateProcessing);
     assert!(signal.should_wake());
-    assert_eq!(
-        driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
-    );
 }

@@ -95,7 +95,6 @@ impl WorkGraphMachine {
         let snoozed_until = request.snoozed_until.or(item.snoozed_until);
         let dsl_state = apply_item_dsl(
             &item,
-            item.machine_state.unresolved_blocker_count,
             wg_dsl::WorkGraphLifecycleInput::Update {
                 expected_revision: request.expected_revision,
                 due_at_utc_ms: due_at.map(datetime_to_millis),
@@ -159,7 +158,6 @@ impl WorkGraphMachine {
         }
         let dsl_state = apply_item_dsl(
             &item,
-            unresolved_blocker_count,
             wg_dsl::WorkGraphLifecycleInput::RefreshEligibility {
                 unresolved_blocker_count,
             },
@@ -184,15 +182,22 @@ impl WorkGraphMachine {
                 .map(|seconds| now + seconds_to_duration(seconds))
         });
         let owner_key = work_owner_key(&request.owner)?;
-        let dsl_state = apply_item_dsl(
-            &item,
-            unresolved_blocker_count,
-            wg_dsl::WorkGraphLifecycleInput::Claim {
+        let dsl_inputs = [
+            (item.machine_state.unresolved_blocker_count != unresolved_blocker_count).then_some(
+                wg_dsl::WorkGraphLifecycleInput::RefreshEligibility {
+                    unresolved_blocker_count,
+                },
+            ),
+            Some(wg_dsl::WorkGraphLifecycleInput::Claim {
                 expected_revision: request.expected_revision,
                 owner_key,
                 now_utc_ms: datetime_to_millis(now),
                 lease_expires_at_utc_ms: lease_expires_at.map(datetime_to_millis),
-            },
+            }),
+        ];
+        let dsl_state = apply_item_dsl_inputs(
+            &item,
+            dsl_inputs.into_iter().flatten(),
             Some(request.expected_revision),
         )?;
         item.owner = Some(request.owner.clone());
@@ -215,7 +220,6 @@ impl WorkGraphMachine {
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
         let dsl_state = apply_item_dsl(
             &item,
-            item.machine_state.unresolved_blocker_count,
             wg_dsl::WorkGraphLifecycleInput::Release {
                 expected_revision: request.expected_revision,
             },
@@ -237,7 +241,6 @@ impl WorkGraphMachine {
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
         let dsl_state = apply_item_dsl(
             &item,
-            item.machine_state.unresolved_blocker_count,
             wg_dsl::WorkGraphLifecycleInput::Block { expected_revision },
             Some(expected_revision),
         )?;
@@ -274,12 +277,7 @@ impl WorkGraphMachine {
                 ));
             }
         };
-        let dsl_state = apply_item_dsl(
-            &item,
-            item.machine_state.unresolved_blocker_count,
-            dsl_input,
-            Some(request.expected_revision),
-        )?;
+        let dsl_state = apply_item_dsl(&item, dsl_input, Some(request.expected_revision))?;
         item.claim = None;
         item.owner = None;
         item.machine_state = dsl_state;
@@ -296,7 +294,6 @@ impl WorkGraphMachine {
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
         let dsl_state = apply_item_dsl(
             &item,
-            item.machine_state.unresolved_blocker_count,
             wg_dsl::WorkGraphLifecycleInput::AddEvidence {
                 expected_revision: request.expected_revision,
             },
@@ -317,7 +314,6 @@ impl WorkGraphMachine {
         };
         apply_item_dsl(
             item,
-            item.machine_state.unresolved_blocker_count,
             wg_dsl::WorkGraphLifecycleInput::Claim {
                 expected_revision: item.revision,
                 owner_key,
@@ -401,26 +397,37 @@ fn apply_link_validation_dsl(
 
 fn apply_item_dsl(
     item: &WorkItem,
-    unresolved_blocker_count: u64,
     input: wg_dsl::WorkGraphLifecycleInput,
     expected_revision: Option<u64>,
 ) -> Result<WorkGraphMachineState, WorkGraphError> {
+    apply_item_dsl_inputs(item, std::iter::once(input), expected_revision)
+}
+
+fn apply_item_dsl_inputs<I>(
+    item: &WorkItem,
+    inputs: I,
+    expected_revision: Option<u64>,
+) -> Result<WorkGraphMachineState, WorkGraphError>
+where
+    I: IntoIterator<Item = wg_dsl::WorkGraphLifecycleInput>,
+{
     validate_item_machine_projection(item)?;
-    let mut state = item.machine_state.clone();
-    state.unresolved_blocker_count = unresolved_blocker_count;
-    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::from_state(state);
-    wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input).map_err(|error| {
-        if let Some(expected) = expected_revision
-            && item.revision != expected
-        {
-            return WorkGraphError::StaleRevision {
-                id: item.id.clone(),
-                expected,
-                actual: item.revision,
-            };
-        }
-        WorkGraphError::InvalidTransition(format!("{error:?}"))
-    })?;
+    let mut dsl_auth =
+        wg_dsl::WorkGraphLifecycleMachineAuthority::from_state(item.machine_state.clone());
+    for input in inputs {
+        wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input).map_err(|error| {
+            if let Some(expected) = expected_revision
+                && item.revision != expected
+            {
+                return WorkGraphError::StaleRevision {
+                    id: item.id.clone(),
+                    expected,
+                    actual: item.revision,
+                };
+            }
+            WorkGraphError::InvalidTransition(format!("{error:?}"))
+        })?;
+    }
     Ok(dsl_auth.state)
 }
 
@@ -822,5 +829,26 @@ mod tests {
         )
         .expect_err("double claim should fail");
         assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+    }
+
+    #[test]
+    fn item_dsl_application_does_not_prewrite_blocker_count() {
+        let source = include_str!("machine.rs");
+        let start = source
+            .find("fn apply_item_dsl_inputs")
+            .expect("apply_item_dsl_inputs exists");
+        let end = source[start..]
+            .find("fn work_status_from_dsl")
+            .expect("work_status_from_dsl follows apply_item_dsl_inputs");
+        let body = &source[start..start + end];
+
+        assert!(
+            !body.contains("state.unresolved_blocker_count ="),
+            "dependency eligibility must change through WorkGraphLifecycleMachine inputs"
+        );
+        assert!(
+            body.contains("WorkGraphLifecycleMachineMutator::apply"),
+            "item DSL application must route through the generated mutator"
+        );
     }
 }

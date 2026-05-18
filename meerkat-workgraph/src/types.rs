@@ -274,7 +274,6 @@ pub struct WorkItem {
     pub owner: Option<WorkOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<WorkClaim>,
-    #[serde(default = "default_workgraph_machine_state")]
     pub machine_state: WorkGraphMachineState,
     pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -291,10 +290,6 @@ pub struct WorkItem {
     pub external_refs: Vec<ExternalWorkRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_refs: Vec<WorkEvidenceRef>,
-}
-
-fn default_workgraph_machine_state() -> WorkGraphMachineState {
-    WorkGraphMachineState::default()
 }
 
 #[derive(Deserialize)]
@@ -341,7 +336,9 @@ impl<'de> Deserialize<'de> for WorkItem {
         let machine_state = wire
             .machine_state
             .take()
-            .unwrap_or_else(|| legacy_workgraph_machine_state(&wire));
+            .ok_or_else(|| serde::de::Error::missing_field("machine_state"))?;
+        validate_work_item_machine_projection(&wire, &machine_state)
+            .map_err(serde::de::Error::custom)?;
         Ok(Self {
             id: wire.id,
             realm_id: wire.realm_id,
@@ -485,23 +482,76 @@ impl schemars::JsonSchema for WorkItem {
     }
 }
 
-fn legacy_workgraph_machine_state(wire: &WorkItemWire) -> WorkGraphMachineState {
-    let mut machine_state = WorkGraphMachineState {
-        lifecycle_phase: work_lifecycle_state_from_status(wire.status),
-        revision: wire.revision,
-        due_at_utc_ms: wire.due_at.map(datetime_to_millis),
-        not_before_utc_ms: wire.not_before.map(datetime_to_millis),
-        snoozed_until_utc_ms: wire.snoozed_until.map(datetime_to_millis),
-        terminal_at_utc_ms: wire.terminal_at.map(datetime_to_millis),
-        evidence_count: wire.evidence_refs.len().try_into().unwrap_or(u64::MAX),
-        ..default_workgraph_machine_state()
-    };
-    if let Some(claim) = &wire.claim {
-        machine_state.claim_owner_key = Some(work_owner_key_to_machine(&claim.owner.key));
-        machine_state.claimed_at_utc_ms = Some(datetime_to_millis(claim.claimed_at));
-        machine_state.lease_expires_at_utc_ms = claim.lease_expires_at.map(datetime_to_millis);
+fn validate_work_item_machine_projection(
+    wire: &WorkItemWire,
+    machine_state: &WorkGraphMachineState,
+) -> Result<(), String> {
+    if work_lifecycle_state_from_status(wire.status) != machine_state.lifecycle_phase {
+        return Err(format!(
+            "work item {} status projection does not match machine_state",
+            wire.id
+        ));
     }
-    machine_state
+    if wire.revision != machine_state.revision {
+        return Err(format!(
+            "work item {} revision projection does not match machine_state",
+            wire.id
+        ));
+    }
+    if wire.due_at.map(datetime_to_millis) != machine_state.due_at_utc_ms {
+        return Err(format!(
+            "work item {} due_at projection does not match machine_state",
+            wire.id
+        ));
+    }
+    if wire.not_before.map(datetime_to_millis) != machine_state.not_before_utc_ms {
+        return Err(format!(
+            "work item {} not_before projection does not match machine_state",
+            wire.id
+        ));
+    }
+    if wire.snoozed_until.map(datetime_to_millis) != machine_state.snoozed_until_utc_ms {
+        return Err(format!(
+            "work item {} snoozed_until projection does not match machine_state",
+            wire.id
+        ));
+    }
+    if wire.terminal_at.map(datetime_to_millis) != machine_state.terminal_at_utc_ms {
+        return Err(format!(
+            "work item {} terminal_at projection does not match machine_state",
+            wire.id
+        ));
+    }
+    if let Some(claim) = &wire.claim {
+        let claim_owner_key = work_owner_key_to_machine(&claim.owner.key);
+        if machine_state.claim_owner_key.as_ref() != Some(&claim_owner_key) {
+            return Err(format!(
+                "work item {} claim owner projection does not match machine_state",
+                wire.id
+            ));
+        }
+        if machine_state.claimed_at_utc_ms != Some(datetime_to_millis(claim.claimed_at)) {
+            return Err(format!(
+                "work item {} claim time projection does not match machine_state",
+                wire.id
+            ));
+        }
+        if machine_state.lease_expires_at_utc_ms != claim.lease_expires_at.map(datetime_to_millis) {
+            return Err(format!(
+                "work item {} claim lease projection does not match machine_state",
+                wire.id
+            ));
+        }
+    } else if machine_state.claim_owner_key.is_some()
+        || machine_state.claimed_at_utc_ms.is_some()
+        || machine_state.lease_expires_at_utc_ms.is_some()
+    {
+        return Err(format!(
+            "work item {} machine_state has a claim without a claim projection",
+            wire.id
+        ));
+    }
+    Ok(())
 }
 
 fn work_lifecycle_state_from_status(status: WorkStatus) -> wg_dsl::WorkLifecycleState {

@@ -133,6 +133,7 @@ fi
 
 if grep -Fq 'Use BuildBuddy Windows hosted executors' .github/workflows/release.yml &&
   grep -Fq '/--remote_default_exec_properties=use-self-hosted-executors=true/d' .github/workflows/release.yml &&
+  grep -Fq -- '--remote_default_exec_properties=Pool=%s' .github/workflows/release.yml &&
   grep -Fq '"use-self-hosted-executors": "true"' .github/workflows/release.yml; then
   pass "Release workflow strips self-hosted Windows executor routing for recovery builds"
 else

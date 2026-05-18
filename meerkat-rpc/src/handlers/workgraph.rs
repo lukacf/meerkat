@@ -30,7 +30,8 @@ fn map_workgraph_error(id: Option<RpcId>, error: WorkGraphError) -> RpcResponse 
         }
         WorkGraphError::StaleRevision { .. }
         | WorkGraphError::Conflict(_)
-        | WorkGraphError::InvalidTransition(_) => {
+        | WorkGraphError::InvalidTransition(_)
+        | WorkGraphError::InvalidTimestampMillis { .. } => {
             RpcResponse::error(id, error::INVALID_PARAMS, error.to_string())
         }
         WorkGraphError::InvalidInput(_) => {

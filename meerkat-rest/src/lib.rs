@@ -3744,7 +3744,10 @@ fn workgraph_error_to_api(error: meerkat::WorkGraphError) -> ApiError {
         meerkat::WorkGraphError::StaleRevision { .. }
         | meerkat::WorkGraphError::Conflict(_)
         | meerkat::WorkGraphError::InvalidTransition(_)
-        | meerkat::WorkGraphError::InvalidInput(_) => ApiError::BadRequest(error.to_string()),
+        | meerkat::WorkGraphError::InvalidInput(_)
+        | meerkat::WorkGraphError::InvalidTimestampMillis { .. } => {
+            ApiError::BadRequest(error.to_string())
+        }
         meerkat::WorkGraphError::UnsupportedBackend(_) => {
             ApiError::ServiceUnavailable(error.to_string())
         }

@@ -133,13 +133,8 @@ fi
 if grep -Fq 'Use BuildBuddy Windows release endpoint' .github/workflows/release.yml &&
   grep -Fq 'BUILDBUDDY_ENDPOINT:' .github/workflows/release.yml &&
   grep -Fq 'secrets.BUILDBUDDY_ENDPOINT' .github/workflows/release.yml &&
-  ! grep -Fq 'build:buildbuddy-windows-rbe --remote_default_exec_properties=use-self-hosted-executors=true' .bazelrc &&
-  ! awk '
-    /^platform[(]/ { in_platform = 0 }
-    /name = "windows_x86_64"/ { in_platform = 1 }
-    in_platform && /"use-self-hosted-executors": "true"/ { found = 1 }
-    END { exit found ? 0 : 1 }
-  ' platforms/BUILD.bazel; then
+  grep -Fq 'build:buildbuddy-windows-rbe --remote_default_exec_properties=use-self-hosted-executors=true' .bazelrc &&
+  grep -Fq '"use-self-hosted-executors": "true"' platforms/BUILD.bazel; then
   pass "Release workflow routes Windows recovery builds to the hosted BuildBuddy endpoint"
 else
   bad "Release workflow should route Windows recovery builds to the hosted BuildBuddy endpoint"

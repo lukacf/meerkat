@@ -523,19 +523,6 @@ jobs:
                   block = block.replace(needle, needle + "      --verbose_failures\n", 1)
               text = text[:start] + block + text[end:]
           path.write_text(text, encoding="utf-8")
-
-          bazelrc = Path(".bazelrc")
-          bazelrc_text = bazelrc.read_text(encoding="utf-8")
-          bazelrc_text = bazelrc_text.replace(
-              "build:buildbuddy-windows-rbe --remote_default_exec_properties=use-self-hosted-executors=true\n",
-              "",
-          )
-          bazelrc.write_text(bazelrc_text, encoding="utf-8")
-
-          platform = Path("platforms/BUILD.bazel")
-          platform_text = platform.read_text(encoding="utf-8")
-          platform_text = platform_text.replace('        "use-self-hosted-executors": "true",\n', "")
-          platform.write_text(platform_text, encoding="utf-8")
           PY
 
       - name: Build release binaries via BuildBuddy

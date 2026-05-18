@@ -112,6 +112,7 @@ platform(
     exec_properties = {
         "Arch": "amd64",
         "OSFamily": "Windows",
+        "use-self-hosted-executors": "true",
         "recycle-runner": "true",
         "preserve-workspace": "true",
     },

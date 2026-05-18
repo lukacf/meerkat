@@ -61,6 +61,7 @@ build:buildbuddy-windows-rbe --platforms=//platforms:windows_x86_64
 build:buildbuddy-windows-rbe --extra_execution_platforms=//platforms:windows_x86_64
 build:buildbuddy-windows-rbe --remote_default_exec_properties=OSFamily=Windows
 build:buildbuddy-windows-rbe --remote_default_exec_properties=Arch=amd64
+build:buildbuddy-windows-rbe --remote_default_exec_properties=use-self-hosted-executors=true
 build:buildbuddy-windows-rbe --incompatible_enable_cc_toolchain_resolution
 build:buildbuddy-windows-rbe --nobuild_runfile_links
 build:buildbuddy-windows-rbe --symlink_prefix=/

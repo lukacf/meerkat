@@ -21604,6 +21604,14 @@ fn test_supervisor_private_trust_realizes_generated_publish_obligation() {
         "supervisor private trust publication must realize the generated supervisor_trust_publish handoff obligation"
     );
     assert!(
+        body.contains("stage_supervisor_trust_publish_request"),
+        "already-bound private trust publication must request a generated publish obligation before touching trust state"
+    );
+    assert!(
+        !body.contains("(None, spec.clone())"),
+        "already-bound private trust publication must not fall back to a locally reconstructed trust descriptor"
+    );
+    assert!(
         !body.contains(
             "stage_supervisor_trust_published(session_id, next_peer_id.clone(), next_epoch)"
         ),

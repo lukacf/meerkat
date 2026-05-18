@@ -732,6 +732,43 @@ impl MeerkatMachine {
         Ok(transition.effects)
     }
 
+    /// Stage a DSL `RequestSupervisorTrustPublish` input.
+    ///
+    /// Used when the current supervisor binding is already correct but
+    /// the shell still needs a fresh generated publish obligation before
+    /// repairing or reasserting the concrete trust edge.
+    pub async fn stage_supervisor_trust_publish_request(
+        &self,
+        session_id: &SessionId,
+        name: String,
+        peer_id: String,
+        address: String,
+        signing_public_key: String,
+        epoch: u64,
+    ) -> Result<Vec<crate::meerkat_machine::dsl::MeerkatMachineEffect>, SupervisorBindingStageError>
+    {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RequestSupervisorTrustPublish {
+                name,
+                peer_id,
+                address,
+                signing_public_key,
+                epoch,
+            },
+        )
+        .map_err(SupervisorBindingStageError::Dsl)?;
+        Ok(transition.effects)
+    }
+
     /// Stage a DSL `RevokeSupervisor` input (Wave 3 D Row 21).
     ///
     /// Returns to `Unbound`. The DSL guard enforces that the supplied

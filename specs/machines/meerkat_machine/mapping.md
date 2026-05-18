@@ -2836,6 +2836,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeSupervisorStopped`
   - anchors: `meerkat_machine`
   - scenarios: `live_topology_and_supervision`
+- `RequestSupervisorTrustPublishIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `live_topology_and_supervision`
+- `RequestSupervisorTrustPublishAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `live_topology_and_supervision`
+- `RequestSupervisorTrustPublishRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `live_topology_and_supervision`
+- `RequestSupervisorTrustPublishRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `live_topology_and_supervision`
+- `RequestSupervisorTrustPublishStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `live_topology_and_supervision`
 - `RevokeSupervisorIdle`
   - anchors: `meerkat_machine`
   - scenarios: `live_topology_and_supervision`
@@ -3243,6 +3258,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `realtime_connection_projection`, `live_topology_and_supervision`
 - `supervisor_revoke_pending_consistency`
+  - anchors: `meerkat_machine`
+  - scenarios: `live_topology_and_supervision`
+- `supervisor_publish_pending_consistency`
   - anchors: `meerkat_machine`
   - scenarios: `live_topology_and_supervision`
 

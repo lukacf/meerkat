@@ -1870,6 +1870,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             supervisor_bound_address: Option<String>,
             supervisor_bound_signing_public_key: Option<String>,
             supervisor_bound_epoch: Option<u64>,
+            supervisor_publish_pending_name: Option<String>,
+            supervisor_publish_pending_peer_id: Option<String>,
+            supervisor_publish_pending_address: Option<String>,
+            supervisor_publish_pending_signing_public_key: Option<String>,
+            supervisor_publish_pending_epoch: Option<u64>,
             supervisor_revoke_pending_name: Option<String>,
             supervisor_revoke_pending_peer_id: Option<String>,
             supervisor_revoke_pending_address: Option<String>,
@@ -2043,6 +2048,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             supervisor_bound_address = None,
             supervisor_bound_signing_public_key = None,
             supervisor_bound_epoch = None,
+            supervisor_publish_pending_name = None,
+            supervisor_publish_pending_peer_id = None,
+            supervisor_publish_pending_address = None,
+            supervisor_publish_pending_signing_public_key = None,
+            supervisor_publish_pending_epoch = None,
             supervisor_revoke_pending_name = None,
             supervisor_revoke_pending_peer_id = None,
             supervisor_revoke_pending_address = None,
@@ -2521,6 +2531,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 epoch: u64,
             },
             AuthorizeSupervisor {
+                name: String,
+                peer_id: String,
+                address: String,
+                signing_public_key: String,
+                epoch: u64,
+            },
+            RequestSupervisorTrustPublish {
                 name: String,
                 peer_id: String,
                 address: String,
@@ -3094,6 +3111,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.supervisor_revoke_pending_address != None
                 && self.supervisor_revoke_pending_signing_public_key != None
                 && self.supervisor_revoke_pending_epoch != None)
+        }
+
+        invariant supervisor_publish_pending_consistency {
+            (self.supervisor_publish_pending_name == None
+                && self.supervisor_publish_pending_peer_id == None
+                && self.supervisor_publish_pending_address == None
+                && self.supervisor_publish_pending_signing_public_key == None
+                && self.supervisor_publish_pending_epoch == None)
+            || (self.supervisor_publish_pending_name != None
+                && self.supervisor_publish_pending_peer_id != None
+                && self.supervisor_publish_pending_address != None
+                && self.supervisor_publish_pending_signing_public_key != None
+                && self.supervisor_publish_pending_epoch != None)
         }
 
 
@@ -11224,6 +11254,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_bound_address = Some(address);
                 self.supervisor_bound_signing_public_key = Some(signing_public_key);
                 self.supervisor_bound_epoch = Some(epoch);
+                self.supervisor_publish_pending_name = Some(self.supervisor_bound_name.get("value"));
+                self.supervisor_publish_pending_peer_id = Some(self.supervisor_bound_peer_id.get("value"));
+                self.supervisor_publish_pending_address = Some(self.supervisor_bound_address.get("value"));
+                self.supervisor_publish_pending_signing_public_key = Some(self.supervisor_bound_signing_public_key.get("value"));
+                self.supervisor_publish_pending_epoch = Some(self.supervisor_bound_epoch.get("value"));
                 self.supervisor_revoke_pending_name = None;
                 self.supervisor_revoke_pending_peer_id = None;
                 self.supervisor_revoke_pending_address = None;
@@ -11257,6 +11292,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_bound_address = Some(address);
                 self.supervisor_bound_signing_public_key = Some(signing_public_key);
                 self.supervisor_bound_epoch = Some(epoch);
+                self.supervisor_publish_pending_name = Some(self.supervisor_bound_name.get("value"));
+                self.supervisor_publish_pending_peer_id = Some(self.supervisor_bound_peer_id.get("value"));
+                self.supervisor_publish_pending_address = Some(self.supervisor_bound_address.get("value"));
+                self.supervisor_publish_pending_signing_public_key = Some(self.supervisor_bound_signing_public_key.get("value"));
+                self.supervisor_publish_pending_epoch = Some(self.supervisor_bound_epoch.get("value"));
                 self.supervisor_revoke_pending_name = None;
                 self.supervisor_revoke_pending_peer_id = None;
                 self.supervisor_revoke_pending_address = None;
@@ -11270,6 +11310,48 @@ macro_rules! meerkat_catalog_machine_dsl {
                 address: self.supervisor_bound_address.get("value"),
                 signing_public_key: Some(self.supervisor_bound_signing_public_key.get("value")),
                 epoch: self.supervisor_bound_epoch.get("value")
+            }
+        }
+
+        // RequestSupervisorTrustPublish: valid only as an exact restatement
+        // of the current binding. Used by repair/idempotence paths that need
+        // a fresh generated publish obligation without changing the
+        // supervisor identity.
+        transition RequestSupervisorTrustPublish {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RequestSupervisorTrustPublish { name, peer_id, address, signing_public_key, epoch }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "name_matches_current" {
+                self.supervisor_bound_name == Some(name)
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "address_matches_current" {
+                self.supervisor_bound_address == Some(address)
+            }
+            guard "signing_public_key_matches_current" {
+                self.supervisor_bound_signing_public_key == Some(signing_public_key)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {
+                self.supervisor_publish_pending_name = Some(name);
+                self.supervisor_publish_pending_peer_id = Some(peer_id);
+                self.supervisor_publish_pending_address = Some(address);
+                self.supervisor_publish_pending_signing_public_key = Some(signing_public_key);
+                self.supervisor_publish_pending_epoch = Some(epoch);
+            }
+            to Idle
+            emit PublishSupervisorTrustEdge {
+                peer_id: self.supervisor_publish_pending_peer_id.get("value"),
+                name: self.supervisor_publish_pending_name.get("value"),
+                address: self.supervisor_publish_pending_address.get("value"),
+                signing_public_key: Some(self.supervisor_publish_pending_signing_public_key.get("value")),
+                epoch: self.supervisor_publish_pending_epoch.get("value")
             }
         }
 
@@ -11301,6 +11383,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_bound_address = None;
                 self.supervisor_bound_signing_public_key = None;
                 self.supervisor_bound_epoch = None;
+                self.supervisor_publish_pending_name = None;
+                self.supervisor_publish_pending_peer_id = None;
+                self.supervisor_publish_pending_address = None;
+                self.supervisor_publish_pending_signing_public_key = None;
+                self.supervisor_publish_pending_epoch = None;
             }
             to Idle
             emit RevokeSupervisorTrustEdge { peer_id: peer_id, epoch: epoch }
@@ -11325,7 +11412,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "epoch_matches_current" {
                 self.supervisor_bound_epoch == Some(epoch)
             }
-            update {}
+            guard "peer_id_matches_pending_publish" {
+                self.supervisor_publish_pending_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_pending_publish" {
+                self.supervisor_publish_pending_epoch == Some(epoch)
+            }
+            update {
+                self.supervisor_publish_pending_name = None;
+                self.supervisor_publish_pending_peer_id = None;
+                self.supervisor_publish_pending_address = None;
+                self.supervisor_publish_pending_signing_public_key = None;
+                self.supervisor_publish_pending_epoch = None;
+            }
             to Idle
         }
 
@@ -11341,7 +11440,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "epoch_matches_current" {
                 self.supervisor_bound_epoch == Some(epoch)
             }
-            update {}
+            guard "peer_id_matches_pending_publish" {
+                self.supervisor_publish_pending_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_pending_publish" {
+                self.supervisor_publish_pending_epoch == Some(epoch)
+            }
+            update {
+                self.supervisor_publish_pending_name = None;
+                self.supervisor_publish_pending_peer_id = None;
+                self.supervisor_publish_pending_address = None;
+                self.supervisor_publish_pending_signing_public_key = None;
+                self.supervisor_publish_pending_epoch = None;
+            }
             to Idle
         }
 

@@ -146,6 +146,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `supervisor_bound_address`: `Option<String>`
 - `supervisor_bound_signing_public_key`: `Option<String>`
 - `supervisor_bound_epoch`: `Option<u64>`
+- `supervisor_publish_pending_name`: `Option<String>`
+- `supervisor_publish_pending_peer_id`: `Option<String>`
+- `supervisor_publish_pending_address`: `Option<String>`
+- `supervisor_publish_pending_signing_public_key`: `Option<String>`
+- `supervisor_publish_pending_epoch`: `Option<u64>`
 - `supervisor_revoke_pending_name`: `Option<String>`
 - `supervisor_revoke_pending_peer_id`: `Option<String>`
 - `supervisor_revoke_pending_address`: `Option<String>`
@@ -335,6 +340,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DetachIngress`
 - `BindSupervisor`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
 - `AuthorizeSupervisor`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
+- `RequestSupervisorTrustPublish`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
 - `RevokeSupervisor`(peer_id: String, epoch: u64)
 - `SupervisorTrustEdgePublished`(peer_id: String, epoch: u64)
 - `SupervisorTrustEdgePublishFailed`(peer_id: String, epoch: u64, reason: String)
@@ -470,6 +476,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `peer_ingress_owner_consistency`
 - `supervisor_binding_consistency`
 - `supervisor_revoke_pending_consistency`
+- `supervisor_publish_pending_consistency`
 
 ## Transitions
 ### `Initialize`
@@ -8596,6 +8603,71 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `PublishSupervisorTrustEdge`
 - To: `Stopped`
 
+### `RequestSupervisorTrustPublishIdle`
+- From: `Idle`
+- On: `RequestSupervisorTrustPublish`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `name_matches_current`
+  - `peer_id_matches_current`
+  - `address_matches_current`
+  - `signing_public_key_matches_current`
+  - `epoch_matches_current`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Idle`
+
+### `RequestSupervisorTrustPublishAttached`
+- From: `Attached`
+- On: `RequestSupervisorTrustPublish`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `name_matches_current`
+  - `peer_id_matches_current`
+  - `address_matches_current`
+  - `signing_public_key_matches_current`
+  - `epoch_matches_current`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Attached`
+
+### `RequestSupervisorTrustPublishRunning`
+- From: `Running`
+- On: `RequestSupervisorTrustPublish`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `name_matches_current`
+  - `peer_id_matches_current`
+  - `address_matches_current`
+  - `signing_public_key_matches_current`
+  - `epoch_matches_current`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Running`
+
+### `RequestSupervisorTrustPublishRetired`
+- From: `Retired`
+- On: `RequestSupervisorTrustPublish`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `name_matches_current`
+  - `peer_id_matches_current`
+  - `address_matches_current`
+  - `signing_public_key_matches_current`
+  - `epoch_matches_current`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Retired`
+
+### `RequestSupervisorTrustPublishStopped`
+- From: `Stopped`
+- On: `RequestSupervisorTrustPublish`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `name_matches_current`
+  - `peer_id_matches_current`
+  - `address_matches_current`
+  - `signing_public_key_matches_current`
+  - `epoch_matches_current`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Stopped`
+
 ### `RevokeSupervisorIdle`
 - From: `Idle`
 - On: `RevokeSupervisor`(peer_id, epoch)
@@ -8653,6 +8725,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `supervisor_bound`
   - `peer_id_matches_current`
   - `epoch_matches_current`
+  - `peer_id_matches_pending_publish`
+  - `epoch_matches_pending_publish`
 - To: `Idle`
 
 ### `SupervisorTrustEdgePublishedAttached`
@@ -8662,6 +8736,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `supervisor_bound`
   - `peer_id_matches_current`
   - `epoch_matches_current`
+  - `peer_id_matches_pending_publish`
+  - `epoch_matches_pending_publish`
 - To: `Attached`
 
 ### `SupervisorTrustEdgePublishedRunning`
@@ -8671,6 +8747,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `supervisor_bound`
   - `peer_id_matches_current`
   - `epoch_matches_current`
+  - `peer_id_matches_pending_publish`
+  - `epoch_matches_pending_publish`
 - To: `Running`
 
 ### `SupervisorTrustEdgePublishedRetired`
@@ -8680,6 +8758,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `supervisor_bound`
   - `peer_id_matches_current`
   - `epoch_matches_current`
+  - `peer_id_matches_pending_publish`
+  - `epoch_matches_pending_publish`
 - To: `Retired`
 
 ### `SupervisorTrustEdgePublishedStopped`
@@ -8689,6 +8769,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `supervisor_bound`
   - `peer_id_matches_current`
   - `epoch_matches_current`
+  - `peer_id_matches_pending_publish`
+  - `epoch_matches_pending_publish`
 - To: `Stopped`
 
 ### `SupervisorTrustEdgePublishFailedIdle`
@@ -8698,6 +8780,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `supervisor_bound`
   - `peer_id_matches_current`
   - `epoch_matches_current`
+  - `peer_id_matches_pending_publish`
+  - `epoch_matches_pending_publish`
 - To: `Idle`
 
 ### `SupervisorTrustEdgePublishFailedAttached`
@@ -8707,6 +8791,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `supervisor_bound`
   - `peer_id_matches_current`
   - `epoch_matches_current`
+  - `peer_id_matches_pending_publish`
+  - `epoch_matches_pending_publish`
 - To: `Attached`
 
 ### `SupervisorTrustEdgePublishFailedRunning`
@@ -8716,6 +8802,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `supervisor_bound`
   - `peer_id_matches_current`
   - `epoch_matches_current`
+  - `peer_id_matches_pending_publish`
+  - `epoch_matches_pending_publish`
 - To: `Running`
 
 ### `SupervisorTrustEdgePublishFailedRetired`
@@ -8725,6 +8813,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `supervisor_bound`
   - `peer_id_matches_current`
   - `epoch_matches_current`
+  - `peer_id_matches_pending_publish`
+  - `epoch_matches_pending_publish`
 - To: `Retired`
 
 ### `SupervisorTrustEdgePublishFailedStopped`
@@ -8734,6 +8824,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `supervisor_bound`
   - `peer_id_matches_current`
   - `epoch_matches_current`
+  - `peer_id_matches_pending_publish`
+  - `epoch_matches_pending_publish`
 - To: `Stopped`
 
 ### `SupervisorTrustEdgeRevokedIdle`

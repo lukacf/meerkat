@@ -16,7 +16,10 @@ use crate::{
 pub const INVALID_ARGUMENTS: &str = "invalid_arguments";
 pub const NOT_FOUND: &str = "not_found";
 pub const CAPABILITY_UNAVAILABLE: &str = "capability_unavailable";
-const INTERNAL_ERROR: &str = "internal_error";
+pub const CONFLICT: &str = "conflict";
+pub const INVALID_TRANSITION: &str = "invalid_transition";
+pub const STORE_ERROR: &str = "store_error";
+pub const INTERNAL_ERROR: &str = "internal_error";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkGraphToolError {
@@ -329,11 +332,11 @@ fn map_error(error: WorkGraphError) -> WorkGraphToolError {
 fn workgraph_tool_code(public_class: WorkGraphPublicErrorClass) -> &'static str {
     match public_class {
         WorkGraphPublicErrorClass::NotFound => NOT_FOUND,
-        WorkGraphPublicErrorClass::Conflict => "conflict",
-        WorkGraphPublicErrorClass::InvalidTransition => "invalid_transition",
+        WorkGraphPublicErrorClass::Conflict => CONFLICT,
+        WorkGraphPublicErrorClass::InvalidTransition => INVALID_TRANSITION,
         WorkGraphPublicErrorClass::InvalidArguments => INVALID_ARGUMENTS,
         WorkGraphPublicErrorClass::CapabilityUnavailable => CAPABILITY_UNAVAILABLE,
-        WorkGraphPublicErrorClass::StoreError => "store_error",
+        WorkGraphPublicErrorClass::StoreError => STORE_ERROR,
     }
 }
 

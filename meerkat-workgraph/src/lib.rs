@@ -36,8 +36,11 @@ pub use surface::wire_workgraph_tools;
 pub use tool_surface::WorkGraphToolSurface;
 pub use tools::{
     CAPABILITY_UNAVAILABLE as WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE,
-    INVALID_ARGUMENTS as WORKGRAPH_TOOL_INVALID_ARGUMENTS, NOT_FOUND as WORKGRAPH_TOOL_NOT_FOUND,
-    WorkGraphToolError, handle_workgraph_tools_call, workgraph_tools_list,
+    CONFLICT as WORKGRAPH_TOOL_CONFLICT, INTERNAL_ERROR as WORKGRAPH_TOOL_INTERNAL_ERROR,
+    INVALID_ARGUMENTS as WORKGRAPH_TOOL_INVALID_ARGUMENTS,
+    INVALID_TRANSITION as WORKGRAPH_TOOL_INVALID_TRANSITION, NOT_FOUND as WORKGRAPH_TOOL_NOT_FOUND,
+    STORE_ERROR as WORKGRAPH_TOOL_STORE_ERROR, WorkGraphToolError, handle_workgraph_tools_call,
+    workgraph_tools_list,
 };
 pub use types::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,

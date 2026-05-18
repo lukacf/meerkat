@@ -192,14 +192,16 @@ pub use meerkat_workgraph::SqliteWorkGraphStore;
 pub use meerkat_workgraph::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
     ExternalWorkRef, LinkWorkItemsRequest, MemoryWorkGraphStore, ReadyWorkFilter,
-    ReleaseWorkItemRequest, UpdateWorkItemRequest, WORKGRAPH_TOOL_INVALID_ARGUMENTS,
-    WORKGRAPH_TOOL_NOT_FOUND, WorkClaim, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphError,
-    WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind, WorkGraphEventsResponse,
-    WorkGraphItemsResponse, WorkGraphMachine, WorkGraphPublicErrorClass, WorkGraphRestRoute,
-    WorkGraphService, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkGraphStore,
-    WorkGraphStoreKind, WorkGraphToolError, WorkGraphToolSurface, WorkItem, WorkItemFilter,
-    WorkItemId, WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus,
-    handle_workgraph_tools_call, workgraph_rest_path_catalog, workgraph_tools_list,
+    ReleaseWorkItemRequest, UpdateWorkItemRequest, WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE,
+    WORKGRAPH_TOOL_CONFLICT, WORKGRAPH_TOOL_INTERNAL_ERROR, WORKGRAPH_TOOL_INVALID_ARGUMENTS,
+    WORKGRAPH_TOOL_INVALID_TRANSITION, WORKGRAPH_TOOL_NOT_FOUND, WORKGRAPH_TOOL_STORE_ERROR,
+    WorkClaim, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphError, WorkGraphEvent,
+    WorkGraphEventFilter, WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphItemsResponse,
+    WorkGraphMachine, WorkGraphPublicErrorClass, WorkGraphRestRoute, WorkGraphService,
+    WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkGraphStore, WorkGraphStoreKind,
+    WorkGraphToolError, WorkGraphToolSurface, WorkItem, WorkItemFilter, WorkItemId, WorkNamespace,
+    WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus, handle_workgraph_tools_call,
+    workgraph_rest_path_catalog, workgraph_tools_list,
 };
 
 // AgentFactory and build_agent types

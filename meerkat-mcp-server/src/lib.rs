@@ -2065,8 +2065,12 @@ fn map_workgraph_tool_error(error: meerkat::WorkGraphToolError) -> ToolCallError
     let code = match error.code.as_str() {
         meerkat::WORKGRAPH_TOOL_INVALID_ARGUMENTS => -32602,
         meerkat::WORKGRAPH_TOOL_NOT_FOUND => -32601,
-        "capability_unavailable" => {
+        meerkat::WORKGRAPH_TOOL_CONFLICT | meerkat::WORKGRAPH_TOOL_INVALID_TRANSITION => -32602,
+        meerkat::WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE => {
             meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        }
+        meerkat::WORKGRAPH_TOOL_STORE_ERROR | meerkat::WORKGRAPH_TOOL_INTERNAL_ERROR => {
+            meerkat_contracts::ErrorCode::InternalError.jsonrpc_code()
         }
         _ => -32603,
     };
@@ -4490,6 +4494,36 @@ mod tests {
         assert_eq!(data["type"], "generation_conflict");
         assert_eq!(data["expected_generation"], 2);
         assert_eq!(data["current_generation"], 5);
+    }
+
+    #[test]
+    fn test_workgraph_tool_error_mapping_preserves_generated_classes() {
+        let cases = [
+            (meerkat::WORKGRAPH_TOOL_INVALID_ARGUMENTS, -32602),
+            (meerkat::WORKGRAPH_TOOL_NOT_FOUND, -32601),
+            (meerkat::WORKGRAPH_TOOL_CONFLICT, -32602),
+            (meerkat::WORKGRAPH_TOOL_INVALID_TRANSITION, -32602),
+            (
+                meerkat::WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE,
+                meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
+            ),
+            (
+                meerkat::WORKGRAPH_TOOL_STORE_ERROR,
+                meerkat_contracts::ErrorCode::InternalError.jsonrpc_code(),
+            ),
+            (
+                meerkat::WORKGRAPH_TOOL_INTERNAL_ERROR,
+                meerkat_contracts::ErrorCode::InternalError.jsonrpc_code(),
+            ),
+        ];
+
+        for (tool_code, rpc_code) in cases {
+            let err = map_workgraph_tool_error(meerkat::WorkGraphToolError {
+                code: tool_code.to_string(),
+                message: format!("workgraph {tool_code}"),
+            });
+            assert_eq!(err.code, rpc_code, "tool code {tool_code}");
+        }
     }
 
     #[test]

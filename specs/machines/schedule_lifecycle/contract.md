@@ -24,7 +24,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `superseded_ack_ids`: `Set<OccurrenceId>`
 
 ## Inputs
-- `Create`(schedule_id: ScheduleId, trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, planning_horizon_days: u64, planning_horizon_occurrences: u64)
+- `Create`(schedule_id: ScheduleId, trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, planning_horizon_days: Option<u64>, planning_horizon_occurrences: Option<u64>)
 - `Revise`(trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, planning_horizon_days: u64, planning_horizon_occurrences: u64)
 - `UpdatePlanningConfig`(planning_horizon_days: u64, planning_horizon_occurrences: u64)
 - `RecordPlanningWindow`(planning_cursor_utc_ms: u64, next_occurrence_ordinal: u64)

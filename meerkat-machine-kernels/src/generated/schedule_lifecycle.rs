@@ -324,8 +324,8 @@ pub mod inputs {
         pub overlap_policy_key: String,
         pub missing_target_policy: MissingTargetPolicy,
         pub missing_target_policy_key: String,
-        pub planning_horizon_days: u64,
-        pub planning_horizon_occurrences: u64,
+        pub planning_horizon_days: Option<u64>,
+        pub planning_horizon_occurrences: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Revise {

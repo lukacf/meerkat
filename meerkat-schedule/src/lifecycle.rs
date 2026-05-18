@@ -9,10 +9,10 @@ use crate::machines::schedule_lifecycle as sched_dsl;
 use crate::types::{
     CreateScheduleRequest, DeliveryReceipt, Occurrence, OccurrenceFailureClass, OccurrenceOrdinal,
     OccurrencePhase, RuntimeDeliveryOutcome, Schedule, ScheduleId, SchedulePhase, ScheduleRevision,
-    TargetBinding, TriggerSpec, UpdateScheduleRequest, default_planning_horizon_days,
-    default_planning_horizon_occurrences,
+    TargetBinding, TriggerSpec, UpdateScheduleRequest,
 };
 use chrono::{DateTime, Utc};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -94,6 +94,10 @@ pub enum ScheduleLifecycleError {
     InvalidPlanningHorizonDays { value: u64 },
     #[error("ScheduleLifecycleMachine emitted invalid planning horizon occurrences `{value}`")]
     InvalidPlanningHorizonOccurrences { value: u64 },
+    #[error("ScheduleLifecycleMachine emitted invalid planning cursor timestamp millis `{millis}`")]
+    InvalidPlanningCursorUtcMillis { millis: u64 },
+    #[error("ScheduleLifecycleMachine emitted invalid superseded occurrence id `{id}`: {source}")]
+    InvalidSupersededAckId { id: String, source: uuid::Error },
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +222,12 @@ pub enum OccurrenceLifecycleError {
     InvalidScheduleId { id: String, source: uuid::Error },
     #[error("OccurrenceLifecycleMachine emitted invalid due timestamp millis `{millis}`")]
     InvalidDueAtUtcMillis { millis: u64 },
+    #[error("OccurrenceLifecycleMachine emitted invalid {field} timestamp millis `{millis}`")]
+    InvalidTimestampMillis { field: &'static str, millis: u64 },
+    #[error("OccurrenceLifecycleMachine emitted invalid claim token `{token}`: {source}")]
+    InvalidClaimToken { token: String, source: uuid::Error },
+    #[error("OccurrenceLifecycleMachine emitted invalid attempt count `{value}`")]
+    InvalidAttemptCount { value: u64 },
     #[error(
         "OccurrenceLifecycleMachine target key `{machine_key}` did not match target snapshot key `{snapshot_key}`"
     )]
@@ -416,21 +426,30 @@ fn occurrence_from_planned_state(
         overlap_policy: schedule.overlap_policy.clone(),
         missing_target_policy: schedule.missing_target_policy.clone(),
         claimed_by: dsl.claimed_by.clone(),
-        lease_expires_at_utc: dsl.lease_expires_at_utc_ms.and_then(millis_to_datetime),
-        claim_token: dsl
-            .claim_token
-            .as_ref()
-            .and_then(|t| Uuid::parse_str(&t.0).ok()),
+        lease_expires_at_utc: occurrence_optional_datetime_from_dsl(
+            dsl.lease_expires_at_utc_ms,
+            "lease_expires_at_utc",
+        )?,
+        claim_token: claim_token_from_dsl(&dsl.claim_token)?,
         delivery_correlation_id: dsl.delivery_correlation_id.clone(),
         last_receipt: None,
         failure_class: dsl.failure_class.map(from_dsl_failure_class),
         runtime_outcome: None,
         failure_detail: dsl.failure_detail.clone(),
-        attempt_count: u32::try_from(dsl.attempt_count).unwrap_or(u32::MAX),
+        attempt_count: attempt_count_from_dsl(dsl.attempt_count)?,
         created_at_utc,
-        claimed_at_utc: dsl.claimed_at_utc_ms.and_then(millis_to_datetime),
-        dispatched_at_utc: dsl.dispatched_at_utc_ms.and_then(millis_to_datetime),
-        completed_at_utc: dsl.completed_at_utc_ms.and_then(millis_to_datetime),
+        claimed_at_utc: occurrence_optional_datetime_from_dsl(
+            dsl.claimed_at_utc_ms,
+            "claimed_at_utc",
+        )?,
+        dispatched_at_utc: occurrence_optional_datetime_from_dsl(
+            dsl.dispatched_at_utc_ms,
+            "dispatched_at_utc",
+        )?,
+        completed_at_utc: occurrence_optional_datetime_from_dsl(
+            dsl.completed_at_utc_ms,
+            "completed_at_utc",
+        )?,
         superseded_by_revision: dsl.superseded_by_revision.map(ScheduleRevision),
     })
 }
@@ -581,19 +600,20 @@ fn write_back_occurrence(
     occ.claimed_by = dsl.claimed_by.clone();
     occ.delivery_correlation_id = dsl.delivery_correlation_id.clone();
     occ.failure_detail = dsl.failure_detail.clone();
-    occ.attempt_count = u32::try_from(dsl.attempt_count).unwrap_or(u32::MAX);
+    occ.attempt_count = attempt_count_from_dsl(dsl.attempt_count)?;
 
     // Timestamps (u64 millis → DateTime<Utc>)
-    occ.lease_expires_at_utc = dsl.lease_expires_at_utc_ms.and_then(millis_to_datetime);
-    occ.claimed_at_utc = dsl.claimed_at_utc_ms.and_then(millis_to_datetime);
-    occ.dispatched_at_utc = dsl.dispatched_at_utc_ms.and_then(millis_to_datetime);
-    occ.completed_at_utc = dsl.completed_at_utc_ms.and_then(millis_to_datetime);
+    occ.lease_expires_at_utc =
+        occurrence_optional_datetime_from_dsl(dsl.lease_expires_at_utc_ms, "lease_expires_at_utc")?;
+    occ.claimed_at_utc =
+        occurrence_optional_datetime_from_dsl(dsl.claimed_at_utc_ms, "claimed_at_utc")?;
+    occ.dispatched_at_utc =
+        occurrence_optional_datetime_from_dsl(dsl.dispatched_at_utc_ms, "dispatched_at_utc")?;
+    occ.completed_at_utc =
+        occurrence_optional_datetime_from_dsl(dsl.completed_at_utc_ms, "completed_at_utc")?;
 
     // Claim token (DSL String → Uuid)
-    occ.claim_token = dsl
-        .claim_token
-        .as_ref()
-        .and_then(|t| Uuid::parse_str(&t.0).ok());
+    occ.claim_token = claim_token_from_dsl(&dsl.claim_token)?;
 
     // Failure class (DSL enum → real enum)
     occ.failure_class = dsl.failure_class.map(from_dsl_failure_class);
@@ -810,10 +830,7 @@ impl Schedule {
                 };
                 let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
                 write_back_schedule(&dsl_state, &mut schedule)?;
-                let effects = map_schedule_effects(
-                    &transition,
-                    Some((planning_cursor_utc, next_occurrence_ordinal)),
-                );
+                let effects = map_schedule_effects(&transition)?;
                 Ok(ScheduleLifecycleMutator {
                     schedule,
                     effects,
@@ -837,7 +854,7 @@ impl Schedule {
                 write_back_schedule(&dsl_state, &mut schedule)?;
                 schedule.target = target;
                 schedule.touch();
-                let effects = map_schedule_effects(&transition, None);
+                let effects = map_schedule_effects(&transition)?;
                 Ok(ScheduleLifecycleMutator {
                     schedule,
                     effects,
@@ -853,7 +870,7 @@ impl Schedule {
                 let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
                 write_back_schedule(&dsl_state, &mut schedule)?;
                 schedule.config.updated_at_utc = at_utc;
-                let effects = map_schedule_effects(&transition, None);
+                let effects = map_schedule_effects(&transition)?;
                 Ok(ScheduleLifecycleMutator {
                     schedule,
                     effects,
@@ -869,7 +886,7 @@ impl Schedule {
                 let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
                 write_back_schedule(&dsl_state, &mut schedule)?;
                 schedule.config.updated_at_utc = at_utc;
-                let effects = map_schedule_effects(&transition, None);
+                let effects = map_schedule_effects(&transition)?;
                 Ok(ScheduleLifecycleMutator {
                     schedule,
                     effects,
@@ -888,7 +905,7 @@ impl Schedule {
                 schedule.config.deleted_at_utc = Some(at_utc);
                 schedule.config.updated_at_utc = at_utc;
                 let revision_bumped = schedule.revision != old_revision;
-                let effects = map_schedule_effects(&transition, None);
+                let effects = map_schedule_effects(&transition)?;
                 Ok(ScheduleLifecycleMutator {
                     schedule,
                     effects,
@@ -907,7 +924,7 @@ impl Schedule {
                 };
                 let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
                 write_back_schedule(&dsl_state, &mut schedule)?;
-                let effects = map_schedule_effects(&transition, None);
+                let effects = map_schedule_effects(&transition)?;
                 Ok(ScheduleLifecycleMutator {
                     schedule,
                     effects,
@@ -927,12 +944,8 @@ fn create_schedule_via_dsl(
     let misfire_policy = request.misfire_policy;
     let overlap_policy = request.overlap_policy;
     let missing_target_policy = request.missing_target_policy;
-    let planning_horizon_days = request
-        .planning_horizon_days
-        .unwrap_or_else(default_planning_horizon_days);
-    let planning_horizon_occurrences = request
-        .planning_horizon_occurrences
-        .unwrap_or_else(default_planning_horizon_occurrences);
+    let planning_horizon_days = request.planning_horizon_days;
+    let planning_horizon_occurrences = request.planning_horizon_occurrences;
 
     let dsl_input = sched_dsl::ScheduleLifecycleInput::Create {
         schedule_id: sched_dsl::ScheduleId(schedule_id.0.to_string()),
@@ -944,8 +957,8 @@ fn create_schedule_via_dsl(
         overlap_policy_key: overlap_policy_authority_key(&overlap_policy),
         missing_target_policy: to_dsl_missing_target_policy(&missing_target_policy),
         missing_target_policy_key: missing_target_policy_authority_key(&missing_target_policy),
-        planning_horizon_days: u64::from(planning_horizon_days),
-        planning_horizon_occurrences: u64::from(planning_horizon_occurrences),
+        planning_horizon_days: planning_horizon_days.map(u64::from),
+        planning_horizon_occurrences: planning_horizon_occurrences.map(u64::from),
     };
     let mut dsl_auth = sched_dsl::ScheduleLifecycleMachineAuthority::new();
     let transition = sched_dsl::ScheduleLifecycleMachineMutator::apply(&mut dsl_auth, dsl_input)
@@ -971,14 +984,8 @@ fn create_schedule_via_dsl(
         overlap_policy,
         missing_target_policy,
         next_occurrence_ordinal: OccurrenceOrdinal(dsl_state.next_occurrence_ordinal),
-        planning_cursor_utc: dsl_state
-            .planning_cursor_utc_ms
-            .and_then(millis_to_datetime),
-        superseded_ack_ids: dsl_state
-            .superseded_ack_ids
-            .iter()
-            .filter_map(|id| crate::types::OccurrenceId::parse(&id.0).ok())
-            .collect(),
+        planning_cursor_utc: schedule_planning_cursor_from_dsl(dsl_state.planning_cursor_utc_ms)?,
+        superseded_ack_ids: schedule_superseded_ack_ids_from_dsl(&dsl_state.superseded_ack_ids)?,
         config: crate::types::ScheduleConfig {
             name: request.name,
             description: request.description,
@@ -990,7 +997,7 @@ fn create_schedule_via_dsl(
             deleted_at_utc: None,
         },
     };
-    let effects = map_schedule_effects(&transition, None);
+    let effects = map_schedule_effects(&transition)?;
     Ok(ScheduleLifecycleMutator {
         schedule,
         effects,
@@ -1083,7 +1090,7 @@ fn apply_update(
         schedule.missing_target_policy = next_missing_target_policy;
         schedule.touch();
         apply_non_machine_schedule_config(schedule, request);
-        return Ok((true, map_schedule_effects(&transition, None)));
+        return Ok((true, map_schedule_effects(&transition)?));
     }
 
     let effects = if planning_config_changed {
@@ -1093,12 +1100,9 @@ fn apply_update(
         };
         let (transition, dsl_state) = run_schedule_dsl(schedule, dsl_input)?;
         write_back_schedule(&dsl_state, schedule)?;
-        map_schedule_effects(&transition, None)
+        map_schedule_effects(&transition)?
     } else {
-        vec![ScheduleLifecycleEffect::EmitScheduleNotice {
-            new_state: schedule.phase,
-            revision: schedule.revision,
-        }]
+        Vec::new()
     };
     schedule.touch();
     apply_non_machine_schedule_config(schedule, request);
@@ -1286,63 +1290,51 @@ fn write_back_schedule(
     sched.revision = ScheduleRevision(dsl.revision);
     sched.config.planning_horizon_days = planning_horizon_days_from_dsl(dsl)?;
     sched.config.planning_horizon_occurrences = planning_horizon_occurrences_from_dsl(dsl)?;
-    sched.planning_cursor_utc = dsl.planning_cursor_utc_ms.and_then(millis_to_datetime);
+    sched.planning_cursor_utc = schedule_planning_cursor_from_dsl(dsl.planning_cursor_utc_ms)?;
     sched.next_occurrence_ordinal = OccurrenceOrdinal(dsl.next_occurrence_ordinal);
-    sched.superseded_ack_ids = dsl
-        .superseded_ack_ids
-        .iter()
-        .filter_map(|id| crate::types::OccurrenceId::parse(&id.0).ok())
-        .collect();
+    sched.superseded_ack_ids = schedule_superseded_ack_ids_from_dsl(&dsl.superseded_ack_ids)?;
     Ok(())
 }
 
 /// Map DSL schedule effect → domain effect.
-///
-/// `planning_cursor_utc` and `next_occurrence_ordinal` are passed in from the
-/// original input since the DSL stores millis, and the PlanningWindowRecorded
-/// effect carries the original DateTime values.
 fn map_schedule_effect(
     effect: &sched_dsl::ScheduleLifecycleEffect,
-    planning_cursor_utc: DateTime<Utc>,
-    next_occurrence_ordinal: OccurrenceOrdinal,
-) -> ScheduleLifecycleEffect {
+) -> Result<ScheduleLifecycleEffect, ScheduleLifecycleError> {
     match effect {
         sched_dsl::ScheduleLifecycleEffect::EmitScheduleNotice {
             new_state,
             revision,
-        } => ScheduleLifecycleEffect::EmitScheduleNotice {
+        } => Ok(ScheduleLifecycleEffect::EmitScheduleNotice {
             new_state: match new_state {
                 sched_dsl::ScheduleLifecycleState::Active => SchedulePhase::Active,
                 sched_dsl::ScheduleLifecycleState::Paused => SchedulePhase::Paused,
                 sched_dsl::ScheduleLifecycleState::Deleted => SchedulePhase::Deleted,
             },
             revision: ScheduleRevision(*revision),
-        },
+        }),
         sched_dsl::ScheduleLifecycleEffect::SupersedePendingOccurrences {
             superseding_revision,
-        } => ScheduleLifecycleEffect::SupersedePendingOccurrences {
+        } => Ok(ScheduleLifecycleEffect::SupersedePendingOccurrences {
             superseding_revision: ScheduleRevision(*superseding_revision),
-        },
-        sched_dsl::ScheduleLifecycleEffect::PlanningWindowRecorded { .. } => {
-            ScheduleLifecycleEffect::PlanningWindowRecorded {
-                planning_cursor_utc,
-                next_occurrence_ordinal,
-            }
-        }
+        }),
+        sched_dsl::ScheduleLifecycleEffect::PlanningWindowRecorded {
+            planning_cursor_utc_ms,
+            next_occurrence_ordinal,
+        } => Ok(ScheduleLifecycleEffect::PlanningWindowRecorded {
+            planning_cursor_utc: millis_to_datetime(*planning_cursor_utc_ms).ok_or(
+                ScheduleLifecycleError::InvalidPlanningCursorUtcMillis {
+                    millis: *planning_cursor_utc_ms,
+                },
+            )?,
+            next_occurrence_ordinal: OccurrenceOrdinal(*next_occurrence_ordinal),
+        }),
     }
 }
 
 fn map_schedule_effects(
     transition: &sched_dsl::ScheduleLifecycleMachineTransition,
-    planning_window: Option<(DateTime<Utc>, OccurrenceOrdinal)>,
-) -> Vec<ScheduleLifecycleEffect> {
-    let (planning_cursor_utc, next_occurrence_ordinal) =
-        planning_window.unwrap_or_else(|| (DateTime::default(), OccurrenceOrdinal::default()));
-    transition
-        .effects
-        .iter()
-        .map(|effect| map_schedule_effect(effect, planning_cursor_utc, next_occurrence_ordinal))
-        .collect()
+) -> Result<Vec<ScheduleLifecycleEffect>, ScheduleLifecycleError> {
+    transition.effects.iter().map(map_schedule_effect).collect()
 }
 
 // ===========================================================================
@@ -1398,6 +1390,60 @@ fn datetime_to_millis(dt: DateTime<Utc>) -> u64 {
 fn millis_to_datetime(ms: u64) -> Option<DateTime<Utc>> {
     let ms_i64 = i64::try_from(ms).ok()?;
     DateTime::from_timestamp_millis(ms_i64)
+}
+
+fn schedule_planning_cursor_from_dsl(
+    ms: Option<u64>,
+) -> Result<Option<DateTime<Utc>>, ScheduleLifecycleError> {
+    ms.map(|millis| {
+        millis_to_datetime(millis)
+            .ok_or(ScheduleLifecycleError::InvalidPlanningCursorUtcMillis { millis })
+    })
+    .transpose()
+}
+
+fn schedule_superseded_ack_ids_from_dsl(
+    ids: &BTreeSet<sched_dsl::OccurrenceId>,
+) -> Result<BTreeSet<crate::types::OccurrenceId>, ScheduleLifecycleError> {
+    ids.iter()
+        .map(|id| {
+            crate::types::OccurrenceId::parse(&id.0).map_err(|source| {
+                ScheduleLifecycleError::InvalidSupersededAckId {
+                    id: id.0.clone(),
+                    source,
+                }
+            })
+        })
+        .collect()
+}
+
+fn occurrence_optional_datetime_from_dsl(
+    ms: Option<u64>,
+    field: &'static str,
+) -> Result<Option<DateTime<Utc>>, OccurrenceLifecycleError> {
+    ms.map(|millis| {
+        millis_to_datetime(millis)
+            .ok_or(OccurrenceLifecycleError::InvalidTimestampMillis { field, millis })
+    })
+    .transpose()
+}
+
+fn claim_token_from_dsl(
+    token: &Option<occ_dsl::ClaimToken>,
+) -> Result<Option<Uuid>, OccurrenceLifecycleError> {
+    token
+        .as_ref()
+        .map(|t| {
+            Uuid::parse_str(&t.0).map_err(|source| OccurrenceLifecycleError::InvalidClaimToken {
+                token: t.0.clone(),
+                source,
+            })
+        })
+        .transpose()
+}
+
+fn attempt_count_from_dsl(value: u64) -> Result<u32, OccurrenceLifecycleError> {
+    u32::try_from(value).map_err(|_| OccurrenceLifecycleError::InvalidAttemptCount { value })
 }
 
 fn to_dsl_failure_class(fc: OccurrenceFailureClass) -> occ_dsl::FailureClass {
@@ -1639,6 +1685,151 @@ mod tests {
         assert_eq!(mutator.schedule.revision, schedule.revision);
         assert!(mutator.effects.is_empty());
         assert!(mutator.schedule.superseded_ack_ids.contains(&occurrence_id));
+        Ok(())
+    }
+
+    #[test]
+    fn config_only_update_emits_no_machine_effects() -> Result<(), Box<dyn std::error::Error>> {
+        let schedule = sample_schedule();
+
+        let mutator = Schedule::apply(
+            Some(schedule.clone()),
+            ScheduleLifecycleInput::Update(UpdateScheduleRequest {
+                name: Some("renamed".into()),
+                ..UpdateScheduleRequest::default()
+            }),
+        )?;
+
+        assert_eq!(mutator.schedule.revision, schedule.revision);
+        assert!(!mutator.revision_bumped);
+        assert_eq!(mutator.schedule.config.name.as_deref(), Some("renamed"));
+        assert!(mutator.effects.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn create_uses_generated_planning_defaults() -> Result<(), Box<dyn std::error::Error>> {
+        let mut request = CreateScheduleRequest {
+            name: None,
+            description: None,
+            trigger: TriggerSpec::Once {
+                due_at_utc: Utc::now() + Duration::minutes(1),
+            },
+            target: TargetBinding::session(SessionTargetBinding::ExactSession {
+                session_id: meerkat_core::SessionId::new(),
+                action: ScheduledSessionAction::Prompt {
+                    prompt: ContentInput::from("scheduled hello"),
+                    system_prompt: None,
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                },
+            }),
+            misfire_policy: MisfirePolicy::Skip,
+            overlap_policy: OverlapPolicy::SkipIfRunning,
+            missing_target_policy: MissingTargetPolicy::MarkMisfired,
+            labels: BTreeMap::new(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        };
+
+        let schedule = Schedule::new(request.clone())?;
+        assert_eq!(
+            schedule.config.planning_horizon_days,
+            sched_dsl::ScheduleLifecycleMachineState::default().planning_horizon_days as u32
+        );
+        assert_eq!(
+            schedule.config.planning_horizon_occurrences,
+            sched_dsl::ScheduleLifecycleMachineState::default().planning_horizon_occurrences as u32
+        );
+
+        request.planning_horizon_days = Some(7);
+        request.planning_horizon_occurrences = Some(9);
+        let schedule = Schedule::new(request)?;
+        assert_eq!(schedule.config.planning_horizon_days, 7);
+        assert_eq!(schedule.config.planning_horizon_occurrences, 9);
+        Ok(())
+    }
+
+    #[test]
+    fn schedule_projection_rejects_invalid_generated_facts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schedule = sample_schedule();
+        let mut dsl = project_schedule(&schedule);
+        dsl.planning_cursor_utc_ms = Some(u64::MAX);
+        let mut projected = schedule.clone();
+
+        assert!(matches!(
+            write_back_schedule(&dsl, &mut projected),
+            Err(ScheduleLifecycleError::InvalidPlanningCursorUtcMillis { millis })
+                if millis == u64::MAX
+        ));
+
+        let mut dsl = project_schedule(&schedule);
+        dsl.superseded_ack_ids
+            .insert(sched_dsl::OccurrenceId("not-a-uuid".into()));
+        let mut projected = schedule;
+
+        assert!(matches!(
+            write_back_schedule(&dsl, &mut projected),
+            Err(ScheduleLifecycleError::InvalidSupersededAckId { id, .. })
+                if id == "not-a-uuid"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn occurrence_projection_rejects_invalid_generated_facts() {
+        let occurrence = sample_occurrence();
+        let input = OccurrenceLifecycleInput::LeaseExpired { at_utc: Utc::now() };
+
+        let mut dsl = project_occurrence(&occurrence);
+        dsl.claim_token = Some(occ_dsl::ClaimToken("not-a-uuid".into()));
+        let mut projected = occurrence.clone();
+        assert!(matches!(
+            write_back_occurrence(&dsl, &mut projected, &input),
+            Err(OccurrenceLifecycleError::InvalidClaimToken { token, .. })
+                if token == "not-a-uuid"
+        ));
+
+        let mut dsl = project_occurrence(&occurrence);
+        dsl.attempt_count = u64::from(u32::MAX) + 1;
+        let mut projected = occurrence;
+        assert!(matches!(
+            write_back_occurrence(&dsl, &mut projected, &input),
+            Err(OccurrenceLifecycleError::InvalidAttemptCount { value })
+                if value == u64::from(u32::MAX) + 1
+        ));
+    }
+
+    #[test]
+    fn planning_window_effect_maps_generated_payload() -> Result<(), Box<dyn std::error::Error>> {
+        let effect = map_schedule_effect(
+            &sched_dsl::ScheduleLifecycleEffect::PlanningWindowRecorded {
+                planning_cursor_utc_ms: 1234,
+                next_occurrence_ordinal: 99,
+            },
+        )?;
+
+        assert_eq!(
+            effect,
+            ScheduleLifecycleEffect::PlanningWindowRecorded {
+                planning_cursor_utc: DateTime::from_timestamp_millis(1234)
+                    .expect("test timestamp should be valid"),
+                next_occurrence_ordinal: OccurrenceOrdinal(99),
+            }
+        );
+
+        assert!(matches!(
+            map_schedule_effect(
+                &sched_dsl::ScheduleLifecycleEffect::PlanningWindowRecorded {
+                    planning_cursor_utc_ms: u64::MAX,
+                    next_occurrence_ordinal: 1,
+                },
+            ),
+            Err(ScheduleLifecycleError::InvalidPlanningCursorUtcMillis { millis })
+                if millis == u64::MAX
+        ));
         Ok(())
     }
 

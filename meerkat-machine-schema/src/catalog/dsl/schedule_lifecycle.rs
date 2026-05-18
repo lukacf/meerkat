@@ -1,3 +1,4 @@
+use super::OptionValueExt;
 use meerkat_machine_dsl::machine;
 
 machine! {
@@ -66,8 +67,8 @@ machine! {
                 overlap_policy_key: String,
                 missing_target_policy: Enum<MissingTargetPolicy>,
                 missing_target_policy_key: String,
-                planning_horizon_days: u64,
-                planning_horizon_occurrences: u64,
+                planning_horizon_days: Option<u64>,
+                planning_horizon_occurrences: Option<u64>,
             },
             Revise {
                 trigger_key: String,
@@ -147,8 +148,12 @@ machine! {
                 self.overlap_policy_key = overlap_policy_key;
                 self.missing_target_policy = missing_target_policy;
                 self.missing_target_policy_key = missing_target_policy_key;
-                self.planning_horizon_days = planning_horizon_days;
-                self.planning_horizon_occurrences = planning_horizon_occurrences;
+                if planning_horizon_days != None {
+                    self.planning_horizon_days = planning_horizon_days.get("value");
+                }
+                if planning_horizon_occurrences != None {
+                    self.planning_horizon_occurrences = planning_horizon_occurrences.get("value");
+                }
             }
             to Active
             emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }

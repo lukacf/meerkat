@@ -12,8 +12,6 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
 
-const DEFAULT_PLANNING_HORIZON_DAYS: u32 = 30;
-const DEFAULT_PLANNING_HORIZON_OCCURRENCES: u32 = 64;
 const DEFAULT_SKIP_MISFIRE_GRACE_SECONDS: i64 = 30;
 
 fn semantic_json_key<T: Serialize>(prefix: &str, value: &T) -> String {
@@ -1114,11 +1112,21 @@ impl UpdateScheduleRequest {
 }
 
 pub fn default_planning_horizon_days() -> u32 {
-    DEFAULT_PLANNING_HORIZON_DAYS
+    let value = crate::machines::schedule_lifecycle::ScheduleLifecycleMachineState::default()
+        .planning_horizon_days;
+    match u32::try_from(value) {
+        Ok(value) => value,
+        Err(_) => panic!("generated planning_horizon_days default exceeds u32: {value}"),
+    }
 }
 
 pub fn default_planning_horizon_occurrences() -> u32 {
-    DEFAULT_PLANNING_HORIZON_OCCURRENCES
+    let value = crate::machines::schedule_lifecycle::ScheduleLifecycleMachineState::default()
+        .planning_horizon_occurrences;
+    match u32::try_from(value) {
+        Ok(value) => value,
+        Err(_) => panic!("generated planning_horizon_occurrences default exceeds u32: {value}"),
+    }
 }
 
 #[cfg(test)]

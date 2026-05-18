@@ -190,7 +190,7 @@ fn seed_mob_authority_sync_from_events(
                 )?;
             }
             MobEventKind::MobDestroyStorageFinalizing => {
-                if !authority.state.destroy_admitted {
+                if !authority.state().destroy_admitted {
                     apply_seeded_mob_signal(
                         authority,
                         mob_dsl::MobMachineSignal::AdmitDestroyCleanup,
@@ -511,7 +511,14 @@ async fn commit_recovered_flow_run_command(
             return Ok(false);
         }
 
-        let mut prepared = mob_dsl::MobMachineAuthority::from_state(authority.state.clone());
+        let mut prepared = mob_dsl::MobMachineAuthority::recover_from_state(
+            authority.state().clone(),
+        )
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "MobMachine recovered flow authority ({context}) could not recover state: {error}"
+            ))
+        })?;
         let input_debug = format!("{authority_input:?}");
         let transition =
             mob_dsl::MobMachineMutator::apply(&mut prepared, authority_input.clone()).map_err(
@@ -525,7 +532,7 @@ async fn commit_recovered_flow_run_command(
             MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&authority_input)?;
         let outcome = apply_mob_machine_flow_run_command(
             &run.flow_state,
-            &prepared.state,
+            prepared.state(),
             run_id,
             command.clone(),
             token,
@@ -1006,7 +1013,7 @@ impl MobBuilder {
             .any(|event| matches!(event.kind, MobEventKind::MobDestroyStorageFinalizing));
         let mut initial_dsl_authority = Box::new(seed_mob_authority());
         seed_mob_authority_sync_from_events(&mut initial_dsl_authority, epoch_events, &definition)?;
-        let resumed_state = seeded_mob_public_phase(&initial_dsl_authority.state);
+        let resumed_state = seeded_mob_public_phase(initial_dsl_authority.state());
         // Runtime metadata owns supervisor authority. External-binding
         // overlays are compatibility projections only.
         if !destroy_storage_finalizing {
@@ -1056,7 +1063,7 @@ impl MobBuilder {
         let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
         let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
         let (machine_state_watch_tx, machine_state_watch_rx) =
-            tokio::sync::watch::channel(initial_dsl_authority.state.clone());
+            tokio::sync::watch::channel(initial_dsl_authority.state().clone());
         // Preview phase watch so the preview handle can answer status()
         // before the actor spawns. The real actor-side sender replaces
         // this once start_runtime_with_components owns the final pair.
@@ -1118,7 +1125,7 @@ impl MobBuilder {
         )?;
         let _ = wiring
             .machine_state_watch_tx
-            .send(wiring.dsl_authority.state.clone());
+            .send(wiring.dsl_authority.state().clone());
         *wiring.roster.write().await = RosterAuthority::from_roster(roster);
 
         Ok(Self::start_runtime_with_components(
@@ -1710,7 +1717,7 @@ impl MobBuilder {
         let mut dsl_authority = Box::new(seed_mob_authority());
         finish_seeded_mob_authority_phase(&mut dsl_authority, initial_state)?;
         let (machine_state_watch_tx, _machine_state_watch_rx) =
-            tokio::sync::watch::channel(dsl_authority.state.clone());
+            tokio::sync::watch::channel(dsl_authority.state().clone());
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
         let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
         let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
@@ -1767,7 +1774,7 @@ impl MobBuilder {
         } = wiring;
         let external_backend = definition.backend.external.clone();
         let handle_session_service = session_service.clone();
-        let wiring_public_phase = seeded_mob_public_phase(&dsl_authority.state);
+        let wiring_public_phase = seeded_mob_public_phase(dsl_authority.state());
         // Terminal-phase watch: seed with the initial phase so a status()
         // call before any DSL transition returns the right answer.
         let (phase_watch_tx_actor, phase_watch_rx) =

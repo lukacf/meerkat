@@ -111,15 +111,18 @@ impl MeerkatMachine {
             .durable_runtime_state_for_registration(&runtime_id)
             .await?;
         let dsl_authority = Arc::new(std::sync::Mutex::new(
-            super::dsl::MeerkatMachineAuthority::from_state(super::dsl_authority::project_state(
-                &session_id,
-                durable_runtime_state.unwrap_or(RuntimeState::Idle),
-                None,
-                None,
-                None,
-                std::collections::BTreeSet::new(),
-                None,
-            )),
+            super::dsl::MeerkatMachineAuthority::recover_from_state(
+                super::dsl_authority::project_state(
+                    &session_id,
+                    durable_runtime_state.unwrap_or(RuntimeState::Idle),
+                    None,
+                    None,
+                    None,
+                    std::collections::BTreeSet::new(),
+                    None,
+                ),
+            )
+            .expect("session registration DSL state must be recoverable"),
         ));
         let initial_runtime_state = durable_runtime_state.unwrap_or(RuntimeState::Idle);
         let mut entry = self.make_driver(
@@ -209,18 +212,6 @@ impl MeerkatMachine {
                 },
             )
             .await;
-    }
-
-    pub(super) async fn set_session_silent_intents_inner(
-        &self,
-        session_id: &SessionId,
-        intents: Vec<String>,
-    ) {
-        let sessions = self.sessions.read().await;
-        if let Some(entry) = sessions.get(session_id) {
-            let mut driver = entry.driver.lock().await;
-            driver.set_silent_comms_intents(intents);
-        }
     }
 
     pub async fn commit_service_turn_terminal_receipt(
@@ -362,7 +353,7 @@ impl MeerkatMachine {
                 };
                 let initial_runtime_state = durable_runtime_state.unwrap_or(RuntimeState::Idle);
                 let dsl_authority = Arc::new(std::sync::Mutex::new(
-                    super::dsl::MeerkatMachineAuthority::from_state(
+                    super::dsl::MeerkatMachineAuthority::recover_from_state(
                         super::dsl_authority::project_state(
                             &session_id,
                             initial_runtime_state,
@@ -372,7 +363,8 @@ impl MeerkatMachine {
                             std::collections::BTreeSet::new(),
                             None,
                         ),
-                    ),
+                    )
+                    .expect("session recovery DSL state must be recoverable"),
                 ));
                 let mut recovered_entry = self.make_driver(
                     runtime_id.clone(),

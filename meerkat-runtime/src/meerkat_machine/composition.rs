@@ -281,7 +281,7 @@ impl MeerkatMachine {
                 .dsl_authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if authority.state.active_runtime_id.as_ref() == Some(runtime_id) {
+            if authority.state().active_runtime_id.as_ref() == Some(runtime_id) {
                 matches.push(session_id.clone());
             }
         }
@@ -780,11 +780,11 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert!(
-                authority.state.active_runtime_id.is_none(),
+                authority.state().active_runtime_id.is_none(),
                 "local resource preparation must leave binding identity unclaimed"
             );
             assert!(
-                authority.state.active_fence_token.is_none(),
+                authority.state().active_fence_token.is_none(),
                 "local resource preparation must leave binding fence unclaimed"
             );
         }
@@ -816,10 +816,10 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert!(
-                matches!(&authority.state.active_runtime_id, Some(value) if value.0 == "rt-authoritative")
+                matches!(&authority.state().active_runtime_id, Some(value) if value.0 == "rt-authoritative")
             );
             assert!(matches!(
-                authority.state.active_fence_token,
+                authority.state().active_fence_token,
                 Some(mm_dsl::FenceToken(13))
             ));
         }

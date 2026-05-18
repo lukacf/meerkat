@@ -305,9 +305,9 @@ mod tests {
         )
         .expect("first Delete from Active must succeed");
         assert_eq!(first.to_phase, ScheduleLifecycleState::Deleted);
-        let revision_after_delete = auth.state.revision;
-        let planning_after_delete = auth.state.planning_cursor_utc_ms;
-        let ordinal_after_delete = auth.state.next_occurrence_ordinal;
+        let revision_after_delete = auth.state().revision;
+        let planning_after_delete = auth.state().planning_cursor_utc_ms;
+        let ordinal_after_delete = auth.state().next_occurrence_ordinal;
 
         let second = ScheduleLifecycleMachineMutator::apply(
             &mut auth,
@@ -321,8 +321,8 @@ mod tests {
             "Delete from Deleted must emit zero effects, got {:?}",
             second.effects
         );
-        assert_eq!(auth.state.revision, revision_after_delete);
-        assert_eq!(auth.state.planning_cursor_utc_ms, planning_after_delete);
-        assert_eq!(auth.state.next_occurrence_ordinal, ordinal_after_delete);
+        assert_eq!(auth.state().revision, revision_after_delete);
+        assert_eq!(auth.state().planning_cursor_utc_ms, planning_after_delete);
+        assert_eq!(auth.state().next_occurrence_ordinal, ordinal_after_delete);
     }
 }

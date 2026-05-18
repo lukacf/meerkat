@@ -109,7 +109,7 @@ impl MachineToolVisibilityOwner {
                 message: super::dsl_authority::map_error(err, context),
             }
         })?;
-        Ok(ToolScopeRevision(guard.state.staged_visibility_revision))
+        Ok(ToolScopeRevision(guard.state().staged_visibility_revision))
     }
 
     fn apply_visibility_dsl_input(
@@ -420,15 +420,15 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
             // deferred authority projection already matches the DSL.
             Err(err @ super::dsl::MeerkatMachineTransitionError::GuardRejected { .. }) => {
                 let counter_covers_install = visibility_state.active_revision
-                    <= guard.state.next_staged_visibility_revision
+                    <= guard.state().next_staged_visibility_revision
                     && visibility_state.staged_revision
-                        <= guard.state.next_staged_visibility_revision;
-                let deferred_authority_matches = guard.state.active_deferred_names
+                        <= guard.state().next_staged_visibility_revision;
+                let deferred_authority_matches = guard.state().active_deferred_names
                     == visibility_state.active_requested_deferred_names
-                    && guard.state.staged_deferred_names
+                    && guard.state().staged_deferred_names
                         == visibility_state.staged_requested_deferred_names
-                    && guard.state.active_deferred_authorities == active_deferred_authorities
-                    && guard.state.staged_deferred_authorities == staged_deferred_authorities;
+                    && guard.state().active_deferred_authorities == active_deferred_authorities
+                    && guard.state().staged_deferred_authorities == staged_deferred_authorities;
                 if !(counter_covers_install && deferred_authority_matches) {
                     return Err(ToolScopeApplyError::Owner {
                         message: super::dsl_authority::map_error(err, "SyncVisibilityRevisions"),

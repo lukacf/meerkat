@@ -200,14 +200,6 @@ impl DriverEntry {
         }
     }
 
-    /// Set the silent comms intents for the underlying driver.
-    pub(crate) fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
-        match self {
-            DriverEntry::Ephemeral(d) => d.set_silent_comms_intents(intents),
-            DriverEntry::Persistent(d) => d.set_silent_comms_intents(intents),
-        }
-    }
-
     pub(crate) fn silent_comms_intents(&self) -> Vec<String> {
         match self {
             DriverEntry::Ephemeral(d) => d.silent_comms_intents(),
@@ -646,7 +638,7 @@ pub(crate) fn machine_begin_run(
         let auth = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        auth.state.session_id.clone()
+        auth.state().session_id.clone()
     };
     if let Some(dsl_session_id) = dsl_session_id {
         let mut auth = authority
@@ -655,12 +647,12 @@ pub(crate) fn machine_begin_run(
         // Idempotent fast-path: if DSL is already at Running with a
         // matching run_id, the caller (e.g. `dispatch_ingress::Prepare`
         // command handler) has already staged Prepare; nothing to do.
-        let already_prepared = auth.state.lifecycle_phase
+        let already_prepared = auth.state().lifecycle_phase
             == crate::meerkat_machine::dsl::MeerkatPhase::Running
-            && auth.state.current_run_id.as_ref().map(|id| id.0.as_str())
+            && auth.state().current_run_id.as_ref().map(|id| id.0.as_str())
                 == Some(run_id.to_string().as_str());
         let is_retired_drain =
-            auth.state.lifecycle_phase == crate::meerkat_machine::dsl::MeerkatPhase::Retired;
+            auth.state().lifecycle_phase == crate::meerkat_machine::dsl::MeerkatPhase::Retired;
         if !already_prepared {
             let apply_result = if is_retired_drain {
                 auth.apply_signal(
@@ -876,7 +868,7 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         !matches!(
-            auth.state.turn_phase,
+            auth.state().turn_phase,
             crate::meerkat_machine::dsl::TurnPhase::Completed
                 | crate::meerkat_machine::dsl::TurnPhase::Failed
                 | crate::meerkat_machine::dsl::TurnPhase::Cancelled
@@ -976,8 +968,8 @@ fn machine_apply_turn_run_completed(
     let mut auth = authority
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if auth.state.lifecycle_phase != crate::meerkat_machine::dsl::MeerkatPhase::Running
-        || auth.state.current_run_id.as_ref().map(|id| id.0.as_str())
+    if auth.state().lifecycle_phase != crate::meerkat_machine::dsl::MeerkatPhase::Running
+        || auth.state().current_run_id.as_ref().map(|id| id.0.as_str())
             != Some(run_id.to_string().as_str())
     {
         return Ok(());
@@ -1008,8 +1000,8 @@ fn machine_apply_turn_run_failed(
     let mut auth = authority
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if auth.state.lifecycle_phase != crate::meerkat_machine::dsl::MeerkatPhase::Running
-        || auth.state.current_run_id.as_ref().map(|id| id.0.as_str())
+    if auth.state().lifecycle_phase != crate::meerkat_machine::dsl::MeerkatPhase::Running
+        || auth.state().current_run_id.as_ref().map(|id| id.0.as_str())
             != Some(run_id.to_string().as_str())
     {
         return Ok(Vec::new());
@@ -1043,8 +1035,8 @@ fn machine_apply_turn_run_cancelled(
     let mut auth = authority
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if auth.state.lifecycle_phase != crate::meerkat_machine::dsl::MeerkatPhase::Running
-        || auth.state.current_run_id.as_ref().map(|id| id.0.as_str())
+    if auth.state().lifecycle_phase != crate::meerkat_machine::dsl::MeerkatPhase::Running
+        || auth.state().current_run_id.as_ref().map(|id| id.0.as_str())
             != Some(run_id.to_string().as_str())
     {
         return Ok(());
@@ -2892,21 +2884,11 @@ mod run_failed_cause_tests {
     use super::*;
 
     fn running_driver(run_id: &RunId) -> DriverEntry {
-        let driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(LogicalRuntimeId::new(
-            "run-failed-cause-test",
-        ));
-        let entry = DriverEntry::Ephemeral(driver);
-        {
-            let authority = entry.shared_dsl_authority();
-            let mut auth = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            auth.state.lifecycle_phase = crate::meerkat_machine::dsl::MeerkatPhase::Running;
-            auth.state.current_run_id =
-                Some(crate::meerkat_machine::dsl::RunId::from_domain(run_id));
-            auth.state.turn_phase = crate::meerkat_machine::dsl::TurnPhase::Ready;
-        }
-        entry
+        let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(
+            LogicalRuntimeId::new("run-failed-cause-test"),
+        );
+        driver.contract_force_runtime_authority(RuntimeState::Running, Some(run_id.clone()), None);
+        DriverEntry::Ephemeral(driver)
     }
 
     #[test]
@@ -2929,15 +2911,15 @@ mod run_failed_cause_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(
-            auth.state.terminal_cause_kind,
+            auth.state().terminal_cause_kind,
             Some(crate::meerkat_machine::dsl::TurnTerminalCauseKind::FatalFailure)
         );
         assert_eq!(
-            auth.state.terminal_outcome,
+            auth.state().terminal_outcome,
             Some(crate::meerkat_machine::dsl::TurnTerminalOutcome::Failed)
         );
-        assert_eq!(auth.state.last_runtime_apply_failure_cause, None);
-        assert_eq!(auth.state.last_runtime_apply_failure_message, None);
+        assert_eq!(auth.state().last_runtime_apply_failure_cause, None);
+        assert_eq!(auth.state().last_runtime_apply_failure_message, None);
     }
 
     #[test]
@@ -2960,15 +2942,15 @@ mod run_failed_cause_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(
-            auth.state.terminal_cause_kind,
+            auth.state().terminal_cause_kind,
             Some(crate::meerkat_machine::dsl::TurnTerminalCauseKind::FatalFailure)
         );
         assert_eq!(
-            auth.state.terminal_outcome,
+            auth.state().terminal_outcome,
             Some(crate::meerkat_machine::dsl::TurnTerminalOutcome::Failed)
         );
-        assert_eq!(auth.state.last_runtime_apply_failure_cause, None);
-        assert_eq!(auth.state.last_runtime_apply_failure_message, None);
+        assert_eq!(auth.state().last_runtime_apply_failure_cause, None);
+        assert_eq!(auth.state().last_runtime_apply_failure_message, None);
     }
 
     #[test]
@@ -2992,19 +2974,19 @@ mod run_failed_cause_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(
-            auth.state.terminal_cause_kind,
+            auth.state().terminal_cause_kind,
             Some(crate::meerkat_machine::dsl::TurnTerminalCauseKind::RuntimeApplyFailure)
         );
         assert_eq!(
-            auth.state.terminal_outcome,
+            auth.state().terminal_outcome,
             Some(crate::meerkat_machine::dsl::TurnTerminalOutcome::Failed)
         );
         assert_eq!(
-            auth.state.last_runtime_apply_failure_cause,
+            auth.state().last_runtime_apply_failure_cause,
             Some(crate::meerkat_machine::dsl::RuntimeApplyFailureCause::RuntimeTurn)
         );
         assert_eq!(
-            auth.state.last_runtime_apply_failure_message.as_deref(),
+            auth.state().last_runtime_apply_failure_message.as_deref(),
             Some("runtime apply failed")
         );
     }
@@ -3034,15 +3016,15 @@ mod run_failed_cause_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(
-            auth.state.turn_phase,
+            auth.state().turn_phase,
             crate::meerkat_machine::dsl::TurnPhase::Failed
         );
         assert_eq!(
-            auth.state.terminal_outcome,
+            auth.state().terminal_outcome,
             Some(crate::meerkat_machine::dsl::TurnTerminalOutcome::BudgetExhausted)
         );
         assert_eq!(
-            auth.state.terminal_cause_kind,
+            auth.state().terminal_cause_kind,
             Some(crate::meerkat_machine::dsl::TurnTerminalCauseKind::BudgetExhausted)
         );
     }

@@ -1364,12 +1364,12 @@ async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 authority
-                    .state
+                    .state()
                     .last_runtime_apply_failure_cause
                     .map(|cause| {
                         (
                             cause,
-                            authority.state.last_runtime_apply_failure_message.clone(),
+                            authority.state().last_runtime_apply_failure_message.clone(),
                         )
                     })
             };
@@ -1480,10 +1480,10 @@ async fn machine_terminal_failure_preserves_typed_cause_through_runtime_loop() {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 (
-                    authority.state.terminal_outcome,
-                    authority.state.terminal_cause_kind,
-                    authority.state.last_runtime_apply_failure_cause,
-                    authority.state.last_runtime_apply_failure_message.clone(),
+                    authority.state().terminal_outcome,
+                    authority.state().terminal_cause_kind,
+                    authority.state().last_runtime_apply_failure_cause,
+                    authority.state().last_runtime_apply_failure_message.clone(),
                 )
             };
             if observed.1.is_some() {
@@ -1559,8 +1559,8 @@ async fn machine_terminal_failure_preserves_typed_outcome_through_runtime_loop()
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     (
-                        authority.state.terminal_outcome,
-                        authority.state.terminal_cause_kind,
+                        authority.state().terminal_outcome,
+                        authority.state().terminal_cause_kind,
                     )
                 };
                 if observed.1.is_some() {
@@ -1751,12 +1751,12 @@ async fn hook_denial_terminalizes_with_typed_machine_apply_failure_cause() {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 authority
-                    .state
+                    .state()
                     .last_runtime_apply_failure_cause
                     .map(|cause| {
                         (
                             cause,
-                            authority.state.last_runtime_apply_failure_message.clone(),
+                            authority.state().last_runtime_apply_failure_message.clone(),
                         )
                     })
             };
@@ -1801,9 +1801,9 @@ async fn legacy_fail_does_not_fabricate_runtime_apply_failure_cause() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         (
-            authority.state.terminal_cause_kind,
-            authority.state.last_runtime_apply_failure_cause,
-            authority.state.last_runtime_apply_failure_message.clone(),
+            authority.state().terminal_cause_kind,
+            authority.state().last_runtime_apply_failure_cause,
+            authority.state().last_runtime_apply_failure_message.clone(),
         )
     };
 
@@ -13590,26 +13590,27 @@ fn assert_live_run_remains_staged(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
-        auth.state.lifecycle_phase,
+        auth.state().lifecycle_phase,
         mm_dsl::MeerkatPhase::Running,
         "{context}: DSL lifecycle must remain Running"
     );
     assert_eq!(
-        auth.state.current_run_id.as_ref().map(|id| id.0.as_str()),
+        auth.state().current_run_id.as_ref().map(|id| id.0.as_str()),
         Some(run_id.to_string().as_str()),
         "{context}: DSL current_run_id must remain bound"
     );
     assert_eq!(
-        auth.state.turn_phase,
+        auth.state().turn_phase,
         mm_dsl::TurnPhase::Ready,
         "{context}: DSL turn_phase must not become terminal"
     );
     assert_eq!(
-        auth.state.terminal_outcome, None,
+        auth.state().terminal_outcome,
+        None,
         "{context}: DSL terminal_outcome must not be set"
     );
     assert_eq!(
-        auth.state.input_phases.get(&input_id.to_string()),
+        auth.state().input_phases.get(&input_id.to_string()),
         Some(&mm_dsl::InputPhase::Staged),
         "{context}: DSL input phase must remain staged"
     );
@@ -13785,15 +13786,15 @@ async fn persistent_commit_success_persists_receipt_and_terminalizes_once() {
     let auth = authority
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(auth.state.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
-    assert_eq!(auth.state.current_run_id, None);
-    assert_eq!(auth.state.turn_phase, mm_dsl::TurnPhase::Completed);
+    assert_eq!(auth.state().lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
+    assert_eq!(auth.state().current_run_id, None);
+    assert_eq!(auth.state().turn_phase, mm_dsl::TurnPhase::Completed);
     assert_eq!(
-        auth.state.terminal_outcome,
+        auth.state().terminal_outcome,
         Some(mm_dsl::TurnTerminalOutcome::Completed)
     );
     assert_eq!(
-        auth.state.input_phases.get(&input_id.to_string()),
+        auth.state().input_phases.get(&input_id.to_string()),
         Some(&mm_dsl::InputPhase::Consumed)
     );
 }
@@ -14156,7 +14157,7 @@ async fn stage_persistent_filter_rejects_missing_filter_witnesses() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
-        authority.state.staged_filter,
+        authority.state().staged_filter,
         mm_dsl::ToolFilter::All,
         "failed filter staging must not mutate DSL staged filter authority"
     );
@@ -14337,8 +14338,8 @@ async fn machine_requested_deferred_names_rejects_name_only_staging() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(
-        authority.state.staged_deferred_names.is_empty()
-            && authority.state.staged_deferred_authorities.is_empty(),
+        authority.state().staged_deferred_names.is_empty()
+            && authority.state().staged_deferred_authorities.is_empty(),
         "failed name-only staging must not mutate DSL deferred authority"
     );
 }
@@ -14378,7 +14379,7 @@ async fn request_deferred_tools_records_typed_authority_in_dsl_state() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
         authority
-            .state
+            .state()
             .staged_deferred_authorities
             .get("deferred_tool"),
         Some(&crate::meerkat_machine::dsl::ToolVisibilityWitness::from(
@@ -14387,7 +14388,7 @@ async fn request_deferred_tools_records_typed_authority_in_dsl_state() {
         "the DSL authority must carry stable owner and provenance, not only the staged name"
     );
     assert_eq!(
-        authority.state.staged_deferred_names,
+        authority.state().staged_deferred_names,
         ["deferred_tool".to_string()].into_iter().collect(),
         "staged names are retained only as the routing projection"
     );
@@ -14446,7 +14447,7 @@ async fn request_deferred_tools_scopes_dsl_authority_to_requested_names() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
-        authority.state.staged_deferred_authorities,
+        authority.state().staged_deferred_authorities,
         [(
             "second_tool".to_string(),
             crate::meerkat_machine::dsl::ToolVisibilityWitness::from(&second_witness),
@@ -14620,7 +14621,7 @@ fn request_deferred_tools_rejects_empty_dsl_authority_witness() {
         "empty witness should be rejected by a DSL guard: {err:?}"
     );
     assert!(
-        authority.state.staged_deferred_names.is_empty(),
+        authority.state().staged_deferred_names.is_empty(),
         "failed DSL admission must not stage routing names"
     );
 }
@@ -14649,7 +14650,7 @@ fn request_deferred_tools_accepts_provenance_only_dsl_authority_witness() {
 
     assert_eq!(
         authority
-            .state
+            .state()
             .staged_deferred_authorities
             .get("deferred_tool"),
         Some(&witness),
@@ -14734,7 +14735,7 @@ async fn machine_owned_visibility_owner_promotes_deferred_authority_at_boundary(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
         authority
-            .state
+            .state()
             .active_deferred_authorities
             .get("deferred_tool"),
         Some(&crate::meerkat_machine::dsl::ToolVisibilityWitness::from(
@@ -15177,8 +15178,8 @@ async fn publish_committed_visible_set_rejects_deferred_authority_mismatched_wit
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(
-        authority.state.active_deferred_authorities.is_empty()
-            && authority.state.staged_deferred_authorities.is_empty(),
+        authority.state().active_deferred_authorities.is_empty()
+            && authority.state().staged_deferred_authorities.is_empty(),
         "failed publish must not leave forged deferred authority in the DSL state"
     );
 }

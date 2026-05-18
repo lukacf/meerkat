@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 
 use chrono::Utc;
+#[cfg(test)]
+use meerkat_core::SessionId;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 use meerkat_core::types::HandlingMode;
 
@@ -116,7 +118,6 @@ pub(crate) struct EphemeralDriverRollbackSnapshot {
     steer_queue: InputQueue,
     events: Vec<RuntimeEventEnvelope>,
     post_admission_signal: PostAdmissionSignal,
-    silent_comms_intents: Vec<String>,
     handling_mode: HashMap<InputId, HandlingMode>,
     runtime_semantics: HashMap<InputId, RuntimeInputSemantics>,
     primitive_projection: HashMap<InputId, RuntimeInputProjection>,
@@ -146,7 +147,6 @@ pub struct EphemeralRuntimeDriver {
     /// Accumulates the strongest signal across all ingress effects since last
     /// drain. `RequestImmediateProcessing` is strictly stronger than `WakeLoop`.
     post_admission_signal: PostAdmissionSignal,
-    silent_comms_intents: Vec<String>,
     /// Shared session-owned DSL authority for ingress semantics (queue/steer
     /// lanes, input phases, admission ordering).
     dsl: DslAuthority,
@@ -196,9 +196,14 @@ pub(crate) fn new_ingress_dsl_authority() -> SharedIngressDslAuthority {
         lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
         ..mm_dsl::MeerkatMachineState::default()
     };
-    Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
-        state,
-    )))
+    Arc::new(Mutex::new(recover_ingress_dsl_authority(state)))
+}
+
+fn recover_ingress_dsl_authority(
+    state: mm_dsl::MeerkatMachineState,
+) -> mm_dsl::MeerkatMachineAuthority {
+    mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+        .expect("projected ingress DSL state must be recoverable")
 }
 
 impl EphemeralRuntimeDriver {
@@ -252,7 +257,6 @@ impl EphemeralRuntimeDriver {
             steer_queue: InputQueue::new(),
             events: Vec::new(),
             post_admission_signal: PostAdmissionSignal::None,
-            silent_comms_intents: Vec::new(),
             dsl: DslAuthority(dsl),
             handling_mode: HashMap::new(),
             runtime_semantics: HashMap::new(),
@@ -275,7 +279,6 @@ impl EphemeralRuntimeDriver {
             steer_queue: self.steer_queue.clone(),
             events: self.events.clone(),
             post_admission_signal: self.post_admission_signal,
-            silent_comms_intents: self.silent_comms_intents.clone(),
             handling_mode: self.handling_mode.clone(),
             runtime_semantics: self.runtime_semantics.clone(),
             primitive_projection: self.primitive_projection.clone(),
@@ -291,9 +294,9 @@ impl EphemeralRuntimeDriver {
     pub(crate) fn clone_with_isolated_dsl_authority(&self) -> Self {
         let mut clone = self.clone();
         let dsl_state = self.with_dsl_state(Clone::clone);
-        clone.dsl = DslAuthority(Arc::new(Mutex::new(
-            mm_dsl::MeerkatMachineAuthority::from_state(dsl_state),
-        )));
+        clone.dsl = DslAuthority(Arc::new(Mutex::new(recover_ingress_dsl_authority(
+            dsl_state,
+        ))));
         clone.control = Arc::new(StdRwLock::new(self.read_control_projection().clone()));
         clone
     }
@@ -312,7 +315,6 @@ impl EphemeralRuntimeDriver {
         self.steer_queue = snapshot.steer_queue;
         self.events = snapshot.events;
         self.post_admission_signal = snapshot.post_admission_signal;
-        self.silent_comms_intents = snapshot.silent_comms_intents;
         self.handling_mode = snapshot.handling_mode;
         self.runtime_semantics = snapshot.runtime_semantics;
         self.primitive_projection = snapshot.primitive_projection;
@@ -367,9 +369,12 @@ impl EphemeralRuntimeDriver {
     ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, RuntimeDriverError> {
         let state = {
             let authority = self.dsl.lock();
-            authority.state.clone()
+            authority.state().clone()
         };
-        let mut preview = mm_dsl::MeerkatMachineAuthority::from_state(state);
+        let mut preview =
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(state).map_err(|err| {
+                RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}"))
+            })?;
         mm_dsl::MeerkatMachineMutator::apply(&mut preview, input)
             .map(|transition| transition.effects)
             .map_err(|err| RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}")))
@@ -413,7 +418,7 @@ impl EphemeralRuntimeDriver {
 
     fn with_dsl_state<R>(&self, body: impl FnOnce(&mm_dsl::MeerkatMachineState) -> R) -> R {
         let authority = self.dsl.lock();
-        body(&authority.state)
+        body(authority.state())
     }
 
     /// Read the current queue lane (FIFO) in admission order, as tracked by
@@ -663,12 +668,19 @@ impl EphemeralRuntimeDriver {
         self.read_control_projection().clone()
     }
 
-    pub fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
-        self.silent_comms_intents = intents;
+    pub fn silent_comms_intents(&self) -> Vec<String> {
+        self.with_dsl_state(|state| state.silent_intent_overrides.iter().cloned().collect())
     }
 
-    pub fn silent_comms_intents(&self) -> Vec<String> {
-        self.silent_comms_intents.clone()
+    fn matches_silent_intent_authority(&self, input: &Input) -> bool {
+        self.with_dsl_state(|state| {
+            let intents = state
+                .silent_intent_overrides
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            crate::silent_intent::matches_silent_intent(input, &intents)
+        })
     }
 
     fn build_projection_queue(&self, ids: &[InputId], lane: &str) -> InputQueue {
@@ -1292,7 +1304,7 @@ impl EphemeralRuntimeDriver {
             let authority = authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authority.state.session_id.clone()
+            authority.state().session_id.clone()
         };
         if let Some(session_id) = existing {
             return Ok(session_id);
@@ -1424,13 +1436,27 @@ impl EphemeralRuntimeDriver {
             let mut authority = authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authority.state.lifecycle_phase =
-                crate::meerkat_machine::dsl_authority::project_phase(next_phase);
-            authority.state.current_run_id = current_run_id
+            let session_id = authority
+                .state()
+                .session_id
                 .as_ref()
-                .map(crate::meerkat_machine::dsl::RunId::from_domain);
-            authority.state.pre_run_phase = pre_run_phase
-                .and_then(crate::meerkat_machine::dsl_authority::pre_run_phase_from_runtime_state);
+                .and_then(|session_id| {
+                    uuid::Uuid::parse_str(&session_id.0)
+                        .ok()
+                        .map(SessionId::from_uuid)
+                });
+            let silent_intent_overrides = authority.state().silent_intent_overrides.clone();
+            *authority = recover_ingress_dsl_authority(
+                crate::meerkat_machine::dsl_authority::project_state(
+                    &session_id.unwrap_or_else(SessionId::new),
+                    next_phase,
+                    Some(&self.runtime_id),
+                    current_run_id.as_ref(),
+                    pre_run_phase,
+                    silent_intent_overrides,
+                    None,
+                ),
+            );
         }
         self.set_control_projection(next_phase, current_run_id, pre_run_phase);
     }
@@ -1878,7 +1904,6 @@ impl EphemeralRuntimeDriver {
         self.queue.drain();
         self.steer_queue.drain();
         self.post_admission_signal = PostAdmissionSignal::None;
-        self.silent_comms_intents.clear();
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
         Ok(ResetReport {
@@ -1891,7 +1916,6 @@ impl EphemeralRuntimeDriver {
         self.queue.drain();
         self.steer_queue.drain();
         self.post_admission_signal = PostAdmissionSignal::None;
-        self.silent_comms_intents.clear();
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
         Ok(abandoned)
@@ -1899,7 +1923,6 @@ impl EphemeralRuntimeDriver {
 
     pub(crate) fn stop_runtime_cleanup(&mut self) -> Result<(), RuntimeDriverError> {
         self.abandon_all_non_terminal(InputAbandonReason::Stopped)?;
-        self.silent_comms_intents.clear();
         self.queue.drain();
         self.steer_queue.drain();
         Ok(())
@@ -1920,7 +1943,6 @@ impl EphemeralRuntimeDriver {
             .filter(|(id, _)| self.input_is_non_terminal_by_authority(id))
             .count();
         let runtime_id = self.runtime_id.clone();
-        let silent_comms_intents = self.silent_comms_intents.clone();
         let ledger = self.ledger.clone();
         let preserved_dsl = self.dsl.clone();
         let preserved_admission_order = std::mem::take(&mut self.admission_order);
@@ -1933,7 +1955,6 @@ impl EphemeralRuntimeDriver {
         let control = self.control.clone();
 
         *self = Self::new_with_control(runtime_id, control);
-        self.silent_comms_intents = silent_comms_intents;
         self.ledger = ledger;
         self.dsl = preserved_dsl;
         self.admission_order = preserved_admission_order;
@@ -2438,7 +2459,7 @@ impl EphemeralRuntimeDriver {
             input.id().to_string(),
             mm_dsl::AdmissionInputKind::from(input.kind()),
             input.handling_mode().map(mm_dsl::InputLane::from),
-            crate::silent_intent::matches_silent_intent(&input, &self.silent_comms_intents),
+            self.matches_silent_intent_authority(input),
             existing_superseded_id,
             self.runtime_phase_snapshot() == RuntimeState::Running,
             without_wake,
@@ -2581,7 +2602,7 @@ impl EphemeralRuntimeDriver {
             input_id.to_string(),
             mm_dsl::AdmissionInputKind::from(input.kind()),
             input.handling_mode().map(mm_dsl::InputLane::from),
-            crate::silent_intent::matches_silent_intent(&input, &self.silent_comms_intents),
+            self.matches_silent_intent_authority(&input),
             existing_superseded_id,
             self.runtime_phase_snapshot() == RuntimeState::Running,
             resolved.authority().without_wake(),
@@ -3424,12 +3445,12 @@ mod tests {
         let input = prompt_input("missing authority");
         let input_id = input.id().clone();
         driver.accept_input(input).await.unwrap();
-        driver
-            .dsl
-            .lock()
-            .state
-            .input_phases
-            .remove(&input_id.to_string());
+        {
+            let mut authority = driver.dsl.lock();
+            let mut state = authority.state().clone();
+            state.input_phases.remove(&input_id.to_string());
+            *authority = super::recover_ingress_dsl_authority(state);
+        }
 
         let err = driver
             .input_is_terminal_by_authority(&input_id)

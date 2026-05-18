@@ -1,9 +1,10 @@
 //! Silent intent override layer for the runtime policy table.
 //!
 //! When a peer sends a request whose `intent` matches one of the session's
-//! `silent_comms_intents`, the runtime must accept the input without triggering
-//! an LLM turn. This module provides the override function that mutates a
-//! `PolicyDecision` in-place when the silent-intent condition is met.
+//! generated `silent_intent_overrides`, the runtime must accept the input
+//! without triggering an LLM turn. This module provides the override function
+//! that mutates a `PolicyDecision` in-place when the machine-owned
+//! silent-intent condition is met.
 
 use crate::input::{Input, PeerConvention};
 use crate::policy::{ApplyMode, PolicyDecision, WakeMode};

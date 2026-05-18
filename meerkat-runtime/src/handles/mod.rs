@@ -108,9 +108,10 @@ impl HandleDslAuthority {
     pub fn ephemeral() -> Self {
         let state = mm_dsl::MeerkatMachineState::default();
         Self {
-            inner: Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
-                state,
-            ))),
+            inner: Arc::new(Mutex::new(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+                    .expect("default MeerkatMachine state must be recoverable"),
+            )),
         }
     }
 
@@ -245,7 +246,7 @@ impl HandleDslAuthority {
         guard
             .apply_signal(signal)
             .map_err(|err| map_kernel_error(err, context))?;
-        Ok(sample(&guard.state))
+        Ok(sample(guard.state()))
     }
 
     /// Clone the current DSL state under the shared authority's mutex.
@@ -254,7 +255,7 @@ impl HandleDslAuthority {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.state.clone()
+        guard.state().clone()
     }
 
     /// Run `body` under the shared authority's mutex. The closure observes
@@ -268,7 +269,7 @@ impl HandleDslAuthority {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        body(&guard.state)
+        body(guard.state())
     }
 }
 

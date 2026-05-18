@@ -90,11 +90,6 @@ impl PersistentRuntimeDriver {
         &self.runtime_id
     }
 
-    /// Set the list of comms intents that should be silently accepted (delegates to inner).
-    pub fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
-        self.inner.set_silent_comms_intents(intents);
-    }
-
     pub fn silent_comms_intents(&self) -> Vec<String> {
         self.inner.silent_comms_intents()
     }

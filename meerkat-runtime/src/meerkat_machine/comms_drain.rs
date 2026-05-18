@@ -332,12 +332,12 @@ impl MeerkatMachine {
             .dsl_authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match authority.state.peer_ingress_owner_kind {
+        match authority.state().peer_ingress_owner_kind {
             crate::meerkat_machine::dsl::PeerIngressOwnerKind::Unattached => {
                 PeerIngressOwner::Unattached
             }
             crate::meerkat_machine::dsl::PeerIngressOwnerKind::SessionOwned => {
-                match authority.state.peer_ingress_comms_runtime_id.clone() {
+                match authority.state().peer_ingress_comms_runtime_id.clone() {
                     Some(comms_runtime_id) => PeerIngressOwner::SessionOwned { comms_runtime_id },
                     None => {
                         tracing::error!(
@@ -350,8 +350,8 @@ impl MeerkatMachine {
             }
             crate::meerkat_machine::dsl::PeerIngressOwnerKind::MobOwned => {
                 match (
-                    authority.state.peer_ingress_comms_runtime_id.clone(),
-                    authority.state.peer_ingress_mob_id.clone(),
+                    authority.state().peer_ingress_comms_runtime_id.clone(),
+                    authority.state().peer_ingress_mob_id.clone(),
                 ) {
                     (Some(comms_runtime_id), Some(mob_id)) => PeerIngressOwner::MobOwned {
                         comms_runtime_id,
@@ -627,16 +627,16 @@ impl MeerkatMachine {
             .dsl_authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match authority.state.supervisor_binding_kind {
+        match authority.state().supervisor_binding_kind {
             crate::meerkat_machine::dsl::SupervisorBindingKind::Unbound => {
                 SupervisorBinding::Unbound
             }
             crate::meerkat_machine::dsl::SupervisorBindingKind::Bound => {
                 match (
-                    authority.state.supervisor_bound_name.clone(),
-                    authority.state.supervisor_bound_peer_id.clone(),
-                    authority.state.supervisor_bound_address.clone(),
-                    authority.state.supervisor_bound_epoch,
+                    authority.state().supervisor_bound_name.clone(),
+                    authority.state().supervisor_bound_peer_id.clone(),
+                    authority.state().supervisor_bound_address.clone(),
+                    authority.state().supervisor_bound_epoch,
                 ) {
                     (Some(name), Some(peer_id), Some(address), Some(epoch)) => {
                         SupervisorBinding::Bound {
@@ -1044,10 +1044,10 @@ impl MeerkatMachine {
             // just committed the transition. No interleaved mutation
             // can slip between the commit and this read.
             let effective: BTreeSet<_> = authority
-                .state
+                .state()
                 .direct_peer_endpoints
                 .iter()
-                .chain(authority.state.mob_overlay_peer_endpoints.iter())
+                .chain(authority.state().mob_overlay_peer_endpoints.iter())
                 .cloned()
                 .collect();
             (epoch, effective)

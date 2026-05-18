@@ -1042,6 +1042,16 @@ impl MobMachineState {
 mod tests {
     use super::*;
 
+    fn mutate_authority_state(
+        authority: &mut MobMachineAuthority,
+        mutate: impl FnOnce(&mut MobMachineState),
+    ) {
+        let mut state = authority.state().clone();
+        mutate(&mut state);
+        *authority = MobMachineAuthority::recover_from_state(state)
+            .expect("test MobMachine state must be recoverable");
+    }
+
     fn seed_run(authority: &mut MobMachineAuthority, run_id: &RunId) {
         MobMachineMutator::apply(
             authority,
@@ -1070,19 +1080,18 @@ mod tests {
         identity: &AgentIdentity,
         runtime_id: &AgentRuntimeId,
     ) {
-        authority.state.live_runtime_ids.insert(runtime_id.clone());
-        authority
-            .state
-            .externally_addressable_runtime_ids
-            .insert(runtime_id.clone());
-        authority
-            .state
-            .runtime_fence_tokens
-            .insert(runtime_id.clone(), FenceToken(7));
-        authority
-            .state
-            .identity_to_runtime
-            .insert(identity.clone(), runtime_id.clone());
+        mutate_authority_state(authority, |state| {
+            state.live_runtime_ids.insert(runtime_id.clone());
+            state
+                .externally_addressable_runtime_ids
+                .insert(runtime_id.clone());
+            state
+                .runtime_fence_tokens
+                .insert(runtime_id.clone(), FenceToken(7));
+            state
+                .identity_to_runtime
+                .insert(identity.clone(), runtime_id.clone());
+        });
     }
 
     fn seed_root_frame(
@@ -1155,24 +1164,27 @@ mod tests {
 
         assert_eq!(transition.to_phase, MobPhase::Running);
         assert_eq!(
-            authority.state.run_status.get(&run_id),
+            authority.state().run_status.get(&run_id),
             Some(&FlowRunStatus::Pending)
         );
         assert_eq!(
-            authority.state.run_ordered_steps.get(&run_id),
+            authority.state().run_ordered_steps.get(&run_id),
             Some(&vec![step_id.clone()])
         );
         assert_eq!(
             authority
-                .state
+                .state()
                 .run_step_dependency_modes
                 .get(&run_id)
                 .and_then(|map| map.get(&step_id)),
             Some(&DependencyMode::All)
         );
-        assert_eq!(authority.state.run_max_active_nodes.get(&run_id), Some(&2));
         assert_eq!(
-            authority.state.run_ready_frames.get(&run_id),
+            authority.state().run_max_active_nodes.get(&run_id),
+            Some(&2)
+        );
+        assert_eq!(
+            authority.state().run_ready_frames.get(&run_id),
             Some(&Vec::new())
         );
     }
@@ -1196,10 +1208,11 @@ mod tests {
         )
         .expect("live externally addressable member should accept work");
 
-        authority
-            .state
-            .member_state_markers
-            .insert(runtime_id.clone(), MobMemberState::Retiring);
+        mutate_authority_state(&mut authority, |state| {
+            state
+                .member_state_markers
+                .insert(runtime_id.clone(), MobMemberState::Retiring);
+        });
 
         let rejected = MobMachineMutator::apply(
             &mut authority,
@@ -1324,17 +1337,17 @@ mod tests {
 
         assert_eq!(transition.to_phase, MobPhase::Running);
         assert_eq!(
-            authority.state.frame_scope.get(&frame_id),
+            authority.state().frame_scope.get(&frame_id),
             Some(&FrameScope::Root)
         );
-        assert_eq!(authority.state.frame_run.get(&frame_id), Some(&run_id));
+        assert_eq!(authority.state().frame_run.get(&frame_id), Some(&run_id));
         assert_eq!(
-            authority.state.frame_ordered_nodes.get(&frame_id),
+            authority.state().frame_ordered_nodes.get(&frame_id),
             Some(&vec![node_id.clone()])
         );
         assert_eq!(
             authority
-                .state
+                .state()
                 .frame_node_kind
                 .get(&frame_id)
                 .and_then(|map| map.get(&node_id)),
@@ -1366,31 +1379,31 @@ mod tests {
 
         assert_eq!(transition.to_phase, MobPhase::Running);
         assert_eq!(
-            authority.state.loop_parent_frame.get(&loop_instance_id),
+            authority.state().loop_parent_frame.get(&loop_instance_id),
             Some(&frame_id)
         );
         assert_eq!(
-            authority.state.loop_parent_node.get(&loop_instance_id),
+            authority.state().loop_parent_node.get(&loop_instance_id),
             Some(&node_id)
         );
         assert_eq!(
-            authority.state.loop_definition.get(&loop_instance_id),
+            authority.state().loop_definition.get(&loop_instance_id),
             Some(&loop_id)
         );
         assert_eq!(
-            authority.state.loop_stage.get(&loop_instance_id),
+            authority.state().loop_stage.get(&loop_instance_id),
             Some(&LoopIterationStage::AwaitingBodyFrame)
         );
         assert_eq!(
             authority
-                .state
+                .state()
                 .loop_current_iteration
                 .get(&loop_instance_id),
             Some(&0)
         );
         assert_eq!(
             authority
-                .state
+                .state()
                 .loop_last_completed_iteration
                 .get(&loop_instance_id),
             Some(&0)
@@ -1422,10 +1435,12 @@ mod tests {
             },
         )
         .expect("CreateLoopSeed should be accepted");
-        authority.state.loop_stage.insert(
-            loop_instance_id.clone(),
-            LoopIterationStage::BodyFrameActive,
-        );
+        mutate_authority_state(&mut authority, |state| {
+            state.loop_stage.insert(
+                loop_instance_id.clone(),
+                LoopIterationStage::BodyFrameActive,
+            );
+        });
 
         MobMachineMutator::apply(
             &mut authority,
@@ -1436,12 +1451,12 @@ mod tests {
         )
         .expect("body completion should be accepted");
         assert_eq!(
-            authority.state.loop_stage.get(&loop_instance_id),
+            authority.state().loop_stage.get(&loop_instance_id),
             Some(&LoopIterationStage::AwaitingUntilEvaluation)
         );
         assert_eq!(
             authority
-                .state
+                .state()
                 .loop_current_iteration
                 .get(&loop_instance_id),
             Some(&1)
@@ -1456,14 +1471,16 @@ mod tests {
         )
         .expect("until=false should request another body frame");
         assert_eq!(
-            authority.state.loop_stage.get(&loop_instance_id),
+            authority.state().loop_stage.get(&loop_instance_id),
             Some(&LoopIterationStage::AwaitingBodyFrame)
         );
 
-        authority.state.loop_stage.insert(
-            loop_instance_id.clone(),
-            LoopIterationStage::BodyFrameActive,
-        );
+        mutate_authority_state(&mut authority, |state| {
+            state.loop_stage.insert(
+                loop_instance_id.clone(),
+                LoopIterationStage::BodyFrameActive,
+            );
+        });
         MobMachineMutator::apply(
             &mut authority,
             MobMachineInput::RecordLoopBodyFrameCompleted {
@@ -1481,7 +1498,7 @@ mod tests {
         )
         .expect("until=true should complete the loop");
         assert_eq!(
-            authority.state.loop_phase.get(&loop_instance_id),
+            authority.state().loop_phase.get(&loop_instance_id),
             Some(&LoopStatus::Completed)
         );
     }
@@ -1491,20 +1508,19 @@ mod tests {
         let mut authority = MobMachineAuthority::new();
         let runtime_id = AgentRuntimeId::from("worker:1");
         let fence_token = FenceToken(7);
-        authority.state.live_runtime_ids.insert(runtime_id.clone());
-        authority
-            .state
-            .externally_addressable_runtime_ids
-            .insert(runtime_id.clone());
-        authority
-            .state
-            .runtime_fence_tokens
-            .insert(runtime_id.clone(), fence_token);
-        authority
-            .state
-            .member_state_markers
-            .insert(runtime_id.clone(), MobMemberState::Retiring);
-        authority.state.active_run_count = 3;
+        mutate_authority_state(&mut authority, |state| {
+            state.live_runtime_ids.insert(runtime_id.clone());
+            state
+                .externally_addressable_runtime_ids
+                .insert(runtime_id.clone());
+            state
+                .runtime_fence_tokens
+                .insert(runtime_id.clone(), fence_token);
+            state
+                .member_state_markers
+                .insert(runtime_id.clone(), MobMemberState::Retiring);
+            state.active_run_count = 3;
+        });
 
         let transition = authority
             .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
@@ -1514,27 +1530,27 @@ mod tests {
             .expect("runtime retire observation should be accepted");
 
         assert_eq!(transition.to_phase, MobPhase::Running);
-        assert_eq!(authority.state.lifecycle_phase, MobPhase::Running);
-        assert!(!authority.state.live_runtime_ids.contains(&runtime_id));
+        assert_eq!(authority.state().lifecycle_phase, MobPhase::Running);
+        assert!(!authority.state().live_runtime_ids.contains(&runtime_id));
         assert!(
             !authority
-                .state
+                .state()
                 .externally_addressable_runtime_ids
                 .contains(&runtime_id)
         );
         assert!(
             !authority
-                .state
+                .state()
                 .runtime_fence_tokens
                 .contains_key(&runtime_id)
         );
         assert!(
             !authority
-                .state
+                .state()
                 .member_state_markers
                 .contains_key(&runtime_id)
         );
-        assert_eq!(authority.state.active_run_count, 0);
+        assert_eq!(authority.state().active_run_count, 0);
     }
 
     #[test]
@@ -1544,7 +1560,7 @@ mod tests {
         let runtime_id = AgentRuntimeId::from("worker:1");
 
         assert_eq!(
-            authority.state.member_lifecycle_for_identity(&identity),
+            authority.state().member_lifecycle_for_identity(&identity),
             MobMemberLifecycleMaterial {
                 status: MobMemberLifecycleStatus::Unknown,
                 terminal_class: MobMemberTerminalClass::TerminalUnknown,
@@ -1552,12 +1568,13 @@ mod tests {
             }
         );
 
-        authority
-            .state
-            .identity_to_runtime
-            .insert(identity.clone(), runtime_id.clone());
-        authority.state.live_runtime_ids.insert(runtime_id.clone());
-        let active = authority.state.member_lifecycle_for_identity(&identity);
+        mutate_authority_state(&mut authority, |state| {
+            state
+                .identity_to_runtime
+                .insert(identity.clone(), runtime_id.clone());
+            state.live_runtime_ids.insert(runtime_id.clone());
+        });
+        let active = authority.state().member_lifecycle_for_identity(&identity);
         assert_eq!(
             active,
             MobMemberLifecycleMaterial {
@@ -1568,11 +1585,12 @@ mod tests {
         );
         assert!(!active.is_terminal());
 
-        authority
-            .state
-            .member_state_markers
-            .insert(runtime_id.clone(), MobMemberState::Retiring);
-        let retiring = authority.state.member_lifecycle_for_identity(&identity);
+        mutate_authority_state(&mut authority, |state| {
+            state
+                .member_state_markers
+                .insert(runtime_id.clone(), MobMemberState::Retiring);
+        });
+        let retiring = authority.state().member_lifecycle_for_identity(&identity);
         assert_eq!(
             retiring,
             MobMemberLifecycleMaterial {
@@ -1583,9 +1601,11 @@ mod tests {
         );
         assert!(!retiring.is_terminal());
 
-        authority.state.member_state_markers.remove(&runtime_id);
-        authority.state.live_runtime_ids.remove(&runtime_id);
-        let completed = authority.state.member_lifecycle_for_identity(&identity);
+        mutate_authority_state(&mut authority, |state| {
+            state.member_state_markers.remove(&runtime_id);
+            state.live_runtime_ids.remove(&runtime_id);
+        });
+        let completed = authority.state().member_lifecycle_for_identity(&identity);
         assert_eq!(
             completed,
             MobMemberLifecycleMaterial {
@@ -1603,18 +1623,18 @@ mod tests {
         let identity = AgentIdentity::from("worker");
         let runtime_id = AgentRuntimeId::from("worker:1");
 
-        authority
-            .state
-            .identity_to_runtime
-            .insert(identity.clone(), runtime_id.clone());
-        authority.state.live_runtime_ids.insert(runtime_id);
-        authority
-            .state
-            .member_restore_failures
-            .insert(identity.clone(), "missing durable session".to_string());
+        mutate_authority_state(&mut authority, |state| {
+            state
+                .identity_to_runtime
+                .insert(identity.clone(), runtime_id.clone());
+            state.live_runtime_ids.insert(runtime_id);
+            state
+                .member_restore_failures
+                .insert(identity.clone(), "missing durable session".to_string());
+        });
 
         assert_eq!(
-            authority.state.member_lifecycle_for_identity(&identity),
+            authority.state().member_lifecycle_for_identity(&identity),
             MobMemberLifecycleMaterial {
                 status: MobMemberLifecycleStatus::Broken,
                 terminal_class: MobMemberTerminalClass::TerminalFailure,

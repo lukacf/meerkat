@@ -53,7 +53,7 @@ pub(crate) fn pre_run_phase_to_runtime_state(phase: mm_dsl::PreRunPhase) -> Runt
 pub(crate) fn runtime_phase_from_authority(
     authority: &mm_dsl::MeerkatMachineAuthority,
 ) -> RuntimeState {
-    write_back_phase(authority.state.lifecycle_phase)
+    write_back_phase(authority.state().lifecycle_phase)
 }
 
 pub(crate) fn visible_runtime_phase(
@@ -95,7 +95,7 @@ pub(crate) fn current_run_id_from_authority(
     authority: &mm_dsl::MeerkatMachineAuthority,
 ) -> Option<RunId> {
     authority
-        .state
+        .state()
         .current_run_id
         .as_ref()
         .and_then(current_run_id_from_dsl)
@@ -105,7 +105,7 @@ pub(crate) fn pre_run_phase_from_authority(
     authority: &mm_dsl::MeerkatMachineAuthority,
 ) -> Option<RuntimeState> {
     authority
-        .state
+        .state()
         .pre_run_phase
         .map(pre_run_phase_to_runtime_state)
 }

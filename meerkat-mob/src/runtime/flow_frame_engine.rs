@@ -407,8 +407,14 @@ impl FlowFrameKernel {
         &self,
         inputs: &[mob_dsl::MobMachineInput],
     ) -> Result<mob_dsl::MobMachineState, MobError> {
-        let mut authority =
-            mob_dsl::MobMachineAuthority::from_state(self.current_mob_machine_state().await?);
+        let mut authority = mob_dsl::MobMachineAuthority::recover_from_state(
+            self.current_mob_machine_state().await?,
+        )
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "MobMachine preview could not recover current state: {error}"
+            ))
+        })?;
         for input in inputs {
             let transition = mob_dsl::MobMachineMutator::apply(&mut authority, input.clone())
                 .map_err(|error| {
@@ -418,7 +424,7 @@ impl FlowFrameKernel {
                 })?;
             let _ = transition;
         }
-        Ok(authority.state)
+        Ok(authority.state().clone())
     }
 
     async fn current_mob_machine_state(&self) -> Result<mob_dsl::MobMachineState, MobError> {

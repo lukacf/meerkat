@@ -514,7 +514,7 @@ impl MeerkatMachine {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 Ok(MeerkatMachineCommandResult::SessionModelRoutingStatus(
-                    project_model_routing_status(&authority.state),
+                    project_model_routing_status(authority.state()),
                 ))
             }
             MeerkatMachineCommand::RequestSwitchTurn {

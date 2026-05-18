@@ -123,7 +123,7 @@ impl MeerkatMachine {
                 let authority = dsl_authority_shared
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                authority.state.active_runtime_id.clone()
+                authority.state().active_runtime_id.clone()
             };
             if let Some(existing_runtime_id) = existing_runtime_id {
                 if existing_runtime_id != agent_runtime_id {
@@ -327,27 +327,18 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::SetSilentIntents {
-                            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
-                                &session_id,
-                            ),
-                            intents: intents.clone().into_iter().collect(),
-                        },
-                        "SetSilentIntents",
-                    )
-                    .await
-                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-                if previous_dsl_state.state().lifecycle_phase
-                    != crate::meerkat_machine::dsl::MeerkatPhase::Stopped
-                {
-                    self.set_session_silent_intents_inner(&session_id, intents)
-                        .await;
-                }
-                // set_session_silent_intents_inner is infallible — no rollback needed.
-                let _ = previous_dsl_state;
+                self.stage_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::SetSilentIntents {
+                        session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
+                            &session_id,
+                        ),
+                        intents: intents.into_iter().collect(),
+                    },
+                    "SetSilentIntents",
+                )
+                .await
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::CancelAfterBoundary { session_id } => {

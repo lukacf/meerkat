@@ -195,13 +195,15 @@ impl Occurrence {
         let dsl_input = convert_occurrence_input(&input);
 
         // 3. Run DSL dispatch
-        let mut dsl_auth = occ_dsl::OccurrenceLifecycleMachineAuthority::from_state(dsl_state);
+        let mut dsl_auth =
+            occ_dsl::OccurrenceLifecycleMachineAuthority::recover_from_state(dsl_state)
+                .map_err(|e| map_occurrence_error(e, &input))?;
         let transition =
             occ_dsl::OccurrenceLifecycleMachineMutator::apply(&mut dsl_auth, dsl_input)
                 .map_err(|e| map_occurrence_error(e, &input))?;
 
         // 4. Write DSL state → occurrence
-        write_back_occurrence(&dsl_auth.state, &mut self, &input);
+        write_back_occurrence(dsl_auth.state(), &mut self, &input);
 
         // 5. Map effects
         let effects = transition
@@ -716,10 +718,11 @@ fn run_schedule_dsl(
     ScheduleLifecycleError,
 > {
     let dsl_state = project_schedule(schedule);
-    let mut dsl_auth = sched_dsl::ScheduleLifecycleMachineAuthority::from_state(dsl_state);
+    let mut dsl_auth = sched_dsl::ScheduleLifecycleMachineAuthority::recover_from_state(dsl_state)
+        .map_err(|_| ScheduleLifecycleError::Deleted)?;
     let transition = sched_dsl::ScheduleLifecycleMachineMutator::apply(&mut dsl_auth, dsl_input)
         .map_err(|_| ScheduleLifecycleError::Deleted)?;
-    Ok((transition, dsl_auth.state))
+    Ok((transition, dsl_auth.state().clone()))
 }
 
 /// Project a domain `Schedule` into the DSL flat state struct.

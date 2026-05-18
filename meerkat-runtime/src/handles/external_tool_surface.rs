@@ -36,7 +36,8 @@ impl RuntimeExternalToolSurfaceHandle {
             ..Default::default()
         };
         let shared = Arc::new(std::sync::Mutex::new(
-            mm_dsl::MeerkatMachineAuthority::from_state(state),
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+                .expect("ephemeral external tool surface state must be recoverable"),
         ));
         Self::new(Arc::new(HandleDslAuthority::from_shared(shared)))
     }
@@ -501,7 +502,8 @@ mod tests {
             lifecycle_phase: phase,
             ..Default::default()
         };
-        let authority = mm_dsl::MeerkatMachineAuthority::from_state(state);
+        let authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("test MeerkatMachine state must be recoverable");
         let shared = Arc::new(Mutex::new(authority));
         RuntimeExternalToolSurfaceHandle::new(Arc::new(HandleDslAuthority::from_shared(shared)))
     }
@@ -517,7 +519,8 @@ mod tests {
             surface_id.to_owned(),
             mm_dsl::ExternalToolSurfaceBaseState::Active,
         );
-        let authority = mm_dsl::MeerkatMachineAuthority::from_state(state);
+        let authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("test MeerkatMachine state must be recoverable");
         let shared = Arc::new(Mutex::new(authority));
         RuntimeExternalToolSurfaceHandle::new(Arc::new(HandleDslAuthority::from_shared(shared)))
     }

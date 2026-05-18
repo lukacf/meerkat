@@ -380,7 +380,7 @@ fn apply_new_item_dsl(
     let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     Ok(AppliedWorkGraphDsl {
-        state: dsl_auth.state,
+        state: dsl_auth.state().clone(),
         effects: transition.effects,
     })
 }
@@ -389,7 +389,8 @@ fn apply_link_validation_dsl(
     state: WorkGraphMachineState,
     input: wg_dsl::WorkGraphLifecycleInput,
 ) -> Result<Vec<wg_dsl::WorkGraphLifecycleEffect>, WorkGraphError> {
-    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::from_state(state);
+    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(state)
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     Ok(transition.effects)
@@ -413,7 +414,8 @@ where
 {
     validate_item_machine_projection(item)?;
     let mut dsl_auth =
-        wg_dsl::WorkGraphLifecycleMachineAuthority::from_state(item.machine_state.clone());
+        wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(item.machine_state.clone())
+            .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     let mut effects = Vec::new();
     for input in inputs {
         let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
@@ -432,7 +434,7 @@ where
         effects.extend(transition.effects);
     }
     Ok(AppliedWorkGraphDsl {
-        state: dsl_auth.state,
+        state: dsl_auth.state().clone(),
         effects,
     })
 }

@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn initial_state_is_pending() {
         let auth = OccurrenceLifecycleMachineAuthority::new();
-        assert_eq!(auth.state.phase(), OccurrenceLifecycleState::Pending);
+        assert_eq!(auth.state().phase(), OccurrenceLifecycleState::Pending);
     }
 
     #[test]
@@ -381,7 +381,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.to_phase, OccurrenceLifecycleState::Claimed);
-        assert_eq!(auth.state.attempt_count, 1);
+        assert_eq!(auth.state().attempt_count, 1);
 
         // Dispatch
         let r = OccurrenceLifecycleMachineMutator::apply(
@@ -448,7 +448,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.to_phase, OccurrenceLifecycleState::Pending);
-        assert_eq!(auth.state.claimed_by, None);
+        assert_eq!(auth.state().claimed_by, None);
     }
 
     #[test]

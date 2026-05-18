@@ -453,9 +453,10 @@ mod tests {
             session_id: Some(mm_dsl::SessionId("session-1".to_string())),
             ..Default::default()
         };
-        let authority = Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
-            state,
-        )));
+        let authority = Arc::new(Mutex::new(
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+                .expect("test MeerkatMachine state must be recoverable"),
+        ));
         RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(authority)))
     }
 
@@ -467,9 +468,10 @@ mod tests {
             silent_intent_overrides: BTreeSet::from(["probe.silent".to_string()]),
             ..Default::default()
         };
-        let authority = Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
-            state,
-        )));
+        let authority = Arc::new(Mutex::new(
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+                .expect("test MeerkatMachine state must be recoverable"),
+        ));
         let handle =
             RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(authority)));
 
@@ -503,9 +505,10 @@ mod tests {
             session_id: Some(mm_dsl::SessionId("session-1".to_string())),
             ..Default::default()
         };
-        let authority = Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
-            state,
-        )));
+        let authority = Arc::new(Mutex::new(
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+                .expect("test MeerkatMachine state must be recoverable"),
+        ));
         let handle =
             RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(authority)));
 

@@ -60,6 +60,22 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             }
         })
         .collect();
+    let recovered_state_validations: Vec<_> = def
+        .invariants
+        .iter()
+        .map(|inv| {
+            let inv_name_str = inv.name.to_string();
+            let check = gen_expr(&inv.expr, FieldPrefix::AuthorityState);
+            quote! {
+                if !(#check) {
+                    return Err(#error_name::GuardRejected {
+                        phase: format!("{:?}", self.state.phase()),
+                        trigger: format!("recover authority state violated invariant '{}'", #inv_name_str),
+                    });
+                }
+            }
+        })
+        .collect();
 
     let helpers: Vec<_> = def.helpers.iter().map(gen_helper).collect();
 
@@ -141,7 +157,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         }
 
         pub struct #authority_name {
-            pub state: #state_name,
+            state: #state_name,
         }
 
         #[derive(Clone, Debug)]
@@ -162,8 +178,25 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                 Self { state: #state_name::default() }
             }
 
-            pub fn from_state(state: #state_name) -> Self {
-                Self { state }
+            pub fn state(&self) -> &#state_name {
+                &self.state
+            }
+
+            pub fn recover_from_state(state: #state_name) -> Result<Self, #error_name> {
+                let authority = Self { state };
+                authority.validate_recovered_state()?;
+                Ok(authority)
+            }
+
+            fn validate_recovered_state(&self) -> Result<(), #error_name> {
+                #(#recovered_state_validations)*
+                Ok(())
+            }
+
+            pub fn fork(&self) -> Self {
+                Self {
+                    state: self.state.clone(),
+                }
             }
 
             pub fn snapshot(&self) -> #authority_snapshot_name {

@@ -3879,7 +3879,7 @@ impl MobRun {
         )?;
 
         let projected_flow_state =
-            project_flow_run_state_from_machine(&authority.state, &self.run_id)?;
+            project_flow_run_state_from_machine(authority.state(), &self.run_id)?;
         if projected_flow_state != self.flow_state {
             return Err(MobError::Internal(format!(
                 "flow authority log projection mismatch for run '{}': flow_state diverged",
@@ -3897,7 +3897,7 @@ impl MobRun {
 
         let run_key = mob_dsl::RunId::from(self.run_id.to_string());
         let projected_frame_ids = authority
-            .state
+            .state()
             .frame_run
             .iter()
             .filter(|(_, frame_run_id)| *frame_run_id == &run_key)
@@ -3913,7 +3913,7 @@ impl MobRun {
 
         for (frame_id, snapshot) in &self.frames {
             let projected =
-                project_flow_frame_authority_state_from_machine(&authority.state, frame_id)?;
+                project_flow_frame_authority_state_from_machine(authority.state(), frame_id)?;
             if projected != snapshot.kernel_state {
                 return Err(MobError::Internal(format!(
                     "flow authority log projection mismatch for run '{}': frame '{}' diverged",
@@ -3923,15 +3923,15 @@ impl MobRun {
         }
 
         let projected_loop_ids = authority
-            .state
+            .state()
             .loop_phase
             .keys()
             .filter(|loop_instance_id| {
                 authority
-                    .state
+                    .state()
                     .loop_parent_frame
                     .get(*loop_instance_id)
-                    .and_then(|frame_id| authority.state.frame_run.get(frame_id))
+                    .and_then(|frame_id| authority.state().frame_run.get(frame_id))
                     == Some(&run_key)
             })
             .map(project_loop_instance_id)
@@ -3946,7 +3946,7 @@ impl MobRun {
 
         for (loop_instance_id, snapshot) in &self.loops {
             let projected =
-                project_loop_iteration_state_from_machine(&authority.state, loop_instance_id)?;
+                project_loop_iteration_state_from_machine(authority.state(), loop_instance_id)?;
             if projected != snapshot.kernel_state {
                 return Err(MobError::Internal(format!(
                     "flow authority log projection mismatch for run '{}': loop '{}' diverged",
@@ -4029,7 +4029,7 @@ impl MobRun {
         let mut authority = mob_dsl::MobMachineAuthority::new();
         mob_dsl::MobMachineMutator::apply(&mut authority, seed_input)
             .map_err(|error| MobError::Internal(format!("test CreateRunSeed rejected: {error}")))?;
-        Self::flow_state_for_config_with_authority(&run_id, config, &authority.state)
+        Self::flow_state_for_config_with_authority(&run_id, config, authority.state())
     }
 
     #[cfg(test)]
@@ -4083,7 +4083,7 @@ impl MobRun {
         mob_dsl::MobMachineMutator::apply(&mut authority, seed_input.clone())
             .map_err(|error| MobError::Internal(format!("test CreateRunSeed rejected: {error}")))?;
         let flow_state =
-            Self::flow_state_for_config_with_authority(&run_id, &config, &authority.state)?;
+            Self::flow_state_for_config_with_authority(&run_id, &config, authority.state())?;
         let mut run =
             Self::pending_with_run_id(run_id, mob_id, flow_id, flow_state, activation_params);
         run.append_flow_authority_inputs(vec![seed_input])?;
@@ -4151,7 +4151,7 @@ impl MobRun {
             MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&input)?;
         let outcome = apply_mob_machine_flow_run_command(
             &self.flow_state,
-            &authority.state,
+            authority.state(),
             &self.run_id,
             command,
             authority_token,
@@ -4517,7 +4517,7 @@ impl MobRun {
         let mut authority = mob_dsl::MobMachineAuthority::new();
         mob_dsl::MobMachineMutator::apply(&mut authority, seed_input)
             .map_err(|error| MobError::Internal(format!("test CreateRunSeed rejected: {error}")))?;
-        Self::flow_state_for_config_with_authority(&run_id, &config, &authority.state)
+        Self::flow_state_for_config_with_authority(&run_id, &config, authority.state())
     }
 }
 

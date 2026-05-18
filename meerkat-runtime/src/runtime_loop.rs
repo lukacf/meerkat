@@ -335,7 +335,7 @@ async fn prepare_turn_state_for_primitive(
     // guard on Initializing/Attached — no Retired variant. Skip the
     // signal during drain; shell-side `set_control_projection` has
     // already advanced control so `executor.apply` proceeds next.
-    if auth.state.lifecycle_phase == crate::meerkat_machine::dsl::MeerkatPhase::Retired {
+    if auth.state().lifecycle_phase == crate::meerkat_machine::dsl::MeerkatPhase::Retired {
         return Ok(());
     }
     crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *auth, input)

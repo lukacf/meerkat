@@ -320,12 +320,13 @@ pub fn runtime_stamped_prompt_turn_metadata(
 }
 
 fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::RuntimeInputSemantics {
-    let mut authority = meerkat_machine::dsl::MeerkatMachineAuthority::from_state(
+    let mut authority = meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(
         meerkat_machine::dsl::MeerkatMachineState {
             lifecycle_phase: meerkat_machine::dsl::MeerkatPhase::Idle,
             ..meerkat_machine::dsl::MeerkatMachineState::default()
         },
-    );
+    )
+    .expect("projected runtime prompt machine state must be recoverable");
     let transition = meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut authority,
         meerkat_machine::dsl::MeerkatMachineInput::ResolveAdmissionPlan {

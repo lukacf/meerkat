@@ -84,6 +84,22 @@ macro_rules! auth_catalog_machine_dsl {
                 MarkReauthRequired,
                 ClearCredentialLifecycle,
                 Release,
+                RestoreAuthoritySnapshot {
+                    lifecycle_phase: AuthLifecyclePhase,
+                    expires_at: Option<u64>,
+                    last_refresh: Option<u64>,
+                    refresh_attempt: u64,
+                    credential_present: bool,
+                    oauth_browser_flow_ids: Set<String>,
+                    oauth_browser_flow_providers: Map<String, String>,
+                    oauth_browser_flow_redirect_uris: Map<String, String>,
+                    oauth_browser_flow_expires_at_millis: Map<String, u64>,
+                    oauth_device_flow_ids: Set<String>,
+                    oauth_device_flow_providers: Map<String, String>,
+                    oauth_device_flow_expires_at_millis: Map<String, u64>,
+                    oauth_device_poll_ids: Set<String>,
+                    oauth_outstanding_flow_count: u64,
+                },
                 AdmitOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64 },
                 VerifyOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, now_millis: u64 },
                 ConsumeOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, now_millis: u64 },
@@ -218,6 +234,191 @@ macro_rules! auth_catalog_machine_dsl {
                     self.oauth_device_flow_expires_at_millis = EmptyMap;
                     self.oauth_device_poll_ids = EmptySet;
                     self.oauth_outstanding_flow_count = 0;
+                }
+                to Released
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition RestoreAuthoritySnapshotValid {
+                on input RestoreAuthoritySnapshot {
+                    lifecycle_phase,
+                    expires_at,
+                    last_refresh,
+                    refresh_attempt,
+                    credential_present,
+                    oauth_browser_flow_ids,
+                    oauth_browser_flow_providers,
+                    oauth_browser_flow_redirect_uris,
+                    oauth_browser_flow_expires_at_millis,
+                    oauth_device_flow_ids,
+                    oauth_device_flow_providers,
+                    oauth_device_flow_expires_at_millis,
+                    oauth_device_poll_ids,
+                    oauth_outstanding_flow_count
+                }
+                guard { lifecycle_phase == Phase::Valid && credential_present }
+                update {
+                    self.expires_at = expires_at;
+                    self.last_refresh = last_refresh;
+                    self.refresh_attempt = refresh_attempt;
+                    self.credential_present = credential_present;
+                    self.oauth_browser_flow_ids = oauth_browser_flow_ids;
+                    self.oauth_browser_flow_providers = oauth_browser_flow_providers;
+                    self.oauth_browser_flow_redirect_uris = oauth_browser_flow_redirect_uris;
+                    self.oauth_browser_flow_expires_at_millis = oauth_browser_flow_expires_at_millis;
+                    self.oauth_device_flow_ids = oauth_device_flow_ids;
+                    self.oauth_device_flow_providers = oauth_device_flow_providers;
+                    self.oauth_device_flow_expires_at_millis = oauth_device_flow_expires_at_millis;
+                    self.oauth_device_poll_ids = oauth_device_poll_ids;
+                    self.oauth_outstanding_flow_count = oauth_outstanding_flow_count;
+                }
+                to Valid
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition RestoreAuthoritySnapshotExpiring {
+                on input RestoreAuthoritySnapshot {
+                    lifecycle_phase,
+                    expires_at,
+                    last_refresh,
+                    refresh_attempt,
+                    credential_present,
+                    oauth_browser_flow_ids,
+                    oauth_browser_flow_providers,
+                    oauth_browser_flow_redirect_uris,
+                    oauth_browser_flow_expires_at_millis,
+                    oauth_device_flow_ids,
+                    oauth_device_flow_providers,
+                    oauth_device_flow_expires_at_millis,
+                    oauth_device_poll_ids,
+                    oauth_outstanding_flow_count
+                }
+                guard { lifecycle_phase == Phase::Expiring && credential_present }
+                update {
+                    self.expires_at = expires_at;
+                    self.last_refresh = last_refresh;
+                    self.refresh_attempt = refresh_attempt;
+                    self.credential_present = credential_present;
+                    self.oauth_browser_flow_ids = oauth_browser_flow_ids;
+                    self.oauth_browser_flow_providers = oauth_browser_flow_providers;
+                    self.oauth_browser_flow_redirect_uris = oauth_browser_flow_redirect_uris;
+                    self.oauth_browser_flow_expires_at_millis = oauth_browser_flow_expires_at_millis;
+                    self.oauth_device_flow_ids = oauth_device_flow_ids;
+                    self.oauth_device_flow_providers = oauth_device_flow_providers;
+                    self.oauth_device_flow_expires_at_millis = oauth_device_flow_expires_at_millis;
+                    self.oauth_device_poll_ids = oauth_device_poll_ids;
+                    self.oauth_outstanding_flow_count = oauth_outstanding_flow_count;
+                }
+                to Expiring
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition RestoreAuthoritySnapshotRefreshing {
+                on input RestoreAuthoritySnapshot {
+                    lifecycle_phase,
+                    expires_at,
+                    last_refresh,
+                    refresh_attempt,
+                    credential_present,
+                    oauth_browser_flow_ids,
+                    oauth_browser_flow_providers,
+                    oauth_browser_flow_redirect_uris,
+                    oauth_browser_flow_expires_at_millis,
+                    oauth_device_flow_ids,
+                    oauth_device_flow_providers,
+                    oauth_device_flow_expires_at_millis,
+                    oauth_device_poll_ids,
+                    oauth_outstanding_flow_count
+                }
+                guard { lifecycle_phase == Phase::Refreshing && credential_present }
+                update {
+                    self.expires_at = expires_at;
+                    self.last_refresh = last_refresh;
+                    self.refresh_attempt = refresh_attempt;
+                    self.credential_present = credential_present;
+                    self.oauth_browser_flow_ids = oauth_browser_flow_ids;
+                    self.oauth_browser_flow_providers = oauth_browser_flow_providers;
+                    self.oauth_browser_flow_redirect_uris = oauth_browser_flow_redirect_uris;
+                    self.oauth_browser_flow_expires_at_millis = oauth_browser_flow_expires_at_millis;
+                    self.oauth_device_flow_ids = oauth_device_flow_ids;
+                    self.oauth_device_flow_providers = oauth_device_flow_providers;
+                    self.oauth_device_flow_expires_at_millis = oauth_device_flow_expires_at_millis;
+                    self.oauth_device_poll_ids = oauth_device_poll_ids;
+                    self.oauth_outstanding_flow_count = oauth_outstanding_flow_count;
+                }
+                to Refreshing
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition RestoreAuthoritySnapshotReauthRequired {
+                on input RestoreAuthoritySnapshot {
+                    lifecycle_phase,
+                    expires_at,
+                    last_refresh,
+                    refresh_attempt,
+                    credential_present,
+                    oauth_browser_flow_ids,
+                    oauth_browser_flow_providers,
+                    oauth_browser_flow_redirect_uris,
+                    oauth_browser_flow_expires_at_millis,
+                    oauth_device_flow_ids,
+                    oauth_device_flow_providers,
+                    oauth_device_flow_expires_at_millis,
+                    oauth_device_poll_ids,
+                    oauth_outstanding_flow_count
+                }
+                guard { lifecycle_phase == Phase::ReauthRequired }
+                update {
+                    self.expires_at = expires_at;
+                    self.last_refresh = last_refresh;
+                    self.refresh_attempt = refresh_attempt;
+                    self.credential_present = credential_present;
+                    self.oauth_browser_flow_ids = oauth_browser_flow_ids;
+                    self.oauth_browser_flow_providers = oauth_browser_flow_providers;
+                    self.oauth_browser_flow_redirect_uris = oauth_browser_flow_redirect_uris;
+                    self.oauth_browser_flow_expires_at_millis = oauth_browser_flow_expires_at_millis;
+                    self.oauth_device_flow_ids = oauth_device_flow_ids;
+                    self.oauth_device_flow_providers = oauth_device_flow_providers;
+                    self.oauth_device_flow_expires_at_millis = oauth_device_flow_expires_at_millis;
+                    self.oauth_device_poll_ids = oauth_device_poll_ids;
+                    self.oauth_outstanding_flow_count = oauth_outstanding_flow_count;
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition RestoreAuthoritySnapshotReleased {
+                on input RestoreAuthoritySnapshot {
+                    lifecycle_phase,
+                    expires_at,
+                    last_refresh,
+                    refresh_attempt,
+                    credential_present,
+                    oauth_browser_flow_ids,
+                    oauth_browser_flow_providers,
+                    oauth_browser_flow_redirect_uris,
+                    oauth_browser_flow_expires_at_millis,
+                    oauth_device_flow_ids,
+                    oauth_device_flow_providers,
+                    oauth_device_flow_expires_at_millis,
+                    oauth_device_poll_ids,
+                    oauth_outstanding_flow_count
+                }
+                guard { lifecycle_phase == Phase::Released && credential_present == false && oauth_outstanding_flow_count == 0 }
+                update {
+                    self.expires_at = expires_at;
+                    self.last_refresh = last_refresh;
+                    self.refresh_attempt = refresh_attempt;
+                    self.credential_present = credential_present;
+                    self.oauth_browser_flow_ids = oauth_browser_flow_ids;
+                    self.oauth_browser_flow_providers = oauth_browser_flow_providers;
+                    self.oauth_browser_flow_redirect_uris = oauth_browser_flow_redirect_uris;
+                    self.oauth_browser_flow_expires_at_millis = oauth_browser_flow_expires_at_millis;
+                    self.oauth_device_flow_ids = oauth_device_flow_ids;
+                    self.oauth_device_flow_providers = oauth_device_flow_providers;
+                    self.oauth_device_flow_expires_at_millis = oauth_device_flow_expires_at_millis;
+                    self.oauth_device_poll_ids = oauth_device_poll_ids;
+                    self.oauth_outstanding_flow_count = oauth_outstanding_flow_count;
                 }
                 to Released
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }

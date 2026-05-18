@@ -1057,10 +1057,10 @@ mod tests {
     #[test]
     fn initial_state_is_running() {
         let auth = MobMachineAuthority::new();
-        assert_eq!(auth.state.phase(), MobPhase::Running);
-        assert!(auth.state.live_runtime_ids.is_empty());
-        assert_eq!(auth.state.active_run_count, 0);
-        assert!(auth.state.coordinator_bound);
+        assert_eq!(auth.state().phase(), MobPhase::Running);
+        assert!(auth.state().live_runtime_ids.is_empty());
+        assert_eq!(auth.state().active_run_count, 0);
+        assert!(auth.state().coordinator_bound);
     }
 
     #[test]
@@ -1081,12 +1081,12 @@ mod tests {
         .unwrap();
         assert_eq!(r.to_phase, MobPhase::Running);
         assert!(
-            auth.state
+            auth.state()
                 .live_runtime_ids
                 .contains(&AgentRuntimeId::from("rt-1"))
         );
         assert!(
-            auth.state
+            auth.state()
                 .externally_addressable_runtime_ids
                 .contains(&AgentRuntimeId::from("rt-1"))
         );
@@ -1108,7 +1108,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(r.to_phase, MobPhase::Stopped);
-        assert!(auth.state.live_runtime_ids.is_empty());
+        assert!(auth.state().live_runtime_ids.is_empty());
     }
 
     #[test]
@@ -1118,12 +1118,12 @@ mod tests {
         // Stop
         let r = MobMachineMutator::apply(&mut auth, MobMachineInput::Stop).unwrap();
         assert_eq!(r.to_phase, MobPhase::Stopped);
-        assert!(!auth.state.coordinator_bound);
+        assert!(!auth.state().coordinator_bound);
 
         // Resume
         let r = MobMachineMutator::apply(&mut auth, MobMachineInput::Resume).unwrap();
         assert_eq!(r.to_phase, MobPhase::Running);
-        assert!(auth.state.coordinator_bound);
+        assert!(auth.state().coordinator_bound);
     }
 
     #[test]
@@ -1141,11 +1141,11 @@ mod tests {
     fn reset_returns_to_running() {
         let mut auth = MobMachineAuthority::new();
         MobMachineMutator::apply(&mut auth, MobMachineInput::Stop).unwrap();
-        assert_eq!(auth.state.phase(), MobPhase::Stopped);
+        assert_eq!(auth.state().phase(), MobPhase::Stopped);
 
         let r = MobMachineMutator::apply(&mut auth, MobMachineInput::Reset).unwrap();
         assert_eq!(r.to_phase, MobPhase::Running);
-        assert!(auth.state.coordinator_bound);
+        assert!(auth.state().coordinator_bound);
     }
 
     // ---- Schema tests ----

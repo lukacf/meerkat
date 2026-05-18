@@ -222,10 +222,11 @@ fn resolve_input_public_terminal_projection(
 }
 
 fn projection_authority() -> dsl::MeerkatMachineAuthority {
-    dsl::MeerkatMachineAuthority::from_state(dsl::MeerkatMachineState {
+    dsl::MeerkatMachineAuthority::recover_from_state(dsl::MeerkatMachineState {
         lifecycle_phase: dsl::MeerkatPhase::Idle,
         ..dsl::MeerkatMachineState::default()
     })
+    .expect("projected MeerkatMachine state must be recoverable")
 }
 
 fn observed_input_phase(phase: InputLifecycleState) -> dsl::RecoveredInputObservedPhase {
@@ -807,7 +808,8 @@ impl MeerkatMachine {
         input: dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<Vec<dsl::MeerkatMachineEffect>, String> {
-        let mut preview = dsl::MeerkatMachineAuthority::from_state(state.clone());
+        let mut preview = dsl::MeerkatMachineAuthority::recover_from_state(state.clone())
+            .map_err(|err| dsl_authority::map_error(err, context))?;
         dsl::MeerkatMachineMutator::apply(&mut preview, input)
             .map(|transition| transition.effects)
             .map_err(|err| dsl_authority::map_error(err, context))
@@ -824,7 +826,7 @@ impl MeerkatMachine {
             let authority = authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authority.state.clone()
+            authority.state().clone()
         };
         Self::preview_dsl_input_on_state(&state, input, context)
     }
@@ -840,7 +842,7 @@ impl MeerkatMachine {
         let authority = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Ok(authority.state.clone())
+        Ok(authority.state().clone())
     }
 
     async fn commit_session_dsl_transition(

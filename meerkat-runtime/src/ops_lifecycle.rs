@@ -362,7 +362,7 @@ struct DslAuthority(mm_dsl::MeerkatMachineAuthority);
 impl std::fmt::Debug for DslAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DslAuthority")
-            .field("state", &self.0.state)
+            .field("state", self.0.state())
             .finish()
     }
 }
@@ -376,7 +376,10 @@ fn new_ops_dsl_authority() -> DslAuthority {
         lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
         ..mm_dsl::MeerkatMachineState::default()
     };
-    DslAuthority(mm_dsl::MeerkatMachineAuthority::from_state(state))
+    DslAuthority(
+        mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("ops lifecycle DSL state must be recoverable"),
+    )
 }
 
 impl ShellState {
@@ -491,7 +494,7 @@ impl ShellState {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
         self.dsl
             .0
-            .state
+            .state()
             .op_statuses
             .get(&id_key)
             .copied()
@@ -503,7 +506,7 @@ impl ShellState {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
         self.dsl
             .0
-            .state
+            .state()
             .op_kinds
             .get(&id_key)
             .copied()
@@ -513,7 +516,7 @@ impl ShellState {
     /// Read the peer-ready flag for `id`.
     fn peer_ready(&self, id: &OperationId) -> Option<bool> {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
-        self.dsl.0.state.op_peer_ready.get(&id_key).copied()
+        self.dsl.0.state().op_peer_ready.get(&id_key).copied()
     }
 
     /// Read the progress counter for `id`.
@@ -521,7 +524,7 @@ impl ShellState {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
         self.dsl
             .0
-            .state
+            .state()
             .op_progress_counts
             .get(&id_key)
             .map(|v| (*v).min(u32::MAX as u64) as u32)
@@ -535,14 +538,14 @@ impl ShellState {
         let kind = self
             .dsl
             .0
-            .state
+            .state()
             .op_terminal_outcomes
             .get(&id_key)
             .copied()?;
         let payload = self
             .dsl
             .0
-            .state
+            .state()
             .op_terminal_payload
             .get(&id_key)
             .map(String::as_str)
@@ -581,24 +584,24 @@ impl ShellState {
     /// Whether the operation is currently tracked in DSL state.
     fn contains(&self, id: &OperationId) -> bool {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
-        self.dsl.0.state.op_statuses.contains_key(&id_key)
+        self.dsl.0.state().op_statuses.contains_key(&id_key)
     }
 
     /// Number of non-terminal operations (derived from DSL state).
     fn active_count(&self) -> usize {
-        self.dsl.0.state.active_op_count as usize
+        self.dsl.0.state().active_op_count as usize
     }
 
     /// Number of operations currently tracked (including terminal).
     fn operation_count(&self) -> usize {
-        self.dsl.0.state.op_statuses.len()
+        self.dsl.0.state().op_statuses.len()
     }
 
     /// Iterate over all tracked operation IDs (DSL keys converted to domain).
     fn operation_ids(&self) -> Vec<OperationId> {
         self.dsl
             .0
-            .state
+            .state()
             .op_statuses
             .keys()
             .filter_map(|k| serde_json::from_str::<OperationId>(k).ok())
@@ -608,7 +611,7 @@ impl ShellState {
     /// Read the DSL-minted completion sequence for a terminal operation.
     fn completion_sequence(&self, id: &OperationId) -> Option<CompletionSeq> {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
-        self.dsl.0.state.op_completion_seq.get(&id_key).copied()
+        self.dsl.0.state().op_completion_seq.get(&id_key).copied()
     }
 
     /// Build a snapshot from DSL state + shell record.
@@ -713,7 +716,7 @@ impl ShellState {
     fn wait_operation_ids(&self) -> Vec<OperationId> {
         self.dsl
             .0
-            .state
+            .state()
             .wait_operation_ids
             .iter()
             .filter_map(|k| serde_json::from_str::<OperationId>(k).ok())
@@ -723,7 +726,7 @@ impl ShellState {
     /// Whether the DSL has a barrier wait active.
     #[cfg(test)]
     fn wait_active(&self) -> bool {
-        self.dsl.0.state.wait_active
+        self.dsl.0.state().wait_active
     }
 
     fn wait_all_satisfied_from_effects(
@@ -921,10 +924,10 @@ impl ShellState {
     fn try_satisfy_wait_all_authority(
         &mut self,
     ) -> Result<Option<WaitAllSatisfied>, OpsLifecycleError> {
-        let Some(dsl_wait_request_id) = self.dsl.0.state.wait_request_id.clone() else {
+        let Some(dsl_wait_request_id) = self.dsl.0.state().wait_request_id.clone() else {
             return Ok(None);
         };
-        let dsl_operation_id_tokens = self.dsl.0.state.wait_operation_id_tokens.clone();
+        let dsl_operation_id_tokens = self.dsl.0.state().wait_operation_id_tokens.clone();
         let transition = match mm_dsl::MeerkatMachineMutator::apply(
             &mut self.dsl.0,
             mm_dsl::MeerkatMachineInput::SatisfyWaitAll {
@@ -1098,10 +1101,15 @@ impl ShellState {
         label: &'static str,
     ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, OpsLifecycleError> {
         let mut authority =
-            mm_dsl::MeerkatMachineAuthority::from_state(mm_dsl::MeerkatMachineState {
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(mm_dsl::MeerkatMachineState {
                 lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
                 ..mm_dsl::MeerkatMachineState::default()
-            });
+            })
+            .map_err(|err| {
+                OpsLifecycleError::Internal(format!(
+                    "DSL rejected ops state recovery ({label}): {err:?}"
+                ))
+            })?;
         let transition =
             mm_dsl::MeerkatMachineMutator::apply(&mut authority, input).map_err(|err| {
                 OpsLifecycleError::Internal(format!(
@@ -1262,7 +1270,7 @@ impl ShellState {
             active_count: self.active_count(),
             wait_request_id: self.wait_request_id.clone(),
             wait_operation_ids: self.wait_operation_ids(),
-            next_completion_seq: self.dsl.0.state.next_completion_seq,
+            next_completion_seq: self.dsl.0.state().next_completion_seq,
         };
 
         PersistedOpsSnapshot {

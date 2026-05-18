@@ -20750,7 +20750,9 @@ fn test_flow_cleanup_uses_terminal_projection_not_authority_clone_probe() {
         .expect("handle_cancel_flow follows cleanup");
     let body = &source[start..start + end];
     assert!(
-        !body.contains("MobMachineAuthority::from_state(self.dsl_authority.state.clone())"),
+        !body.contains(
+            "MobMachineAuthority::recover_from_state(self.dsl_authority.state().clone())"
+        ),
         "flow cleanup must use run terminality and live authority state directly, not clone-probe MobMachine"
     );
     assert!(
@@ -20989,7 +20991,7 @@ fn authority_backed_root_frame_run(
         run_id.clone(),
         definition.id.clone(),
         FlowId::from("demo"),
-        MobRun::flow_state_for_config_with_authority(&run_id, &config, &authority.state)
+        MobRun::flow_state_for_config_with_authority(&run_id, &config, &authority.state())
             .expect("project flow state"),
         serde_json::json!({}),
     );
@@ -21003,7 +21005,7 @@ fn authority_backed_root_frame_run(
         frame_id.clone(),
         crate::run::FrameSnapshot {
             kernel_state: crate::run::project_flow_frame_authority_state_from_machine(
-                &authority.state,
+                &authority.state(),
                 &frame_id,
             )
             .expect("project frame state"),
@@ -21032,7 +21034,7 @@ fn running_authority_backed_run(definition: &MobDefinition) -> MobRun {
         run_id.clone(),
         definition.id.clone(),
         flow_id,
-        MobRun::flow_state_for_config_with_authority(&run_id, &config, &authority.state)
+        MobRun::flow_state_for_config_with_authority(&run_id, &config, &authority.state())
             .expect("project admitted flow state"),
         serde_json::json!({}),
     );
@@ -21047,7 +21049,7 @@ fn running_authority_backed_run(definition: &MobDefinition) -> MobRun {
             .expect("start authority token");
     let outcome = apply_mob_machine_flow_run_command(
         &run.flow_state,
-        &authority.state,
+        &authority.state(),
         &run_id,
         start,
         authority_token,

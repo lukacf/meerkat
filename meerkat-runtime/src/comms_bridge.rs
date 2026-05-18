@@ -37,6 +37,12 @@ pub enum PeerIngressProjectionError {
     MissingResponseTerminality {
         interaction_id: meerkat_core::InteractionId,
     },
+    #[error(
+        "classified peer response {interaction_id} has unsupported machine response terminality"
+    )]
+    UnsupportedResponseTerminality {
+        interaction_id: meerkat_core::InteractionId,
+    },
 }
 
 /// Convert a classified comms interaction into the appropriate runtime-owned
@@ -166,7 +172,7 @@ fn map_ingress_convention(
         } => {
             let terminality = response_terminality
                 .ok_or(PeerIngressProjectionError::MissingResponseTerminality { interaction_id })?;
-            Ok(map_response_convention(*in_reply_to, terminality))
+            map_response_convention(interaction_id, *in_reply_to, terminality)
         }
         PeerIngressConvention::Lifecycle { kind, .. } => Ok(PeerConvention::Request {
             request_id: ingress.interaction_id.to_string(),
@@ -182,11 +188,12 @@ fn map_ingress_convention(
 }
 
 fn map_response_convention(
+    interaction_id: meerkat_core::InteractionId,
     in_reply_to: meerkat_core::InteractionId,
     terminality: meerkat_core::interaction::TerminalityClass,
-) -> PeerConvention {
+) -> Result<PeerConvention, PeerIngressProjectionError> {
     let request_id = in_reply_to.to_string();
-    match terminality {
+    Ok(match terminality {
         meerkat_core::interaction::TerminalityClass::Progress => PeerConvention::ResponseProgress {
             request_id,
             phase: ResponseProgressPhase::Accepted,
@@ -199,12 +206,10 @@ fn map_response_convention(
                 meerkat_core::interaction::TerminalDisposition::Failed => {
                     ResponseTerminalStatus::Failed
                 }
-                other => {
-                    tracing::warn!(
-                        disposition = ?other,
-                        "unknown terminal disposition; treating as Failed"
-                    );
-                    ResponseTerminalStatus::Failed
+                _ => {
+                    return Err(PeerIngressProjectionError::UnsupportedResponseTerminality {
+                        interaction_id,
+                    });
                 }
             };
             PeerConvention::ResponseTerminal {
@@ -212,17 +217,12 @@ fn map_response_convention(
                 status: term,
             }
         }
-        other => {
-            tracing::warn!(
-                class = ?other,
-                "unknown terminality class; routing response as progress (non-terminal)"
-            );
-            PeerConvention::ResponseProgress {
-                request_id,
-                phase: ResponseProgressPhase::Accepted,
-            }
+        _ => {
+            return Err(PeerIngressProjectionError::UnsupportedResponseTerminality {
+                interaction_id,
+            });
         }
-    }
+    })
 }
 
 fn peer_rendered_body(interaction: &InboxInteraction) -> String {

@@ -148,22 +148,45 @@ pub fn spawn_comms_drain(
                         // Response progress/terminal status is fixed by the
                         // ingress classifier and carried on the candidate. Do
                         // not re-match raw `ResponseStatus` here.
-                        let terminal_status = match candidate.response_terminality {
-                            Some(meerkat_core::interaction::TerminalityClass::Terminal {
-                                disposition,
-                            }) => match disposition {
+                        let terminal_status = match (
+                            candidate_class,
+                            candidate.response_terminality,
+                        ) {
+                            (
+                                PeerInputClass::ResponseTerminal,
+                                Some(meerkat_core::interaction::TerminalityClass::Terminal {
+                                    disposition,
+                                }),
+                            ) => match disposition {
                                 meerkat_core::interaction::TerminalDisposition::Completed => {
                                     Some(meerkat_core::handles::PeerTerminalDisposition::Completed)
                                 }
                                 meerkat_core::interaction::TerminalDisposition::Failed => {
                                     Some(meerkat_core::handles::PeerTerminalDisposition::Failed)
                                 }
-                                _ => None,
+                                _ => {
+                                    tracing::warn!(
+                                        class = ?candidate_class,
+                                        disposition = ?disposition,
+                                        interaction_id = %candidate.interaction.id,
+                                        "comms_drain: rejected peer response with unsupported terminal disposition"
+                                    );
+                                    continue;
+                                }
                             },
-                            Some(meerkat_core::interaction::TerminalityClass::Progress) | None => {
-                                None
+                            (
+                                PeerInputClass::ResponseProgress,
+                                Some(meerkat_core::interaction::TerminalityClass::Progress),
+                            ) => None,
+                            (class, terminality) => {
+                                tracing::warn!(
+                                    class = ?class,
+                                    terminality = ?terminality,
+                                    interaction_id = %candidate.interaction.id,
+                                    "comms_drain: rejected peer response with missing or inconsistent machine terminality"
+                                );
+                                continue;
                             }
-                            Some(_) => None,
                         };
                         let is_terminal = terminal_status.is_some();
 
@@ -2201,6 +2224,85 @@ mod tests {
             lifecycle_peer: None,
             response_terminality: None,
         }
+    }
+
+    fn response_candidate(
+        class: PeerInputClass,
+        response_terminality: Option<meerkat_core::interaction::TerminalityClass>,
+    ) -> PeerInputCandidate {
+        assert!(
+            matches!(
+                class,
+                PeerInputClass::ResponseProgress | PeerInputClass::ResponseTerminal
+            ),
+            "test helper only builds peer response candidates"
+        );
+        let id = InteractionId(Uuid::new_v4());
+        let in_reply_to = InteractionId(Uuid::new_v4());
+        PeerInputCandidate {
+            interaction: InboxInteraction {
+                id,
+                from_route: Some(PeerId::new()),
+                from: "response-peer".to_string(),
+                content: InteractionContent::Response {
+                    in_reply_to,
+                    status: meerkat_core::interaction::ResponseStatus::Completed,
+                    result: json!({ "ok": true }),
+                    blocks: None,
+                },
+                rendered_text: String::new(),
+                handling_mode: HandlingMode::Queue,
+                render_metadata: None,
+            },
+            ingress: PeerIngressFact::peer(
+                id,
+                class,
+                meerkat_core::PeerIngressKind::Response,
+                Some(meerkat_core::PeerIngressAuthDecision::Required),
+                PeerIngressIdentity::new(
+                    PeerId::new(),
+                    "response-peer",
+                    PeerIngressConvention::Response {
+                        in_reply_to,
+                        status: meerkat_core::interaction::ResponseStatus::Completed,
+                    },
+                ),
+            ),
+            lifecycle_peer: None,
+            response_terminality,
+        }
+    }
+
+    #[tokio::test]
+    async fn response_without_machine_terminality_is_rejected_before_progress_or_admission() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        let runtime = Arc::new(OneShotPeerRequestRuntime::new(
+            response_candidate(PeerInputClass::ResponseTerminal, None),
+            None,
+        ));
+        let drain = spawn_comms_drain(
+            adapter.clone(),
+            session_id.clone(),
+            runtime.clone(),
+            Some(Duration::from_millis(10)),
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), drain)
+            .await
+            .expect("drain should exit after one response candidate")
+            .expect("drain task should not panic");
+
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .expect("registered session snapshot");
+        assert_eq!(
+            snapshot.ledger.input_count, 0,
+            "missing terminality must fail closed before runtime admission"
+        );
     }
 
     #[tokio::test]

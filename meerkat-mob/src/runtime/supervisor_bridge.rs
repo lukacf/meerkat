@@ -339,9 +339,22 @@ impl MobSupervisorBridge {
         }
 
         match candidate.response_terminality {
-            Some(TerminalityClass::Terminal { .. }) => Ok(Some(result.clone())),
-            Some(TerminalityClass::Progress) | None => Ok(None),
-            _ => Ok(None),
+            Some(TerminalityClass::Terminal { disposition }) => match disposition {
+                meerkat_core::interaction::TerminalDisposition::Completed
+                | meerkat_core::interaction::TerminalDisposition::Failed => {
+                    Ok(Some(result.clone()))
+                }
+                _ => Err(MobError::Internal(format!(
+                    "supervisor bridge received response for {request_envelope_id} with unsupported terminal disposition"
+                ))),
+            },
+            Some(TerminalityClass::Progress) => Ok(None),
+            None => Err(MobError::Internal(format!(
+                "supervisor bridge received response for {request_envelope_id} without machine terminality"
+            ))),
+            _ => Err(MobError::Internal(format!(
+                "supervisor bridge received response for {request_envelope_id} with unsupported terminality"
+            ))),
         }
     }
 }
@@ -507,6 +520,24 @@ mod tests {
                 ),
             }
         }
+    }
+
+    #[test]
+    fn response_value_missing_machine_terminality_fails_closed() {
+        let request_envelope_id = uuid::Uuid::new_v4();
+        let mut candidate = response_candidate(
+            request_envelope_id,
+            ResponseStatus::Completed,
+            serde_json::json!({"ok": true}),
+        );
+        candidate.response_terminality = None;
+
+        let result = MobSupervisorBridge::response_value(&candidate, request_envelope_id);
+
+        assert!(
+            matches!(result, Err(MobError::Internal(ref message)) if message.contains("without machine terminality")),
+            "missing terminality must not be treated as no response: {result:?}"
+        );
     }
 
     #[test]

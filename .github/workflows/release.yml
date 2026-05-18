@@ -489,19 +489,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${RUNNER_TEMP}/bazelisk"
-          curl \
-            --fail \
-            --location \
-            --show-error \
-            --silent \
-            --connect-timeout 20 \
-            --retry 5 \
-            --retry-delay 2 \
-            --retry-max-time 120 \
-            https://github.com/bazelbuild/bazelisk/releases/download/v1.27.0/bazelisk-linux-amd64 \
-            -o "${RUNNER_TEMP}/bazelisk/bazel"
-          chmod 0755 "${RUNNER_TEMP}/bazelisk/bazel"
           python3 - <<'PY'
           from pathlib import Path
 
@@ -525,9 +512,7 @@ jobs:
         shell: bash
         env:
           BUILDBUDDY_BAZEL_COMMAND: ${{ matrix.bb_command }}
-          BUILDBUDDY_BB: ${{ matrix.bb_command == 'release-build-windows-x86' && format('{0}/bazelisk/bazel', runner.temp) || '' }}
           BUILDBUDDY_ENDPOINT: ${{ matrix.bb_command == 'release-build-windows-x86' && secrets.BUILDBUDDY_ENDPOINT || '' }}
-          USE_BAZEL_VERSION: ${{ matrix.bb_command == 'release-build-windows-x86' && '9.1.0' || '' }}
           BUILDBUDDY_OUTPUT_LANE: release-build-${{ matrix.target }}
           BUILDBUDDY_OUTPUT_BASE: ${{ runner.temp }}/bb-release-${{ matrix.target }}
           MEERKAT_BUILDBUDDY_OUTPUT_ROOT: ${{ runner.temp }}/bb-release

@@ -311,7 +311,9 @@ fn map_error(error: WorkGraphError) -> WorkGraphToolError {
         WorkGraphError::NotFound { .. } => NOT_FOUND,
         WorkGraphError::StaleRevision { .. } | WorkGraphError::Conflict(_) => "conflict",
         WorkGraphError::InvalidTransition(_) => "invalid_transition",
-        WorkGraphError::InvalidInput(_) => INVALID_ARGUMENTS,
+        WorkGraphError::InvalidInput(_) | WorkGraphError::InvalidTimestampMillis { .. } => {
+            INVALID_ARGUMENTS
+        }
         WorkGraphError::UnsupportedBackend(_) => CAPABILITY_UNAVAILABLE,
         WorkGraphError::Store(_) => "store_error",
     };

@@ -57,7 +57,7 @@ async fn assert_atomic_schedule_mutation_supersedes_old_pending(
     let updated_trigger = TriggerSpec::Once {
         due_at_utc: Utc::now() + Duration::minutes(10),
     };
-    let mut updated = Schedule::apply(
+    let update_mutator = Schedule::apply(
         Some(original.clone()),
         ScheduleLifecycleInput::Update(UpdateScheduleRequest {
             expected_revision: Some(original.revision),
@@ -65,8 +65,12 @@ async fn assert_atomic_schedule_mutation_supersedes_old_pending(
             ..UpdateScheduleRequest::default()
         }),
     )
-    .expect("schedule update should pass generated authority")
-    .into_schedule();
+    .expect("schedule update should pass generated authority");
+    let supersession = update_mutator
+        .effects
+        .iter()
+        .find_map(|effect| PendingSupersession::from_schedule_effect(effect, Utc::now()));
+    let mut updated = update_mutator.into_schedule();
     updated = Schedule::apply(
         Some(updated),
         ScheduleLifecycleInput::RecordPlanningWindow {
@@ -84,15 +88,8 @@ async fn assert_atomic_schedule_mutation_supersedes_old_pending(
     )
     .expect("replacement occurrence planning should pass generated authority");
 
-    store
-        .commit_schedule_mutation(
-            updated.clone(),
-            vec![replacement.clone()],
-            Some(PendingSupersession {
-                at_utc: Utc::now(),
-                superseded_by_revision: updated.revision,
-            }),
-        )
+    let committed = store
+        .commit_schedule_mutation(updated.clone(), vec![replacement.clone()], supersession)
         .await?;
 
     let stored = store
@@ -100,6 +97,15 @@ async fn assert_atomic_schedule_mutation_supersedes_old_pending(
         .await?
         .expect("updated schedule should exist");
     assert_eq!(stored.revision, updated.revision);
+    assert!(
+        committed
+            .superseded_ack_ids
+            .contains(&old_pending.occurrence_id)
+            && stored
+                .superseded_ack_ids
+                .contains(&old_pending.occurrence_id),
+        "supersession ack should be routed back through schedule authority in the atomic mutation"
+    );
 
     let occurrences = store
         .list_occurrences(OccurrenceFilter {

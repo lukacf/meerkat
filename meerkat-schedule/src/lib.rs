@@ -32,6 +32,7 @@ pub use service::ScheduleService;
 pub use store::{
     ClaimDueRequest, ClaimDueResult, DisabledScheduleStore, MemoryScheduleStore, OccurrenceFilter,
     PendingSupersession, ScheduleFilter, ScheduleStore, ScheduleStoreKind,
+    apply_supersession_feedback,
 };
 pub use surface::wire_schedule_tools;
 pub use tool_surface::ScheduleToolSurface;

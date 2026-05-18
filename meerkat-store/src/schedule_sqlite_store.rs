@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use meerkat_schedule::{
     ClaimDueRequest, ClaimDueResult, DeliveryReceipt, DeliveryReceiptStage, Occurrence,
-    OccurrenceFailureClass, OccurrenceFilter, OccurrenceId, OccurrenceLifecycleError,
-    OccurrenceLifecycleInput, PendingSupersession, Schedule, ScheduleFilter, ScheduleStore,
-    ScheduleStoreError, ScheduleStoreKind,
+    OccurrenceFailureClass, OccurrenceFilter, OccurrenceId, OccurrenceLifecycleEffect,
+    OccurrenceLifecycleError, OccurrenceLifecycleInput, PendingSupersession, Schedule,
+    ScheduleFilter, ScheduleStore, ScheduleStoreError, ScheduleStoreKind,
+    apply_supersession_feedback,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -451,21 +452,26 @@ impl ScheduleStore for SqliteScheduleStore {
         schedule: Schedule,
         occurrences: Vec<Occurrence>,
         supersession: Option<PendingSupersession>,
-    ) -> Result<(), ScheduleStoreError> {
+    ) -> Result<Schedule, ScheduleStoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = open_connection(&path)?;
             ensure_schedule_schema(&conn)?;
             let tx = begin_immediate_transaction(&mut conn)?;
-            write_schedule_in_txn(&tx, &schedule)?;
+            let mut committed_schedule = schedule;
+            write_schedule_in_txn(&tx, &committed_schedule)?;
             for occurrence in &occurrences {
                 write_occurrence_in_txn(&tx, occurrence)?;
             }
             if let Some(supersession) = supersession {
-                supersede_pending_occurrences_in_txn(&tx, &schedule, supersession)?;
+                let effects =
+                    supersede_pending_occurrences_in_txn(&tx, &committed_schedule, supersession)?;
+                committed_schedule = apply_supersession_feedback(committed_schedule, effects)
+                    .map_err(|error| StoreError::Internal(error.to_string()))?;
+                write_schedule_in_txn(&tx, &committed_schedule)?;
             }
             tx.commit()?;
-            Ok(())
+            Ok(committed_schedule)
         })
         .await
         .map_err(StoreError::Join)
@@ -686,7 +692,7 @@ fn supersede_pending_occurrences_in_txn(
     tx: &rusqlite::Transaction<'_>,
     schedule: &Schedule,
     supersession: PendingSupersession,
-) -> Result<(), StoreError> {
+) -> Result<Vec<OccurrenceLifecycleEffect>, StoreError> {
     let mut stmt = tx.prepare(
         "SELECT occurrence_json
          FROM schedule_occurrences
@@ -696,23 +702,25 @@ fn supersede_pending_occurrences_in_txn(
     let rows = stmt.query_map(params![schedule.schedule_id.to_string()], |row| {
         row.get::<_, Vec<u8>>(0)
     })?;
+    let mut effects = Vec::new();
     for row in rows {
         let bytes = row?;
         let occurrence: Occurrence =
             serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
-        if occurrence.schedule_revision >= supersession.superseded_by_revision {
+        if occurrence.schedule_revision >= supersession.superseded_by_revision() {
             continue;
         }
-        let updated = occurrence
+        let mutator = occurrence
             .apply(OccurrenceLifecycleInput::Supersede {
-                superseded_by_revision: supersession.superseded_by_revision,
-                at_utc: supersession.at_utc,
+                superseded_by_revision: supersession.superseded_by_revision(),
+                at_utc: supersession.at_utc(),
             })
-            .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
-            .into_occurrence();
+            .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?;
+        effects.extend(mutator.effects);
+        let updated = mutator.into_occurrence();
         write_occurrence_in_txn(tx, &updated)?;
     }
-    Ok(())
+    Ok(effects)
 }
 
 fn record_occurrence_receipt_in_txn(

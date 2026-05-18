@@ -487,25 +487,31 @@ fn validate_work_item_machine_projection(
             wire.id
         ));
     }
-    if wire.due_at.map(datetime_to_millis) != machine_state.due_at_utc_ms {
+    if optional_datetime_to_millis(wire.due_at, "due_at")? != machine_state.due_at_utc_ms {
         return Err(format!(
             "work item {} due_at projection does not match machine_state",
             wire.id
         ));
     }
-    if wire.not_before.map(datetime_to_millis) != machine_state.not_before_utc_ms {
+    if optional_datetime_to_millis(wire.not_before, "not_before")?
+        != machine_state.not_before_utc_ms
+    {
         return Err(format!(
             "work item {} not_before projection does not match machine_state",
             wire.id
         ));
     }
-    if wire.snoozed_until.map(datetime_to_millis) != machine_state.snoozed_until_utc_ms {
+    if optional_datetime_to_millis(wire.snoozed_until, "snoozed_until")?
+        != machine_state.snoozed_until_utc_ms
+    {
         return Err(format!(
             "work item {} snoozed_until projection does not match machine_state",
             wire.id
         ));
     }
-    if wire.terminal_at.map(datetime_to_millis) != machine_state.terminal_at_utc_ms {
+    if optional_datetime_to_millis(wire.terminal_at, "terminal_at")?
+        != machine_state.terminal_at_utc_ms
+    {
         return Err(format!(
             "work item {} terminal_at projection does not match machine_state",
             wire.id
@@ -519,13 +525,17 @@ fn validate_work_item_machine_projection(
                 wire.id
             ));
         }
-        if machine_state.claimed_at_utc_ms != Some(datetime_to_millis(claim.claimed_at)) {
+        if machine_state.claimed_at_utc_ms
+            != Some(datetime_to_millis(claim.claimed_at, "claimed_at")?)
+        {
             return Err(format!(
                 "work item {} claim time projection does not match machine_state",
                 wire.id
             ));
         }
-        if machine_state.lease_expires_at_utc_ms != claim.lease_expires_at.map(datetime_to_millis) {
+        if machine_state.lease_expires_at_utc_ms
+            != optional_datetime_to_millis(claim.lease_expires_at, "lease_expires_at")?
+        {
             return Err(format!(
                 "work item {} claim lease projection does not match machine_state",
                 wire.id
@@ -568,8 +578,18 @@ fn work_owner_key_to_machine(owner: &WorkOwnerKey) -> wg_dsl::WorkOwnerKey {
     }
 }
 
-fn datetime_to_millis(dt: DateTime<Utc>) -> u64 {
-    u64::try_from(dt.timestamp_millis()).unwrap_or(0)
+fn datetime_to_millis(dt: DateTime<Utc>, field: &'static str) -> Result<u64, String> {
+    let millis = dt.timestamp_millis();
+    u64::try_from(millis).map_err(|_| {
+        format!("work graph timestamp `{field}` cannot be represented as unsigned millis: {millis}")
+    })
+}
+
+fn optional_datetime_to_millis(
+    dt: Option<DateTime<Utc>>,
+    field: &'static str,
+) -> Result<Option<u64>, String> {
+    dt.map(|value| datetime_to_millis(value, field)).transpose()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

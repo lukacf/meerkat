@@ -1,5 +1,5 @@
 use crate::error::{ScheduleDomainError, ScheduleStoreError};
-use crate::lifecycle::ScheduleLifecycleInput;
+use crate::lifecycle::{ScheduleLifecycleEffect, ScheduleLifecycleInput};
 use crate::store::{OccurrenceFilter, PendingSupersession, ScheduleFilter, ScheduleStore};
 use crate::trigger::occurrences_for_horizon;
 use crate::types::{
@@ -48,10 +48,11 @@ impl ScheduleService {
         let planned = self
             .plan_schedule_occurrences(&mut mutator.schedule, store_now)
             .await?;
-        self.store
+        let committed = self
+            .store
             .commit_schedule_mutation(mutator.schedule.clone(), planned, None)
             .await?;
-        Ok(mutator.schedule)
+        Ok(committed)
     }
 
     pub async fn get(&self, schedule_id: &ScheduleId) -> Result<Schedule, ScheduleDomainError> {
@@ -99,17 +100,12 @@ impl ScheduleService {
         let planned = self
             .plan_schedule_occurrences(&mut mutator.schedule, store_now)
             .await?;
-        self.store
-            .commit_schedule_mutation(
-                mutator.schedule.clone(),
-                planned,
-                mutator.revision_bumped.then_some(PendingSupersession {
-                    at_utc: store_now,
-                    superseded_by_revision: mutator.schedule.revision,
-                }),
-            )
+        let supersession = pending_supersession_from_effects(&mutator.effects, store_now);
+        let committed = self
+            .store
+            .commit_schedule_mutation(mutator.schedule.clone(), planned, supersession)
             .await?;
-        Ok(mutator.schedule)
+        Ok(committed)
     }
 
     pub async fn pause(&self, schedule_id: &ScheduleId) -> Result<Schedule, ScheduleDomainError> {
@@ -140,10 +136,11 @@ impl ScheduleService {
         let planned = self
             .plan_schedule_occurrences(&mut mutator.schedule, store_now)
             .await?;
-        self.store
+        let committed = self
+            .store
             .commit_schedule_mutation(mutator.schedule.clone(), planned, None)
             .await?;
-        Ok(mutator.schedule)
+        Ok(committed)
     }
 
     pub async fn delete(&self, schedule_id: &ScheduleId) -> Result<Schedule, ScheduleDomainError> {
@@ -156,17 +153,12 @@ impl ScheduleService {
         )
         .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
         let deleted = mutator.schedule.clone();
-        self.store
-            .commit_schedule_mutation(
-                deleted.clone(),
-                Vec::new(),
-                Some(PendingSupersession {
-                    at_utc: store_now,
-                    superseded_by_revision: deleted.revision,
-                }),
-            )
+        let supersession = pending_supersession_from_effects(&mutator.effects, store_now);
+        let committed = self
+            .store
+            .commit_schedule_mutation(deleted.clone(), Vec::new(), supersession)
             .await?;
-        Ok(deleted)
+        Ok(committed)
     }
 
     pub async fn list_occurrences(
@@ -202,7 +194,8 @@ impl ScheduleService {
             .plan_schedule_occurrences(&mut schedule, store_now)
             .await?;
         if !planned.is_empty() {
-            self.store
+            let _ = self
+                .store
                 .commit_schedule_mutation(schedule, planned.clone(), None)
                 .await?;
         }
@@ -342,7 +335,7 @@ impl ScheduleService {
             .map(|occurrence| occurrence.due_at_utc)
             .max()
             .or(schedule.planning_cursor_utc)
-            .unwrap_or_else(|| schedule.config.updated_at_utc - Duration::minutes(1));
+            .unwrap_or_else(|| store_now_utc - Duration::minutes(1));
 
         let due_times = occurrences_for_horizon(
             &schedule.trigger,
@@ -381,11 +374,19 @@ impl ScheduleService {
             )
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
             *schedule = mutator.schedule;
-            schedule.touch();
         }
 
         Ok(planned)
     }
+}
+
+fn pending_supersession_from_effects(
+    effects: &[ScheduleLifecycleEffect],
+    at_utc: chrono::DateTime<Utc>,
+) -> Option<PendingSupersession> {
+    effects
+        .iter()
+        .find_map(|effect| PendingSupersession::from_schedule_effect(effect, at_utc))
 }
 
 #[cfg(test)]
@@ -466,7 +467,7 @@ mod tests {
             schedule: Schedule,
             occurrences: Vec<Occurrence>,
             supersession: Option<PendingSupersession>,
-        ) -> Result<(), ScheduleStoreError> {
+        ) -> Result<Schedule, ScheduleStoreError> {
             self.atomic_calls.fetch_add(1, Ordering::SeqCst);
             self.inner
                 .commit_schedule_mutation(schedule, occurrences, supersession)
@@ -712,6 +713,18 @@ mod tests {
             "revision bump should supersede prior pending future occurrences"
         );
         assert!(
+            occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.phase == OccurrencePhase::Superseded
+                        && occurrence.schedule_revision == created.revision
+                })
+                .all(|occurrence| updated
+                    .superseded_ack_ids
+                    .contains(&occurrence.occurrence_id)),
+            "supersession acks should be routed back through schedule authority"
+        );
+        assert!(
             replanned > 0,
             "revision bump should plan replacement pending occurrences"
         );
@@ -838,6 +851,18 @@ mod tests {
                     && occurrence.superseded_by_revision == Some(deleted.revision)
             }),
             "delete should supersede pending occurrences against the new deleted revision"
+        );
+        assert!(
+            occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.phase == OccurrencePhase::Superseded
+                        && occurrence.schedule_revision == created.revision
+                })
+                .all(|occurrence| deleted
+                    .superseded_ack_ids
+                    .contains(&occurrence.occurrence_id)),
+            "delete supersession acks should be routed back through schedule authority"
         );
         Ok(())
     }

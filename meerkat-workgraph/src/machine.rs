@@ -40,9 +40,12 @@ impl WorkGraphMachine {
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
         let title = validate_title(request.title)?;
         let input = wg_dsl::WorkGraphLifecycleInput::Create {
-            due_at_utc_ms: request.due_at.map(datetime_to_millis),
-            not_before_utc_ms: request.not_before.map(datetime_to_millis),
-            snoozed_until_utc_ms: request.snoozed_until.map(datetime_to_millis),
+            due_at_utc_ms: optional_datetime_to_millis(request.due_at, "due_at")?,
+            not_before_utc_ms: optional_datetime_to_millis(request.not_before, "not_before")?,
+            snoozed_until_utc_ms: optional_datetime_to_millis(
+                request.snoozed_until,
+                "snoozed_until",
+            )?,
             unresolved_blocker_count: 0,
             requested_status: request.status.map(dsl_work_lifecycle_state),
         };
@@ -61,12 +64,18 @@ impl WorkGraphMachine {
             claim: None,
             machine_state: dsl_state.clone(),
             revision: dsl_state.revision,
-            due_at: dsl_state.due_at_utc_ms.and_then(millis_to_datetime),
-            not_before: dsl_state.not_before_utc_ms.and_then(millis_to_datetime),
-            snoozed_until: dsl_state.snoozed_until_utc_ms.and_then(millis_to_datetime),
+            due_at: optional_datetime_from_millis(dsl_state.due_at_utc_ms, "due_at")?,
+            not_before: optional_datetime_from_millis(dsl_state.not_before_utc_ms, "not_before")?,
+            snoozed_until: optional_datetime_from_millis(
+                dsl_state.snoozed_until_utc_ms,
+                "snoozed_until",
+            )?,
             created_at: now,
             updated_at: now,
-            terminal_at: dsl_state.terminal_at_utc_ms.and_then(millis_to_datetime),
+            terminal_at: optional_datetime_from_millis(
+                dsl_state.terminal_at_utc_ms,
+                "terminal_at",
+            )?,
             external_refs: request.external_refs,
             evidence_refs: request.evidence_refs,
         };
@@ -87,9 +96,9 @@ impl WorkGraphMachine {
             &item,
             wg_dsl::WorkGraphLifecycleInput::Update {
                 expected_revision: request.expected_revision,
-                due_at_utc_ms: due_at.map(datetime_to_millis),
-                not_before_utc_ms: not_before.map(datetime_to_millis),
-                snoozed_until_utc_ms: snoozed_until.map(datetime_to_millis),
+                due_at_utc_ms: optional_datetime_to_millis(due_at, "due_at")?,
+                not_before_utc_ms: optional_datetime_to_millis(not_before, "not_before")?,
+                snoozed_until_utc_ms: optional_datetime_to_millis(snoozed_until, "snoozed_until")?,
                 unresolved_blocker_count: item.machine_state.unresolved_blocker_count,
             },
             Some(request.expected_revision),
@@ -181,8 +190,11 @@ impl WorkGraphMachine {
             Some(wg_dsl::WorkGraphLifecycleInput::Claim {
                 expected_revision: request.expected_revision,
                 owner_key,
-                now_utc_ms: datetime_to_millis(now),
-                lease_expires_at_utc_ms: lease_expires_at.map(datetime_to_millis),
+                now_utc_ms: datetime_to_millis(now, "now")?,
+                lease_expires_at_utc_ms: optional_datetime_to_millis(
+                    lease_expires_at,
+                    "lease_expires_at",
+                )?,
             }),
         ];
         let applied = apply_item_dsl_inputs(
@@ -250,7 +262,7 @@ impl WorkGraphMachine {
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
         let dsl_input = wg_dsl::WorkGraphLifecycleInput::Close {
             expected_revision: request.expected_revision,
-            at_utc_ms: datetime_to_millis(now),
+            at_utc_ms: datetime_to_millis(now, "now")?,
             requested_status: request.status.map(dsl_work_lifecycle_state),
         };
         let applied = apply_item_dsl(&item, dsl_input, Some(request.expected_revision))?;
@@ -284,6 +296,9 @@ impl WorkGraphMachine {
     }
 
     pub fn is_ready(item: &WorkItem, now: DateTime<Utc>) -> bool {
+        let Ok(now_utc_ms) = datetime_to_millis(now, "now") else {
+            return false;
+        };
         let owner_key = wg_dsl::WorkOwnerKey {
             kind: wg_dsl::WorkOwnerKind::Label,
             id: "__ready_probe__".to_string(),
@@ -293,7 +308,7 @@ impl WorkGraphMachine {
             wg_dsl::WorkGraphLifecycleInput::Claim {
                 expected_revision: item.revision,
                 owner_key,
-                now_utc_ms: datetime_to_millis(now),
+                now_utc_ms,
                 lease_expires_at_utc_ms: None,
             },
             Some(item.revision),
@@ -467,22 +482,13 @@ fn dsl_work_lifecycle_state(status: WorkStatus) -> wg_dsl::WorkLifecycleState {
 fn sync_item_from_machine_state(item: &mut WorkItem) -> Result<(), WorkGraphError> {
     item.status = work_status_from_dsl(item.machine_state.lifecycle_phase)?;
     item.revision = item.machine_state.revision;
-    item.due_at = item
-        .machine_state
-        .due_at_utc_ms
-        .and_then(millis_to_datetime);
-    item.not_before = item
-        .machine_state
-        .not_before_utc_ms
-        .and_then(millis_to_datetime);
-    item.snoozed_until = item
-        .machine_state
-        .snoozed_until_utc_ms
-        .and_then(millis_to_datetime);
-    item.terminal_at = item
-        .machine_state
-        .terminal_at_utc_ms
-        .and_then(millis_to_datetime);
+    item.due_at = optional_datetime_from_millis(item.machine_state.due_at_utc_ms, "due_at")?;
+    item.not_before =
+        optional_datetime_from_millis(item.machine_state.not_before_utc_ms, "not_before")?;
+    item.snoozed_until =
+        optional_datetime_from_millis(item.machine_state.snoozed_until_utc_ms, "snoozed_until")?;
+    item.terminal_at =
+        optional_datetime_from_millis(item.machine_state.terminal_at_utc_ms, "terminal_at")?;
     Ok(())
 }
 
@@ -500,25 +506,31 @@ fn validate_item_machine_projection(item: &WorkItem) -> Result<(), WorkGraphErro
             item.id, item.revision, item.machine_state.revision
         )));
     }
-    if item.due_at.map(datetime_to_millis) != item.machine_state.due_at_utc_ms {
+    if optional_datetime_to_millis(item.due_at, "due_at")? != item.machine_state.due_at_utc_ms {
         return Err(WorkGraphError::Store(format!(
             "work item {} due_at projection does not match machine state",
             item.id
         )));
     }
-    if item.not_before.map(datetime_to_millis) != item.machine_state.not_before_utc_ms {
+    if optional_datetime_to_millis(item.not_before, "not_before")?
+        != item.machine_state.not_before_utc_ms
+    {
         return Err(WorkGraphError::Store(format!(
             "work item {} not_before projection does not match machine state",
             item.id
         )));
     }
-    if item.snoozed_until.map(datetime_to_millis) != item.machine_state.snoozed_until_utc_ms {
+    if optional_datetime_to_millis(item.snoozed_until, "snoozed_until")?
+        != item.machine_state.snoozed_until_utc_ms
+    {
         return Err(WorkGraphError::Store(format!(
             "work item {} snoozed_until projection does not match machine state",
             item.id
         )));
     }
-    if item.terminal_at.map(datetime_to_millis) != item.machine_state.terminal_at_utc_ms {
+    if optional_datetime_to_millis(item.terminal_at, "terminal_at")?
+        != item.machine_state.terminal_at_utc_ms
+    {
         return Err(WorkGraphError::Store(format!(
             "work item {} terminal_at projection does not match machine state",
             item.id
@@ -532,14 +544,16 @@ fn validate_item_machine_projection(item: &WorkItem) -> Result<(), WorkGraphErro
                 item.id
             )));
         }
-        if item.machine_state.claimed_at_utc_ms != Some(datetime_to_millis(claim.claimed_at)) {
+        if item.machine_state.claimed_at_utc_ms
+            != Some(datetime_to_millis(claim.claimed_at, "claimed_at")?)
+        {
             return Err(WorkGraphError::Store(format!(
                 "work item {} claim time projection does not match machine state",
                 item.id
             )));
         }
         if item.machine_state.lease_expires_at_utc_ms
-            != claim.lease_expires_at.map(datetime_to_millis)
+            != optional_datetime_to_millis(claim.lease_expires_at, "lease_expires_at")?
         {
             return Err(WorkGraphError::Store(format!(
                 "work item {} claim lease projection does not match machine state",
@@ -674,12 +688,34 @@ fn edge_kind_key(kind: WorkEdgeKind) -> &'static str {
     }
 }
 
-fn datetime_to_millis(dt: DateTime<Utc>) -> u64 {
-    u64::try_from(dt.timestamp_millis()).unwrap_or(0)
+fn datetime_to_millis(dt: DateTime<Utc>, field: &'static str) -> Result<u64, WorkGraphError> {
+    let millis = dt.timestamp_millis();
+    u64::try_from(millis).map_err(|_| WorkGraphError::InvalidTimestampMillis { field, millis })
+}
+
+fn optional_datetime_to_millis(
+    dt: Option<DateTime<Utc>>,
+    field: &'static str,
+) -> Result<Option<u64>, WorkGraphError> {
+    dt.map(|value| datetime_to_millis(value, field)).transpose()
 }
 
 fn millis_to_datetime(ms: u64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_millis(i64::try_from(ms).ok()?)
+}
+
+fn optional_datetime_from_millis(
+    ms: Option<u64>,
+    field: &'static str,
+) -> Result<Option<DateTime<Utc>>, WorkGraphError> {
+    ms.map(|value| {
+        millis_to_datetime(value).ok_or_else(|| {
+            WorkGraphError::InvalidInput(format!(
+                "work graph machine timestamp `{field}` cannot be represented as DateTime: {value}"
+            ))
+        })
+    })
+    .transpose()
 }
 
 fn item_event_from_effects(
@@ -879,6 +915,29 @@ mod tests {
         .expect_err("terminal create status should fail");
 
         assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+    }
+
+    #[test]
+    fn create_rejects_negative_machine_timestamp_projection() {
+        let now = Utc::now();
+        let mut request = create_request("negative due");
+        request.due_at = Some(DateTime::from_timestamp(-1, 0).expect("test timestamp is valid"));
+
+        let error = WorkGraphMachine::create_item(
+            request,
+            "realm".to_string(),
+            WorkNamespace::default(),
+            now,
+        )
+        .expect_err("negative timestamp should fail before generated input");
+
+        assert!(matches!(
+            error,
+            WorkGraphError::InvalidTimestampMillis {
+                field: "due_at",
+                millis: -1000
+            }
+        ));
     }
 
     #[test]

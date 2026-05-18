@@ -1821,6 +1821,27 @@ fn rest_continue_requires_rebuild(req: &ContinueSessionRequest) -> bool {
         || req.peer_meta.is_some()
 }
 
+fn create_session_resume_override_mask(
+    req: &CreateSessionRequest,
+    keep_alive_override: Option<bool>,
+) -> ResumeOverrideMask {
+    ResumeOverrideMask {
+        model: req.model.is_some(),
+        provider: req.provider.is_some(),
+        max_tokens: req.max_tokens.is_some(),
+        structured_output_retries: req.structured_output_retries.is_some(),
+        provider_params: req.provider_params.is_some(),
+        preload_skills: req.preload_skills.is_some(),
+        keep_alive: keep_alive_override.is_some(),
+        comms_name: req.comms_name.is_some(),
+        peer_meta: req.peer_meta.is_some(),
+        override_schedule: req.enable_schedule.is_some(),
+        override_workgraph: req.enable_workgraph.is_some(),
+        override_web_search: req.enable_web_search.is_some(),
+        ..Default::default()
+    }
+}
+
 async fn canonical_skill_keys_for_state(
     state: &AppState,
     skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
@@ -3988,6 +4009,7 @@ async fn create_session_inner(
     let keep_alive = keep_alive_override.unwrap_or(false);
     let model_was_explicit = req.model.is_some();
     let provider_was_explicit = req.provider.is_some();
+    let resume_override_mask = create_session_resume_override_mask(&req, keep_alive_override);
     let model = req.model.unwrap_or_else(|| state.default_model.clone());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
     let skill_references = match canonical_skill_keys_for_state(state, req.skill_refs.clone()).await
@@ -4189,20 +4211,7 @@ async fn create_session_inner(
         additional_instructions: req.additional_instructions,
         initial_metadata_entries: std::collections::BTreeMap::new(),
         shell_env: req.shell_env,
-        resume_override_mask: ResumeOverrideMask {
-            model: model_was_explicit,
-            provider: req.provider.is_some(),
-            max_tokens: req.max_tokens.is_some(),
-            structured_output_retries: req.structured_output_retries.is_some(),
-            provider_params: req.provider_params.is_some(),
-            preload_skills: req.preload_skills.is_some(),
-            keep_alive: keep_alive_override.is_some(),
-            comms_name: req.comms_name.is_some(),
-            peer_meta: req.peer_meta.is_some(),
-            override_schedule: req.enable_schedule.is_some(),
-            override_web_search: req.enable_web_search.is_some(),
-            ..Default::default()
-        },
+        resume_override_mask,
         call_timeout_override: Default::default(),
         blob_store_override: None,
         mob_tools: None,
@@ -9025,6 +9034,22 @@ mod tests {
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
         assert_eq!(req.keep_alive, None);
         assert!(req.comms_name.is_none());
+    }
+
+    #[test]
+    fn test_create_session_resume_override_mask_marks_workgraph_with_schedule() {
+        let req_json = serde_json::json!({
+            "prompt": "Hello",
+            "enable_schedule": false,
+            "enable_workgraph": true
+        });
+
+        let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
+        let mask = create_session_resume_override_mask(&req, None);
+
+        assert!(mask.override_schedule);
+        assert!(mask.override_workgraph);
+        assert!(!mask.override_web_search);
     }
 
     #[test]

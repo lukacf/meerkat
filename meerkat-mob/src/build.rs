@@ -60,6 +60,7 @@ pub(crate) fn open_profile_tool_categories_for_inherited_filter(profile: &mut Pr
     profile.tools.shell = true;
     profile.tools.comms = true;
     profile.tools.memory = true;
+    profile.tools.workgraph = true;
     profile.tools.mob = true;
     profile.tools.schedule = true;
     profile.tools.image_generation = true;
@@ -186,6 +187,8 @@ pub async fn build_agent_config(
     config.override_shell = meerkat_core::ToolCategoryOverride::from_effective(profile.tools.shell);
     config.override_memory =
         meerkat_core::ToolCategoryOverride::from_effective(profile.tools.memory);
+    config.override_workgraph =
+        meerkat_core::ToolCategoryOverride::from_effective(profile.tools.workgraph);
     config.override_schedule =
         meerkat_core::ToolCategoryOverride::from_effective(profile.tools.schedule);
     config.override_image_generation =
@@ -342,6 +345,8 @@ fn apply_resumed_session_metadata(
     config.override_builtins = metadata.tooling.builtins;
     config.override_shell = metadata.tooling.shell;
     config.override_memory = metadata.tooling.memory;
+    config.override_schedule = metadata.tooling.schedule;
+    config.override_workgraph = metadata.tooling.workgraph;
     config.override_image_generation = metadata.tooling.image_generation;
     if matches!(
         config.override_mob,
@@ -448,6 +453,7 @@ mod tests {
                     shell: true,
                     comms: true,
                     memory: false,
+                    workgraph: true,
                     mob: true,
                     schedule: false,
                     image_generation: true,
@@ -473,6 +479,7 @@ mod tests {
                     shell: false,
                     comms: true,
                     memory: false,
+                    workgraph: false,
                     mob: false,
                     schedule: false,
                     image_generation: false,
@@ -566,7 +573,8 @@ mod tests {
                     comms: meerkat_core::session::ToolCategoryOverride::Enable,
                     mob: meerkat_core::session::ToolCategoryOverride::Enable,
                     memory: meerkat_core::session::ToolCategoryOverride::Disable,
-                    workgraph: meerkat_core::session::ToolCategoryOverride::Inherit,
+                    schedule: meerkat_core::session::ToolCategoryOverride::Enable,
+                    workgraph: meerkat_core::session::ToolCategoryOverride::Enable,
                     image_generation: meerkat_core::session::ToolCategoryOverride::Enable,
                     web_search: meerkat_core::session::ToolCategoryOverride::Inherit,
                     active_skills: None,
@@ -743,6 +751,10 @@ mod tests {
             meerkat_core::ToolCategoryOverride::Disable
         );
         assert_eq!(
+            config.override_workgraph,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
+        assert_eq!(
             config.override_image_generation,
             meerkat_core::ToolCategoryOverride::Enable
         );
@@ -785,6 +797,10 @@ mod tests {
         );
         assert_eq!(
             config.override_memory,
+            meerkat_core::ToolCategoryOverride::Disable
+        );
+        assert_eq!(
+            config.override_workgraph,
             meerkat_core::ToolCategoryOverride::Disable
         );
         assert_eq!(
@@ -847,6 +863,10 @@ mod tests {
         );
         assert_eq!(
             config.override_memory,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
+        assert_eq!(
+            config.override_workgraph,
             meerkat_core::ToolCategoryOverride::Enable
         );
         assert_eq!(
@@ -1024,6 +1044,52 @@ mod tests {
         assert!(
             config.mob_tool_authority_context.is_some(),
             "resolver must synthesize an authority context when profile says enable"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_resumed_agent_config_preserves_persisted_schedule_and_workgraph_overrides()
+    {
+        let def = sample_definition();
+        let mut lead = def.profiles[&ProfileName::from("lead")]
+            .as_inline()
+            .unwrap()
+            .clone();
+        lead.tools.workgraph = false;
+        lead.tools.schedule = false;
+        let session_id = SessionId::new();
+        let resumed_session = resumed_session_with_metadata(session_id.clone());
+
+        let config = build_resumed_agent_config(BuildResumedAgentConfigParams {
+            base: BuildAgentConfigParams {
+                mob_id: &def.id,
+                profile_name: &ProfileName::from("lead"),
+                agent_identity: &MeerkatId::from("lead-1"),
+                profile: &lead,
+                definition: &def,
+                external_tools: None,
+                context: None,
+                labels: None,
+                additional_instructions: None,
+                shell_env: None,
+                mob_tool_authority_context: None,
+                inherited_tool_filter: None,
+            },
+            expected_session_id: &session_id,
+            resumed_session,
+        })
+        .await
+        .expect("build_resumed_agent_config");
+
+        assert_eq!(
+            config.override_schedule,
+            meerkat_core::ToolCategoryOverride::Enable,
+            "resumed mob members must keep durable schedule exposure intent from metadata"
+        );
+        assert_eq!(
+            config.override_workgraph,
+            meerkat_core::ToolCategoryOverride::Enable,
+            "resumed mob members must keep durable WorkGraph exposure intent from metadata"
         );
     }
 

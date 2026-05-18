@@ -128,6 +128,7 @@ fn profile_from_wire(profile: WireMobProfile) -> Profile {
             shell: tools.shell,
             comms: tools.comms,
             memory: tools.memory,
+            workgraph: tools.workgraph,
             mob: tools.mob,
             schedule: tools.schedule,
             image_generation: tools.image_generation,

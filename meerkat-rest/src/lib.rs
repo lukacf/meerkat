@@ -4199,6 +4199,7 @@ async fn create_session_inner(
             keep_alive: keep_alive_override.is_some(),
             comms_name: req.comms_name.is_some(),
             peer_meta: req.peer_meta.is_some(),
+            override_schedule: req.enable_schedule.is_some(),
             override_web_search: req.enable_web_search.is_some(),
             ..Default::default()
         },

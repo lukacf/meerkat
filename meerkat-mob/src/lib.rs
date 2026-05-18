@@ -127,8 +127,8 @@ pub use runtime::{
     MemberRespawnReceipt, MobBuilder, MobDestroyError, MobDestroyReport, MobEventRouterConfig,
     MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig, MobHandle,
     MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
-    MobSessionService, MobState, MobUnreachablePeer, MobWireMembersBatchReport, PeerTarget,
-    PreviousMemberCleanupReport, SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSpec,
+    MobSessionService, MobState, MobUnreachablePeer, MobWireMembersBatchReport, PeerMessageReceipt,
+    PeerTarget, PreviousMemberCleanupReport, SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSpec,
     SupervisorRotationReport, WorkDeliveryReceipt,
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};

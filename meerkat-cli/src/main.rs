@@ -14114,6 +14114,7 @@ default_model = "gemma"
             comms: meerkat_core::ToolCategoryOverride::Enable,
             mob: meerkat_core::ToolCategoryOverride::Disable,
             memory: meerkat_core::ToolCategoryOverride::Disable,
+            schedule: meerkat_core::ToolCategoryOverride::Inherit,
             workgraph: meerkat_core::ToolCategoryOverride::Disable,
             image_generation: meerkat_core::ToolCategoryOverride::Disable,
             web_search: meerkat_core::ToolCategoryOverride::Disable,

@@ -203,6 +203,12 @@ pub struct MeerkatRunInput {
     /// Enable semantic memory.
     #[serde(default)]
     pub enable_memory: Option<bool>,
+    /// Enable schedule tools.
+    #[serde(default)]
+    pub enable_schedule: Option<bool>,
+    /// Enable WorkGraph tools.
+    #[serde(default)]
+    pub enable_workgraph: Option<bool>,
     /// Enable mob tools.
     #[serde(default)]
     pub enable_mob: Option<bool>,
@@ -271,6 +277,8 @@ fn mcp_resume_requires_rebuild(input: &MeerkatResumeInput) -> bool {
             .as_ref()
             .is_some_and(|cfg| cfg.enable_shell.is_some())
         || input.enable_memory.is_some()
+        || input.enable_schedule.is_some()
+        || input.enable_workgraph.is_some()
         || input.enable_mob.is_some()
         || input.enable_web_search.is_some()
         || input.budget_limits.is_some()
@@ -1019,6 +1027,12 @@ pub struct MeerkatResumeInput {
     /// Enable semantic memory.
     #[serde(default)]
     pub enable_memory: Option<bool>,
+    /// Enable schedule tools.
+    #[serde(default)]
+    pub enable_schedule: Option<bool>,
+    /// Enable WorkGraph tools.
+    #[serde(default)]
+    pub enable_workgraph: Option<bool>,
     /// Enable mob tools.
     #[serde(default)]
     pub enable_mob: Option<bool>,
@@ -2927,6 +2941,8 @@ async fn handle_meerkat_help(
         peer_meta: None,
         hooks_override: None,
         enable_memory: Some(false),
+        enable_schedule: Some(false),
+        enable_workgraph: Some(false),
         enable_mob: Some(false),
         enable_web_search: Some(false),
         provider_params: None,
@@ -3140,8 +3156,8 @@ async fn handle_meerkat_run(
         override_builtins: ToolCategoryOverride::from_override(input.enable_builtins),
         override_shell: ToolCategoryOverride::from_override(enable_shell_override),
         override_memory: ToolCategoryOverride::from_override(input.enable_memory),
-        override_schedule: ToolCategoryOverride::Inherit,
-        override_workgraph: ToolCategoryOverride::Inherit,
+        override_schedule: ToolCategoryOverride::from_override(input.enable_schedule),
+        override_workgraph: ToolCategoryOverride::from_override(input.enable_workgraph),
         override_mob: ToolCategoryOverride::Inherit,
         override_image_generation: ToolCategoryOverride::Inherit,
         override_web_search: ToolCategoryOverride::from_override(input.enable_web_search),
@@ -3174,6 +3190,8 @@ async fn handle_meerkat_run(
             keep_alive: keep_alive_override.is_some(),
             comms_name: input.comms_name.is_some(),
             peer_meta: input.peer_meta.is_some(),
+            override_schedule: input.enable_schedule.is_some(),
+            override_workgraph: input.enable_workgraph.is_some(),
             override_web_search: input.enable_web_search.is_some(),
             ..Default::default()
         },
@@ -3512,8 +3530,8 @@ async fn handle_meerkat_resume(
             override_builtins: ToolCategoryOverride::from_override(enable_builtins_override),
             override_shell: ToolCategoryOverride::from_override(enable_shell_override),
             override_memory: ToolCategoryOverride::from_override(input.enable_memory),
-            override_schedule: ToolCategoryOverride::Inherit,
-            override_workgraph: ToolCategoryOverride::Inherit,
+            override_schedule: ToolCategoryOverride::from_override(input.enable_schedule),
+            override_workgraph: ToolCategoryOverride::from_override(input.enable_workgraph),
             override_mob: ToolCategoryOverride::Inherit,
             override_image_generation: ToolCategoryOverride::Inherit,
             override_web_search: ToolCategoryOverride::from_override(input.enable_web_search),
@@ -3554,6 +3572,8 @@ async fn handle_meerkat_resume(
                 keep_alive: keep_alive_override.is_some(),
                 comms_name: input.comms_name.is_some(),
                 peer_meta: input.peer_meta.is_some(),
+                override_schedule: input.enable_schedule.is_some(),
+                override_workgraph: input.enable_workgraph.is_some(),
                 override_web_search: input.enable_web_search.is_some(),
                 ..Default::default()
             },
@@ -5149,6 +5169,8 @@ mod tests {
                 peer_meta: None,
                 hooks_override: None,
                 enable_memory: None,
+                enable_schedule: None,
+                enable_workgraph: None,
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
@@ -5199,6 +5221,8 @@ mod tests {
                 peer_meta: None,
                 hooks_override: None,
                 enable_memory: None,
+                enable_schedule: None,
+                enable_workgraph: None,
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
@@ -5303,6 +5327,8 @@ mod tests {
                 peer_meta: None,
                 hooks_override: None,
                 enable_memory: None,
+                enable_schedule: None,
+                enable_workgraph: None,
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
@@ -5385,6 +5411,8 @@ mod tests {
                 peer_meta: None,
                 hooks_override: None,
                 enable_memory: None,
+                enable_schedule: None,
+                enable_workgraph: None,
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
@@ -5447,6 +5475,8 @@ mod tests {
                 peer_meta: None,
                 hooks_override: None,
                 enable_memory: None,
+                enable_schedule: None,
+                enable_workgraph: None,
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
@@ -5580,6 +5610,8 @@ mod tests {
                 peer_meta: None,
                 hooks_override: None,
                 enable_memory: None,
+                enable_schedule: None,
+                enable_workgraph: None,
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
@@ -5699,6 +5731,8 @@ mod tests {
                 peer_meta: None,
                 hooks_override: None,
                 enable_memory: None,
+                enable_schedule: None,
+                enable_workgraph: None,
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
@@ -5816,6 +5850,8 @@ mod tests {
                 peer_meta: None,
                 hooks_override: None,
                 enable_memory: None,
+                enable_schedule: None,
+                enable_workgraph: None,
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
@@ -5912,6 +5948,8 @@ mod tests {
                 peer_meta: None,
                 hooks_override: None,
                 enable_memory: None,
+                enable_schedule: None,
+                enable_workgraph: None,
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
@@ -6005,6 +6043,8 @@ mod tests {
                 peer_meta: None,
                 hooks_override: None,
                 enable_memory: None,
+                enable_schedule: None,
+                enable_workgraph: None,
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
@@ -6085,6 +6125,14 @@ mod tests {
         });
         assert!(mcp_resume_requires_rebuild(&input));
         input.builtin_config = None;
+
+        input.enable_schedule = Some(true);
+        assert!(mcp_resume_requires_rebuild(&input));
+        input.enable_schedule = None;
+
+        input.enable_workgraph = Some(true);
+        assert!(mcp_resume_requires_rebuild(&input));
+        input.enable_workgraph = None;
 
         input.comms_name = Some("agent-a".to_string());
         assert!(mcp_resume_requires_rebuild(&input));

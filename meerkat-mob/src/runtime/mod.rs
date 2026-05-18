@@ -127,7 +127,7 @@ pub use handle::{
     HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt, MobDestroyError,
     MobDestroyReport, MobEventsSubscription, MobEventsSubscriptionConfig, MobEventsView, MobHandle,
     MobMemberListEntry, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
-    MobRespawnError, MobUnreachablePeer, MobWireMembersBatchReport, PeerTarget,
+    MobRespawnError, MobUnreachablePeer, MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget,
     PreviousMemberCleanupReport, SpawnMemberSpec, SpawnResult, SupervisorRotationReport,
     WorkDeliveryReceipt,
 };

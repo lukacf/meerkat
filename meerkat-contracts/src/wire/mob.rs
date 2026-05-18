@@ -130,6 +130,8 @@ pub struct WireMobToolConfig {
     #[serde(default)]
     pub memory: bool,
     #[serde(default)]
+    pub workgraph: bool,
+    #[serde(default)]
     pub mob: bool,
     #[serde(default)]
     pub schedule: bool,
@@ -210,6 +212,8 @@ pub struct MobToolConfigInput {
     pub comms: bool,
     #[serde(default)]
     pub memory: bool,
+    #[serde(default)]
+    pub workgraph: bool,
     #[serde(default)]
     pub mob: bool,
     #[serde(default)]

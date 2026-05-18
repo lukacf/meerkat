@@ -3223,6 +3223,18 @@ impl MobActor {
                     let result = Box::pin(self.handle_submit_work(payload)).await;
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::SendPeerMessage {
+                    from,
+                    to,
+                    content,
+                    handling_mode,
+                    reply_tx,
+                } => {
+                    let result =
+                        Box::pin(self.handle_send_peer_message(from, to, content, handling_mode))
+                            .await;
+                    let _ = reply_tx.send(result);
+                }
                 #[cfg(feature = "runtime-adapter")]
                 MobCommand::KickoffOutcomeResolved {
                     agent_identity,
@@ -6325,6 +6337,86 @@ impl MobActor {
             already_wired,
             wired,
         })
+    }
+
+    async fn handle_send_peer_message(
+        &mut self,
+        from: MeerkatId,
+        to: MeerkatId,
+        content: ContentInput,
+        handling_mode: meerkat_core::types::HandlingMode,
+    ) -> Result<meerkat_core::comms::SendReceipt, MobError> {
+        self.require_state(&[MobState::Running])?;
+        if from == to {
+            return Err(MobError::WiringError(format!(
+                "peer message requires distinct members (got '{from}')"
+            )));
+        }
+        self.ensure_member_not_broken(&from).await?;
+        self.ensure_member_not_broken(&to).await?;
+
+        let (sender_entry, recipient_entry) = {
+            let roster = self.roster.read().await;
+            (
+                roster
+                    .get(&from)
+                    .cloned()
+                    .ok_or_else(|| MobError::MemberNotFound(from.clone()))?,
+                roster
+                    .get(&to)
+                    .cloned()
+                    .ok_or_else(|| MobError::MemberNotFound(to.clone()))?,
+            )
+        };
+
+        let edge = mob_dsl::WiringEdge::new(
+            mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(from.as_str())),
+            mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(to.as_str())),
+        );
+        let wired_by_machine = self
+            .dsl_authority
+            .state
+            .wiring_edges
+            .iter()
+            .any(|existing| existing == &edge);
+        if !wired_by_machine {
+            return Err(MobError::WiringError(format!(
+                "peer message requires wired members '{from}' and '{to}'"
+            )));
+        }
+
+        let sender_comms = self
+            .provisioner_comms(&sender_entry.member_ref)
+            .await
+            .ok_or_else(|| {
+                MobError::WiringError(format!(
+                    "peer message requires sender comms runtime for '{from}'"
+                ))
+            })?;
+        let recipient_endpoint = self
+            .resolve_wiring_endpoint(&recipient_entry, "peer_message")
+            .await?;
+        let recipient_spec = match recipient_endpoint {
+            WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
+        };
+        let route =
+            PeerRoute::with_display_name(recipient_spec.peer_id, recipient_spec.name.clone());
+        let (body, blocks) = match content {
+            ContentInput::Text(body) => (body, None),
+            ContentInput::Blocks(blocks) => {
+                (meerkat_core::types::text_content(&blocks), Some(blocks))
+            }
+        };
+
+        sender_comms
+            .send(CommsCommand::PeerMessage {
+                to: route,
+                body,
+                blocks,
+                handling_mode,
+            })
+            .await
+            .map_err(MobError::from)
     }
 
     async fn rollback_wire_members_batch(

@@ -40,7 +40,7 @@ macro_rules! mob_catalog_machine_dsl {
             run_target_retry_counts_flat: Map<RunStepKey, u64>,
             run_failure_count: Map<RunId, u64>,
             run_consecutive_failure_count: Map<RunId, u64>,
-            run_escalation_threshold: Map<RunId, u32>,
+            run_escalation_threshold: Map<RunId, u64>,
             run_max_step_retries: Map<RunId, u32>,
             run_ready_frames: Map<RunId, Seq<FrameId>>,
             run_ready_frame_membership: Map<RunId, Set<FrameId>>,
@@ -245,7 +245,7 @@ macro_rules! mob_catalog_machine_dsl {
                 step_branches: Map<StepId, Option<BranchId>>,
                 step_collection_policies: Map<StepId, Enum<CollectionPolicyKind>>,
                 step_quorum_thresholds: Map<StepId, u32>,
-                escalation_threshold: u32,
+                escalation_threshold: u64,
                 max_step_retries: u32,
                 max_active_nodes: u64,
                 max_active_frames: u64,
@@ -261,7 +261,7 @@ macro_rules! mob_catalog_machine_dsl {
                 step_branches: Map<StepId, Option<BranchId>>,
                 step_collection_policies: Map<StepId, Enum<CollectionPolicyKind>>,
                 step_quorum_thresholds: Map<StepId, u32>,
-                escalation_threshold: u32,
+                escalation_threshold: u64,
                 max_step_retries: u32,
                 max_active_nodes: u64,
                 max_active_frames: u64,
@@ -2196,6 +2196,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "has_run_step_key" { run_step_key != None }
             guard "failed_step_status" { step_status == Some(StepRunStatus::Failed) }
             guard "step_tracked" { self.run_tracked_steps.get_cloned(run_id).get("value").contains(step_id.get("value")) }
+            guard "supervisor_escalation_not_due" {
+                self.run_escalation_threshold.get_cloned(run_id).get("value") == 0
+                || self.run_consecutive_failure_count.get_cloned(run_id).get("value") + 1
+                    < self.run_escalation_threshold.get_cloned(run_id).get("value")
+            }
             update {
                 self.run_step_status_flat.insert(run_step_key.get("value"), StepRunStatus::Failed);
                 self.run_failure_count.increment(run_id, 1);
@@ -2204,6 +2209,32 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
             emit EmitRunLifecycleNotice
             emit AppendFailureLedger
+        }
+
+        transition AuthorizeFlowRunReducerCommandFailStepEscalating {
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            guard "known_run" { self.run_status.contains_key(run_id) == true }
+            guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
+            guard "fail_step_command" { command == FlowRunReducerCommandKind::FailStep }
+            guard "has_step_id" { step_id != None }
+            guard "has_run_step_key" { run_step_key != None }
+            guard "failed_step_status" { step_status == Some(StepRunStatus::Failed) }
+            guard "step_tracked" { self.run_tracked_steps.get_cloned(run_id).get("value").contains(step_id.get("value")) }
+            guard "supervisor_escalation_due" {
+                self.run_escalation_threshold.get_cloned(run_id).get("value") > 0
+                && self.run_consecutive_failure_count.get_cloned(run_id).get("value") + 1
+                    >= self.run_escalation_threshold.get_cloned(run_id).get("value")
+            }
+            update {
+                self.run_step_status_flat.insert(run_step_key.get("value"), StepRunStatus::Failed);
+                self.run_failure_count.increment(run_id, 1);
+                self.run_consecutive_failure_count.increment(run_id, 1);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+            emit AppendFailureLedger
+            emit EscalateSupervisor
         }
 
         transition AuthorizeFlowRunReducerCommandSkipStep {
@@ -2281,6 +2312,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "frame_node_failed" {
                 self.frame_node_status.get_cloned(frame_id.get("value")).get("value").get_cloned(node_id.get("value")) == Some(NodeRunStatus::Failed)
             }
+            guard "supervisor_escalation_not_due" {
+                self.run_escalation_threshold.get_cloned(run_id).get("value") == 0
+                || self.run_consecutive_failure_count.get_cloned(run_id).get("value") + 1
+                    < self.run_escalation_threshold.get_cloned(run_id).get("value")
+            }
             update {
                 self.run_step_status_flat.insert(run_step_key.get("value"), StepRunStatus::Failed);
                 self.run_failure_count.increment(run_id, 1);
@@ -2289,6 +2325,43 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
             emit EmitRunLifecycleNotice
             emit AppendFailureLedger
+        }
+
+        transition AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalating {
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
+            guard "known_run" { self.run_status.contains_key(run_id) == true }
+            guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
+            guard "project_frame_step_status_command" { command == FlowRunReducerCommandKind::ProjectFrameStepStatus }
+            guard "has_step_id" { step_id != None }
+            guard "has_run_step_key" { run_step_key != None }
+            guard "has_frame_id" { frame_id != None }
+            guard "has_node_id" { node_id != None }
+            guard "step_tracked" { self.run_tracked_steps.get_cloned(run_id).get("value").contains(step_id.get("value")) }
+            guard "frame_belongs_to_run" { self.frame_run.get_cloned(frame_id.get("value")) == Some(run_id) }
+            guard "frame_node_tracked" { self.frame_tracked_nodes.get_cloned(frame_id.get("value")).get("value").contains(node_id.get("value")) }
+            guard "frame_node_maps_to_step" { self.frame_node_step_ids.get_cloned(frame_id.get("value")).get("value").get_cloned(node_id.get("value")) == Some(step_id.get("value")) }
+            guard "run_step_not_already_terminal_projected" {
+                self.run_step_status_flat.contains_key(run_step_key.get("value")) == false
+                || self.run_step_status_flat.get_cloned(run_step_key.get("value")) == Some(StepRunStatus::Dispatched)
+            }
+            guard "frame_node_failed" {
+                self.frame_node_status.get_cloned(frame_id.get("value")).get("value").get_cloned(node_id.get("value")) == Some(NodeRunStatus::Failed)
+            }
+            guard "supervisor_escalation_due" {
+                self.run_escalation_threshold.get_cloned(run_id).get("value") > 0
+                && self.run_consecutive_failure_count.get_cloned(run_id).get("value") + 1
+                    >= self.run_escalation_threshold.get_cloned(run_id).get("value")
+            }
+            update {
+                self.run_step_status_flat.insert(run_step_key.get("value"), StepRunStatus::Failed);
+                self.run_failure_count.increment(run_id, 1);
+                self.run_consecutive_failure_count.increment(run_id, 1);
+            }
+            to Running
+            emit EmitRunLifecycleNotice
+            emit AppendFailureLedger
+            emit EscalateSupervisor
         }
 
         transition AuthorizeFlowRunReducerCommandCancelStep {

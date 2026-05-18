@@ -933,7 +933,7 @@ pub struct FlowRunSeedAuthorityRecord {
     pub step_branches: BTreeMap<mob_dsl::StepId, Option<mob_dsl::BranchId>>,
     pub step_collection_policies: BTreeMap<mob_dsl::StepId, mob_dsl::CollectionPolicyKind>,
     pub step_quorum_thresholds: BTreeMap<mob_dsl::StepId, u32>,
-    pub escalation_threshold: u32,
+    pub escalation_threshold: u64,
     pub max_step_retries: u32,
     pub max_active_nodes: u64,
     pub max_active_frames: u64,
@@ -2068,11 +2068,12 @@ pub(crate) fn project_flow_run_state_from_machine(
         .map(|(key, value)| (key, saturating_u64_to_u32(value)))
         .collect();
     project_flow_run_counters_from_machine(&mut state, machine_state, &run_key)?;
-    state.escalation_threshold = *required_machine_value(
+    state.escalation_threshold = required_machine_value(
         &machine_state.run_escalation_threshold,
         &run_key,
         "run_escalation_threshold",
-    )?;
+    )
+    .map(|value| saturating_u64_to_u32(*value))?;
     state.max_step_retries = *required_machine_value(
         &machine_state.run_max_step_retries,
         &run_key,
@@ -2360,16 +2361,6 @@ fn project_flow_run_frame_step_status_from_machine(
                 &run_key,
             )?;
             append_generated_flow_run_effects(&mut outcome.effects, machine_effects, step_id);
-            if outcome.next_state.escalation_threshold > 0
-                && outcome.next_state.consecutive_failure_count
-                    >= outcome.next_state.escalation_threshold
-            {
-                outcome.effects.push(flow_run::Effect::EscalateSupervisor(
-                    flow_run::effects::EscalateSupervisor {
-                        step_id: step_id.clone(),
-                    },
-                ));
-            }
         }
         flow_run::StepRunStatus::Completed => {
             let run_key = mob_dsl::RunId::from(run_id.to_string());
@@ -2390,12 +2381,22 @@ fn append_generated_flow_run_effects(
     step_id: &StepId,
 ) {
     for effect in machine_effects {
-        if matches!(effect, mob_dsl::MobMachineEffect::AppendFailureLedger) {
-            effects.push(flow_run::Effect::AppendFailureLedger(
-                flow_run::effects::AppendFailureLedger {
-                    step_id: step_id.clone(),
-                },
-            ));
+        match effect {
+            mob_dsl::MobMachineEffect::AppendFailureLedger => {
+                effects.push(flow_run::Effect::AppendFailureLedger(
+                    flow_run::effects::AppendFailureLedger {
+                        step_id: step_id.clone(),
+                    },
+                ));
+            }
+            mob_dsl::MobMachineEffect::EscalateSupervisor => {
+                effects.push(flow_run::Effect::EscalateSupervisor(
+                    flow_run::effects::EscalateSupervisor {
+                        step_id: step_id.clone(),
+                    },
+                ));
+            }
+            _ => {}
         }
     }
 }
@@ -4262,7 +4263,7 @@ impl MobRun {
             escalation_threshold: config
                 .supervisor
                 .as_ref()
-                .map_or(0, |supervisor| supervisor.escalation_threshold),
+                .map_or(0, |supervisor| u64::from(supervisor.escalation_threshold)),
             max_step_retries: config
                 .limits
                 .as_ref()

@@ -432,6 +432,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeFlowRunReducerCommandFailStep`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
+- `AuthorizeFlowRunReducerCommandFailStepEscalating`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 - `AuthorizeFlowRunReducerCommandSkipStep`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
@@ -439,6 +442,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalating`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `AuthorizeFlowRunReducerCommandCancelStep`

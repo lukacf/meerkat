@@ -37,7 +37,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `run_target_retry_counts_flat`: `Map<RunStepKey, u64>`
 - `run_failure_count`: `Map<RunId, u64>`
 - `run_consecutive_failure_count`: `Map<RunId, u64>`
-- `run_escalation_threshold`: `Map<RunId, u32>`
+- `run_escalation_threshold`: `Map<RunId, u64>`
 - `run_max_step_retries`: `Map<RunId, u32>`
 - `run_ready_frames`: `Map<RunId, Seq<FrameId>>`
 - `run_ready_frame_membership`: `Map<RunId, Set<FrameId>>`
@@ -105,8 +105,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `topology_epoch`: `u64`
 
 ## Inputs
-- `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, escalation_threshold: u32, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
-- `CreateRunSeed`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, escalation_threshold: u32, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
+- `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
+- `CreateRunSeed`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
 - `CreateFrameSeed`(run_id: RunId, frame_id: FrameId, frame_scope: FrameScope, loop_instance_id: Option<LoopInstanceId>, iteration: u32, tracked_nodes: Set<FlowNodeId>, ordered_nodes: Seq<FlowNodeId>, node_kind: Map<FlowNodeId, FlowNodeKind>, node_dependencies: Map<FlowNodeId, Seq<FlowNodeId>>, node_dependency_modes: Map<FlowNodeId, DependencyMode>, node_branches: Map<FlowNodeId, Option<BranchId>>, node_step_ids: Map<FlowNodeId, StepId>, node_loop_ids: Map<FlowNodeId, LoopId>, node_status: Map<FlowNodeId, NodeRunStatus>, ready_queue: Seq<FlowNodeId>)
 - `CreateLoopSeed`(loop_instance_id: LoopInstanceId, parent_frame_id: FrameId, parent_node_id: FlowNodeId, loop_id: LoopId, depth: u32, max_iterations: u64)
 - `RecordLoopBodyFrameCompleted`(loop_instance_id: LoopInstanceId, iteration: u64)
@@ -1273,7 +1273,23 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `has_run_step_key`
   - `failed_step_status`
   - `step_tracked`
+  - `supervisor_escalation_not_due`
 - Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`
+- To: `Running`
+
+### `AuthorizeFlowRunReducerCommandFailStepEscalating`
+- From: `Running`, `Stopped`, `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `fail_step_command`
+  - `has_step_id`
+  - `has_run_step_key`
+  - `failed_step_status`
+  - `step_tracked`
+  - `supervisor_escalation_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`, `EscalateSupervisor`
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandSkipStep`
@@ -1327,7 +1343,29 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `frame_node_maps_to_step`
   - `run_step_not_already_terminal_projected`
   - `frame_node_failed`
+  - `supervisor_escalation_not_due`
 - Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`
+- To: `Running`
+
+### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalating`
+- From: `Running`, `Stopped`, `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `project_frame_step_status_command`
+  - `has_step_id`
+  - `has_run_step_key`
+  - `has_frame_id`
+  - `has_node_id`
+  - `step_tracked`
+  - `frame_belongs_to_run`
+  - `frame_node_tracked`
+  - `frame_node_maps_to_step`
+  - `run_step_not_already_terminal_projected`
+  - `frame_node_failed`
+  - `supervisor_escalation_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`, `EscalateSupervisor`
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandCancelStep`

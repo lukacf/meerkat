@@ -826,19 +826,12 @@ pub(crate) fn transition<C: Context>(
             next_state.failure_count = next_state.failure_count.saturating_add(1);
             next_state.consecutive_failure_count =
                 next_state.consecutive_failure_count.saturating_add(1);
-            let should_escalate = next_state.escalation_threshold > 0
-                && next_state.consecutive_failure_count >= next_state.escalation_threshold;
-            let mut effects = vec![
+            let effects = vec![
                 emit_step_notice(payload.step_id.clone(), StepRunStatus::Failed),
                 Effect::AppendFailureLedger(effects::AppendFailureLedger {
                     step_id: payload.step_id.clone(),
                 }),
             ];
-            if should_escalate {
-                effects.push(Effect::EscalateSupervisor(effects::EscalateSupervisor {
-                    step_id: payload.step_id.clone(),
-                }));
-            }
             Ok(Outcome {
                 transition_id: TransitionId::FailStep,
                 next_state,

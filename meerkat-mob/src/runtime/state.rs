@@ -375,9 +375,9 @@ pub(super) enum MobCommand {
     ///
     /// D-wire-handler (#26): the MobMachine DSL owns wiring-graph authority.
     /// Local member targets route through `WireMembers { edge }`; raw
-    /// external peer descriptors route through `WireExternalPeer { edge }`
-    /// so descriptor/key/address truth is not collapsed into a member
-    /// `WiringEdge`.
+    /// external peer descriptors route through `WireExternalPeer { key, edge }`
+    /// so local/name uniqueness and descriptor/key/address truth are not
+    /// collapsed into a member `WiringEdge`.
     Wire {
         local: MeerkatId,
         target: super::handle::PeerTarget,

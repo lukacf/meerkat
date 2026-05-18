@@ -10406,7 +10406,7 @@ async fn test_respawn_success_restores_existing_peer_wiring() {
 }
 
 #[tokio::test]
-async fn test_respawn_restores_local_wiring_from_mob_machine_edge() {
+async fn test_respawn_repairs_local_machine_edge_without_roster_projection() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let left = MeerkatId::from("respawn-machine-left");
     let right = MeerkatId::from("respawn-machine-right");
@@ -10467,14 +10467,16 @@ async fn test_respawn_restores_local_wiring_from_mob_machine_edge() {
         .await
         .expect("right after respawn");
     assert!(
-        left_after
+        !left_after
             .wired_to
-            .contains(&AgentIdentity::from(right.as_str()))
+            .contains(&AgentIdentity::from(right.as_str())),
+        "respawn trust repair must not synthesize left roster projection"
     );
     assert!(
-        right_after
+        !right_after
             .wired_to
-            .contains(&AgentIdentity::from(left.as_str()))
+            .contains(&AgentIdentity::from(left.as_str())),
+        "respawn trust repair must not synthesize right roster projection"
     );
 }
 
@@ -15073,6 +15075,102 @@ async fn test_wire_external_adds_trusted_peer_and_tracks_projection() {
 }
 
 #[tokio::test]
+async fn test_wire_external_rejects_same_name_descriptor_replacement() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let sid_l = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    let external = test_trusted_peer_descriptor(
+        "remote-mob/worker/duplicate-agent",
+        "inproc://remote-mob/worker/duplicate-agent-a",
+    );
+    let replacement = test_trusted_peer_descriptor(
+        external.name.as_str(),
+        "inproc://remote-mob/worker/duplicate-agent-b",
+    );
+
+    handle
+        .wire(
+            AgentIdentity::from("l-1"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("wire external");
+    let result = handle
+        .wire(
+            AgentIdentity::from("l-1"),
+            PeerTarget::External(replacement.clone()),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "MobMachine should reject a second descriptor for the same local/name peer key"
+    );
+
+    let entry_l = handle
+        .get_member(&AgentIdentity::from("l-1"))
+        .await
+        .expect("member should exist");
+    assert_eq!(
+        entry_l
+            .external_peer_specs
+            .get(&MeerkatId::from(external.name.as_str()))
+            .cloned(),
+        Some(external.clone()),
+        "projection must still reflect the descriptor admitted by MobMachine"
+    );
+
+    let trusted_addresses = service.trusted_peer_addresses(&sid_l).await;
+    assert!(
+        trusted_addresses
+            .iter()
+            .any(|address| address == "inproc://remote-mob/worker/duplicate-agent-a"),
+        "trusted peer should keep the first admitted descriptor"
+    );
+    assert!(
+        !trusted_addresses
+            .iter()
+            .any(|address| address == "inproc://remote-mob/worker/duplicate-agent-b"),
+        "rejected replacement descriptor must not be installed into comms trust"
+    );
+
+    let dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("debug dsl snapshot");
+    let external_key = crate::machines::mob_machine::ExternalPeerKey::new(
+        crate::machines::mob_machine::AgentIdentity::from("l-1"),
+        crate::machines::mob_machine::PeerName::from(external.name.as_str()),
+    );
+    let external_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from("l-1"),
+        crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
+    );
+    assert_eq!(
+        dsl.external_peer_edges_by_key.get(&external_key).cloned(),
+        Some(external_edge.clone()),
+        "MobMachine should own one descriptor edge for the local/name peer key"
+    );
+    let duplicate_name_edges = dsl
+        .external_peer_edges
+        .iter()
+        .filter(|edge| {
+            edge.local == crate::machines::mob_machine::AgentIdentity::from("l-1")
+                && edge.endpoint.name.0 == external.name.as_str()
+        })
+        .count();
+    assert_eq!(
+        duplicate_name_edges, 1,
+        "MobMachine must not retain multiple descriptor edges for one local/name peer key"
+    );
+}
+
+#[tokio::test]
 async fn test_rewire_external_repairs_trust_for_existing_machine_edge() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let sid_l = handle
@@ -15149,13 +15247,21 @@ async fn test_rewire_external_machine_edge_without_roster_projection_repairs_tru
         "remote-mob/worker/repair-agent",
         "inproc://remote-mob/worker/repair-agent",
     );
+    let machine_local = crate::machines::mob_machine::AgentIdentity::from("l-machine-repair");
+    let machine_key = crate::machines::mob_machine::ExternalPeerKey::new(
+        machine_local.clone(),
+        crate::machines::mob_machine::PeerName::from(external.name.as_str()),
+    );
     let machine_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
-        crate::machines::mob_machine::AgentIdentity::from("l-machine-repair"),
+        machine_local,
         crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
     );
     handle
         .project_machine_input(
-            crate::machines::mob_machine::MobMachineInput::WireExternalPeer { edge: machine_edge },
+            crate::machines::mob_machine::MobMachineInput::WireExternalPeer {
+                key: machine_key,
+                edge: machine_edge,
+            },
         )
         .await
         .expect("seed machine-owned external edge without roster projection");
@@ -15194,7 +15300,7 @@ async fn test_rewire_external_machine_edge_without_roster_projection_repairs_tru
 }
 
 #[tokio::test]
-async fn test_respawn_restores_external_wiring_from_roster_spec() {
+async fn test_respawn_repairs_external_roster_spec_trust_without_projection() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let old_sid = handle
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
@@ -15235,22 +15341,21 @@ async fn test_respawn_restores_external_wiring_from_roster_spec() {
     let trusted = service.trusted_peer_names(&new_sid).await;
     assert!(
         trusted.iter().any(|n| n == external.name.as_str()),
-        "respawn should restore external trusted peers from the stored roster spec"
+        "respawn should restore external trust from the stored roster spec"
     );
 
-    assert_eq!(
-        entry
+    assert!(
+        !entry
             .external_peer_specs
-            .get(&MeerkatId::from(external.name.as_str()))
-            .cloned(),
-        Some(external)
+            .contains_key(&MeerkatId::from(external.name.as_str())),
+        "respawn trust repair must not synthesize external roster projection"
     );
     assert_eq!(entry.agent_runtime_id, receipt.agent_runtime_id);
     assert_eq!(entry.fence_token, receipt.fence_token);
 }
 
 #[tokio::test]
-async fn test_respawn_restores_external_wiring_from_mob_machine_edge() {
+async fn test_respawn_repairs_external_machine_edge_without_roster_projection() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let old_sid = handle
         .spawn(
@@ -15268,13 +15373,21 @@ async fn test_respawn_restores_external_wiring_from_mob_machine_edge() {
         "remote-mob/worker/machine-agent",
         "inproc://remote-mob/worker/machine-agent",
     );
+    let machine_local = crate::machines::mob_machine::AgentIdentity::from("l-machine");
+    let machine_key = crate::machines::mob_machine::ExternalPeerKey::new(
+        machine_local.clone(),
+        crate::machines::mob_machine::PeerName::from(external.name.as_str()),
+    );
     let machine_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
-        crate::machines::mob_machine::AgentIdentity::from("l-machine"),
+        machine_local,
         crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
     );
     handle
         .project_machine_input(
-            crate::machines::mob_machine::MobMachineInput::WireExternalPeer { edge: machine_edge },
+            crate::machines::mob_machine::MobMachineInput::WireExternalPeer {
+                key: machine_key,
+                edge: machine_edge,
+            },
         )
         .await
         .expect("seed machine-owned external edge without roster projection");
@@ -15309,12 +15422,11 @@ async fn test_respawn_restores_external_wiring_from_mob_machine_edge() {
         trusted.iter().any(|n| n == external.name.as_str()),
         "respawn should restore external trust from MobMachine topology"
     );
-    assert_eq!(
-        entry
+    assert!(
+        !entry
             .external_peer_specs
-            .get(&MeerkatId::from(external.name.as_str()))
-            .cloned(),
-        Some(external)
+            .contains_key(&MeerkatId::from(external.name.as_str())),
+        "respawn trust repair must not synthesize external roster projection"
     );
     assert_eq!(entry.agent_runtime_id, receipt.agent_runtime_id);
     assert_eq!(entry.fence_token, receipt.fence_token);
@@ -16008,6 +16120,81 @@ async fn test_rewire_repairs_local_trust_for_existing_machine_edge() {
     assert_eq!(
         pair_wired_events, 1,
         "trust repair for an existing machine edge must not duplicate the logical wire event"
+    );
+}
+
+#[tokio::test]
+async fn test_rewire_local_repair_failure_rolls_back_first_trust_side() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let sid_l = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_w = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wire(AgentIdentity::from("l-1"), MeerkatId::from("w-1"))
+        .await
+        .expect("initial wire");
+    service.force_remove_trust(&sid_l, &sid_w).await;
+    service.force_remove_trust(&sid_w, &sid_l).await;
+    service
+        .set_comms_behavior(
+            &test_comms_name("worker", "w-1"),
+            MockCommsBehavior {
+                fail_add_trust: true,
+                ..MockCommsBehavior::default()
+            },
+        )
+        .await;
+
+    let result = handle
+        .wire(AgentIdentity::from("l-1"), MeerkatId::from("w-1"))
+        .await;
+    assert!(
+        result.is_err(),
+        "repair should surface reciprocal trust install failure"
+    );
+
+    let trusted_by_lead = service.trusted_peer_names(&sid_l).await;
+    let trusted_by_worker = service.trusted_peer_names(&sid_w).await;
+    assert!(
+        !trusted_by_lead
+            .iter()
+            .any(|name| name.as_str() == test_comms_name("worker", "w-1")),
+        "failed repair must rollback trust installed on the first side"
+    );
+    assert!(
+        !trusted_by_worker
+            .iter()
+            .any(|name| name.as_str() == test_comms_name("lead", "l-1")),
+        "failed repair must not leave reciprocal trust on the failing side"
+    );
+
+    let events = handle.events().replay_all().await.expect("replay");
+    let pair_wired_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::MembersWired { a, b }
+                    if (a == &AgentIdentity::from("l-1") && b == &AgentIdentity::from("w-1"))
+                        || (a == &AgentIdentity::from("w-1") && b == &AgentIdentity::from("l-1"))
+            )
+        })
+        .count();
+    assert_eq!(
+        pair_wired_events, 1,
+        "failed trust repair must not append a replacement MembersWired event"
     );
 }
 

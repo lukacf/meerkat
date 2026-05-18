@@ -5960,9 +5960,9 @@ impl MobActor {
         }
 
         // Respawn restore: re-fire topology captured from MobMachine, not
-        // from roster projection fields. `handle_wire` repairs live comms and
-        // read-model projection after MobMachine admits or already owns the
-        // edge, so respawn never writes roster wiring directly.
+        // from roster projection fields. When the machine already owns an
+        // edge, `handle_wire` consumes generated repair authority to restore
+        // live trust only; it does not manufacture roster/event projection.
         let mut failed_restore_peer_ids: Vec<MeerkatId> = Vec::new();
         if let Some(plan) = restore_wiring {
             for peer_identity in plan.local_peers {
@@ -6255,8 +6255,15 @@ impl MobActor {
                         ..
                     },
                 ) => {
-                    local_comms.add_trusted_peer(peer_spec.clone()).await?;
-                    peer_comms.add_trusted_peer(local_spec.clone()).await?;
+                    if let Err(error) = local_comms.add_trusted_peer(peer_spec.clone()).await {
+                        return Err(MobError::from(error));
+                    }
+                    if let Err(error) = peer_comms.add_trusted_peer(local_spec.clone()).await {
+                        let _ = local_comms
+                            .remove_trusted_peer(&Self::trusted_peer_removal_key(peer_spec))
+                            .await;
+                        return Err(MobError::from(error));
+                    }
                 }
                 (
                     WiringEndpoint::PeerOnly {
@@ -6274,14 +6281,34 @@ impl MobActor {
                         peer_spec,
                         std::time::Duration::from_secs(10),
                     )
-                    .await?;
-                    self.wire_peer_only_recipient(
-                        peer_spec,
-                        Some(peer_binding),
-                        local_spec,
-                        std::time::Duration::from_secs(10),
-                    )
-                    .await?;
+                    .await
+                    .map_err(|error| {
+                        tracing::debug!(
+                            mob_id = %self.definition.id,
+                            %error,
+                            "peer-only trust repair failed before reciprocal side"
+                        );
+                        error
+                    })?;
+                    if let Err(error) = self
+                        .wire_peer_only_recipient(
+                            peer_spec,
+                            Some(peer_binding),
+                            local_spec,
+                            std::time::Duration::from_secs(10),
+                        )
+                        .await
+                    {
+                        self.rollback_peer_only_wire(
+                            &edge,
+                            false,
+                            &["local"],
+                            local_spec,
+                            peer_spec,
+                        )
+                        .await;
+                        return Err(error);
+                    }
                 }
                 (
                     WiringEndpoint::Local {
@@ -6294,14 +6321,23 @@ impl MobActor {
                         binding: peer_binding,
                     },
                 ) => {
-                    local_comms.add_trusted_peer(peer_spec.clone()).await?;
-                    self.wire_peer_only_recipient(
-                        peer_spec,
-                        Some(peer_binding),
-                        local_spec,
-                        std::time::Duration::from_secs(10),
-                    )
-                    .await?;
+                    if let Err(error) = local_comms.add_trusted_peer(peer_spec.clone()).await {
+                        return Err(MobError::from(error));
+                    }
+                    if let Err(error) = self
+                        .wire_peer_only_recipient(
+                            peer_spec,
+                            Some(peer_binding),
+                            local_spec,
+                            std::time::Duration::from_secs(10),
+                        )
+                        .await
+                    {
+                        let _ = local_comms
+                            .remove_trusted_peer(&Self::trusted_peer_removal_key(peer_spec))
+                            .await;
+                        return Err(error);
+                    }
                 }
                 (
                     WiringEndpoint::PeerOnly {
@@ -6314,14 +6350,23 @@ impl MobActor {
                         ..
                     },
                 ) => {
-                    peer_comms.add_trusted_peer(local_spec.clone()).await?;
-                    self.wire_peer_only_recipient(
-                        local_spec,
-                        Some(local_binding),
-                        peer_spec,
-                        std::time::Duration::from_secs(10),
-                    )
-                    .await?;
+                    if let Err(error) = peer_comms.add_trusted_peer(local_spec.clone()).await {
+                        return Err(MobError::from(error));
+                    }
+                    if let Err(error) = self
+                        .wire_peer_only_recipient(
+                            local_spec,
+                            Some(local_binding),
+                            peer_spec,
+                            std::time::Duration::from_secs(10),
+                        )
+                        .await
+                    {
+                        let _ = peer_comms
+                            .remove_trusted_peer(&Self::trusted_peer_removal_key(local_spec))
+                            .await;
+                        return Err(error);
+                    }
                 }
             }
             return Ok(());
@@ -7502,26 +7547,43 @@ impl MobActor {
         )
     }
 
+    fn external_peer_key(
+        local_identity: &AgentIdentity,
+        peer_name: &meerkat_core::comms::PeerName,
+    ) -> mob_dsl::ExternalPeerKey {
+        mob_dsl::ExternalPeerKey::new(
+            mob_dsl::AgentIdentity::from_domain(local_identity),
+            mob_dsl::PeerName::from(peer_name.as_str()),
+        )
+    }
+
+    fn external_peer_key_for_edge(edge: &mob_dsl::ExternalPeerEdge) -> mob_dsl::ExternalPeerKey {
+        mob_dsl::ExternalPeerKey::new(edge.local.clone(), edge.endpoint.name.clone())
+    }
+
     fn external_peer_edge_for_name(
         &self,
         local_identity: &AgentIdentity,
         peer_name: &meerkat_core::comms::PeerName,
     ) -> Option<mob_dsl::ExternalPeerEdge> {
-        let local = mob_dsl::AgentIdentity::from_domain(local_identity);
+        let key = Self::external_peer_key(local_identity, peer_name);
         self.dsl_authority
             .state()
-            .external_peer_edges
-            .iter()
-            .find(|edge| edge.local == local && edge.endpoint.name.0 == peer_name.as_str())
+            .external_peer_edges_by_key
+            .get(&key)
             .cloned()
     }
 
     fn apply_wire_external_peer_idempotent(
         &mut self,
+        key: &mob_dsl::ExternalPeerKey,
         edge: &mob_dsl::ExternalPeerEdge,
     ) -> Result<WireTrustAuthority, MobError> {
         let effects = self.apply_dsl_input_collect_effects(
-            mob_dsl::MobMachineInput::WireExternalPeer { edge: edge.clone() },
+            mob_dsl::MobMachineInput::WireExternalPeer {
+                key: key.clone(),
+                edge: edge.clone(),
+            },
             "wire_external_peer",
         )?;
         Self::wire_external_authority_from_effects(&effects, edge, "wire_external_peer")
@@ -7529,10 +7591,14 @@ impl MobActor {
 
     fn apply_unwire_external_peer_idempotent(
         &mut self,
+        key: &mob_dsl::ExternalPeerKey,
         edge: &mob_dsl::ExternalPeerEdge,
     ) -> Result<bool, MobError> {
         let effects = self.apply_dsl_input_collect_effects(
-            mob_dsl::MobMachineInput::UnwireExternalPeer { edge: edge.clone() },
+            mob_dsl::MobMachineInput::UnwireExternalPeer {
+                key: key.clone(),
+                edge: edge.clone(),
+            },
             "unwire_external_peer",
         )?;
         Ok(Self::effects_include_wiring_graph_change(&effects))
@@ -7672,8 +7738,12 @@ impl MobActor {
             )));
         }
         let edge = Self::external_peer_edge(&local_identity, &spec);
+        let key = Self::external_peer_key_for_edge(&edge);
         self.probe_command_admission(
-            mob_dsl::MobMachineInput::WireExternalPeer { edge: edge.clone() },
+            mob_dsl::MobMachineInput::WireExternalPeer {
+                key: key.clone(),
+                edge: edge.clone(),
+            },
             MobState::Running,
             "wire_external_peer_command_admission",
         )?;
@@ -7699,7 +7769,7 @@ impl MobActor {
             ))
         })?;
 
-        let authority = self.apply_wire_external_peer_idempotent(&edge)?;
+        let authority = self.apply_wire_external_peer_idempotent(&key, &edge)?;
         if authority.is_repair() {
             comms.add_trusted_peer(spec.clone()).await?;
             return Ok(());
@@ -7707,7 +7777,7 @@ impl MobActor {
 
         if already_wired_with_same_spec {
             if authority.dsl_added() {
-                self.rollback_external_wire_dsl(&edge, true).await;
+                self.rollback_external_wire_dsl(&key, &edge, true).await;
             }
             return Err(MobError::WiringError(format!(
                 "idempotent external wire repair for '{local}' did not produce generated repair authority"
@@ -7717,7 +7787,8 @@ impl MobActor {
 
         // Install trust on the local's session comms runtime.
         if let Err(error) = comms.add_trusted_peer(spec.clone()).await {
-            self.rollback_external_wire_dsl(&edge, dsl_added).await;
+            self.rollback_external_wire_dsl(&key, &edge, dsl_added)
+                .await;
             return Err(MobError::from(error));
         }
 
@@ -7745,7 +7816,8 @@ impl MobActor {
                         "failed to rollback external trust install after event append failure"
                     );
                 }
-                self.rollback_external_wire_dsl(&edge, dsl_added).await;
+                self.rollback_external_wire_dsl(&key, &edge, dsl_added)
+                    .await;
                 return Err(MobError::from(append_err));
             }
         };
@@ -7758,12 +7830,16 @@ impl MobActor {
 
     async fn rollback_external_wire_dsl(
         &mut self,
+        key: &mob_dsl::ExternalPeerKey,
         edge: &mob_dsl::ExternalPeerEdge,
         dsl_added: bool,
     ) {
         if dsl_added
             && let Err(error) = self.apply_dsl_input(
-                mob_dsl::MobMachineInput::UnwireExternalPeer { edge: edge.clone() },
+                mob_dsl::MobMachineInput::UnwireExternalPeer {
+                    key: key.clone(),
+                    edge: edge.clone(),
+                },
                 "external_wire_rollback",
             )
         {
@@ -7817,7 +7893,10 @@ impl MobActor {
 
         let Some(prior_spec) = prior_spec else {
             let dsl_removed = match authority_edge.as_ref() {
-                Some(edge) => self.apply_unwire_external_peer_idempotent(edge)?,
+                Some(edge) => {
+                    let key = Self::external_peer_key_for_edge(edge);
+                    self.apply_unwire_external_peer_idempotent(&key, edge)?
+                }
                 None => false,
             };
             if let Some(spec) = stale_cleanup_spec
@@ -7838,19 +7917,22 @@ impl MobActor {
                     return Ok(());
                 }
                 if let Err(error) = comms.remove_trusted_peer(&removal_key).await {
-                    if dsl_removed
-                        && let Some(edge) = authority_edge.as_ref()
-                        && let Err(rollback_err) = self.apply_dsl_input(
-                            mob_dsl::MobMachineInput::WireExternalPeer { edge: edge.clone() },
+                    if dsl_removed && let Some(edge) = authority_edge.as_ref() {
+                        let key = Self::external_peer_key_for_edge(edge);
+                        if let Err(rollback_err) = self.apply_dsl_input(
+                            mob_dsl::MobMachineInput::WireExternalPeer {
+                                key,
+                                edge: edge.clone(),
+                            },
                             "external_unwire_stale_cleanup_rollback",
-                        )
-                    {
-                        tracing::warn!(
-                            mob_id = %self.definition.id,
-                            local = %local,
-                            error = %rollback_err,
-                            "failed to rollback external DSL unwire after stale cleanup failure"
-                        );
+                        ) {
+                            tracing::warn!(
+                                mob_id = %self.definition.id,
+                                local = %local,
+                                error = %rollback_err,
+                                "failed to rollback external DSL unwire after stale cleanup failure"
+                            );
+                        }
                     }
                     return Err(MobError::from(error));
                 }
@@ -7860,13 +7942,14 @@ impl MobActor {
 
         let edge = authority_edge
             .unwrap_or_else(|| Self::external_peer_edge(&local_identity, &prior_spec));
+        let key = Self::external_peer_key_for_edge(&edge);
         let comms = self.provisioner_comms(&member_ref).await.ok_or_else(|| {
             MobError::WiringError(format!(
                 "unwire requires comms runtime for '{local}' (external peer unwire)"
             ))
         })?;
 
-        let dsl_removed = self.apply_unwire_external_peer_idempotent(&edge)?;
+        let dsl_removed = self.apply_unwire_external_peer_idempotent(&key, &edge)?;
         if !dsl_removed {
             return Err(MobError::WiringError(format!(
                 "external unwire for '{local}' -> '{peer_name}' was not authorized by MobMachine"
@@ -7880,7 +7963,10 @@ impl MobActor {
         {
             if dsl_removed
                 && let Err(rollback_err) = self.apply_dsl_input(
-                    mob_dsl::MobMachineInput::WireExternalPeer { edge: edge.clone() },
+                    mob_dsl::MobMachineInput::WireExternalPeer {
+                        key: key.clone(),
+                        edge: edge.clone(),
+                    },
                     "external_unwire_trust_remove_rollback",
                 )
             {
@@ -7917,7 +8003,10 @@ impl MobActor {
                 }
                 if dsl_removed
                     && let Err(rollback_err) = self.apply_dsl_input(
-                        mob_dsl::MobMachineInput::WireExternalPeer { edge: edge.clone() },
+                        mob_dsl::MobMachineInput::WireExternalPeer {
+                            key: key.clone(),
+                            edge: edge.clone(),
+                        },
                         "external_unwire_rollback",
                     )
                 {
@@ -12529,7 +12618,12 @@ impl MobActor {
         local_peers.dedup();
 
         let mut external_peers = Vec::new();
-        for edge in &self.dsl_authority.state().external_peer_edges {
+        for edge in self
+            .dsl_authority
+            .state()
+            .external_peer_edges_by_key
+            .values()
+        {
             if edge.local == local {
                 external_peers.push(Self::trusted_peer_descriptor_from_machine_endpoint(
                     &edge.endpoint,

@@ -125,8 +125,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetireAll`
 - `WireMembers`(edge: WiringEdge)
 - `UnwireMembers`(edge: WiringEdge)
-- `WireExternalPeer`(edge: ExternalPeerEdge)
-- `UnwireExternalPeer`(edge: ExternalPeerEdge)
+- `WireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
+- `UnwireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
 - `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
 - `SubmitWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
@@ -917,17 +917,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `WireExternalPeerRunning`
 - From: `Running`
-- On: `WireExternalPeer`(edge)
+- On: `WireExternalPeer`(key, edge)
 - Guards:
-  - `external_peer_not_already_wired`
+  - `external_peer_key_not_already_wired`
+  - `external_peer_edge_not_already_wired`
 - Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
 - To: `Running`
 
 ### `WireExternalPeerAlreadyWired`
 - From: `Running`
-- On: `WireExternalPeer`(edge)
+- On: `WireExternalPeer`(key, edge)
 - Guards:
-  - `external_peer_already_wired`
+  - `external_peer_key_already_wired`
+  - `external_peer_edge_already_wired`
 - Emits: `ExternalPeerTrustRepairRequested`
 - To: `Running`
 
@@ -935,14 +937,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `RecoverExternalPeerWiring`(key, edge)
 - Guards:
-  - `external_peer_not_already_recovered`
+  - `external_peer_key_not_already_recovered`
+  - `external_peer_edge_not_already_recovered`
 - To: `Running`
 
 ### `RecoverExternalPeerWiringAlreadyRecovered`
 - From: `Running`
 - On: `RecoverExternalPeerWiring`(key, edge)
 - Guards:
-  - `external_peer_already_recovered`
+  - `external_peer_key_already_recovered`
+  - `external_peer_edge_already_recovered`
 - To: `Running`
 
 ### `RecoverExternalPeerUnwireRunning`
@@ -961,17 +965,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `UnwireExternalPeerRunning`
 - From: `Running`
-- On: `UnwireExternalPeer`(edge)
+- On: `UnwireExternalPeer`(key, edge)
 - Guards:
-  - `external_peer_currently_wired`
+  - `external_peer_key_currently_wired`
+  - `external_peer_edge_currently_wired`
 - Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
 - To: `Running`
 
 ### `UnwireExternalPeerAlreadyAbsent`
 - From: `Running`
-- On: `UnwireExternalPeer`(edge)
+- On: `UnwireExternalPeer`(key, edge)
 - Guards:
-  - `external_peer_already_absent`
+  - `external_peer_key_already_absent`
+  - `external_peer_edge_already_absent`
 - To: `Running`
 
 ### `ForceCancelRunning`

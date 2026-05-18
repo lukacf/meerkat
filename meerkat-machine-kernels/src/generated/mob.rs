@@ -2136,10 +2136,12 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WireExternalPeer {
+        pub key: ExternalPeerKey,
         pub edge: ExternalPeerEdge,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct UnwireExternalPeer {
+        pub key: ExternalPeerKey,
         pub edge: ExternalPeerEdge,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

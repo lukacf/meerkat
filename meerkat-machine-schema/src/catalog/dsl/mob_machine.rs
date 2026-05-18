@@ -348,8 +348,8 @@ macro_rules! mob_catalog_machine_dsl {
             // edge via `WiringEdge::new(a, b)` before submitting.
             WireMembers { edge: WiringEdge },
             UnwireMembers { edge: WiringEdge },
-            WireExternalPeer { edge: ExternalPeerEdge },
-            UnwireExternalPeer { edge: ExternalPeerEdge },
+            WireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
+            UnwireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
             SessionIngressDetachedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
             SessionIngressDetachFailedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String },
             SubmitWork { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
@@ -1583,11 +1583,13 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition WireExternalPeerRunning {
-            on input WireExternalPeer { edge }
+            on input WireExternalPeer { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "external_peer_not_already_wired" { self.external_peer_edges.contains(edge) == false }
+            guard "external_peer_key_not_already_wired" { self.external_peer_edges_by_key.contains_key(key) == false }
+            guard "external_peer_edge_not_already_wired" { self.external_peer_edges.contains(edge) == false }
             update {
                 self.external_peer_edges.insert(edge);
+                self.external_peer_edges_by_key.insert(key, edge);
                 self.topology_epoch += 1;
             }
             to Running
@@ -1596,9 +1598,10 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition WireExternalPeerAlreadyWired {
-            on input WireExternalPeer { edge }
+            on input WireExternalPeer { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "external_peer_already_wired" { self.external_peer_edges.contains(edge) == true }
+            guard "external_peer_key_already_wired" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
+            guard "external_peer_edge_already_wired" { self.external_peer_edges.contains(edge) == true }
             update {}
             to Running
             emit ExternalPeerTrustRepairRequested { edge: edge }
@@ -1607,7 +1610,8 @@ macro_rules! mob_catalog_machine_dsl {
         transition RecoverExternalPeerWiringRunning {
             on signal RecoverExternalPeerWiring { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "external_peer_not_already_recovered" { self.external_peer_edges.contains(edge) == false }
+            guard "external_peer_key_not_already_recovered" { self.external_peer_edges_by_key.contains_key(key) == false }
+            guard "external_peer_edge_not_already_recovered" { self.external_peer_edges.contains(edge) == false }
             update {
                 self.external_peer_edges.insert(edge);
                 self.external_peer_edges_by_key.insert(key, edge);
@@ -1619,10 +1623,9 @@ macro_rules! mob_catalog_machine_dsl {
         transition RecoverExternalPeerWiringAlreadyRecovered {
             on signal RecoverExternalPeerWiring { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "external_peer_already_recovered" { self.external_peer_edges.contains(edge) == true }
-            update {
-                self.external_peer_edges_by_key.insert(key, edge);
-            }
+            guard "external_peer_key_already_recovered" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
+            guard "external_peer_edge_already_recovered" { self.external_peer_edges.contains(edge) == true }
+            update {}
             to Running
         }
 
@@ -1647,11 +1650,13 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition UnwireExternalPeerRunning {
-            on input UnwireExternalPeer { edge }
+            on input UnwireExternalPeer { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "external_peer_currently_wired" { self.external_peer_edges.contains(edge) == true }
+            guard "external_peer_key_currently_wired" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
+            guard "external_peer_edge_currently_wired" { self.external_peer_edges.contains(edge) == true }
             update {
                 self.external_peer_edges.remove(edge);
+                self.external_peer_edges_by_key.remove(key);
                 self.topology_epoch += 1;
             }
             to Running
@@ -1660,9 +1665,10 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition UnwireExternalPeerAlreadyAbsent {
-            on input UnwireExternalPeer { edge }
+            on input UnwireExternalPeer { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "external_peer_already_absent" { self.external_peer_edges.contains(edge) == false }
+            guard "external_peer_key_already_absent" { self.external_peer_edges_by_key.contains_key(key) == false }
+            guard "external_peer_edge_already_absent" { self.external_peer_edges.contains(edge) == false }
             update {}
             to Running
         }

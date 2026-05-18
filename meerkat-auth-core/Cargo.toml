@@ -35,7 +35,7 @@ dirs = { workspace = true }
 # Optional: OS keychain TokenStore.
 keyring = { version = "3", optional = true, features = ["apple-native", "windows-native", "linux-native"] }
 # Optional: cross-process refresh lockfile.
-fs4 = { version = "0.12", optional = true }
+fs4 = { version = "0.13", optional = true }
 # Optional: generic OAuth2 helpers (PKCE / callback / device-code / token-exchange).
 oauth2 = { version = "5", optional = true }
 jsonwebtoken = { version = "9", optional = true, default-features = false, features = ["use_pem"] }

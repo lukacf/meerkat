@@ -3969,6 +3969,40 @@ async fn create_test_mob_with_run_store(
     (handle, service)
 }
 
+struct UnusedFlowTurnExecutor;
+
+#[async_trait]
+impl FlowTurnExecutor for UnusedFlowTurnExecutor {
+    async fn dispatch(
+        &self,
+        _run_id: &RunId,
+        _step_id: &crate::StepId,
+        _target: &MeerkatId,
+        _message: ContentInput,
+        _flow_tool_overlay: Option<TurnToolOverlay>,
+    ) -> Result<FlowTurnTicket, MobError> {
+        Err(MobError::Internal(
+            "unused flow turn executor dispatch called".into(),
+        ))
+    }
+
+    async fn await_terminal(
+        &self,
+        _ticket: FlowTurnTicket,
+        _timeout: Duration,
+    ) -> Result<FlowTurnOutcome, MobError> {
+        Err(MobError::Internal(
+            "unused flow turn executor await_terminal called".into(),
+        ))
+    }
+
+    async fn on_timeout(&self, _ticket: FlowTurnTicket) -> Result<TimeoutDisposition, MobError> {
+        Err(MobError::Internal(
+            "unused flow turn executor on_timeout called".into(),
+        ))
+    }
+}
+
 async fn seed_test_run_in_mob_machine(handle: &MobHandle, run_id: &RunId) {
     handle
         .project_machine_input(
@@ -22501,6 +22535,118 @@ async fn test_supervisor_escalation_forces_reset_via_retire_path() {
         remaining.is_empty(),
         "force_reset should retire active meerkats via handle.retire()"
     );
+}
+
+#[tokio::test]
+async fn test_cleanup_fail_step_routes_generated_supervisor_escalation_effect() {
+    use crate::machines::mob_machine as mob_dsl;
+    use crate::run::{
+        MobMachineFlowAuthorityToken, MobMachineFlowRunCommand, apply_mob_machine_flow_run_command,
+        flow_run,
+    };
+
+    let definition = sample_definition_with_supervisor_threshold(1);
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let run_store: Arc<dyn MobRunStore> = Arc::new(InMemoryMobRunStore::new());
+    let event_store: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
+    let storage = MobStorage {
+        events: event_store.clone(),
+        runs: run_store.clone(),
+        specs: Arc::new(InMemoryMobSpecStore::new()),
+        runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
+        realm_profiles: None,
+    };
+    let handle = MobBuilder::new(definition.clone(), storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+
+    let config = crate::run::FlowRunConfig::from_definition(flow_id("demo"), &definition)
+        .expect("demo flow config");
+    let run_id = RunId::new();
+    let seed_input =
+        MobRun::create_run_seed_input(&run_id, &config).expect("create run seed input");
+    let mut authority = mob_dsl::MobMachineAuthority::new();
+    mob_dsl::MobMachineMutator::apply(&mut authority, seed_input.clone())
+        .expect("seed input accepted");
+    let flow_state =
+        MobRun::flow_state_for_config_with_authority(&run_id, &config, authority.state())
+            .expect("project flow state");
+    let mut run = MobRun::pending_with_run_id(
+        run_id.clone(),
+        handle.mob_id().clone(),
+        config.flow_id.clone(),
+        flow_state,
+        serde_json::json!({}),
+    );
+    run.append_flow_authority_inputs(vec![seed_input.clone()])
+        .expect("append seed authority");
+
+    let start_command = MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {});
+    let start_input = start_command.authority_input(&run_id);
+    let start_transition = mob_dsl::MobMachineMutator::apply(&mut authority, start_input.clone())
+        .expect("start input accepted");
+    let start_authority =
+        MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&start_input)
+            .expect("start authority token");
+    let start_outcome = apply_mob_machine_flow_run_command(
+        &run.flow_state,
+        authority.state(),
+        &run_id,
+        start_command,
+        start_authority,
+        &start_transition.effects,
+    )
+    .expect("project start");
+    run.flow_state = start_outcome.next_state;
+    run.status = MobRunStatus::Running;
+    run.append_flow_authority_inputs(vec![start_input.clone()])
+        .expect("append start authority");
+    run_store.create_run(run).await.expect("create run");
+
+    handle
+        .project_machine_input(seed_input)
+        .await
+        .expect("project seed into actor machine");
+    handle
+        .project_machine_input(start_input)
+        .await
+        .expect("project start into actor machine");
+
+    let engine = FlowEngine::new(
+        Arc::new(UnusedFlowTurnExecutor),
+        handle,
+        run_store.clone(),
+        event_store,
+        Arc::new(super::topology::MobTopologyService::new(
+            definition.topology.clone(),
+        )),
+    );
+    let escalation_steps = engine
+        .fail_unfinished_steps(&run_id, "cleanup failure")
+        .await
+        .expect("fail unfinished steps");
+    assert_eq!(escalation_steps, vec![step_id("start")]);
+
+    let stored = run_store
+        .get_run(&run_id)
+        .await
+        .expect("load run")
+        .expect("run exists");
+    assert_eq!(
+        stored
+            .step_status_snapshot()
+            .unwrap()
+            .get(&step_id("start")),
+        Some(&StepRunStatus::Failed)
+    );
+    assert_eq!(stored.step_ledger.len(), 1);
+    assert_eq!(stored.step_ledger[0].status, StepRunStatus::Failed);
+    assert_eq!(stored.failure_ledger.len(), 1);
+    assert_eq!(stored.failure_ledger[0].step_id, step_id("start"));
+    assert_eq!(stored.failure_ledger[0].reason, "cleanup failure");
 }
 
 #[tokio::test]

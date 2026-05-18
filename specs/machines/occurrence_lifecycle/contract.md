@@ -11,7 +11,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `schedule_id`: `ScheduleId`
 - `schedule_revision`: `u64`
 - `occurrence_ordinal`: `u64`
+- `trigger_key`: `String`
 - `target_binding_key`: `String`
+- `misfire_policy`: `MisfirePolicy`
+- `misfire_policy_key`: `String`
+- `overlap_policy`: `OverlapPolicy`
+- `overlap_policy_key`: `String`
+- `missing_target_policy`: `MissingTargetPolicy`
+- `missing_target_policy_key`: `String`
 - `due_at_utc_ms`: `u64`
 - `claimed_by`: `Option<String>`
 - `lease_expires_at_utc_ms`: `Option<u64>`
@@ -19,6 +26,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `claim_token`: `Option<ClaimToken>`
 - `delivery_correlation_id`: `Option<String>`
 - `last_receipt`: `Option<DeliveryReceipt>`
+- `runtime_outcome_key`: `Option<String>`
 - `failure_class`: `Option<OccurrenceFailureClass>`
 - `failure_detail`: `Option<String>`
 - `dispatched_at_utc_ms`: `Option<u64>`
@@ -27,8 +35,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `superseded_by_revision`: `Option<u64>`
 
 ## Inputs
-- `PlanOccurrence`(occurrence_id: OccurrenceId, schedule_id: ScheduleId, schedule_revision: u64, occurrence_ordinal: u64, target_binding_key: String, due_at_utc_ms: u64)
+- `PlanOccurrence`(occurrence_id: OccurrenceId, schedule_id: ScheduleId, schedule_revision: u64, occurrence_ordinal: u64, trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, due_at_utc_ms: u64)
 - `SyncTargetSnapshot`(target_binding_key: String)
+- `RecordReceipt`(receipt: DeliveryReceipt, runtime_outcome_key: Option<String>)
 - `Claim`(owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken)
 - `DispatchStarted`(correlation_id: Option<String>, at_utc_ms: u64)
 - `AwaitCompletion`(at_utc_ms: u64)
@@ -64,7 +73,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Transitions
 ### `PlanOccurrenceFromPending`
 - From: `Pending`
-- On: `PlanOccurrence`(occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, target_binding_key, due_at_utc_ms)
+- On: `PlanOccurrence`(occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms)
 - Guards:
   - ``
 - To: `Pending`
@@ -78,6 +87,51 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Claimed`
 - On: `SyncTargetSnapshot`(target_binding_key)
 - To: `Claimed`
+
+### `RecordReceiptPending`
+- From: `Pending`
+- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- To: `Pending`
+
+### `RecordReceiptClaimed`
+- From: `Claimed`
+- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- To: `Claimed`
+
+### `RecordReceiptDispatching`
+- From: `Dispatching`
+- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- To: `Dispatching`
+
+### `RecordReceiptAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- To: `AwaitingCompletion`
+
+### `RecordReceiptCompleted`
+- From: `Completed`
+- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- To: `Completed`
+
+### `RecordReceiptSkipped`
+- From: `Skipped`
+- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- To: `Skipped`
+
+### `RecordReceiptMisfired`
+- From: `Misfired`
+- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- To: `Misfired`
+
+### `RecordReceiptSuperseded`
+- From: `Superseded`
+- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- To: `Superseded`
+
+### `RecordReceiptDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- To: `DeliveryFailed`
 
 ### `ClaimPending`
 - From: `Pending`
@@ -147,10 +201,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-schedule/src/lifecycle.rs` — Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
+- `meerkat-schedule/src/lifecycle.rs` — Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
 
 ### Scenarios
 - `occurrence_start_complete_fail` — occurrence transitions through pending, running, and terminal lifecycle states
-- `occurrence_claim_dispatch_completion` — plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, and record claimed/dispatch/awaiting/completed effects
+- `occurrence_claim_dispatch_completion` — plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, and record claimed/dispatch/awaiting/completed effects
 - `occurrence_terminal_classification` — skip/skipped, misfire/misfired, supersede/superseded, delivery failed, occurrences superseded, records revision and explicit failure class for terminal occurrence outcomes
 - `occurrence_lease_recovery` — lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery

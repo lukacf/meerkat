@@ -5,13 +5,14 @@ use chrono::{Duration, Utc};
 use meerkat_core::{ContentInput, SessionId};
 use meerkat_schedule::{
     CreateScheduleRequest, DeliveryReceipt, DeliveryReceiptStage, MisfirePolicy,
-    MissingTargetPolicy, Occurrence, OccurrenceFilter, OccurrenceOrdinal, OccurrencePhase,
+    MissingTargetPolicy, Occurrence, OccurrenceFilter, OccurrenceLifecycleInput, OccurrenceOrdinal,
     OverlapPolicy, Schedule, ScheduleStore, ScheduledSessionAction, SessionTargetBinding,
     TargetBinding, TriggerSpec,
 };
 use meerkat_store::SqliteScheduleStore;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use uuid::Uuid;
 
 fn sample_schedule() -> Schedule {
     Schedule::new(CreateScheduleRequest {
@@ -37,18 +38,37 @@ fn sample_schedule() -> Schedule {
         planning_horizon_days: Some(1),
         planning_horizon_occurrences: Some(1),
     })
+    .expect("sample schedule creation should pass generated authority")
 }
 
 fn sample_in_flight_occurrence(schedule: &Schedule) -> Occurrence {
-    let mut occurrence = Occurrence::planned_from_schedule(
+    let occurrence = Occurrence::planned_from_schedule(
         schedule,
         OccurrenceOrdinal(0),
         Utc::now() + Duration::minutes(1),
-    );
-    occurrence.phase = OccurrencePhase::AwaitingCompletion;
-    occurrence.attempt_count = 1;
-    occurrence.delivery_correlation_id = Some("dispatch-attempt-1".to_string());
+    )
+    .expect("sample occurrence planning should pass generated authority");
+    let claim_token = Uuid::now_v7();
+    let occurrence = occurrence
+        .apply(OccurrenceLifecycleInput::Claim {
+            owner_id: "receipt-projection-test".to_string(),
+            at_utc: Utc::now(),
+            lease_expires_at_utc: Utc::now() + Duration::minutes(5),
+            claim_token,
+        })
+        .expect("claim should pass generated authority")
+        .into_occurrence();
+    let occurrence = occurrence
+        .apply(OccurrenceLifecycleInput::DispatchStarted {
+            correlation_id: Some("dispatch-attempt-1".to_string()),
+            at_utc: Utc::now(),
+        })
+        .expect("dispatch start should pass generated authority")
+        .into_occurrence();
     occurrence
+        .apply(OccurrenceLifecycleInput::AwaitCompletion { at_utc: Utc::now() })
+        .expect("await completion should pass generated authority")
+        .into_occurrence()
 }
 
 async fn assert_append_receipt_updates_occurrence_projection(

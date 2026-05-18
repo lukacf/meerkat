@@ -5,8 +5,9 @@ use chrono::{Duration, Utc};
 use meerkat_core::{ContentInput, SessionId};
 use meerkat_schedule::{
     CreateScheduleRequest, MisfirePolicy, MissingTargetPolicy, Occurrence, OccurrenceFilter,
-    OccurrencePhase, OverlapPolicy, PendingSupersession, Schedule, ScheduleStore,
-    ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
+    OccurrencePhase, OverlapPolicy, PendingSupersession, Schedule, ScheduleLifecycleInput,
+    ScheduleStore, ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
+    UpdateScheduleRequest,
 };
 use meerkat_store::SqliteScheduleStore;
 use std::collections::BTreeMap;
@@ -36,6 +37,7 @@ fn sample_schedule() -> Schedule {
         planning_horizon_days: Some(1),
         planning_horizon_occurrences: Some(2),
     })
+    .expect("sample schedule creation should pass generated authority")
 }
 
 async fn assert_atomic_schedule_mutation_supersedes_old_pending(
@@ -48,19 +50,39 @@ async fn assert_atomic_schedule_mutation_supersedes_old_pending(
         &original,
         original.next_occurrence_ordinal,
         Utc::now() + Duration::minutes(6),
-    );
+    )
+    .expect("old occurrence planning should pass generated authority");
     store.put_occurrence(old_pending.clone()).await?;
 
-    let mut updated = original.clone();
-    updated.revision = updated.revision.next();
-    updated.config.updated_at_utc = Utc::now();
-    updated.next_occurrence_ordinal = updated.next_occurrence_ordinal.next();
+    let updated_trigger = TriggerSpec::Once {
+        due_at_utc: Utc::now() + Duration::minutes(10),
+    };
+    let mut updated = Schedule::apply(
+        Some(original.clone()),
+        ScheduleLifecycleInput::Update(UpdateScheduleRequest {
+            expected_revision: Some(original.revision),
+            trigger: Some(updated_trigger),
+            ..UpdateScheduleRequest::default()
+        }),
+    )
+    .expect("schedule update should pass generated authority")
+    .into_schedule();
+    updated = Schedule::apply(
+        Some(updated),
+        ScheduleLifecycleInput::RecordPlanningWindow {
+            planning_cursor_utc: Utc::now() + Duration::minutes(6),
+            next_occurrence_ordinal: original.next_occurrence_ordinal.next(),
+        },
+    )
+    .expect("planning window should pass generated authority")
+    .into_schedule();
 
     let replacement = Occurrence::planned_from_schedule(
         &updated,
         updated.next_occurrence_ordinal,
         Utc::now() + Duration::minutes(10),
-    );
+    )
+    .expect("replacement occurrence planning should pass generated authority");
 
     store
         .commit_schedule_mutation(

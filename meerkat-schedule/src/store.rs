@@ -401,14 +401,26 @@ impl ScheduleStore for MemoryScheduleStore {
 
     async fn append_receipt(&self, receipt: DeliveryReceipt) -> Result<(), ScheduleStoreError> {
         let mut state = self.inner.write().await;
+        let Some(occurrence) = state.occurrences.get(&receipt.occurrence_id).cloned() else {
+            return Err(ScheduleStoreError::OccurrenceNotFound {
+                occurrence_id: receipt.occurrence_id,
+            });
+        };
+        let updated = occurrence
+            .apply(OccurrenceLifecycleInput::RecordReceipt {
+                runtime_outcome: receipt.runtime_outcome.clone(),
+                receipt: receipt.clone(),
+            })
+            .map_err(|error| ScheduleStoreError::Internal(error.to_string()))?
+            .into_occurrence();
         state
             .receipts
             .entry(receipt.occurrence_id.clone())
             .or_default()
-            .push(receipt.clone());
-        if let Some(occurrence) = state.occurrences.get_mut(&receipt.occurrence_id) {
-            occurrence.last_receipt = Some(receipt);
-        }
+            .push(receipt);
+        state
+            .occurrences
+            .insert(updated.occurrence_id.clone(), updated);
         Ok(())
     }
 
@@ -475,7 +487,13 @@ impl ScheduleStore for MemoryScheduleStore {
                 .entry(updated.occurrence_id.clone())
                 .or_default()
                 .push(receipt.clone());
-            updated.last_receipt = Some(receipt);
+            updated = updated
+                .apply(OccurrenceLifecycleInput::RecordReceipt {
+                    runtime_outcome: receipt.runtime_outcome.clone(),
+                    receipt,
+                })
+                .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
+                .into_occurrence();
             state
                 .occurrences
                 .insert(updated.occurrence_id.clone(), updated);
@@ -536,8 +554,13 @@ impl ScheduleStore for MemoryScheduleStore {
                     .entry(lease_expired.occurrence_id.clone())
                     .or_default()
                     .push(receipt.clone());
-                let mut lease_expired = lease_expired;
-                lease_expired.last_receipt = Some(receipt);
+                let lease_expired = lease_expired
+                    .apply(OccurrenceLifecycleInput::RecordReceipt {
+                        runtime_outcome: receipt.runtime_outcome.clone(),
+                        receipt,
+                    })
+                    .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
+                    .into_occurrence();
                 state
                     .occurrences
                     .insert(lease_expired.occurrence_id.clone(), lease_expired.clone());

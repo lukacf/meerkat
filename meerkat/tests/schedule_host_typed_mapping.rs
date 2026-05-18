@@ -53,10 +53,12 @@ fn sample_occurrence(attempt_count: u32) -> Occurrence {
         labels: BTreeMap::new(),
         planning_horizon_days: None,
         planning_horizon_occurrences: None,
-    });
+    })
+    .expect("sample schedule creation should pass generated authority");
 
     let mut occ =
-        Occurrence::planned_from_schedule(&schedule, OccurrenceOrdinal(0), chrono::Utc::now());
+        Occurrence::planned_from_schedule(&schedule, OccurrenceOrdinal(0), chrono::Utc::now())
+            .expect("sample occurrence planning should pass generated authority");
     occ.attempt_count = attempt_count;
     occ
 }

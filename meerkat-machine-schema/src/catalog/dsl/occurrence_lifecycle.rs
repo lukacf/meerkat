@@ -11,7 +11,14 @@ machine! {
             schedule_id: ScheduleId,
             schedule_revision: u64,
             occurrence_ordinal: u64,
+            trigger_key: String,
             target_binding_key: String,
+            misfire_policy: Enum<MisfirePolicy>,
+            misfire_policy_key: String,
+            overlap_policy: Enum<OverlapPolicy>,
+            overlap_policy_key: String,
+            missing_target_policy: Enum<MissingTargetPolicy>,
+            missing_target_policy_key: String,
             due_at_utc_ms: u64,
             claimed_by: Option<String>,
             lease_expires_at_utc_ms: Option<u64>,
@@ -19,6 +26,7 @@ machine! {
             claim_token: Option<ClaimToken>,
             delivery_correlation_id: Option<String>,
             last_receipt: Option<DeliveryReceipt>,
+            runtime_outcome_key: Option<String>,
             failure_class: Option<Enum<OccurrenceFailureClass>>,
             failure_detail: Option<String>,
             dispatched_at_utc_ms: Option<u64>,
@@ -32,7 +40,14 @@ machine! {
             schedule_id = "schedule-0",
             schedule_revision = 1,
             occurrence_ordinal = 0,
+            trigger_key = "trigger-0",
             target_binding_key = "target-0",
+            misfire_policy = MisfirePolicy::Skip,
+            misfire_policy_key = "misfire:skip",
+            overlap_policy = OverlapPolicy::SkipIfRunning,
+            overlap_policy_key = "overlap:skip_if_running",
+            missing_target_policy = MissingTargetPolicy::MarkMisfired,
+            missing_target_policy_key = "missing_target:mark_misfired",
             due_at_utc_ms = 1,
             claimed_by = None,
             lease_expires_at_utc_ms = None,
@@ -40,6 +55,7 @@ machine! {
             claim_token = None,
             delivery_correlation_id = None,
             last_receipt = None,
+            runtime_outcome_key = None,
             failure_class = None,
             failure_detail = None,
             dispatched_at_utc_ms = None,
@@ -68,10 +84,18 @@ machine! {
                 schedule_id: ScheduleId,
                 schedule_revision: u64,
                 occurrence_ordinal: u64,
+                trigger_key: String,
                 target_binding_key: String,
+                misfire_policy: Enum<MisfirePolicy>,
+                misfire_policy_key: String,
+                overlap_policy: Enum<OverlapPolicy>,
+                overlap_policy_key: String,
+                missing_target_policy: Enum<MissingTargetPolicy>,
+                missing_target_policy_key: String,
                 due_at_utc_ms: u64,
             },
             SyncTargetSnapshot { target_binding_key: String },
+            RecordReceipt { receipt: DeliveryReceipt, runtime_outcome_key: Option<String> },
             Claim { owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken },
             DispatchStarted { correlation_id: Option<String>, at_utc_ms: u64 },
             AwaitCompletion { at_utc_ms: u64 },
@@ -143,7 +167,14 @@ machine! {
                 schedule_id,
                 schedule_revision,
                 occurrence_ordinal,
+                trigger_key,
                 target_binding_key,
+                misfire_policy,
+                misfire_policy_key,
+                overlap_policy,
+                overlap_policy_key,
+                missing_target_policy,
+                missing_target_policy_key,
                 due_at_utc_ms
             }
             guard {
@@ -160,7 +191,14 @@ machine! {
                 self.schedule_id = schedule_id;
                 self.schedule_revision = schedule_revision;
                 self.occurrence_ordinal = occurrence_ordinal;
+                self.trigger_key = trigger_key;
                 self.target_binding_key = target_binding_key;
+                self.misfire_policy = misfire_policy;
+                self.misfire_policy_key = misfire_policy_key;
+                self.overlap_policy = overlap_policy;
+                self.overlap_policy_key = overlap_policy_key;
+                self.missing_target_policy = missing_target_policy;
+                self.missing_target_policy_key = missing_target_policy_key;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.claimed_by = None;
                 self.lease_expires_at_utc_ms = None;
@@ -168,6 +206,7 @@ machine! {
                 self.claim_token = None;
                 self.delivery_correlation_id = None;
                 self.last_receipt = None;
+                self.runtime_outcome_key = None;
                 self.failure_class = None;
                 self.failure_detail = None;
                 self.dispatched_at_utc_ms = None;
@@ -202,6 +241,98 @@ machine! {
             to Claimed
         }
 
+        // --- Receipt/result projection ---
+
+        transition RecordReceiptPending {
+            on input RecordReceipt { receipt, runtime_outcome_key }
+            guard { self.lifecycle_phase == Phase::Pending }
+            update {
+                self.last_receipt = Some(receipt);
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Pending
+        }
+
+        transition RecordReceiptClaimed {
+            on input RecordReceipt { receipt, runtime_outcome_key }
+            guard { self.lifecycle_phase == Phase::Claimed }
+            update {
+                self.last_receipt = Some(receipt);
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Claimed
+        }
+
+        transition RecordReceiptDispatching {
+            on input RecordReceipt { receipt, runtime_outcome_key }
+            guard { self.lifecycle_phase == Phase::Dispatching }
+            update {
+                self.last_receipt = Some(receipt);
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Dispatching
+        }
+
+        transition RecordReceiptAwaitingCompletion {
+            on input RecordReceipt { receipt, runtime_outcome_key }
+            guard { self.lifecycle_phase == Phase::AwaitingCompletion }
+            update {
+                self.last_receipt = Some(receipt);
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to AwaitingCompletion
+        }
+
+        transition RecordReceiptCompleted {
+            on input RecordReceipt { receipt, runtime_outcome_key }
+            guard { self.lifecycle_phase == Phase::Completed }
+            update {
+                self.last_receipt = Some(receipt);
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Completed
+        }
+
+        transition RecordReceiptSkipped {
+            on input RecordReceipt { receipt, runtime_outcome_key }
+            guard { self.lifecycle_phase == Phase::Skipped }
+            update {
+                self.last_receipt = Some(receipt);
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Skipped
+        }
+
+        transition RecordReceiptMisfired {
+            on input RecordReceipt { receipt, runtime_outcome_key }
+            guard { self.lifecycle_phase == Phase::Misfired }
+            update {
+                self.last_receipt = Some(receipt);
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Misfired
+        }
+
+        transition RecordReceiptSuperseded {
+            on input RecordReceipt { receipt, runtime_outcome_key }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            update {
+                self.last_receipt = Some(receipt);
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Superseded
+        }
+
+        transition RecordReceiptDeliveryFailed {
+            on input RecordReceipt { receipt, runtime_outcome_key }
+            guard { self.lifecycle_phase == Phase::DeliveryFailed }
+            update {
+                self.last_receipt = Some(receipt);
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to DeliveryFailed
+        }
+
         // --- Claim ---
 
         transition ClaimPending {
@@ -214,6 +345,7 @@ machine! {
                 self.claim_token = Some(claim_token);
                 self.delivery_correlation_id = None;
                 self.last_receipt = None;
+                self.runtime_outcome_key = None;
                 self.failure_class = None;
                 self.failure_detail = None;
                 self.dispatched_at_utc_ms = None;
@@ -426,6 +558,22 @@ impl<T: Into<String>> From<T> for DeliveryReceipt {
     fn from(s: T) -> Self {
         Self(s.into())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MisfirePolicy {
+    Skip,
+    CatchUpWithin,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlapPolicy {
+    AllowConcurrent,
+    SkipIfRunning,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingTargetPolicy {
+    MarkMisfired,
+    Skip,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

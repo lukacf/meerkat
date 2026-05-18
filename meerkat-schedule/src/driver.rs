@@ -355,7 +355,13 @@ impl ScheduleDriver {
             })
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
             .into_occurrence();
-        dispatching.last_receipt = Some(dispatch_receipt.clone());
+        dispatching = dispatching
+            .apply(OccurrenceLifecycleInput::RecordReceipt {
+                receipt: dispatch_receipt.clone(),
+                runtime_outcome: dispatch_receipt.runtime_outcome.clone(),
+            })
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
+            .into_occurrence();
         self.store.put_occurrence(dispatching.clone()).await?;
         self.store.append_receipt(dispatch_receipt).await?;
 
@@ -574,8 +580,13 @@ async fn terminalize_occurrence_inner(
         updated.failure_detail.clone(),
         materialized_session_id,
     );
-    updated.runtime_outcome = runtime_outcome;
-    updated.last_receipt = Some(final_receipt.clone());
+    updated = updated
+        .apply(OccurrenceLifecycleInput::RecordReceipt {
+            receipt: final_receipt.clone(),
+            runtime_outcome,
+        })
+        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
+        .into_occurrence();
     store.put_occurrence(updated).await?;
     store.append_receipt(final_receipt).await?;
     Ok(true)

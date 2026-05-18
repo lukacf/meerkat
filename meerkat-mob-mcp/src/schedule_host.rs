@@ -697,9 +697,11 @@ mod tests {
             labels: Default::default(),
             planning_horizon_days: None,
             planning_horizon_occurrences: None,
-        });
+        })
+        .expect("sample schedule creation should pass generated authority");
         let mut occurrence =
-            Occurrence::planned_from_schedule(&schedule, OccurrenceOrdinal(0), chrono::Utc::now());
+            Occurrence::planned_from_schedule(&schedule, OccurrenceOrdinal(0), chrono::Utc::now())
+                .expect("sample occurrence planning should pass generated authority");
         occurrence.attempt_count = 1;
         occurrence
     }

@@ -257,8 +257,8 @@ impl SqliteScheduleStore {
             let mut conn = open_connection(&path)?;
             ensure_schedule_schema(&conn)?;
             let tx = begin_immediate_transaction(&mut conn)?;
+            record_occurrence_receipt_in_txn(&tx, &receipt)?;
             write_receipt_in_txn(&tx, &receipt)?;
-            update_occurrence_last_receipt_in_txn(&tx, &receipt)?;
             tx.commit()?;
             Ok(())
         })
@@ -344,8 +344,15 @@ impl SqliteScheduleStore {
                     );
                     receipt.failure_class = Some(OccurrenceFailureClass::LeaseLost);
                     receipt.detail = Some("lease expired before completion".to_string());
-                    let mut expired = expired;
-                    expired.last_receipt = Some(receipt.clone());
+                    let expired = expired
+                        .apply(OccurrenceLifecycleInput::RecordReceipt {
+                            runtime_outcome: receipt.runtime_outcome.clone(),
+                            receipt: receipt.clone(),
+                        })
+                        .map_err(|error: OccurrenceLifecycleError| {
+                            StoreError::Internal(error.to_string())
+                        })?
+                        .into_occurrence();
                     write_receipt_in_txn(&tx, &receipt)?;
                     write_occurrence_in_txn(&tx, &expired)?;
                     expired
@@ -708,7 +715,7 @@ fn supersede_pending_occurrences_in_txn(
     Ok(())
 }
 
-fn update_occurrence_last_receipt_in_txn(
+fn record_occurrence_receipt_in_txn(
     tx: &rusqlite::Transaction<'_>,
     receipt: &DeliveryReceipt,
 ) -> Result<(), StoreError> {
@@ -716,16 +723,24 @@ fn update_occurrence_last_receipt_in_txn(
     let Some(bytes) = tx
         .query_row(
             "SELECT occurrence_json FROM schedule_occurrences WHERE occurrence_id = ?1",
-            params![occurrence_id],
+            params![occurrence_id.clone()],
             |row| row.get::<_, Vec<u8>>(0),
         )
         .optional()?
     else {
-        return Ok(());
+        return Err(StoreError::Internal(format!(
+            "occurrence {occurrence_id} not found while recording receipt"
+        )));
     };
-    let mut occurrence: Occurrence =
+    let occurrence: Occurrence =
         serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
-    occurrence.last_receipt = Some(receipt.clone());
+    let occurrence = occurrence
+        .apply(OccurrenceLifecycleInput::RecordReceipt {
+            runtime_outcome: receipt.runtime_outcome.clone(),
+            receipt: receipt.clone(),
+        })
+        .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
+        .into_occurrence();
     write_occurrence_in_txn(tx, &occurrence)
 }
 

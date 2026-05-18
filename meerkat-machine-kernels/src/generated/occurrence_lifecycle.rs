@@ -82,6 +82,106 @@ impl std::fmt::Display for DeliveryReceipt {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MisfirePolicy {
+    #[default]
+    #[serde(rename = "Skip")]
+    Skip,
+    #[serde(rename = "CatchUpWithin")]
+    CatchUpWithin,
+}
+impl MisfirePolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Skip => "Skip",
+            Self::CatchUpWithin => "CatchUpWithin",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MisfirePolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Skip" => Ok(Self::Skip),
+            "CatchUpWithin" => Ok(Self::CatchUpWithin),
+            other => Err(format!("invalid MisfirePolicy value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MisfirePolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MisfirePolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MissingTargetPolicy {
+    #[default]
+    #[serde(rename = "MarkMisfired")]
+    MarkMisfired,
+    #[serde(rename = "Skip")]
+    Skip,
+}
+impl MissingTargetPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MarkMisfired => "MarkMisfired",
+            Self::Skip => "Skip",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MissingTargetPolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MarkMisfired" => Ok(Self::MarkMisfired),
+            "Skip" => Ok(Self::Skip),
+            other => Err(format!("invalid MissingTargetPolicy value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MissingTargetPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MissingTargetPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum OccurrenceFailureClass {
     #[default]
     #[serde(rename = "TargetMaterializationFailed")]
@@ -248,6 +348,56 @@ impl std::fmt::Display for OccurrenceLifecycleState {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OverlapPolicy {
+    #[default]
+    #[serde(rename = "AllowConcurrent")]
+    AllowConcurrent,
+    #[serde(rename = "SkipIfRunning")]
+    SkipIfRunning,
+}
+impl OverlapPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AllowConcurrent => "AllowConcurrent",
+            Self::SkipIfRunning => "SkipIfRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OverlapPolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AllowConcurrent" => Ok(Self::AllowConcurrent),
+            "SkipIfRunning" => Ok(Self::SkipIfRunning),
+            other => Err(format!("invalid OverlapPolicy value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OverlapPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OverlapPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -302,7 +452,14 @@ pub struct State {
     pub schedule_id: ScheduleId,
     pub schedule_revision: u64,
     pub occurrence_ordinal: u64,
+    pub trigger_key: String,
     pub target_binding_key: String,
+    pub misfire_policy: MisfirePolicy,
+    pub misfire_policy_key: String,
+    pub overlap_policy: OverlapPolicy,
+    pub overlap_policy_key: String,
+    pub missing_target_policy: MissingTargetPolicy,
+    pub missing_target_policy_key: String,
     pub due_at_utc_ms: u64,
     pub claimed_by: Option<String>,
     pub lease_expires_at_utc_ms: Option<u64>,
@@ -310,6 +467,7 @@ pub struct State {
     pub claim_token: Option<ClaimToken>,
     pub delivery_correlation_id: Option<String>,
     pub last_receipt: Option<DeliveryReceipt>,
+    pub runtime_outcome_key: Option<String>,
     pub failure_class: Option<OccurrenceFailureClass>,
     pub failure_detail: Option<String>,
     pub dispatched_at_utc_ms: Option<u64>,
@@ -332,12 +490,24 @@ pub mod inputs {
         pub schedule_id: ScheduleId,
         pub schedule_revision: u64,
         pub occurrence_ordinal: u64,
+        pub trigger_key: String,
         pub target_binding_key: String,
+        pub misfire_policy: MisfirePolicy,
+        pub misfire_policy_key: String,
+        pub overlap_policy: OverlapPolicy,
+        pub overlap_policy_key: String,
+        pub missing_target_policy: MissingTargetPolicy,
+        pub missing_target_policy_key: String,
         pub due_at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SyncTargetSnapshot {
         pub target_binding_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordReceipt {
+        pub receipt: DeliveryReceipt,
+        pub runtime_outcome_key: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Claim {
@@ -394,6 +564,7 @@ pub mod inputs {
 pub enum Input {
     PlanOccurrence(inputs::PlanOccurrence),
     SyncTargetSnapshot(inputs::SyncTargetSnapshot),
+    RecordReceipt(inputs::RecordReceipt),
     Claim(inputs::Claim),
     DispatchStarted(inputs::DispatchStarted),
     AwaitCompletion(inputs::AwaitCompletion),
@@ -409,6 +580,7 @@ impl Input {
         match self {
             Self::PlanOccurrence(_) => InputKind::PlanOccurrence,
             Self::SyncTargetSnapshot(_) => InputKind::SyncTargetSnapshot,
+            Self::RecordReceipt(_) => InputKind::RecordReceipt,
             Self::Claim(_) => InputKind::Claim,
             Self::DispatchStarted(_) => InputKind::DispatchStarted,
             Self::AwaitCompletion(_) => InputKind::AwaitCompletion,
@@ -425,6 +597,7 @@ impl Input {
 pub enum InputKind {
     PlanOccurrence,
     SyncTargetSnapshot,
+    RecordReceipt,
     Claim,
     DispatchStarted,
     AwaitCompletion,
@@ -497,6 +670,15 @@ pub enum TransitionId {
     PlanOccurrenceFromPending,
     SyncTargetSnapshotPending,
     SyncTargetSnapshotClaimed,
+    RecordReceiptPending,
+    RecordReceiptClaimed,
+    RecordReceiptDispatching,
+    RecordReceiptAwaitingCompletion,
+    RecordReceiptCompleted,
+    RecordReceiptSkipped,
+    RecordReceiptMisfired,
+    RecordReceiptSuperseded,
+    RecordReceiptDeliveryFailed,
     ClaimPending,
     DispatchStartedFromClaimed,
     AwaitCompletionFromDispatching,
@@ -584,7 +766,14 @@ pub fn initial_state() -> State {
         schedule_id: ScheduleId("schedule-0".to_string()),
         schedule_revision: 1,
         occurrence_ordinal: 0,
+        trigger_key: "trigger-0".to_string(),
         target_binding_key: "target-0".to_string(),
+        misfire_policy: MisfirePolicy::Skip,
+        misfire_policy_key: "misfire:skip".to_string(),
+        overlap_policy: OverlapPolicy::SkipIfRunning,
+        overlap_policy_key: "overlap:skip_if_running".to_string(),
+        missing_target_policy: MissingTargetPolicy::MarkMisfired,
+        missing_target_policy_key: "missing_target:mark_misfired".to_string(),
         due_at_utc_ms: 1,
         claimed_by: None,
         lease_expires_at_utc_ms: None,
@@ -592,6 +781,7 @@ pub fn initial_state() -> State {
         claim_token: None,
         delivery_correlation_id: None,
         last_receipt: None,
+        runtime_outcome_key: None,
         failure_class: None,
         failure_detail: None,
         dispatched_at_utc_ms: None,

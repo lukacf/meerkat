@@ -16,6 +16,13 @@ const DEFAULT_PLANNING_HORIZON_DAYS: u32 = 30;
 const DEFAULT_PLANNING_HORIZON_OCCURRENCES: u32 = 64;
 const DEFAULT_SKIP_MISFIRE_GRACE_SECONDS: i64 = 30;
 
+fn semantic_json_key<T: Serialize>(prefix: &str, value: &T) -> String {
+    match serde_json::to_string(value) {
+        Ok(json) => format!("{prefix}:{json}"),
+        Err(error) => format!("{prefix}:serialization-error:{error}"),
+    }
+}
+
 macro_rules! uuid_newtype {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
@@ -294,10 +301,7 @@ impl TargetBinding {
     }
 
     pub fn stable_key(&self) -> String {
-        match self {
-            Self::Session(binding) => binding.stable_key(),
-            Self::Mob(binding) => binding.stable_key(),
-        }
+        semantic_json_key("target", self)
     }
 
     pub fn bind_materialized_session(&mut self, session_id: &SessionId) -> bool {
@@ -348,26 +352,7 @@ impl SessionTargetBinding {
     }
 
     pub fn stable_key(&self) -> String {
-        match self {
-            Self::ExactSession { session_id, .. } => format!("session:exact:{session_id}"),
-            Self::ResumableSession { session_id, .. } => {
-                format!("session:resumable:{session_id}")
-            }
-            Self::MaterializeOnDemandSession {
-                create,
-                bound_session_id,
-                ..
-            } => bound_session_id.as_ref().map_or_else(
-                || {
-                    let name = create
-                        .comms_name
-                        .clone()
-                        .unwrap_or_else(|| create.model.clone());
-                    format!("session:materialize:{name}")
-                },
-                |session_id| format!("session:materialize:{session_id}"),
-            ),
-        }
+        semantic_json_key("session_target", self)
     }
 
     pub fn action(&self) -> &ScheduledSessionAction {
@@ -623,23 +608,7 @@ impl PartialEq for MobTargetBinding {
 
 impl MobTargetBinding {
     pub fn stable_key(&self) -> String {
-        match self {
-            Self::Member {
-                mob_id, member_id, ..
-            } => format!("mob:{mob_id}:member:{member_id}"),
-            Self::Flow {
-                mob_id, flow_id, ..
-            } => format!("mob:{mob_id}:flow:{flow_id}"),
-            Self::SpawnHelper {
-                mob_id, member_id, ..
-            } => format!("mob:{mob_id}:spawn_helper:{member_id}"),
-            Self::ForkHelper {
-                mob_id,
-                source_member_id,
-                member_id,
-                ..
-            } => format!("mob:{mob_id}:fork_helper:{source_member_id}:{member_id}"),
-        }
+        semantic_json_key("mob_target", self)
     }
 
     pub fn validate_public_api(&self) -> Result<(), String> {
@@ -965,40 +934,14 @@ pub struct Schedule {
 }
 
 impl Schedule {
-    pub fn new(request: CreateScheduleRequest) -> Self {
-        let now = Utc::now();
-        Self {
-            schedule_id: ScheduleId::new(),
-            phase: SchedulePhase::Active,
-            revision: ScheduleRevision::initial(),
-            trigger: request.trigger,
-            target: request.target,
-            misfire_policy: request.misfire_policy,
-            overlap_policy: request.overlap_policy,
-            missing_target_policy: request.missing_target_policy,
-            next_occurrence_ordinal: OccurrenceOrdinal(0),
-            planning_cursor_utc: None,
-            superseded_ack_ids: BTreeSet::new(),
-            config: ScheduleConfig {
-                name: request.name,
-                description: request.description,
-                planning_horizon_days: request
-                    .planning_horizon_days
-                    .unwrap_or(DEFAULT_PLANNING_HORIZON_DAYS),
-                planning_horizon_occurrences: request
-                    .planning_horizon_occurrences
-                    .unwrap_or(DEFAULT_PLANNING_HORIZON_OCCURRENCES),
-                labels: request.labels,
-                created_at_utc: now,
-                updated_at_utc: now,
-                deleted_at_utc: None,
-            },
-        }
-    }
-
-    pub fn bump_revision(&mut self) {
-        self.revision = self.revision.next();
-        self.config.updated_at_utc = Utc::now();
+    pub fn new(
+        request: CreateScheduleRequest,
+    ) -> Result<Self, crate::lifecycle::ScheduleLifecycleError> {
+        Ok(Self::apply(
+            None,
+            crate::lifecycle::ScheduleLifecycleInput::Create(request),
+        )?
+        .into_schedule())
     }
 
     pub fn touch(&mut self) {

@@ -1263,6 +1263,7 @@ pub fn schedule_lifecycle_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("MissingTargetPolicy", &["MarkMisfired", "Skip"]),
             NamedTypeBinding::string("OccurrenceId"),
             NamedTypeBinding::string_enum("OverlapPolicy", &["AllowConcurrent", "SkipIfRunning"]),
+            NamedTypeBinding::string("ScheduleId"),
             NamedTypeBinding::string_enum(
                 "ScheduleLifecycleState",
                 &["Active", "Paused", "Deleted"],
@@ -1282,6 +1283,8 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         vec![
             NamedTypeBinding::string("ClaimToken"),
             NamedTypeBinding::string("DeliveryReceipt"),
+            NamedTypeBinding::string_enum("MisfirePolicy", &["Skip", "CatchUpWithin"]),
+            NamedTypeBinding::string_enum("MissingTargetPolicy", &["MarkMisfired", "Skip"]),
             NamedTypeBinding::string_enum(
                 "OccurrenceFailureClass",
                 &[
@@ -1296,6 +1299,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string("OccurrenceId"),
+            NamedTypeBinding::string_enum("OverlapPolicy", &["AllowConcurrent", "SkipIfRunning"]),
             NamedTypeBinding::string_enum(
                 "OccurrenceLifecycleState",
                 &[

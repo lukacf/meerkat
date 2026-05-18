@@ -50,6 +50,22 @@ pub enum FlowTurnOutcome {
 pub enum TimeoutDisposition {
     Detached,
     Canceled,
+    Rejected(TimeoutRejection),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutRejection {
+    OrphanBudgetExhausted,
+}
+
+impl fmt::Display for TimeoutRejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OrphanBudgetExhausted => f.write_str(
+                "flow turn timeout with exhausted orphan budget or per-flow orphan limit",
+            ),
+        }
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

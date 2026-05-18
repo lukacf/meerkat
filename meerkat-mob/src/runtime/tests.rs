@@ -29934,6 +29934,7 @@ enum MobRuntimeParityOutcomeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct MobRuntimeParitySnapshotSummary {
     phase: String,
+    destroy_admitted: bool,
     live_intent_identities: BTreeSet<String>,
     live_runtime_ids: BTreeSet<String>,
     externally_addressable_runtime_ids: BTreeSet<String>,
@@ -29955,6 +29956,7 @@ struct MobRuntimeParitySnapshotSummary {
     member_state_markers: BTreeMap<String, String>,
     wiring_edges: BTreeSet<String>,
     external_peer_edges: BTreeSet<String>,
+    external_peer_edges_by_key: BTreeMap<String, String>,
     identity_to_runtime: BTreeMap<String, String>,
     member_restore_failures: BTreeMap<String, String>,
     // W3-H-1: canonical identity→bridge-session binding map. Stubbed as an
@@ -30636,9 +30638,11 @@ async fn mob_runtime_parity_snapshot_summary(
     // state via the `debug_dsl_t2_snapshot()` command-channel seam (dogma
     // #1: one owner, #13: projection rebuilt from explicit DSL source).
     let (
+        destroy_admitted,
         member_state_markers,
         wiring_edges,
         external_peer_edges,
+        external_peer_edges_by_key,
         identity_to_runtime,
         member_restore_failures,
         member_session_bindings,
@@ -30648,6 +30652,7 @@ async fn mob_runtime_parity_snapshot_summary(
     ) = dsl_t2
         .map(|snap| {
             (
+                snap.destroy_admitted,
                 snap.member_state_markers
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
@@ -30660,6 +30665,10 @@ async fn mob_runtime_parity_snapshot_summary(
                     .into_iter()
                     .map(|edge| format!("{edge:?}"))
                     .collect::<BTreeSet<_>>(),
+                snap.external_peer_edges_by_key
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+                    .collect::<BTreeMap<_, _>>(),
                 snap.identity_to_runtime
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
@@ -30687,6 +30696,7 @@ async fn mob_runtime_parity_snapshot_summary(
 
     Some(MobRuntimeParitySnapshotSummary {
         phase: phase.as_str().to_string(),
+        destroy_admitted,
         live_intent_identities,
         live_runtime_ids,
         externally_addressable_runtime_ids,
@@ -30714,6 +30724,7 @@ async fn mob_runtime_parity_snapshot_summary(
         member_state_markers,
         wiring_edges,
         external_peer_edges,
+        external_peer_edges_by_key,
         identity_to_runtime,
         member_restore_failures,
         member_session_bindings,
@@ -30738,6 +30749,7 @@ fn mob_runtime_parity_field_value(
     field: &str,
 ) -> Option<MobRuntimeParityExprValue> {
     match field {
+        "destroy_admitted" => Some(MobRuntimeParityExprValue::Bool(snapshot.destroy_admitted)),
         "live_intent_identities" => Some(MobRuntimeParityExprValue::Set(
             snapshot.live_intent_identities.clone(),
         )),
@@ -30756,6 +30768,13 @@ fn mob_runtime_parity_field_value(
         )),
         "external_peer_edges" => Some(MobRuntimeParityExprValue::Set(
             snapshot.external_peer_edges.clone(),
+        )),
+        "external_peer_edges_by_key" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .external_peer_edges_by_key
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
         )),
         "identity_to_runtime" => Some(MobRuntimeParityExprValue::Map(
             snapshot

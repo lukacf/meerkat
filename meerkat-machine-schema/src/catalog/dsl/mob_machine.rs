@@ -1150,6 +1150,26 @@ macro_rules! mob_catalog_machine_dsl {
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
         }
 
+        transition ObserveMemberRetirementArchivedLiveStopped {
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            update {
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
+                self.active_run_count = 0;
+            }
+            to Stopped
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+        }
+
         transition ObserveMemberRetirementArchivedRetired {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
             guard { self.lifecycle_phase == Phase::Running }
@@ -1160,6 +1180,18 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_state_markers.remove(agent_runtime_id);
             }
             to Running
+        }
+
+        transition ObserveMemberRetirementArchivedRetiredStopped {
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            update {
+                self.member_state_markers.remove(agent_runtime_id);
+            }
+            to Stopped
         }
 
         transition ObserveMemberRetirementArchivedStaleRuntime {
@@ -1174,6 +1206,18 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        transition ObserveMemberRetirementArchivedStaleRuntimeStopped {
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "identity_remapped" { self.identity_to_runtime.get_cloned(agent_identity) != Some(agent_runtime_id) }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            update {
+                self.member_state_markers.remove(agent_runtime_id);
+            }
+            to Stopped
+        }
+
         transition ObserveMemberRetirementArchivedAlreadyCleared {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
             guard { self.lifecycle_phase == Phase::Running }
@@ -1181,6 +1225,15 @@ macro_rules! mob_catalog_machine_dsl {
             guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
             update {}
             to Running
+        }
+
+        transition ObserveMemberRetirementArchivedAlreadyClearedStopped {
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            update {}
+            to Stopped
         }
 
         transition ResetMember {

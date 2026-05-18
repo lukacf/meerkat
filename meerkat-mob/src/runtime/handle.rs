@@ -1572,7 +1572,7 @@ impl MobHandle {
                     .read()
                     .await
                     .entry(&agent_identity)
-                    .and_then(|entry| {
+                    .map(|entry| {
                         let machine_state = self.machine_state_watch_rx.borrow().clone();
                         Self::project_roster_entry_from_machine_state(entry, &machine_state)
                     });
@@ -1962,31 +1962,35 @@ impl MobHandle {
     fn project_member_ref_session_binding(
         member_ref: &crate::event::MemberRef,
         current_bridge_session_id: Option<SessionId>,
-    ) -> Option<crate::event::MemberRef> {
+    ) -> crate::event::MemberRef {
         match member_ref {
-            crate::event::MemberRef::Session { .. } => {
-                current_bridge_session_id.map(crate::event::MemberRef::from_bridge_session_id)
-            }
+            // The event roster has no sessionless encoding for a session-backed
+            // member. When MobMachine has no active binding, keep the member ref
+            // only as a structural roster anchor; behavior paths must resolve
+            // bridge sessions through `MobMachineState.member_session_bindings`.
+            crate::event::MemberRef::Session { .. } => current_bridge_session_id
+                .map(crate::event::MemberRef::from_bridge_session_id)
+                .unwrap_or_else(|| member_ref.clone()),
             crate::event::MemberRef::BackendPeer {
                 peer_id,
                 address,
                 pubkey,
                 bootstrap_token,
                 ..
-            } => Some(crate::event::MemberRef::BackendPeer {
+            } => crate::event::MemberRef::BackendPeer {
                 peer_id: peer_id.clone(),
                 address: address.clone(),
                 pubkey: *pubkey,
                 bootstrap_token: bootstrap_token.clone(),
                 session_id: current_bridge_session_id,
-            }),
+            },
         }
     }
 
     fn project_roster_entry_from_machine_state(
         mut entry: RosterEntry,
         machine_state: &mob_dsl::MobMachineState,
-    ) -> Option<RosterEntry> {
+    ) -> RosterEntry {
         let machine_lifecycle =
             Self::member_lifecycle_from_machine_state(&entry.agent_identity, machine_state);
         entry.state =
@@ -1994,8 +1998,8 @@ impl MobHandle {
         let current_bridge_session_id =
             Self::machine_bridge_session_id_for_identity(&entry.agent_identity, machine_state);
         entry.member_ref =
-            Self::project_member_ref_session_binding(&entry.member_ref, current_bridge_session_id)?;
-        Some(entry)
+            Self::project_member_ref_session_binding(&entry.member_ref, current_bridge_session_id);
+        entry
     }
 
     fn member_lifecycle_from_machine_state(
@@ -2036,7 +2040,7 @@ impl MobHandle {
     ) -> Vec<RosterEntry> {
         entries
             .into_iter()
-            .filter_map(|entry| Self::project_roster_entry_from_machine_state(entry, machine_state))
+            .map(|entry| Self::project_roster_entry_from_machine_state(entry, machine_state))
             .collect()
     }
 

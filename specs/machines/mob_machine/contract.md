@@ -679,6 +679,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Running`
 
+### `ObserveMemberRetirementArchivedLiveStopped`
+- From: `Stopped`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+- Emits: `EmitMemberLifecycleNotice`
+- To: `Stopped`
+
 ### `ObserveMemberRetirementArchivedRetired`
 - From: `Running`
 - On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
@@ -687,6 +697,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_not_live`
   - `member_retiring`
 - To: `Running`
+
+### `ObserveMemberRetirementArchivedRetiredStopped`
+- From: `Stopped`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_not_live`
+  - `member_retiring`
+- To: `Stopped`
 
 ### `ObserveMemberRetirementArchivedStaleRuntime`
 - From: `Running`
@@ -697,6 +716,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `member_retiring`
 - To: `Running`
 
+### `ObserveMemberRetirementArchivedStaleRuntimeStopped`
+- From: `Stopped`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_remapped`
+  - `runtime_not_live`
+  - `member_retiring`
+- To: `Stopped`
+
 ### `ObserveMemberRetirementArchivedAlreadyCleared`
 - From: `Running`
 - On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
@@ -704,6 +732,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_not_live`
   - `member_not_retiring`
 - To: `Running`
+
+### `ObserveMemberRetirementArchivedAlreadyClearedStopped`
+- From: `Stopped`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `runtime_not_live`
+  - `member_not_retiring`
+- To: `Stopped`
 
 ### `ResetMember`
 - From: `Running`, `Stopped`

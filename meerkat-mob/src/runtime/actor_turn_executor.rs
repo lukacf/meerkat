@@ -2,9 +2,10 @@ use super::handle::MobHandle;
 use super::provisioner::MobProvisioner;
 use super::turn_executor::{
     ActorTurnTicket, FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition,
+    TimeoutRejection,
 };
 use crate::error::MobError;
-use crate::ids::{MeerkatId, RunId, StepId};
+use crate::ids::{AgentIdentity, MeerkatId, RunId, StepId};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
@@ -399,14 +400,18 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                          use turn_driven runtime mode for steps with allowed_tools/blocked_tools"
                     )));
                 }
-                let bridge_session_id = entry.member_ref.bridge_session_id().ok_or_else(|| {
+                let bridge_session_id = self
+                    .handle
+                    .resolve_bridge_session_id(&AgentIdentity::from(target.as_str()))
+                    .await
+                    .ok_or_else(|| {
                     MobError::Internal(format!(
-                        "autonomous flow dispatch requires session-backed member ref for '{target}'"
+                        "autonomous flow dispatch requires MobMachine session binding for '{target}'"
                     ))
                 })?;
                 let injector = self
                     .provisioner
-                    .interaction_event_injector(bridge_session_id)
+                    .interaction_event_injector(&bridge_session_id)
                     .await
                     .ok_or_else(|| MobError::MissingMemberCapability {
                         member_id: target.clone(),
@@ -535,9 +540,8 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
             Ok(TimeoutDisposition::Detached)
         } else {
             bridge_handle.abort();
-            Err(MobError::Internal(
-                "flow turn timeout with exhausted orphan budget or per-flow orphan limit"
-                    .to_string(),
+            Ok(TimeoutDisposition::Rejected(
+                TimeoutRejection::OrphanBudgetExhausted,
             ))
         }
     }

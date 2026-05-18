@@ -100,6 +100,7 @@ impl Default for MobLifecycleSnapshot {
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MobDslT2Snapshot {
+    pub destroy_admitted: bool,
     pub member_state_markers: std::collections::BTreeMap<
         crate::machines::mob_machine::AgentRuntimeId,
         crate::machines::mob_machine::MobMemberState,
@@ -107,6 +108,10 @@ pub(crate) struct MobDslT2Snapshot {
     pub wiring_edges: std::collections::BTreeSet<crate::machines::mob_machine::WiringEdge>,
     pub external_peer_edges:
         std::collections::BTreeSet<crate::machines::mob_machine::ExternalPeerEdge>,
+    pub external_peer_edges_by_key: std::collections::BTreeMap<
+        crate::machines::mob_machine::ExternalPeerKey,
+        crate::machines::mob_machine::ExternalPeerEdge,
+    >,
     pub identity_to_runtime: std::collections::BTreeMap<
         crate::machines::mob_machine::AgentIdentity,
         crate::machines::mob_machine::AgentRuntimeId,

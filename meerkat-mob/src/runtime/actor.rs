@@ -3619,9 +3619,11 @@ impl MobActor {
                 MobCommand::DslT2Snapshot { reply_tx } => {
                     let dsl = self.dsl_authority.state();
                     let _ = reply_tx.send(super::state::MobDslT2Snapshot {
+                        destroy_admitted: dsl.destroy_admitted,
                         member_state_markers: dsl.member_state_markers.clone(),
                         wiring_edges: dsl.wiring_edges.clone(),
                         external_peer_edges: dsl.external_peer_edges.clone(),
+                        external_peer_edges_by_key: dsl.external_peer_edges_by_key.clone(),
                         identity_to_runtime: dsl.identity_to_runtime.clone(),
                         member_restore_failures: dsl.member_restore_failures.clone(),
                         member_session_bindings: dsl.member_session_bindings.clone(),
@@ -10835,16 +10837,28 @@ impl MobActor {
     ) -> Result<(), MobError> {
         match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
-                let bridge_session_id = entry.member_ref.bridge_session_id().ok_or_else(|| {
+                let bridge_session_id = self
+                    .machine_bridge_session_id_for_identity(&entry.agent_identity)
+                    .ok_or_else(|| {
+                        MobError::Internal(format!(
+                            "autonomous direct turn delivery requires MobMachine session binding for '{}'",
+                            entry.agent_identity
+                        ))
+                    })?;
+                let machine_member_ref = Self::project_member_ref_session_binding(
+                    &entry.member_ref,
+                    Some(bridge_session_id.clone()),
+                )
+                .ok_or_else(|| {
                     Self::peer_only_member_control_error(entry.runtime_mode, "direct turn delivery")
                 })?;
 
-                self.ensure_autonomous_runtime_ready(&entry.agent_identity, &entry.member_ref)
+                self.ensure_autonomous_runtime_ready(&entry.agent_identity, &machine_member_ref)
                     .await?;
 
                 let injector = self
                     .provisioner
-                    .interaction_event_injector(bridge_session_id)
+                    .interaction_event_injector(&bridge_session_id)
                     .await
                     .ok_or_else(|| MobError::MissingMemberCapability {
                         member_id: crate::ids::MeerkatId::from(entry.agent_identity.as_str()),

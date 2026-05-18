@@ -177,15 +177,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ObserveMemberRetirementArchivedLive`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ObserveMemberRetirementArchivedLiveStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
 - `ObserveMemberRetirementArchivedRetired`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ObserveMemberRetirementArchivedRetiredStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
 - `ObserveMemberRetirementArchivedStaleRuntime`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ObserveMemberRetirementArchivedStaleRuntimeStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
 - `ObserveMemberRetirementArchivedAlreadyCleared`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ObserveMemberRetirementArchivedAlreadyClearedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
 - `ResetMember`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`

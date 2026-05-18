@@ -3115,13 +3115,22 @@ pub(crate) fn project_flow_frame_authority_state_from_machine(
     frame_id: &FrameId,
 ) -> Result<flow_frame::State, MobError> {
     let state = project_flow_frame_state_from_machine(machine_state, frame_id, BTreeSet::new())?;
-    let branch_winners = state
+    let branch_winners = completed_branch_winners(&state);
+    project_flow_frame_state_from_machine(machine_state, frame_id, branch_winners)
+}
+
+fn completed_branch_winners(state: &flow_frame::State) -> BTreeSet<BranchId> {
+    state
         .node_status
         .iter()
         .filter(|(_, status)| **status == flow_frame::NodeRunStatus::Completed)
         .filter_map(|(node_id, _)| state.node_branches.get(node_id).and_then(Clone::clone))
-        .collect();
-    project_flow_frame_state_from_machine(machine_state, frame_id, branch_winners)
+        .collect()
+}
+
+fn refresh_completed_branch_winners(mut state: flow_frame::State) -> flow_frame::State {
+    state.branch_winners = completed_branch_winners(&state);
+    state
 }
 
 fn project_flow_frame_admit_from_machine(
@@ -3194,11 +3203,11 @@ fn project_flow_frame_node_from_machine(
     expected_status: flow_frame::NodeRunStatus,
     transition_id: flow_frame::TransitionId,
 ) -> Result<flow_frame::Outcome, MobError> {
-    let next_state = project_flow_frame_state_from_machine(
+    let next_state = refresh_completed_branch_winners(project_flow_frame_state_from_machine(
         machine_state,
         &state.frame_id,
         state.branch_winners.clone(),
-    )?;
+    )?);
     let projected = next_state
         .node_status
         .get(node_id)
@@ -3232,11 +3241,11 @@ fn project_flow_frame_node_output_from_machine(
     machine_state: &mob_dsl::MobMachineState,
     node_id: &FlowNodeId,
 ) -> Result<flow_frame::Outcome, MobError> {
-    let next_state = project_flow_frame_state_from_machine(
+    let next_state = refresh_completed_branch_winners(project_flow_frame_state_from_machine(
         machine_state,
         &state.frame_id,
         state.branch_winners.clone(),
-    )?;
+    )?);
     if next_state.output_recorded.get(node_id) != Some(&true) {
         return Err(MobError::Internal(format!(
             "MobMachine frame '{}' did not project output recorded for node '{}'",

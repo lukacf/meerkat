@@ -194,67 +194,65 @@ impl FlowEngine {
                                     &projection_record.frame_id,
                                     &projection_record.node_id,
                                 )?;
-                                if !matches!(
-                                    step_status,
-                                    StepRunStatus::Failed | StepRunStatus::Skipped
-                                ) {
-                                    continue;
-                                }
                                 let failure = frame_outcome.step_failures.get(step_id);
-                                let request = match (&step_status, failure) {
-                                    (StepRunStatus::Failed, Some(_)) => {
+                                let (request, output, reason) = match (&step_status, failure) {
+                                    (StepRunStatus::Completed, _) => (
+                                        FrameStepProjectionRequest::completed(
+                                            projection_record.frame_id.clone(),
+                                            projection_record.node_id.clone(),
+                                        ),
+                                        frame_outcome.outputs.get(step_id).cloned(),
+                                        None,
+                                    ),
+                                    (StepRunStatus::Failed, Some(failure)) => (
                                         FrameStepProjectionRequest::failed(
                                             projection_record.frame_id.clone(),
                                             projection_record.node_id.clone(),
-                                        )
-                                    }
-                                    (StepRunStatus::Failed, None) => {
+                                        ),
+                                        None,
+                                        Some(failure.reason.clone()),
+                                    ),
+                                    (StepRunStatus::Failed, None) => (
                                         FrameStepProjectionRequest::failed(
                                             projection_record.frame_id.clone(),
                                             projection_record.node_id.clone(),
-                                        )
-                                    }
-                                    (StepRunStatus::Skipped, _) => {
+                                        ),
+                                        None,
+                                        Some("frame execution marked step failed".to_string()),
+                                    ),
+                                    (StepRunStatus::Skipped, _) => (
                                         FrameStepProjectionRequest::skipped(
                                             projection_record.frame_id.clone(),
                                             projection_record.node_id.clone(),
-                                        )
-                                    }
-                                    _ => unreachable!("filtered terminal status above"),
+                                        ),
+                                        None,
+                                        Some("auto-skipped by failed frame execution".to_string()),
+                                    ),
+                                    _ => continue,
                                 };
                                 let projection = self
                                     .project_frame_step_status(&run_id, step_id, request)
                                     .await?;
-                                let reason = match (&projection.step_status, failure) {
-                                    (StepRunStatus::Failed, Some(failure)) => {
-                                        failure.reason.as_str()
-                                    }
-                                    (StepRunStatus::Failed, None) => {
-                                        "frame execution marked step failed"
-                                    }
-                                    (StepRunStatus::Skipped, _) => {
-                                        "auto-skipped by failed frame execution"
-                                    }
-                                    _ => {
-                                        return Err(MobError::Internal(format!(
-                                            "failed frame projected non-failed step status {:?} \
-                                             for step '{step_id}' in run '{run_id}'",
-                                            projection.step_status
-                                        )));
-                                    }
-                                };
+                                if projection.step_status != step_status {
+                                    return Err(MobError::Internal(format!(
+                                        "failed frame projected status {:?} for step '{step_id}' \
+                                         in run '{run_id}', expected {step_status:?}",
+                                        projection.step_status
+                                    )));
+                                }
                                 if self
                                     .apply_frame_step_projection(
                                         projection.effects,
                                         &run_id,
                                         step_id,
-                                        None,
-                                        Some(reason.to_owned()),
+                                        output,
+                                        reason.clone(),
                                     )
                                     .await?
                                 {
                                     let supervisor =
                                         Supervisor::new(self.handle.clone(), self.emitter.clone());
+                                    let reason = reason.as_deref().unwrap_or("frame step failed");
                                     supervisor
                                         .escalate(&config, &run_id, step_id, reason)
                                         .await?;
@@ -494,6 +492,7 @@ impl FlowEngine {
                 max_retries,
                 cancel,
                 flow_deadline_timeout_reason,
+                TimeoutRejectionPolicy::AbortStep,
             )
             .await?
         {
@@ -584,6 +583,7 @@ impl FlowEngine {
                         max_retries,
                         cancel,
                         flow_deadline_timeout_reason,
+                        TimeoutRejectionPolicy::RecordTargetFailure,
                     )
                     .await;
                 (target, result)
@@ -665,6 +665,7 @@ impl FlowEngine {
         max_retries: usize,
         cancel: Option<&CancellationToken>,
         flow_deadline_timeout_reason: Option<String>,
+        timeout_rejection_policy: TimeoutRejectionPolicy,
     ) -> Result<Result<Value, StepTargetFailure>, MobError> {
         let mut attempt = 0usize;
         loop {
@@ -695,7 +696,15 @@ impl FlowEngine {
                         result = self.executor.await_terminal(ticket.clone(), step_timeout) => result,
                         () = cancel_token.cancelled() => {
                             match self.executor.on_timeout(ticket.clone()).await {
-                                Ok(_) => return Err(MobError::RunCanceled(run_id.clone())),
+                                Ok(TimeoutDisposition::Detached | TimeoutDisposition::Canceled) => {
+                                    return Err(MobError::RunCanceled(run_id.clone()));
+                                }
+                                Ok(TimeoutDisposition::Rejected(rejection)) => {
+                                    return Err(MobError::FlowFailed {
+                                        run_id: run_id.clone(),
+                                        reason: rejection.to_string(),
+                                    });
+                                }
                                 Err(e) => {
                                     return Err(MobError::FlowFailed {
                                         run_id: run_id.clone(),
@@ -815,6 +824,17 @@ impl FlowEngine {
                         }
                         Ok(TimeoutDisposition::Canceled) => {
                             format!("timeout + canceled after {}ms", step_timeout.as_millis())
+                        }
+                        Ok(TimeoutDisposition::Rejected(rejection)) => {
+                            let reason = rejection.to_string();
+                            if matches!(timeout_rejection_policy, TimeoutRejectionPolicy::AbortStep)
+                            {
+                                return Err(MobError::FlowFailed {
+                                    run_id: run_id.clone(),
+                                    reason,
+                                });
+                            }
+                            reason
                         }
                         Err(e) => {
                             return Err(MobError::FlowFailed {
@@ -1714,6 +1734,12 @@ impl StepTargetFailure {
     fn unrecorded(reason: String) -> Self {
         Self { reason }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeoutRejectionPolicy {
+    AbortStep,
+    RecordTargetFailure,
 }
 
 pub(crate) struct StepExecutionRequest<'a> {

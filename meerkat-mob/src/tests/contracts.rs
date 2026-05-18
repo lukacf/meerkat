@@ -695,6 +695,8 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
 
     let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
     let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+    sender.install_peer_comms_handle(meerkat_runtime::test_peer_comms_handle());
+    receiver.install_peer_comms_handle(meerkat_runtime::test_peer_comms_handle());
 
     // Establish trust
     let spec = inproc_peer_descriptor(&receiver_name, &receiver).expect("valid spec");

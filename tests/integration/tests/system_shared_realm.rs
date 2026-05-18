@@ -277,7 +277,7 @@ async fn seed_workgraph_commitments(
             realm_id: None,
             namespace: None,
             expected_revision: claimed.revision,
-            status: meerkat::WorkStatus::Completed,
+            status: Some(meerkat::WorkStatus::Completed),
         })
         .await?;
 

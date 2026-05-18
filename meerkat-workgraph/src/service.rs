@@ -750,7 +750,7 @@ mod tests {
                 realm_id: None,
                 namespace: None,
                 expected_revision: blocker.revision,
-                status: crate::WorkStatus::Completed,
+                status: Some(crate::WorkStatus::Completed),
             })
             .await
             .expect("close blocker");
@@ -826,7 +826,7 @@ mod tests {
                 realm_id: None,
                 namespace: None,
                 expected_revision: blocker.revision,
-                status: crate::WorkStatus::Completed,
+                status: Some(crate::WorkStatus::Completed),
             })
             .await
             .expect("close should report committed terminal item despite refresh conflict");

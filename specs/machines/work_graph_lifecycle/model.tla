@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for WorkGraphLifecycleMachine.
 
-CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkItemKeyValues, WorkOwnerKeyValues
+CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
 
 WorkOwnerKeyValuesCi == {}
 
@@ -13,6 +13,7 @@ None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
 OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
+OptionWorkLifecycleStateValues == {None} \cup {Some(x) : x \in WorkLifecycleStateValues}
 OptionWorkOwnerKeyValues == {None} \cup {Some(x) : x \in WorkOwnerKeyValues}
 
 MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
@@ -53,6 +54,32 @@ Init ==
 TerminalStutter ==
     /\ phase = "Completed" \/ phase = "Cancelled" \/ phase = "Failed"
     /\ UNCHANGED vars
+
+CreateDefaultOrOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status) ==
+    /\ phase = "Absent"
+    /\ ((requested_status = None) \/ (requested_status = Some("Open")))
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ revision' = 1
+    /\ unresolved_blocker_count' = arg_unresolved_blocker_count
+    /\ due_at_utc_ms' = arg_due_at_utc_ms
+    /\ not_before_utc_ms' = arg_not_before_utc_ms
+    /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+CreateRequestedBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status) ==
+    /\ phase = "Absent"
+    /\ (requested_status = Some("Blocked"))
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ revision' = 1
+    /\ unresolved_blocker_count' = arg_unresolved_blocker_count
+    /\ due_at_utc_ms' = arg_due_at_utc_ms
+    /\ not_before_utc_ms' = arg_not_before_utc_ms
+    /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+
 
 CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
     /\ phase = "Absent"
@@ -286,6 +313,132 @@ ValidateLink(kind, from_item_key, to_item_key, edge_key, reverse_path_key) ==
     /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
+CloseOpenDefaultOrCompleted(expected_revision, at_utc_ms, requested_status) ==
+    /\ phase = "Open"
+    /\ (revision = expected_revision)
+    /\ ((requested_status = None) \/ (requested_status = Some("Completed")))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
+    /\ claim_owner_key' = None
+    /\ claimed_at_utc_ms' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ terminal_at_utc_ms' = Some(at_utc_ms)
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+
+
+CloseInProgressDefaultOrCompleted(expected_revision, at_utc_ms, requested_status) ==
+    /\ phase = "InProgress"
+    /\ (revision = expected_revision)
+    /\ ((requested_status = None) \/ (requested_status = Some("Completed")))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
+    /\ claim_owner_key' = None
+    /\ claimed_at_utc_ms' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ terminal_at_utc_ms' = Some(at_utc_ms)
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+
+
+CloseBlockedDefaultOrCompleted(expected_revision, at_utc_ms, requested_status) ==
+    /\ phase = "Blocked"
+    /\ (revision = expected_revision)
+    /\ ((requested_status = None) \/ (requested_status = Some("Completed")))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
+    /\ claim_owner_key' = None
+    /\ claimed_at_utc_ms' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ terminal_at_utc_ms' = Some(at_utc_ms)
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+
+
+CloseOpenRequestedCancelled(expected_revision, at_utc_ms, requested_status) ==
+    /\ phase = "Open"
+    /\ (revision = expected_revision)
+    /\ (requested_status = Some("Cancelled"))
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
+    /\ claim_owner_key' = None
+    /\ claimed_at_utc_ms' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ terminal_at_utc_ms' = Some(at_utc_ms)
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+
+
+CloseInProgressRequestedCancelled(expected_revision, at_utc_ms, requested_status) ==
+    /\ phase = "InProgress"
+    /\ (revision = expected_revision)
+    /\ (requested_status = Some("Cancelled"))
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
+    /\ claim_owner_key' = None
+    /\ claimed_at_utc_ms' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ terminal_at_utc_ms' = Some(at_utc_ms)
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+
+
+CloseBlockedRequestedCancelled(expected_revision, at_utc_ms, requested_status) ==
+    /\ phase = "Blocked"
+    /\ (revision = expected_revision)
+    /\ (requested_status = Some("Cancelled"))
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
+    /\ claim_owner_key' = None
+    /\ claimed_at_utc_ms' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ terminal_at_utc_ms' = Some(at_utc_ms)
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+
+
+CloseOpenRequestedFailed(expected_revision, at_utc_ms, requested_status) ==
+    /\ phase = "Open"
+    /\ (revision = expected_revision)
+    /\ (requested_status = Some("Failed"))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
+    /\ claim_owner_key' = None
+    /\ claimed_at_utc_ms' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ terminal_at_utc_ms' = Some(at_utc_ms)
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+
+
+CloseInProgressRequestedFailed(expected_revision, at_utc_ms, requested_status) ==
+    /\ phase = "InProgress"
+    /\ (revision = expected_revision)
+    /\ (requested_status = Some("Failed"))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
+    /\ claim_owner_key' = None
+    /\ claimed_at_utc_ms' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ terminal_at_utc_ms' = Some(at_utc_ms)
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+
+
+CloseBlockedRequestedFailed(expected_revision, at_utc_ms, requested_status) ==
+    /\ phase = "Blocked"
+    /\ (revision = expected_revision)
+    /\ (requested_status = Some("Failed"))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
+    /\ claim_owner_key' = None
+    /\ claimed_at_utc_ms' = None
+    /\ lease_expires_at_utc_ms' = None
+    /\ terminal_at_utc_ms' = Some(at_utc_ms)
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+
+
 CloseOpenCompleted(expected_revision, at_utc_ms) ==
     /\ phase = "Open"
     /\ (revision = expected_revision)
@@ -464,6 +617,8 @@ AddEvidenceFailed(expected_revision) ==
 
 
 Next ==
+    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CreateDefaultOrOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status)
+    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CreateRequestedBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status)
     \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
     \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
     \/ \E expected_revision \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : UpdateOpen(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
@@ -486,6 +641,15 @@ Next ==
     \/ ClassifyBlockerUnsatisfiedCancelled
     \/ ClassifyBlockerUnsatisfiedFailed
     \/ \E kind \in WorkEdgeKindValues : \E from_item_key \in WorkItemKeyValues : \E to_item_key \in WorkItemKeyValues : \E edge_key \in WorkEdgeKeyValues : \E reverse_path_key \in WorkDependencyPathKeyValues : ValidateLink(kind, from_item_key, to_item_key, edge_key, reverse_path_key)
+    \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CloseOpenDefaultOrCompleted(expected_revision, at_utc_ms, requested_status)
+    \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CloseInProgressDefaultOrCompleted(expected_revision, at_utc_ms, requested_status)
+    \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CloseBlockedDefaultOrCompleted(expected_revision, at_utc_ms, requested_status)
+    \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CloseOpenRequestedCancelled(expected_revision, at_utc_ms, requested_status)
+    \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CloseInProgressRequestedCancelled(expected_revision, at_utc_ms, requested_status)
+    \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CloseBlockedRequestedCancelled(expected_revision, at_utc_ms, requested_status)
+    \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CloseOpenRequestedFailed(expected_revision, at_utc_ms, requested_status)
+    \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CloseInProgressRequestedFailed(expected_revision, at_utc_ms, requested_status)
+    \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CloseBlockedRequestedFailed(expected_revision, at_utc_ms, requested_status)
     \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : CloseOpenCompleted(expected_revision, at_utc_ms)
     \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : CloseInProgressCompleted(expected_revision, at_utc_ms)
     \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : CloseBlockedCompleted(expected_revision, at_utc_ms)

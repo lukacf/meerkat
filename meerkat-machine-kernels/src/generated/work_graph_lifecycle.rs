@@ -274,6 +274,14 @@ pub mod inputs {
     #[allow(unused_imports)]
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct Create {
+        pub due_at_utc_ms: Option<u64>,
+        pub not_before_utc_ms: Option<u64>,
+        pub snoozed_until_utc_ms: Option<u64>,
+        pub unresolved_blocker_count: u64,
+        pub requested_status: Option<WorkLifecycleState>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CreateOpen {
         pub due_at_utc_ms: Option<u64>,
         pub not_before_utc_ms: Option<u64>,
@@ -325,6 +333,12 @@ pub mod inputs {
         pub reverse_path_key: WorkDependencyPathKey,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct Close {
+        pub expected_revision: u64,
+        pub at_utc_ms: u64,
+        pub requested_status: Option<WorkLifecycleState>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CloseCompleted {
         pub expected_revision: u64,
         pub at_utc_ms: u64,
@@ -347,6 +361,7 @@ pub mod inputs {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Input {
+    Create(inputs::Create),
     CreateOpen(inputs::CreateOpen),
     CreateBlocked(inputs::CreateBlocked),
     Update(inputs::Update),
@@ -356,6 +371,7 @@ pub enum Input {
     RefreshEligibility(inputs::RefreshEligibility),
     ClassifyBlockerSatisfaction(inputs::ClassifyBlockerSatisfaction),
     ValidateLink(inputs::ValidateLink),
+    Close(inputs::Close),
     CloseCompleted(inputs::CloseCompleted),
     CloseCancelled(inputs::CloseCancelled),
     CloseFailed(inputs::CloseFailed),
@@ -364,6 +380,7 @@ pub enum Input {
 impl Input {
     pub fn kind(&self) -> InputKind {
         match self {
+            Self::Create(_) => InputKind::Create,
             Self::CreateOpen(_) => InputKind::CreateOpen,
             Self::CreateBlocked(_) => InputKind::CreateBlocked,
             Self::Update(_) => InputKind::Update,
@@ -373,6 +390,7 @@ impl Input {
             Self::RefreshEligibility(_) => InputKind::RefreshEligibility,
             Self::ClassifyBlockerSatisfaction(_) => InputKind::ClassifyBlockerSatisfaction,
             Self::ValidateLink(_) => InputKind::ValidateLink,
+            Self::Close(_) => InputKind::Close,
             Self::CloseCompleted(_) => InputKind::CloseCompleted,
             Self::CloseCancelled(_) => InputKind::CloseCancelled,
             Self::CloseFailed(_) => InputKind::CloseFailed,
@@ -382,6 +400,7 @@ impl Input {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InputKind {
+    Create,
     CreateOpen,
     CreateBlocked,
     Update,
@@ -391,6 +410,7 @@ pub enum InputKind {
     RefreshEligibility,
     ClassifyBlockerSatisfaction,
     ValidateLink,
+    Close,
     CloseCompleted,
     CloseCancelled,
     CloseFailed,
@@ -456,6 +476,8 @@ pub enum EffectKind {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
+    CreateDefaultOrOpen,
+    CreateRequestedBlocked,
     CreateOpen,
     CreateBlocked,
     UpdateOpen,
@@ -478,6 +500,15 @@ pub enum TransitionId {
     ClassifyBlockerUnsatisfiedCancelled,
     ClassifyBlockerUnsatisfiedFailed,
     ValidateLink,
+    CloseOpenDefaultOrCompleted,
+    CloseInProgressDefaultOrCompleted,
+    CloseBlockedDefaultOrCompleted,
+    CloseOpenRequestedCancelled,
+    CloseInProgressRequestedCancelled,
+    CloseBlockedRequestedCancelled,
+    CloseOpenRequestedFailed,
+    CloseInProgressRequestedFailed,
+    CloseBlockedRequestedFailed,
     CloseOpenCompleted,
     CloseInProgressCompleted,
     CloseBlockedCompleted,

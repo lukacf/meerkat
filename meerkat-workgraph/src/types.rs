@@ -98,11 +98,10 @@ fn validate_token(name: &str, value: String) -> Result<String, WorkGraphError> {
     Ok(trimmed.to_string())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WorkStatus {
-    #[default]
     Open,
     InProgress,
     Blocked,
@@ -749,12 +748,8 @@ pub struct CloseWorkItemRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<WorkNamespace>,
     pub expected_revision: u64,
-    #[serde(default = "default_terminal_status")]
-    pub status: WorkStatus,
-}
-
-fn default_terminal_status() -> WorkStatus {
-    WorkStatus::Completed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<WorkStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

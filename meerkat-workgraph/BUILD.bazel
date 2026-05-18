@@ -42,6 +42,9 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/workgraph-workflow/SKILL.md",
+        "src/machine.rs",
+        "src/service.rs",
+        "src/types.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -78,6 +81,9 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/workgraph-workflow/SKILL.md",
+        "src/machine.rs",
+        "src/service.rs",
+        "src/types.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -122,6 +128,9 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/workgraph-workflow/SKILL.md",
+        "src/machine.rs",
+        "src/service.rs",
+        "src/types.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],

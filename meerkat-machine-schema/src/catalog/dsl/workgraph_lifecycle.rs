@@ -177,6 +177,13 @@ machine! {
         }
 
         input WorkGraphLifecycleInput {
+            Create {
+                due_at_utc_ms: Option<u64>,
+                not_before_utc_ms: Option<u64>,
+                snoozed_until_utc_ms: Option<u64>,
+                unresolved_blocker_count: u64,
+                requested_status: Option<Enum<WorkLifecycleState>>,
+            },
             CreateOpen {
                 due_at_utc_ms: Option<u64>,
                 not_before_utc_ms: Option<u64>,
@@ -213,6 +220,7 @@ machine! {
                 edge_key: WorkEdgeKey,
                 reverse_path_key: WorkDependencyPathKey,
             },
+            Close { expected_revision: u64, at_utc_ms: u64, requested_status: Option<Enum<WorkLifecycleState>> },
             CloseCompleted { expected_revision: u64, at_utc_ms: u64 },
             CloseCancelled { expected_revision: u64, at_utc_ms: u64 },
             CloseFailed { expected_revision: u64, at_utc_ms: u64 },
@@ -274,6 +282,36 @@ machine! {
         disposition LinkValidated => local,
         disposition Closed => local,
         disposition EvidenceAdded => local,
+
+        transition CreateDefaultOrOpen {
+            on input Create { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status }
+            guard "absent" { self.lifecycle_phase == Phase::Absent }
+            guard "default_or_open" { requested_status == None || requested_status == Some(WorkLifecycleState::Open) }
+            update {
+                self.revision = 1;
+                self.unresolved_blocker_count = unresolved_blocker_count;
+                self.due_at_utc_ms = due_at_utc_ms;
+                self.not_before_utc_ms = not_before_utc_ms;
+                self.snoozed_until_utc_ms = snoozed_until_utc_ms;
+            }
+            to Open
+            emit Created
+        }
+
+        transition CreateRequestedBlocked {
+            on input Create { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status }
+            guard "absent" { self.lifecycle_phase == Phase::Absent }
+            guard "requested_blocked" { requested_status == Some(WorkLifecycleState::Blocked) }
+            update {
+                self.revision = 1;
+                self.unresolved_blocker_count = unresolved_blocker_count;
+                self.due_at_utc_ms = due_at_utc_ms;
+                self.not_before_utc_ms = not_before_utc_ms;
+                self.snoozed_until_utc_ms = snoozed_until_utc_ms;
+            }
+            to Blocked
+            emit Created
+        }
 
         transition CreateOpen {
             on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
@@ -528,6 +566,141 @@ machine! {
             }
             to Absent
             emit LinkValidated
+        }
+
+        transition CloseOpenDefaultOrCompleted {
+            on input Close { expected_revision, at_utc_ms, requested_status }
+            guard "revision_matches" { self.lifecycle_phase == Phase::Open && self.revision == expected_revision }
+            guard "default_or_completed" { requested_status == None || requested_status == Some(WorkLifecycleState::Completed) }
+            update {
+                self.revision += 1;
+                self.claim_owner_key = None;
+                self.claimed_at_utc_ms = None;
+                self.lease_expires_at_utc_ms = None;
+                self.terminal_at_utc_ms = Some(at_utc_ms);
+            }
+            to Completed
+            emit Closed { terminal_state: self.lifecycle_phase }
+        }
+
+        transition CloseInProgressDefaultOrCompleted {
+            on input Close { expected_revision, at_utc_ms, requested_status }
+            guard "revision_matches" { self.lifecycle_phase == Phase::InProgress && self.revision == expected_revision }
+            guard "default_or_completed" { requested_status == None || requested_status == Some(WorkLifecycleState::Completed) }
+            update {
+                self.revision += 1;
+                self.claim_owner_key = None;
+                self.claimed_at_utc_ms = None;
+                self.lease_expires_at_utc_ms = None;
+                self.terminal_at_utc_ms = Some(at_utc_ms);
+            }
+            to Completed
+            emit Closed { terminal_state: self.lifecycle_phase }
+        }
+
+        transition CloseBlockedDefaultOrCompleted {
+            on input Close { expected_revision, at_utc_ms, requested_status }
+            guard "revision_matches" { self.lifecycle_phase == Phase::Blocked && self.revision == expected_revision }
+            guard "default_or_completed" { requested_status == None || requested_status == Some(WorkLifecycleState::Completed) }
+            update {
+                self.revision += 1;
+                self.claim_owner_key = None;
+                self.claimed_at_utc_ms = None;
+                self.lease_expires_at_utc_ms = None;
+                self.terminal_at_utc_ms = Some(at_utc_ms);
+            }
+            to Completed
+            emit Closed { terminal_state: self.lifecycle_phase }
+        }
+
+        transition CloseOpenRequestedCancelled {
+            on input Close { expected_revision, at_utc_ms, requested_status }
+            guard "revision_matches" { self.lifecycle_phase == Phase::Open && self.revision == expected_revision }
+            guard "requested_cancelled" { requested_status == Some(WorkLifecycleState::Cancelled) }
+            update {
+                self.revision += 1;
+                self.claim_owner_key = None;
+                self.claimed_at_utc_ms = None;
+                self.lease_expires_at_utc_ms = None;
+                self.terminal_at_utc_ms = Some(at_utc_ms);
+            }
+            to Cancelled
+            emit Closed { terminal_state: self.lifecycle_phase }
+        }
+
+        transition CloseInProgressRequestedCancelled {
+            on input Close { expected_revision, at_utc_ms, requested_status }
+            guard "revision_matches" { self.lifecycle_phase == Phase::InProgress && self.revision == expected_revision }
+            guard "requested_cancelled" { requested_status == Some(WorkLifecycleState::Cancelled) }
+            update {
+                self.revision += 1;
+                self.claim_owner_key = None;
+                self.claimed_at_utc_ms = None;
+                self.lease_expires_at_utc_ms = None;
+                self.terminal_at_utc_ms = Some(at_utc_ms);
+            }
+            to Cancelled
+            emit Closed { terminal_state: self.lifecycle_phase }
+        }
+
+        transition CloseBlockedRequestedCancelled {
+            on input Close { expected_revision, at_utc_ms, requested_status }
+            guard "revision_matches" { self.lifecycle_phase == Phase::Blocked && self.revision == expected_revision }
+            guard "requested_cancelled" { requested_status == Some(WorkLifecycleState::Cancelled) }
+            update {
+                self.revision += 1;
+                self.claim_owner_key = None;
+                self.claimed_at_utc_ms = None;
+                self.lease_expires_at_utc_ms = None;
+                self.terminal_at_utc_ms = Some(at_utc_ms);
+            }
+            to Cancelled
+            emit Closed { terminal_state: self.lifecycle_phase }
+        }
+
+        transition CloseOpenRequestedFailed {
+            on input Close { expected_revision, at_utc_ms, requested_status }
+            guard "revision_matches" { self.lifecycle_phase == Phase::Open && self.revision == expected_revision }
+            guard "requested_failed" { requested_status == Some(WorkLifecycleState::Failed) }
+            update {
+                self.revision += 1;
+                self.claim_owner_key = None;
+                self.claimed_at_utc_ms = None;
+                self.lease_expires_at_utc_ms = None;
+                self.terminal_at_utc_ms = Some(at_utc_ms);
+            }
+            to Failed
+            emit Closed { terminal_state: self.lifecycle_phase }
+        }
+
+        transition CloseInProgressRequestedFailed {
+            on input Close { expected_revision, at_utc_ms, requested_status }
+            guard "revision_matches" { self.lifecycle_phase == Phase::InProgress && self.revision == expected_revision }
+            guard "requested_failed" { requested_status == Some(WorkLifecycleState::Failed) }
+            update {
+                self.revision += 1;
+                self.claim_owner_key = None;
+                self.claimed_at_utc_ms = None;
+                self.lease_expires_at_utc_ms = None;
+                self.terminal_at_utc_ms = Some(at_utc_ms);
+            }
+            to Failed
+            emit Closed { terminal_state: self.lifecycle_phase }
+        }
+
+        transition CloseBlockedRequestedFailed {
+            on input Close { expected_revision, at_utc_ms, requested_status }
+            guard "revision_matches" { self.lifecycle_phase == Phase::Blocked && self.revision == expected_revision }
+            guard "requested_failed" { requested_status == Some(WorkLifecycleState::Failed) }
+            update {
+                self.revision += 1;
+                self.claim_owner_key = None;
+                self.claimed_at_utc_ms = None;
+                self.lease_expires_at_utc_ms = None;
+                self.terminal_at_utc_ms = Some(at_utc_ms);
+            }
+            to Failed
+            emit Closed { terminal_state: self.lifecycle_phase }
         }
 
         transition CloseOpenCompleted {

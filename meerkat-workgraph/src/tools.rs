@@ -93,7 +93,7 @@ impl WorkGraphToolContract {
             Self::Release => "Release a claimed WorkGraph item.",
             Self::Update => "Update non-terminal WorkGraph item fields.",
             Self::Block => "Mark a WorkGraph item blocked.",
-            Self::Close => "Close a WorkGraph item with a terminal status.",
+            Self::Close => "Close a WorkGraph item.",
             Self::Link => "Create a dependency or relationship edge.",
             Self::AddEvidence => "Attach a typed evidence reference to a WorkGraph item.",
         }
@@ -412,10 +412,7 @@ fn create_schema() -> Value {
             "snoozed_until".to_string(),
             json!({ "type": "string", "format": "date-time" }),
         ),
-        (
-            "status".to_string(),
-            json!({ "type": "string", "enum": ["open", "blocked"] }),
-        ),
+        ("status".to_string(), work_status_schema()),
         (
             "external_refs".to_string(),
             json!({ "type": "array", "items": external_ref_schema() }),
@@ -573,12 +570,13 @@ fn close_schema() -> Value {
             "expected_revision".to_string(),
             json!({ "type": "integer", "minimum": 0 }),
         ),
-        (
-            "status".to_string(),
-            json!({ "type": "string", "enum": ["completed", "cancelled", "failed"] }),
-        ),
+        ("status".to_string(), work_status_schema()),
     ]);
     object(properties, &["id", "expected_revision"])
+}
+
+fn work_status_schema() -> Value {
+    json!({ "type": "string", "enum": ["open", "in_progress", "blocked", "completed", "cancelled", "failed"] })
 }
 
 fn link_schema() -> Value {

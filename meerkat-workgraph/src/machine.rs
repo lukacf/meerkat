@@ -39,35 +39,12 @@ impl WorkGraphMachine {
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
         let title = validate_title(request.title)?;
-        let status = request.status.unwrap_or_default();
-        if matches!(
-            status,
-            WorkStatus::InProgress
-                | WorkStatus::Completed
-                | WorkStatus::Cancelled
-                | WorkStatus::Failed
-        ) {
-            return Err(WorkGraphError::InvalidTransition(
-                "new work items may only start open or blocked".to_string(),
-            ));
-        }
-        let input = match status {
-            WorkStatus::Open => wg_dsl::WorkGraphLifecycleInput::CreateOpen {
-                due_at_utc_ms: request.due_at.map(datetime_to_millis),
-                not_before_utc_ms: request.not_before.map(datetime_to_millis),
-                snoozed_until_utc_ms: request.snoozed_until.map(datetime_to_millis),
-                unresolved_blocker_count: 0,
-            },
-            WorkStatus::Blocked => wg_dsl::WorkGraphLifecycleInput::CreateBlocked {
-                due_at_utc_ms: request.due_at.map(datetime_to_millis),
-                not_before_utc_ms: request.not_before.map(datetime_to_millis),
-                snoozed_until_utc_ms: request.snoozed_until.map(datetime_to_millis),
-                unresolved_blocker_count: 0,
-            },
-            WorkStatus::InProgress
-            | WorkStatus::Completed
-            | WorkStatus::Cancelled
-            | WorkStatus::Failed => unreachable!("invalid create status rejected above"),
+        let input = wg_dsl::WorkGraphLifecycleInput::Create {
+            due_at_utc_ms: request.due_at.map(datetime_to_millis),
+            not_before_utc_ms: request.not_before.map(datetime_to_millis),
+            snoozed_until_utc_ms: request.snoozed_until.map(datetime_to_millis),
+            unresolved_blocker_count: 0,
+            requested_status: request.status.map(dsl_work_lifecycle_state),
         };
         let applied = apply_new_item_dsl(input)?;
         let dsl_state = applied.state.clone();
@@ -271,24 +248,10 @@ impl WorkGraphMachine {
         request: CloseWorkItemRequest,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
-        let dsl_input = match request.status {
-            WorkStatus::Completed => wg_dsl::WorkGraphLifecycleInput::CloseCompleted {
-                expected_revision: request.expected_revision,
-                at_utc_ms: datetime_to_millis(now),
-            },
-            WorkStatus::Cancelled => wg_dsl::WorkGraphLifecycleInput::CloseCancelled {
-                expected_revision: request.expected_revision,
-                at_utc_ms: datetime_to_millis(now),
-            },
-            WorkStatus::Failed => wg_dsl::WorkGraphLifecycleInput::CloseFailed {
-                expected_revision: request.expected_revision,
-                at_utc_ms: datetime_to_millis(now),
-            },
-            WorkStatus::Open | WorkStatus::InProgress | WorkStatus::Blocked => {
-                return Err(WorkGraphError::InvalidTransition(
-                    "close requires a terminal status".to_string(),
-                ));
-            }
+        let dsl_input = wg_dsl::WorkGraphLifecycleInput::Close {
+            expected_revision: request.expected_revision,
+            at_utc_ms: datetime_to_millis(now),
+            requested_status: request.status.map(dsl_work_lifecycle_state),
         };
         let applied = apply_item_dsl(&item, dsl_input, Some(request.expected_revision))?;
         item.claim = None;
@@ -476,6 +439,17 @@ fn work_status_from_dsl(status: wg_dsl::WorkLifecycleState) -> Result<WorkStatus
         wg_dsl::WorkLifecycleState::Absent => Err(WorkGraphError::InvalidTransition(
             "work item lifecycle state is absent".to_string(),
         )),
+    }
+}
+
+fn dsl_work_lifecycle_state(status: WorkStatus) -> wg_dsl::WorkLifecycleState {
+    match status {
+        WorkStatus::Open => wg_dsl::WorkLifecycleState::Open,
+        WorkStatus::InProgress => wg_dsl::WorkLifecycleState::InProgress,
+        WorkStatus::Blocked => wg_dsl::WorkLifecycleState::Blocked,
+        WorkStatus::Completed => wg_dsl::WorkLifecycleState::Completed,
+        WorkStatus::Cancelled => wg_dsl::WorkLifecycleState::Cancelled,
+        WorkStatus::Failed => wg_dsl::WorkLifecycleState::Failed,
     }
 }
 
@@ -798,22 +772,26 @@ mod tests {
         ClaimWorkItemRequest, CloseWorkItemRequest, UpdateWorkItemRequest, WorkOwner, WorkOwnerKey,
     };
 
+    fn create_request(title: &str) -> CreateWorkItemRequest {
+        CreateWorkItemRequest {
+            realm_id: None,
+            namespace: None,
+            title: title.to_string(),
+            description: None,
+            priority: Default::default(),
+            labels: BTreeSet::new(),
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+            evidence_refs: Vec::new(),
+            status: None,
+        }
+    }
+
     fn create(title: &str, now: DateTime<Utc>) -> WorkItem {
         WorkGraphMachine::create_item(
-            CreateWorkItemRequest {
-                realm_id: None,
-                namespace: None,
-                title: title.to_string(),
-                description: None,
-                priority: Default::default(),
-                labels: BTreeSet::new(),
-                due_at: None,
-                not_before: None,
-                snoozed_until: None,
-                external_refs: Vec::new(),
-                evidence_refs: Vec::new(),
-                status: None,
-            },
+            create_request(title),
             "realm".to_string(),
             WorkNamespace::default(),
             now,
@@ -824,6 +802,95 @@ mod tests {
 
     fn owner(id: &str) -> WorkOwner {
         WorkOwner::new(WorkOwnerKey::label(id).expect("owner key"))
+    }
+
+    #[test]
+    fn create_default_open_comes_from_generated_machine() {
+        let now = Utc::now();
+        let (item, event) = WorkGraphMachine::create_item(
+            create_request("default open"),
+            "realm".to_string(),
+            WorkNamespace::default(),
+            now,
+        )
+        .expect("create");
+
+        assert_eq!(item.status, WorkStatus::Open);
+        assert_eq!(
+            item.machine_state.lifecycle_phase,
+            wg_dsl::WorkLifecycleState::Open
+        );
+        assert_eq!(event.kind, WorkGraphEventKind::Created);
+        assert_eq!(
+            event.payload["machine_effects"],
+            serde_json::json!(["Created"])
+        );
+    }
+
+    #[test]
+    fn create_rejects_non_starting_status_through_machine() {
+        let now = Utc::now();
+        let mut request = create_request("invalid create status");
+        request.status = Some(WorkStatus::Completed);
+
+        let error = WorkGraphMachine::create_item(
+            request,
+            "realm".to_string(),
+            WorkNamespace::default(),
+            now,
+        )
+        .expect_err("terminal create status should fail");
+
+        assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+    }
+
+    #[test]
+    fn close_default_completed_comes_from_generated_machine() {
+        let now = Utc::now();
+        let item = create("default close", now);
+        let (item, event) = WorkGraphMachine::close_item(
+            item,
+            CloseWorkItemRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                status: None,
+            },
+            now,
+        )
+        .expect("close");
+
+        assert_eq!(item.status, WorkStatus::Completed);
+        assert_eq!(
+            item.machine_state.lifecycle_phase,
+            wg_dsl::WorkLifecycleState::Completed
+        );
+        assert_eq!(event.kind, WorkGraphEventKind::Closed);
+        assert_eq!(
+            event.payload["machine_effects"],
+            serde_json::json!(["Closed"])
+        );
+    }
+
+    #[test]
+    fn close_rejects_non_terminal_status_through_machine() {
+        let now = Utc::now();
+        let item = create("invalid close status", now);
+        let error = WorkGraphMachine::close_item(
+            item,
+            CloseWorkItemRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                status: Some(WorkStatus::Open),
+            },
+            now,
+        )
+        .expect_err("non-terminal close status should fail");
+
+        assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
     }
 
     #[test]
@@ -872,7 +939,7 @@ mod tests {
                 realm_id: None,
                 namespace: None,
                 expected_revision: 1,
-                status: WorkStatus::Completed,
+                status: Some(WorkStatus::Completed),
             },
             now,
         )
@@ -998,7 +1065,7 @@ mod tests {
                 realm_id: None,
                 namespace: None,
                 expected_revision: 1,
-                status: WorkStatus::Completed,
+                status: Some(WorkStatus::Completed),
             },
             now,
         )
@@ -1031,6 +1098,49 @@ mod tests {
         assert!(
             !include_str!("service.rs").contains("is_terminal_success"),
             "dependency admission must use WorkGraphLifecycleMachine blocker-satisfaction feedback"
+        );
+    }
+
+    #[test]
+    fn public_status_defaults_are_generated_only() {
+        let source = include_str!("machine.rs");
+        let create_start = source
+            .find("pub fn create_item")
+            .expect("create_item exists");
+        let create_end = source[create_start..]
+            .find("pub fn update_item")
+            .expect("update_item follows create_item");
+        let create_body = &source[create_start..create_start + create_end];
+        let close_start = source.find("pub fn close_item").expect("close_item exists");
+        let close_end = source[close_start..]
+            .find("pub fn add_evidence")
+            .expect("add_evidence follows close_item");
+        let close_body = &source[close_start..close_start + close_end];
+
+        assert!(
+            create_body.contains("WorkGraphLifecycleInput::Create"),
+            "create defaults must be decided by the generated WorkGraphLifecycle Create input"
+        );
+        assert!(
+            !create_body.contains("unwrap_or_default")
+                && !create_body.contains("CreateOpen")
+                && !create_body.contains("CreateBlocked"),
+            "create must not preselect lifecycle defaults before generated authority"
+        );
+        assert!(
+            close_body.contains("WorkGraphLifecycleInput::Close"),
+            "close defaults must be decided by the generated WorkGraphLifecycle Close input"
+        );
+        assert!(
+            !close_body.contains("CloseCompleted")
+                && !close_body.contains("CloseCancelled")
+                && !close_body.contains("CloseFailed")
+                && !close_body.contains("close requires a terminal status"),
+            "close must not preselect terminality before generated authority"
+        );
+        assert!(
+            !include_str!("types.rs").contains("default_terminal_status"),
+            "public close status omission must not default outside generated authority"
         );
     }
 }

@@ -23,6 +23,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `evidence_count`: `u64`
 
 ## Inputs
+- `Create`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64, requested_status: Option<WorkLifecycleState>)
 - `CreateOpen`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
 - `CreateBlocked`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
 - `Update`(expected_revision: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
@@ -32,6 +33,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RefreshEligibility`(unresolved_blocker_count: u64)
 - `ClassifyBlockerSatisfaction`
 - `ValidateLink`(kind: WorkEdgeKind, from_item_key: WorkItemKey, to_item_key: WorkItemKey, edge_key: WorkEdgeKey, reverse_path_key: WorkDependencyPathKey)
+- `Close`(expected_revision: u64, at_utc_ms: u64, requested_status: Option<WorkLifecycleState>)
 - `CloseCompleted`(expected_revision: u64, at_utc_ms: u64)
 - `CloseCancelled`(expected_revision: u64, at_utc_ms: u64)
 - `CloseFailed`(expected_revision: u64, at_utc_ms: u64)
@@ -61,6 +63,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `terminal_has_no_claim`
 
 ## Transitions
+### `CreateDefaultOrOpen`
+- From: `Absent`
+- On: `Create`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status)
+- Guards:
+  - `default_or_open`
+- Emits: `Created`
+- To: `Open`
+
+### `CreateRequestedBlocked`
+- From: `Absent`
+- On: `Create`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status)
+- Guards:
+  - `requested_blocked`
+- Emits: `Created`
+- To: `Blocked`
+
 ### `CreateOpen`
 - From: `Absent`
 - On: `CreateOpen`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
@@ -229,6 +247,87 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LinkValidated`
 - To: `Absent`
 
+### `CloseOpenDefaultOrCompleted`
+- From: `Open`
+- On: `Close`(expected_revision, at_utc_ms, requested_status)
+- Guards:
+  - `revision_matches`
+  - `default_or_completed`
+- Emits: `Closed`
+- To: `Completed`
+
+### `CloseInProgressDefaultOrCompleted`
+- From: `InProgress`
+- On: `Close`(expected_revision, at_utc_ms, requested_status)
+- Guards:
+  - `revision_matches`
+  - `default_or_completed`
+- Emits: `Closed`
+- To: `Completed`
+
+### `CloseBlockedDefaultOrCompleted`
+- From: `Blocked`
+- On: `Close`(expected_revision, at_utc_ms, requested_status)
+- Guards:
+  - `revision_matches`
+  - `default_or_completed`
+- Emits: `Closed`
+- To: `Completed`
+
+### `CloseOpenRequestedCancelled`
+- From: `Open`
+- On: `Close`(expected_revision, at_utc_ms, requested_status)
+- Guards:
+  - `revision_matches`
+  - `requested_cancelled`
+- Emits: `Closed`
+- To: `Cancelled`
+
+### `CloseInProgressRequestedCancelled`
+- From: `InProgress`
+- On: `Close`(expected_revision, at_utc_ms, requested_status)
+- Guards:
+  - `revision_matches`
+  - `requested_cancelled`
+- Emits: `Closed`
+- To: `Cancelled`
+
+### `CloseBlockedRequestedCancelled`
+- From: `Blocked`
+- On: `Close`(expected_revision, at_utc_ms, requested_status)
+- Guards:
+  - `revision_matches`
+  - `requested_cancelled`
+- Emits: `Closed`
+- To: `Cancelled`
+
+### `CloseOpenRequestedFailed`
+- From: `Open`
+- On: `Close`(expected_revision, at_utc_ms, requested_status)
+- Guards:
+  - `revision_matches`
+  - `requested_failed`
+- Emits: `Closed`
+- To: `Failed`
+
+### `CloseInProgressRequestedFailed`
+- From: `InProgress`
+- On: `Close`(expected_revision, at_utc_ms, requested_status)
+- Guards:
+  - `revision_matches`
+  - `requested_failed`
+- Emits: `Closed`
+- To: `Failed`
+
+### `CloseBlockedRequestedFailed`
+- From: `Blocked`
+- On: `Close`(expected_revision, at_utc_ms, requested_status)
+- Guards:
+  - `revision_matches`
+  - `requested_failed`
+- Emits: `Closed`
+- To: `Failed`
+
 ### `CloseOpenCompleted`
 - From: `Open`
 - On: `CloseCompleted`(expected_revision, at_utc_ms)
@@ -351,10 +450,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-workgraph/src/machine.rs` — WorkGraphMachine domain-facing lifecycle transition seam over CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ValidateLink, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LinkValidated, Closed, EvidenceAdded; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, and topology legality
+- `meerkat-workgraph/src/machine.rs` — WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LinkValidated, Closed, EvidenceAdded; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, and topology legality
 
 ### Scenarios
-- `workgraph_create_update_ready_claim` — CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, blocker satisfaction, and CAS revision
+- `workgraph_create_update_ready_claim` — CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, blocker satisfaction, public create status defaulting, and CAS revision
 - `workgraph_claim_release_recovery` — only one active claim exists, ReleaseInProgress, Released, expired leases become recoverable through machine-approved claim, claim_only_in_progress, blocked_has_no_claim, and terminal_has_no_claim
-- `workgraph_block_close_evidence` — BlockOpen, BlockInProgress, BlockBlocked, Blocked, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, Closed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, EvidenceAdded, absent_has_zero_revision, live_has_positive_revision, and terminal_has_terminal_time
+- `workgraph_block_close_evidence` — BlockOpen, BlockInProgress, BlockBlocked, Blocked, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, Closed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, EvidenceAdded, public close status defaulting, absent_has_zero_revision, live_has_positive_revision, and terminal_has_terminal_time
 - `workgraph_topology_legality` — ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, BlockerSatisfied, BlockerUnsatisfied, ValidateLink, and LinkValidated reject missing endpoints, self edges, duplicate edges, dependency cycles, and unsatisfied blockers without adding a separate topology machine

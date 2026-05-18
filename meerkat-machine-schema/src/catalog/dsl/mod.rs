@@ -548,7 +548,12 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "PeerIngressReceiveOutcomeClass",
-                &["Admitted", "DroppedUntrustedSender"],
+                &[
+                    "Admitted",
+                    "DroppedUntrustedSender",
+                    "DroppedSessionClosed",
+                    "DroppedInboxFull",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "PeerIngressAdmissionDiagnosticClass",

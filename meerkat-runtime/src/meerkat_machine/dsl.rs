@@ -914,6 +914,8 @@ pub enum PeerIngressReceiveOutcomeClass {
     #[default]
     Admitted,
     DroppedUntrustedSender,
+    DroppedSessionClosed,
+    DroppedInboxFull,
 }
 
 impl From<PeerIngressReceiveOutcomeClass> for meerkat_core::PeerIngressReceiveOutcome {
@@ -921,6 +923,8 @@ impl From<PeerIngressReceiveOutcomeClass> for meerkat_core::PeerIngressReceiveOu
         match outcome {
             PeerIngressReceiveOutcomeClass::Admitted => Self::Admitted,
             PeerIngressReceiveOutcomeClass::DroppedUntrustedSender => Self::DroppedUntrustedSender,
+            PeerIngressReceiveOutcomeClass::DroppedSessionClosed => Self::DroppedSessionClosed,
+            PeerIngressReceiveOutcomeClass::DroppedInboxFull => Self::DroppedInboxFull,
         }
     }
 }

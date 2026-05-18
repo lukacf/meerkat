@@ -193,7 +193,7 @@ fn runtime_input_for_interaction(
             ..
         } => {
             let classification =
-                meerkat_core::PeerIngressMachinePolicy::default().classify_response(*status);
+                meerkat_core::PeerIngressGeneratedAuthority::default().classify_response(*status);
             (
                 classification.class,
                 PeerIngressConvention::Response {

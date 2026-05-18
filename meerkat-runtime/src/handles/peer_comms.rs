@@ -244,7 +244,7 @@ fn classified_effect(
 
 struct PeerIngressReceiveResolvedEffect {
     outcome: mm_dsl::PeerIngressReceiveOutcomeClass,
-    admission_diagnostic: mm_dsl::PeerIngressAdmissionDiagnosticClass,
+    admission_diagnostic: Option<mm_dsl::PeerIngressAdmissionDiagnosticClass>,
     phase: mm_dsl::PeerIngressAuthorityPhaseClass,
 }
 
@@ -395,17 +395,20 @@ impl PeerCommsHandle for RuntimePeerCommsHandle {
         let context = "PeerCommsHandle::resolve_peer_ingress_receive";
         let effects = self.dsl.apply_input_with_effects(
             mm_dsl::MeerkatMachineInput::ResolvePeerIngressReceive {
+                kind: kind_to_dsl(facts.kind),
                 auth_required: facts.auth_required,
                 auth_exempt: facts.auth_exempt,
                 trusted: facts.trusted,
                 queued_work_present: facts.queued_work_present,
+                queue_closed: facts.queue_closed,
+                queue_capacity_available: facts.queue_capacity_available,
             },
             context,
         )?;
         let effect = receive_resolved_effect(effects, context)?;
         Ok(PeerIngressReceiveAuthority {
             outcome: effect.outcome.into(),
-            admission_diagnostic: effect.admission_diagnostic.into(),
+            admission_diagnostic: effect.admission_diagnostic.map(Into::into),
             authority_phase: phase_from_dsl(effect.phase),
         })
     }
@@ -666,10 +669,14 @@ mod tests {
 
         let admitted = handle
             .resolve_peer_ingress_receive(PeerIngressReceiveFacts {
+                kind: meerkat_core::PeerIngressKind::Request,
+                current_phase: meerkat_core::PeerIngressAuthorityPhase::Absent,
                 auth_required: true,
                 auth_exempt: false,
                 trusted: true,
                 queued_work_present: false,
+                queue_closed: false,
+                queue_capacity_available: true,
             })
             .expect("trusted receive should resolve");
         assert_eq!(
@@ -678,7 +685,7 @@ mod tests {
         );
         assert_eq!(
             admitted.admission_diagnostic,
-            meerkat_core::PeerIngressAdmissionDiagnostic::TrustedAtAdmission
+            Some(meerkat_core::PeerIngressAdmissionDiagnostic::TrustedAtAdmission)
         );
         assert_eq!(
             admitted.authority_phase,
@@ -687,10 +694,14 @@ mod tests {
 
         let dropped = handle
             .resolve_peer_ingress_receive(PeerIngressReceiveFacts {
+                kind: meerkat_core::PeerIngressKind::Request,
+                current_phase: meerkat_core::PeerIngressAuthorityPhase::Absent,
                 auth_required: true,
                 auth_exempt: false,
                 trusted: false,
                 queued_work_present: false,
+                queue_closed: false,
+                queue_capacity_available: true,
             })
             .expect("untrusted receive should resolve as a typed drop");
         assert_eq!(
@@ -709,10 +720,14 @@ mod tests {
 
         handle
             .resolve_peer_ingress_receive(PeerIngressReceiveFacts {
+                kind: meerkat_core::PeerIngressKind::Request,
+                current_phase: meerkat_core::PeerIngressAuthorityPhase::Absent,
                 auth_required: true,
                 auth_exempt: false,
                 trusted: true,
                 queued_work_present: false,
+                queue_closed: false,
+                queue_capacity_available: true,
             })
             .expect("trusted receive should seed Received phase");
 

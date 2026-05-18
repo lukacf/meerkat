@@ -156,7 +156,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId)
 - `SetPeerIngressContext`(keep_alive: Bool)
-- `ResolvePeerIngressReceive`(auth_required: Bool, auth_exempt: Bool, trusted: Bool, queued_work_present: Bool)
+- `ResolvePeerIngressReceive`(kind: PeerIngressAdmittedKind, auth_required: Bool, auth_exempt: Bool, trusted: Bool, queued_work_present: Bool, queue_closed: Bool, queue_capacity_available: Bool)
 - `ResolvePeerIngressDequeue`(kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, queued_work_remaining: Bool)
 - `NotifyDrainExited`(reason: DrainExitReason)
 - `InterruptCurrentRun`
@@ -422,7 +422,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CollectCompletedResult`
 - `EnqueueClassifiedEntry`
 - `PeerIngressClassified`(class: PeerIngressInputClass, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
-- `PeerIngressReceiveResolved`(outcome: PeerIngressReceiveOutcomeClass, admission_diagnostic: PeerIngressAdmissionDiagnosticClass, phase: PeerIngressAuthorityPhaseClass)
+- `PeerIngressReceiveResolved`(outcome: PeerIngressReceiveOutcomeClass, admission_diagnostic: Option<PeerIngressAdmissionDiagnosticClass>, phase: PeerIngressAuthorityPhaseClass)
 - `PeerIngressDequeueResolved`(phase: PeerIngressAuthorityPhaseClass)
 - `SpawnDrainTask`
 - `ScheduleSurfaceCompletion`(surface_id: String, operation: ExternalToolSurfaceDeltaOperation, pending_task_sequence: u64, staged_intent_sequence: u64, applied_at_turn: u64)
@@ -1221,56 +1221,224 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - To: `Stopped`
 
-### `ResolvePeerIngressReceiveTrustedIdle`
+### `ResolvePeerIngressReceiveClosedIdle`
 - From: `Idle`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_closed`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Idle`
+
+### `ResolvePeerIngressReceiveClosedAttached`
+- From: `Attached`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_closed`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Attached`
+
+### `ResolvePeerIngressReceiveClosedRunning`
+- From: `Running`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_closed`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Running`
+
+### `ResolvePeerIngressReceiveClosedRetired`
+- From: `Retired`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_closed`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Retired`
+
+### `ResolvePeerIngressReceiveClosedStopped`
+- From: `Stopped`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_closed`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Stopped`
+
+### `ResolvePeerIngressReceiveFullIdle`
+- From: `Idle`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_open`
+  - `queue_full`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Idle`
+
+### `ResolvePeerIngressReceiveFullAttached`
+- From: `Attached`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_open`
+  - `queue_full`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Attached`
+
+### `ResolvePeerIngressReceiveFullRunning`
+- From: `Running`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_open`
+  - `queue_full`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Running`
+
+### `ResolvePeerIngressReceiveFullRetired`
+- From: `Retired`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_open`
+  - `queue_full`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Retired`
+
+### `ResolvePeerIngressReceiveFullStopped`
+- From: `Stopped`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_open`
+  - `queue_full`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Stopped`
+
+### `ResolvePeerIngressReceivePlainEventIdle`
+- From: `Idle`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `plain_event`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Idle`
+
+### `ResolvePeerIngressReceivePlainEventAttached`
+- From: `Attached`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `plain_event`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Attached`
+
+### `ResolvePeerIngressReceivePlainEventRunning`
+- From: `Running`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `plain_event`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Running`
+
+### `ResolvePeerIngressReceivePlainEventRetired`
+- From: `Retired`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `plain_event`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Retired`
+
+### `ResolvePeerIngressReceivePlainEventStopped`
+- From: `Stopped`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `plain_event`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Stopped`
+
+### `ResolvePeerIngressReceiveTrustedIdle`
+- From: `Idle`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `trusted_sender`
 - Emits: `PeerIngressReceiveResolved`
 - To: `Idle`
 
 ### `ResolvePeerIngressReceiveTrustedAttached`
 - From: `Attached`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `trusted_sender`
 - Emits: `PeerIngressReceiveResolved`
 - To: `Attached`
 
 ### `ResolvePeerIngressReceiveTrustedRunning`
 - From: `Running`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `trusted_sender`
 - Emits: `PeerIngressReceiveResolved`
 - To: `Running`
 
 ### `ResolvePeerIngressReceiveTrustedRetired`
 - From: `Retired`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `trusted_sender`
 - Emits: `PeerIngressReceiveResolved`
 - To: `Retired`
 
 ### `ResolvePeerIngressReceiveTrustedStopped`
 - From: `Stopped`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `trusted_sender`
 - Emits: `PeerIngressReceiveResolved`
 - To: `Stopped`
 
 ### `ResolvePeerIngressReceiveAuthExemptUntrustedIdle`
 - From: `Idle`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_exempt`
 - Emits: `PeerIngressReceiveResolved`
@@ -1278,9 +1446,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveAuthExemptUntrustedAttached`
 - From: `Attached`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_exempt`
 - Emits: `PeerIngressReceiveResolved`
@@ -1288,9 +1459,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveAuthExemptUntrustedRunning`
 - From: `Running`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_exempt`
 - Emits: `PeerIngressReceiveResolved`
@@ -1298,9 +1472,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveAuthExemptUntrustedRetired`
 - From: `Retired`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_exempt`
 - Emits: `PeerIngressReceiveResolved`
@@ -1308,9 +1485,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveAuthExemptUntrustedStopped`
 - From: `Stopped`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_exempt`
 - Emits: `PeerIngressReceiveResolved`
@@ -1318,9 +1498,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveAuthOpenUntrustedIdle`
 - From: `Idle`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required_disabled`
   - `auth_not_exempt`
@@ -1329,9 +1512,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveAuthOpenUntrustedAttached`
 - From: `Attached`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required_disabled`
   - `auth_not_exempt`
@@ -1340,9 +1526,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveAuthOpenUntrustedRunning`
 - From: `Running`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required_disabled`
   - `auth_not_exempt`
@@ -1351,9 +1540,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveAuthOpenUntrustedRetired`
 - From: `Retired`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required_disabled`
   - `auth_not_exempt`
@@ -1362,9 +1554,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveAuthOpenUntrustedStopped`
 - From: `Stopped`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required_disabled`
   - `auth_not_exempt`
@@ -1373,9 +1568,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveUntrustedQueuedDropIdle`
 - From: `Idle`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required`
   - `auth_not_exempt`
@@ -1385,9 +1583,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveUntrustedQueuedDropAttached`
 - From: `Attached`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required`
   - `auth_not_exempt`
@@ -1397,9 +1598,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveUntrustedQueuedDropRunning`
 - From: `Running`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required`
   - `auth_not_exempt`
@@ -1409,9 +1613,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveUntrustedQueuedDropRetired`
 - From: `Retired`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required`
   - `auth_not_exempt`
@@ -1421,9 +1628,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveUntrustedQueuedDropStopped`
 - From: `Stopped`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required`
   - `auth_not_exempt`
@@ -1433,9 +1643,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveUntrustedEmptyDropIdle`
 - From: `Idle`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required`
   - `auth_not_exempt`
@@ -1445,9 +1658,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveUntrustedEmptyDropAttached`
 - From: `Attached`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required`
   - `auth_not_exempt`
@@ -1457,9 +1673,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveUntrustedEmptyDropRunning`
 - From: `Running`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required`
   - `auth_not_exempt`
@@ -1469,9 +1688,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveUntrustedEmptyDropRetired`
 - From: `Retired`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required`
   - `auth_not_exempt`
@@ -1481,9 +1703,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolvePeerIngressReceiveUntrustedEmptyDropStopped`
 - From: `Stopped`
-- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
 - Guards:
   - `session_registered`
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
   - `untrusted_sender`
   - `auth_required`
   - `auth_not_exempt`

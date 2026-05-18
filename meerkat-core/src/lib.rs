@@ -36,6 +36,7 @@ pub mod event_injector;
 pub mod event_tap;
 pub mod gateway;
 pub mod generated;
+pub use generated::peer_ingress_authority::PeerIngressGeneratedAuthority;
 pub mod handles;
 pub mod hooks;
 pub mod image_content;
@@ -199,13 +200,12 @@ pub use interaction::{
     PeerIngressConvention, PeerIngressDequeueAuthority, PeerIngressDequeueFacts,
     PeerIngressDiagnosticDisplay, PeerIngressEntrySnapshot, PeerIngressEnvelopeFacts,
     PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressIdentity, PeerIngressKind,
-    PeerIngressMachinePolicy, PeerIngressPlainEventFacts, PeerIngressQueueSnapshot,
-    PeerIngressReceiveAuthority, PeerIngressReceiveFacts, PeerIngressReceiveOutcome,
-    PeerIngressRuntimeSnapshot, PeerInputClass, ResponseStatus, SendResponseCallProjection,
-    TerminalDisposition, TerminalityClass, classify_response_terminality,
-    format_external_event_projection, format_peer_ack_projection, format_peer_message_projection,
-    format_peer_request_projection, format_peer_response_projection, peer_lifecycle_subject,
-    render_peer_ingress_admitted_text,
+    PeerIngressPlainEventFacts, PeerIngressQueueSnapshot, PeerIngressReceiveAuthority,
+    PeerIngressReceiveFacts, PeerIngressReceiveOutcome, PeerIngressRuntimeSnapshot, PeerInputClass,
+    ResponseStatus, SendResponseCallProjection, TerminalDisposition, TerminalityClass,
+    classify_response_terminality, format_external_event_projection, format_peer_ack_projection,
+    format_peer_message_projection, format_peer_request_projection,
+    format_peer_response_projection, peer_lifecycle_subject, render_peer_ingress_admitted_text,
 };
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreApplyFailureCause,

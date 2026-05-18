@@ -3400,12 +3400,18 @@ pub enum PeerIngressReceiveOutcomeClass {
     Admitted,
     #[serde(rename = "DroppedUntrustedSender")]
     DroppedUntrustedSender,
+    #[serde(rename = "DroppedSessionClosed")]
+    DroppedSessionClosed,
+    #[serde(rename = "DroppedInboxFull")]
+    DroppedInboxFull,
 }
 impl PeerIngressReceiveOutcomeClass {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Admitted => "Admitted",
             Self::DroppedUntrustedSender => "DroppedUntrustedSender",
+            Self::DroppedSessionClosed => "DroppedSessionClosed",
+            Self::DroppedInboxFull => "DroppedInboxFull",
         }
     }
 }
@@ -3415,6 +3421,8 @@ impl std::convert::TryFrom<&str> for PeerIngressReceiveOutcomeClass {
         match value {
             "Admitted" => Ok(Self::Admitted),
             "DroppedUntrustedSender" => Ok(Self::DroppedUntrustedSender),
+            "DroppedSessionClosed" => Ok(Self::DroppedSessionClosed),
+            "DroppedInboxFull" => Ok(Self::DroppedInboxFull),
             other => Err(format!(
                 "invalid PeerIngressReceiveOutcomeClass value `{other}`"
             )),
@@ -6201,10 +6209,13 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolvePeerIngressReceive {
+        pub kind: PeerIngressAdmittedKind,
         pub auth_required: bool,
         pub auth_exempt: bool,
         pub trusted: bool,
         pub queued_work_present: bool,
+        pub queue_closed: bool,
+        pub queue_capacity_available: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolvePeerIngressDequeue {
@@ -8002,7 +8013,7 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerIngressReceiveResolved {
         pub outcome: PeerIngressReceiveOutcomeClass,
-        pub admission_diagnostic: PeerIngressAdmissionDiagnosticClass,
+        pub admission_diagnostic: Option<PeerIngressAdmissionDiagnosticClass>,
         pub phase: PeerIngressAuthorityPhaseClass,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -8376,6 +8387,21 @@ pub enum TransitionId {
     SetPeerIngressContextRunning,
     SetPeerIngressContextRetired,
     SetPeerIngressContextStopped,
+    ResolvePeerIngressReceiveClosedIdle,
+    ResolvePeerIngressReceiveClosedAttached,
+    ResolvePeerIngressReceiveClosedRunning,
+    ResolvePeerIngressReceiveClosedRetired,
+    ResolvePeerIngressReceiveClosedStopped,
+    ResolvePeerIngressReceiveFullIdle,
+    ResolvePeerIngressReceiveFullAttached,
+    ResolvePeerIngressReceiveFullRunning,
+    ResolvePeerIngressReceiveFullRetired,
+    ResolvePeerIngressReceiveFullStopped,
+    ResolvePeerIngressReceivePlainEventIdle,
+    ResolvePeerIngressReceivePlainEventAttached,
+    ResolvePeerIngressReceivePlainEventRunning,
+    ResolvePeerIngressReceivePlainEventRetired,
+    ResolvePeerIngressReceivePlainEventStopped,
     ResolvePeerIngressReceiveTrustedIdle,
     ResolvePeerIngressReceiveTrustedAttached,
     ResolvePeerIngressReceiveTrustedRunning,

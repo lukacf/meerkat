@@ -443,6 +443,8 @@ pub enum PeerIngressReceiveOutcomeClass {
     #[default]
     Admitted,
     DroppedUntrustedSender,
+    DroppedSessionClosed,
+    DroppedInboxFull,
 }
 
 /// DSL-owned admission diagnostic copy emitted with receive authority.
@@ -2016,10 +2018,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             PrepareBindings { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
             SetPeerIngressContext { keep_alive: bool },
             ResolvePeerIngressReceive {
+                kind: Enum<PeerIngressAdmittedKind>,
                 auth_required: bool,
                 auth_exempt: bool,
                 trusted: bool,
                 queued_work_present: bool,
+                queue_closed: bool,
+                queue_capacity_available: bool,
             },
             ResolvePeerIngressDequeue {
                 kind: Enum<PeerIngressAdmittedKind>,
@@ -2683,7 +2688,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             },
             PeerIngressReceiveResolved {
                 outcome: Enum<PeerIngressReceiveOutcomeClass>,
-                admission_diagnostic: Enum<PeerIngressAdmissionDiagnosticClass>,
+                admission_diagnostic: Option<Enum<PeerIngressAdmissionDiagnosticClass>>,
                 phase: Enum<PeerIngressAuthorityPhaseClass>,
             },
             PeerIngressDequeueResolved {
@@ -3613,10 +3618,67 @@ macro_rules! meerkat_catalog_machine_dsl {
         // queue occupancy. MeerkatMachine owns the derived public admission
         // result and peer-ingress authority phase. The queue may project the
         // emitted phase for snapshots, but it must not derive these facts.
+        transition ResolvePeerIngressReceiveClosed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard "session_registered" { self.session_id != None }
+            guard "queue_closed" { queue_closed == true }
+            update {}
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::DroppedSessionClosed,
+                admission_diagnostic: None,
+                phase: self.peer_ingress_authority_phase
+            }
+        }
+        transition ResolvePeerIngressReceiveFull {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_full" { queue_capacity_available == false }
+            update {}
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::DroppedInboxFull,
+                admission_diagnostic: None,
+                phase: self.peer_ingress_authority_phase
+            }
+        }
+        transition ResolvePeerIngressReceivePlainEvent {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "plain_event" { kind == PeerIngressAdmittedKind::PlainEvent }
+            update {}
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::Admitted,
+                admission_diagnostic: None,
+                phase: self.peer_ingress_authority_phase
+            }
+        }
         transition ResolvePeerIngressReceiveTrusted {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ResolvePeerIngressReceive { auth_required, auth_exempt, trusted, queued_work_present }
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
             guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
             guard "trusted_sender" { trusted == true }
             update {
                 self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
@@ -3624,14 +3686,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit PeerIngressReceiveResolved {
                 outcome: PeerIngressReceiveOutcomeClass::Admitted,
-                admission_diagnostic: PeerIngressAdmissionDiagnosticClass::TrustedAtAdmission,
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnosticClass::TrustedAtAdmission),
                 phase: PeerIngressAuthorityPhaseClass::Received
             }
         }
         transition ResolvePeerIngressReceiveAuthExemptUntrusted {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ResolvePeerIngressReceive { auth_required, auth_exempt, trusted, queued_work_present }
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
             guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
             guard "untrusted_sender" { trusted == false }
             guard "auth_exempt" { auth_exempt == true }
             update {
@@ -3640,14 +3708,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit PeerIngressReceiveResolved {
                 outcome: PeerIngressReceiveOutcomeClass::Admitted,
-                admission_diagnostic: PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission,
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission),
                 phase: PeerIngressAuthorityPhaseClass::Received
             }
         }
         transition ResolvePeerIngressReceiveAuthOpenUntrusted {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ResolvePeerIngressReceive { auth_required, auth_exempt, trusted, queued_work_present }
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
             guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
             guard "untrusted_sender" { trusted == false }
             guard "auth_required_disabled" { auth_required == false }
             guard "auth_not_exempt" { auth_exempt == false }
@@ -3657,14 +3731,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit PeerIngressReceiveResolved {
                 outcome: PeerIngressReceiveOutcomeClass::Admitted,
-                admission_diagnostic: PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission,
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission),
                 phase: PeerIngressAuthorityPhaseClass::Received
             }
         }
         transition ResolvePeerIngressReceiveUntrustedQueuedDrop {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ResolvePeerIngressReceive { auth_required, auth_exempt, trusted, queued_work_present }
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
             guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
             guard "untrusted_sender" { trusted == false }
             guard "auth_required" { auth_required == true }
             guard "auth_not_exempt" { auth_exempt == false }
@@ -3675,14 +3755,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit PeerIngressReceiveResolved {
                 outcome: PeerIngressReceiveOutcomeClass::DroppedUntrustedSender,
-                admission_diagnostic: PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission,
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission),
                 phase: PeerIngressAuthorityPhaseClass::Received
             }
         }
         transition ResolvePeerIngressReceiveUntrustedEmptyDrop {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ResolvePeerIngressReceive { auth_required, auth_exempt, trusted, queued_work_present }
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
             guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
             guard "untrusted_sender" { trusted == false }
             guard "auth_required" { auth_required == true }
             guard "auth_not_exempt" { auth_exempt == false }
@@ -3693,7 +3779,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit PeerIngressReceiveResolved {
                 outcome: PeerIngressReceiveOutcomeClass::DroppedUntrustedSender,
-                admission_diagnostic: PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission,
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission),
                 phase: PeerIngressAuthorityPhaseClass::Dropped
             }
         }

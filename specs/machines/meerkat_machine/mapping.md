@@ -316,6 +316,51 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SetPeerIngressContextStopped`
   - anchors: `meerkat_machine`
   - scenarios: `retire-reset-destroy`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
+- `ResolvePeerIngressReceiveClosedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveClosedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `realtime_connection_projection`
+- `ResolvePeerIngressReceiveClosedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveClosedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveClosedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveFullIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveFullAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveFullRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveFullRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveFullStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceivePlainEventIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressReceivePlainEventAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressReceivePlainEventRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressReceivePlainEventRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressReceivePlainEventStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveTrustedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`

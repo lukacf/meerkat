@@ -516,29 +516,31 @@ impl DriverEntry {
         reason: crate::input_state::InputAbandonReason,
     ) -> Result<usize, RuntimeDriverError> {
         match self {
-            DriverEntry::Ephemeral(d) => Ok(d.abandon_pending_inputs(reason)),
+            DriverEntry::Ephemeral(d) => d.abandon_pending_inputs(reason),
             DriverEntry::Persistent(d) => d.abandon_pending_inputs(reason).await,
         }
     }
 
-    pub(crate) fn prepare_destroy_lifecycle(&mut self) -> PreparedDestroy {
+    pub(crate) fn prepare_destroy_lifecycle(
+        &mut self,
+    ) -> Result<PreparedDestroy, RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(d) => {
                 let checkpoint = d.rollback_snapshot();
-                let abandoned = d.destroy_cleanup();
-                PreparedDestroy {
+                let abandoned = d.destroy_cleanup()?;
+                Ok(PreparedDestroy {
                     report: DestroyReport {
                         inputs_abandoned: abandoned,
                     },
                     lifecycle: PreparedDestroyLifecycle::Ephemeral(checkpoint),
-                }
+                })
             }
             DriverEntry::Persistent(d) => {
-                let (checkpoint, report) = d.prepare_destroy_lifecycle();
-                PreparedDestroy {
+                let (checkpoint, report) = d.prepare_destroy_lifecycle()?;
+                Ok(PreparedDestroy {
                     report,
                     lifecycle: PreparedDestroyLifecycle::Persistent(checkpoint),
-                }
+                })
             }
         }
     }
@@ -1892,7 +1894,7 @@ pub(crate) async fn machine_stop_runtime(
         DriverEntry::Ephemeral(d) => {
             d.apply_runtime_executor_exited_authority()?;
             d.sync_control_projection_from_dsl_authority();
-            d.finalize_stop_runtime();
+            d.finalize_stop_runtime()?;
             Ok(())
         }
         DriverEntry::Persistent(d) => d.finalize_runtime_executor_exit().await,
@@ -2362,7 +2364,7 @@ pub(crate) fn machine_prepare_destroy(
         | RuntimeState::Destroyed => {}
     }
 
-    Ok(driver.prepare_destroy_lifecycle())
+    driver.prepare_destroy_lifecycle()
 }
 
 pub(crate) async fn machine_commit_prepared_destroy(
@@ -2428,7 +2430,7 @@ pub(crate) async fn machine_reset(
             // Reset is machine-owned; mirror the accepted DSL phase into the
             // concrete projection before cleanup observes the lifecycle state.
             d.set_control_projection(RuntimeState::Idle, None, None);
-            Ok(d.reset_cleanup())
+            d.reset_cleanup()
         }
         DriverEntry::Persistent(d) => d.realize_reset_lifecycle().await,
     }

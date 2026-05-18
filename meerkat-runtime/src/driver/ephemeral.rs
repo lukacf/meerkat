@@ -1706,17 +1706,12 @@ impl EphemeralRuntimeDriver {
                 "ConsumeInput",
             )?;
 
-            let now = Utc::now();
-            if let Some(state) = self.ledger.get_mut(input_id) {
-                state.history.push(InputStateHistoryEntry {
-                    timestamp: now,
-                    from: from_phase,
-                    to: InputLifecycleState::Consumed,
-                    reason: Some("Consume".into()),
-                });
-                state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
-                state.updated_at = now;
-            }
+            self.sync_terminal_projection_from_machine(
+                input_id,
+                from_phase,
+                InputLifecycleState::Consumed,
+                "Consume",
+            )?;
             self.events
                 .push(self.make_envelope(RuntimeEvent::InputLifecycle(
                     InputLifecycleEvent::Consumed {
@@ -1754,25 +1749,17 @@ impl EphemeralRuntimeDriver {
                     "AbandonInput(MaxAttemptsExhausted)",
                 )?;
 
-                let now = Utc::now();
                 tracing::warn!(
                     input_id = %input_id,
                     attempts,
                     "input abandoned after max stage attempts"
                 );
-                let outcome = InputTerminalOutcome::Abandoned {
-                    reason: InputAbandonReason::MaxAttemptsExhausted { attempts },
-                };
-                if let Some(state) = self.ledger.get_mut(input_id) {
-                    state.history.push(InputStateHistoryEntry {
-                        timestamp: now,
-                        from: InputLifecycleState::Staged,
-                        to: InputLifecycleState::Abandoned,
-                        reason: Some(format!("RollbackStaged→Abandon(attempts={attempts})")),
-                    });
-                    state.terminal_outcome = Some(outcome.clone());
-                    state.updated_at = now;
-                }
+                self.sync_terminal_projection_from_machine(
+                    input_id,
+                    InputLifecycleState::Staged,
+                    InputLifecycleState::Abandoned,
+                    "RollbackStaged->Abandon",
+                )?;
                 self.events.push(
                     self.make_envelope(RuntimeEvent::InputLifecycle(
                         InputLifecycleEvent::Abandoned {
@@ -1835,39 +1822,40 @@ impl EphemeralRuntimeDriver {
         }
     }
 
-    pub(crate) fn reset_cleanup(&mut self) -> ResetReport {
-        let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Reset);
+    pub(crate) fn reset_cleanup(&mut self) -> Result<ResetReport, RuntimeDriverError> {
+        let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Reset)?;
         self.queue.drain();
         self.steer_queue.drain();
         self.post_admission_signal = PostAdmissionSignal::None;
         self.silent_comms_intents.clear();
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
-        ResetReport {
+        Ok(ResetReport {
             inputs_abandoned: abandoned,
-        }
+        })
     }
 
-    pub(crate) fn destroy_cleanup(&mut self) -> usize {
-        let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Destroyed);
+    pub(crate) fn destroy_cleanup(&mut self) -> Result<usize, RuntimeDriverError> {
+        let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Destroyed)?;
         self.queue.drain();
         self.steer_queue.drain();
         self.post_admission_signal = PostAdmissionSignal::None;
         self.silent_comms_intents.clear();
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
-        abandoned
+        Ok(abandoned)
     }
 
-    pub(crate) fn stop_runtime_cleanup(&mut self) {
-        self.abandon_all_non_terminal(InputAbandonReason::Stopped);
+    pub(crate) fn stop_runtime_cleanup(&mut self) -> Result<(), RuntimeDriverError> {
+        self.abandon_all_non_terminal(InputAbandonReason::Stopped)?;
         self.silent_comms_intents.clear();
         self.queue.drain();
         self.steer_queue.drain();
+        Ok(())
     }
 
-    pub(crate) fn finalize_stop_runtime(&mut self) {
-        self.stop_runtime_cleanup();
+    pub(crate) fn finalize_stop_runtime(&mut self) -> Result<(), RuntimeDriverError> {
+        self.stop_runtime_cleanup()
     }
 
     pub fn recover_ephemeral(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
@@ -2152,6 +2140,38 @@ impl EphemeralRuntimeDriver {
         }
     }
 
+    fn reject_peer_response_terminal_observation_if_present(
+        &mut self,
+        input: &Input,
+        detail: &str,
+    ) {
+        let Input::Peer(peer) = input else {
+            return;
+        };
+        let Some(crate::input::PeerConvention::ResponseTerminal { request_id, .. }) =
+            &peer.convention
+        else {
+            return;
+        };
+        let Ok(corr_id) = uuid::Uuid::parse_str(request_id) else {
+            return;
+        };
+
+        if let Err(error) = self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::PeerResponseRejected {
+                corr_id: corr_id.into(),
+            },
+            "PeerResponseRejected(invalid peer terminal observation)",
+        ) {
+            tracing::debug!(
+                request_id,
+                detail,
+                error = ?error,
+                "generated peer response rejection did not match pending request"
+            );
+        }
+    }
+
     fn resolve_idempotency(
         &mut self,
         input_id: &InputId,
@@ -2389,6 +2409,9 @@ impl EphemeralRuntimeDriver {
             peer_handling_mode_error.is_none(),
             peer_response_terminal_error.is_none(),
         )? {
+            if let Some(detail) = peer_response_terminal_error.as_deref() {
+                self.reject_peer_response_terminal_observation_if_present(&input, detail);
+            }
             let reason = Self::reject_reason_from_machine_validation(
                 reason,
                 durability_error.as_deref(),
@@ -2551,7 +2574,10 @@ impl EphemeralRuntimeDriver {
         })
     }
 
-    pub fn abandon_all_non_terminal(&mut self, reason: InputAbandonReason) -> usize {
+    pub fn abandon_all_non_terminal(
+        &mut self,
+        reason: InputAbandonReason,
+    ) -> Result<usize, RuntimeDriverError> {
         let non_terminal_ids: Vec<InputId> = self
             .ledger
             .iter()
@@ -2576,33 +2602,21 @@ impl EphemeralRuntimeDriver {
             let from_phase = self
                 .input_phase(id)
                 .unwrap_or(InputLifecycleState::Accepted);
-            if self
-                .dsl_apply(
-                    mm_dsl::MeerkatMachineInput::AbandonInput {
-                        input_id: key.clone(),
-                        reason: dsl_reason,
-                        attempt_count,
-                    },
-                    "AbandonInput",
-                )
-                .is_err()
-            {
-                continue;
-            }
+            self.dsl_apply(
+                mm_dsl::MeerkatMachineInput::AbandonInput {
+                    input_id: key.clone(),
+                    reason: dsl_reason,
+                    attempt_count,
+                },
+                "AbandonInput",
+            )?;
 
-            let now = Utc::now();
-            if let Some(state) = self.ledger.get_mut(id) {
-                state.history.push(InputStateHistoryEntry {
-                    timestamp: now,
-                    from: from_phase,
-                    to: InputLifecycleState::Abandoned,
-                    reason: Some(format!("Abandon({reason_label})")),
-                });
-                state.terminal_outcome = Some(InputTerminalOutcome::Abandoned {
-                    reason: reason.clone(),
-                });
-                state.updated_at = now;
-            }
+            self.sync_terminal_projection_from_machine(
+                id,
+                from_phase,
+                InputLifecycleState::Abandoned,
+                "Abandon",
+            )?;
             count += 1;
             self.events
                 .push(self.make_envelope(RuntimeEvent::InputLifecycle(
@@ -2612,7 +2626,7 @@ impl EphemeralRuntimeDriver {
                     },
                 )));
         }
-        count
+        Ok(count)
     }
 
     pub(crate) fn abandon_staged_inputs(
@@ -2640,19 +2654,12 @@ impl EphemeralRuntimeDriver {
                 "AbandonInput(CancelledRun)",
             )?;
 
-            let now = Utc::now();
-            if let Some(state) = self.ledger.get_mut(input_id) {
-                state.history.push(InputStateHistoryEntry {
-                    timestamp: now,
-                    from: from_phase,
-                    to: InputLifecycleState::Abandoned,
-                    reason: Some(format!("Abandon({reason_label})")),
-                });
-                state.terminal_outcome = Some(InputTerminalOutcome::Abandoned {
-                    reason: reason.clone(),
-                });
-                state.updated_at = now;
-            }
+            self.sync_terminal_projection_from_machine(
+                input_id,
+                from_phase,
+                InputLifecycleState::Abandoned,
+                "Abandon",
+            )?;
             count += 1;
             self.events
                 .push(self.make_envelope(RuntimeEvent::InputLifecycle(
@@ -2668,14 +2675,17 @@ impl EphemeralRuntimeDriver {
         Ok(count)
     }
 
-    pub(crate) fn abandon_pending_inputs(&mut self, reason: InputAbandonReason) -> usize {
-        let abandoned = self.abandon_all_non_terminal(reason);
+    pub(crate) fn abandon_pending_inputs(
+        &mut self,
+        reason: InputAbandonReason,
+    ) -> Result<usize, RuntimeDriverError> {
+        let abandoned = self.abandon_all_non_terminal(reason)?;
         self.queue.drain();
         self.steer_queue.drain();
         self.post_admission_signal = PostAdmissionSignal::None;
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
-        abandoned
+        Ok(abandoned)
     }
 
     /// Machine-owned realization for a validated run-completion transition.
@@ -3265,6 +3275,93 @@ mod tests {
                 "ConsumeOnAccept must write generated terminal kind"
             );
         });
+    }
+
+    #[tokio::test]
+    async fn cancelled_peer_response_terminal_rejects_and_cleans_pending_via_machine() {
+        let mut driver =
+            EphemeralRuntimeDriver::new(LogicalRuntimeId::new("cancelled-peer-terminal"));
+        let peer_id = "550e8400-e29b-41d4-a716-446655440000";
+        let request_uuid = uuid::Uuid::parse_str("018f6f79-7a82-7c4e-a552-a3b86f9630f1").unwrap();
+        let request_id = meerkat_core::PeerCorrelationId::from_uuid(request_uuid);
+        driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::PeerRequestSent {
+                    corr_id: request_id.into(),
+                    to: peer_id.to_string(),
+                },
+                "PeerRequestSent(test)",
+            )
+            .unwrap();
+
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: peer_id.into(),
+                    display_identity: Some("Analyst".into()),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(PeerConvention::ResponseTerminal {
+                request_id: request_uuid.to_string(),
+                status: meerkat_core::handles::PeerResponseTerminalProjectionStatus::Cancelled,
+            }),
+            body: String::new(),
+            payload: Some(serde_json::json!({"ok": false})),
+            blocks: None,
+            handling_mode: None,
+        });
+
+        let outcome = driver.accept_input(input).await.unwrap();
+        match outcome {
+            crate::accept::AcceptOutcome::Rejected {
+                reason: crate::accept::RejectReason::PeerResponseTerminalInvalid { detail },
+            } => assert!(detail.contains("unsupported peer response terminal status")),
+            other => panic!("expected generated peer terminal rejection, got {other:?}"),
+        }
+        driver.with_dsl_state(|state| {
+            assert!(
+                !state
+                    .pending_peer_requests
+                    .contains_key(&mm_dsl::PeerCorrelationId::from(request_uuid)),
+                "invalid terminal observation must clean pending peer truth through generated authority"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn abandon_all_non_terminal_cache_mirrors_generated_projection() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("abandon-projection"));
+        let input = prompt_input("abandon me");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+
+        let abandoned = driver
+            .abandon_all_non_terminal(InputAbandonReason::Stopped)
+            .unwrap();
+
+        assert_eq!(abandoned, 1);
+        assert_eq!(
+            driver.input_terminal_outcome(&input_id),
+            Some(InputTerminalOutcome::Abandoned {
+                reason: InputAbandonReason::Stopped
+            })
+        );
+        let cached = driver
+            .input_state(&input_id)
+            .and_then(|state| state.terminal_outcome.clone());
+        assert_eq!(
+            cached,
+            driver.input_terminal_outcome(&input_id),
+            "compatibility cache must mirror the generated terminal projection"
+        );
     }
 
     #[test]

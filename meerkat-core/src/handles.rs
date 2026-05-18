@@ -220,12 +220,18 @@ pub enum PeerResponseTerminalProjectionStatus {
 }
 
 impl PeerResponseTerminalProjectionStatus {
-    fn label(self) -> &'static str {
+    pub fn generated_terminal_label(self) -> Result<&'static str, PeerResponseTerminalFactError> {
         match self {
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
+            Self::Completed => Ok("completed"),
+            Self::Failed => Ok("failed"),
+            Self::Cancelled => Err(PeerResponseTerminalFactError::UnsupportedTerminalStatus {
+                status: "cancelled",
+            }),
         }
+    }
+
+    fn projection_label(self) -> &'static str {
+        self.generated_terminal_label().unwrap_or("unsupported")
     }
 }
 
@@ -247,6 +253,8 @@ pub enum PeerResponseTerminalFactError {
     EmptyCorrelationId,
     #[error("correlation id must be a UUID: {input}")]
     InvalidCorrelationId { input: String },
+    #[error("unsupported peer response terminal status: {status}")]
+    UnsupportedTerminalStatus { status: &'static str },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -425,13 +433,14 @@ impl PeerResponseTerminalFact {
         correlation_id: PeerResponseTerminalCorrelationId,
         status: PeerResponseTerminalProjectionStatus,
         render_payload: PeerResponseTerminalRenderPayload,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, PeerResponseTerminalFactError> {
+        status.generated_terminal_label()?;
+        Ok(Self {
             source,
             correlation_id,
             status,
             render_payload,
-        }
+        })
     }
 
     pub fn prompt_text(&self) -> String {
@@ -439,7 +448,7 @@ impl PeerResponseTerminalFact {
             "Peer terminal response from {}. Request ID: {}. Status: {}. Result: {}.",
             self.source.display_identity,
             self.correlation_id,
-            self.status.label(),
+            self.status.projection_label(),
             format_peer_projection_payload(self.render_payload.as_ref())
         )
     }
@@ -1709,7 +1718,8 @@ mod tests {
                     "request_subject": "alpha beta gamma",
                     "token": "birch seventeen"
                 }))),
-            ),
+            )
+            .expect("terminal fact"),
         };
 
         assert_eq!(
@@ -1721,6 +1731,35 @@ mod tests {
         assert_eq!(
             projection.prompt_text(),
             "Peer terminal response from Analyst. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"request_subject\": \"alpha beta gamma\",\n  \"token\": \"birch seventeen\"\n}."
+        );
+    }
+
+    #[test]
+    fn peer_terminal_fact_rejects_unsupported_terminal_status() {
+        let route_id = "550e8400-e29b-41d4-a716-446655440000";
+        let route_identity =
+            PeerResponseTerminalRouteIdentity::parse(route_id).expect("route identity");
+        let correlation_id =
+            PeerResponseTerminalCorrelationId::parse("018f6f79-7a82-7c4e-a552-a3b86f9630f1")
+                .expect("correlation id");
+
+        let err = PeerResponseTerminalFact::new(
+            PeerResponseTerminalSource::new(
+                None,
+                route_identity,
+                PeerResponseTerminalDisplayIdentity::parse("Analyst").expect("display identity"),
+            ),
+            correlation_id,
+            PeerResponseTerminalProjectionStatus::Cancelled,
+            PeerResponseTerminalRenderPayload::new(None),
+        )
+        .expect_err("cancelled terminal status must not become a terminal fact");
+
+        assert_eq!(
+            err,
+            PeerResponseTerminalFactError::UnsupportedTerminalStatus {
+                status: "cancelled"
+            }
         );
     }
 

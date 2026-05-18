@@ -363,7 +363,13 @@ impl PersistentRuntimeDriver {
         reason: InputAbandonReason,
     ) -> Result<usize, RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
-        let abandoned = self.inner.abandon_pending_inputs(reason);
+        let abandoned = match self.inner.abandon_pending_inputs(reason) {
+            Ok(abandoned) => abandoned,
+            Err(err) => {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(err);
+            }
+        };
         let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
             .store
@@ -434,7 +440,13 @@ impl PersistentRuntimeDriver {
         &mut self,
     ) -> Result<crate::traits::ResetReport, RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
-        let report = self.inner.reset_cleanup();
+        let report = match self.inner.reset_cleanup() {
+            Ok(report) => report,
+            Err(err) => {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(err);
+            }
+        };
         self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Idle, "reset")
             .await?;
         self.inner
@@ -444,15 +456,21 @@ impl PersistentRuntimeDriver {
 
     pub(crate) fn prepare_destroy_lifecycle(
         &mut self,
-    ) -> (EphemeralDriverRollbackSnapshot, DestroyReport) {
+    ) -> Result<(EphemeralDriverRollbackSnapshot, DestroyReport), RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
-        let abandoned = self.inner.destroy_cleanup();
-        (
+        let abandoned = match self.inner.destroy_cleanup() {
+            Ok(abandoned) => abandoned,
+            Err(err) => {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(err);
+            }
+        };
+        Ok((
             checkpoint,
             DestroyReport {
                 inputs_abandoned: abandoned,
             },
-        )
+        ))
     }
 
     pub(crate) async fn commit_prepared_destroy_lifecycle(
@@ -482,7 +500,10 @@ impl PersistentRuntimeDriver {
             self.inner.restore_rollback_snapshot(checkpoint);
             return Err(err);
         }
-        self.inner.stop_runtime_cleanup();
+        if let Err(err) = self.inner.stop_runtime_cleanup() {
+            self.inner.restore_rollback_snapshot(checkpoint);
+            return Err(err);
+        }
         self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Stopped, "stop")
             .await?;
         self.inner.sync_control_projection_from_dsl_authority();

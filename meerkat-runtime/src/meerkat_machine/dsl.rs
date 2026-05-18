@@ -2204,6 +2204,21 @@ pub enum AdmissionRejectReasonKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WaitAllAdmissionResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WaitAllRejectReasonKind {
+    #[default]
+    DuplicateOperation,
+    WaitAlreadyActive,
+    OperationNotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RecoveredInputNormalizationReasonKind {
     #[default]
     ConsumeOnAccept,

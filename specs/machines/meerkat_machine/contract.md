@@ -269,7 +269,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverOpsCompletionCursor`(next_completion_seq: u64)
 - `EvictCompletedOp`(operation_id: String)
 - `CollectCompletedOp`(operation_id: String)
-- `RequestWaitAll`(wait_request_id: WaitRequestId, operation_ids: Set<String>, operation_id_tokens: Set<OperationId>)
+- `ResolveWaitAllAdmission`(wait_request_id: WaitRequestId, operation_id_sequence: Seq<String>, operation_ids: Set<String>, operation_id_tokens: Set<OperationId>, duplicate_operation_id: Option<String>, not_found_operation_id: Option<String>)
+- `RequestWaitAll`(wait_request_id: WaitRequestId, operation_id_sequence: Seq<String>, operation_ids: Set<String>, operation_id_tokens: Set<OperationId>)
 - `SatisfyWaitAll`(wait_request_id: WaitRequestId, operation_id_tokens: Set<OperationId>)
 - `CancelWaitAll`
 - `SpawnDrain`(mode: DrainMode)
@@ -396,6 +397,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetainTerminalRecord`(operation_id: String)
 - `EvictCompletedRecord`(operation_id: String)
 - `CompletionProduced`(seq: u64, operation_id: OperationId, kind: OperationKind)
+- `WaitAllAdmissionResolved`(wait_request_id: WaitRequestId, result: WaitAllAdmissionResultKind, reject_reason: Option<WaitAllRejectReasonKind>, rejected_operation_id: Option<String>)
 - `WaitAllSatisfied`(wait_request_id: WaitRequestId, operation_ids: Set<OperationId>)
 - `CollectCompletedResult`
 - `EnqueueClassifiedEntry`
@@ -5376,29 +5378,259 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `CollectCompletedResult`
 - To: `Stopped`
 
+### `ResolveWaitAllAdmissionDuplicateRejectedIdle`
+- From: `Idle`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `duplicate_observed`
+  - `duplicate_witness_present`
+  - `duplicate_witness_requested`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Idle`
+
+### `ResolveWaitAllAdmissionDuplicateRejectedAttached`
+- From: `Attached`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `duplicate_observed`
+  - `duplicate_witness_present`
+  - `duplicate_witness_requested`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Attached`
+
+### `ResolveWaitAllAdmissionDuplicateRejectedRunning`
+- From: `Running`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `duplicate_observed`
+  - `duplicate_witness_present`
+  - `duplicate_witness_requested`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Running`
+
+### `ResolveWaitAllAdmissionDuplicateRejectedRetired`
+- From: `Retired`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `duplicate_observed`
+  - `duplicate_witness_present`
+  - `duplicate_witness_requested`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Retired`
+
+### `ResolveWaitAllAdmissionDuplicateRejectedStopped`
+- From: `Stopped`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `duplicate_observed`
+  - `duplicate_witness_present`
+  - `duplicate_witness_requested`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveWaitAllAdmissionActiveRejectedIdle`
+- From: `Idle`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_already_active`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Idle`
+
+### `ResolveWaitAllAdmissionActiveRejectedAttached`
+- From: `Attached`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_already_active`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Attached`
+
+### `ResolveWaitAllAdmissionActiveRejectedRunning`
+- From: `Running`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_already_active`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Running`
+
+### `ResolveWaitAllAdmissionActiveRejectedRetired`
+- From: `Retired`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_already_active`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Retired`
+
+### `ResolveWaitAllAdmissionActiveRejectedStopped`
+- From: `Stopped`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_already_active`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveWaitAllAdmissionNotFoundRejectedIdle`
+- From: `Idle`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operation_missing`
+  - `not_found_witness_present`
+  - `not_found_witness_requested`
+  - `not_found_witness_missing`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Idle`
+
+### `ResolveWaitAllAdmissionNotFoundRejectedAttached`
+- From: `Attached`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operation_missing`
+  - `not_found_witness_present`
+  - `not_found_witness_requested`
+  - `not_found_witness_missing`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Attached`
+
+### `ResolveWaitAllAdmissionNotFoundRejectedRunning`
+- From: `Running`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operation_missing`
+  - `not_found_witness_present`
+  - `not_found_witness_requested`
+  - `not_found_witness_missing`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Running`
+
+### `ResolveWaitAllAdmissionNotFoundRejectedRetired`
+- From: `Retired`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operation_missing`
+  - `not_found_witness_present`
+  - `not_found_witness_requested`
+  - `not_found_witness_missing`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Retired`
+
+### `ResolveWaitAllAdmissionNotFoundRejectedStopped`
+- From: `Stopped`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operation_missing`
+  - `not_found_witness_present`
+  - `not_found_witness_requested`
+  - `not_found_witness_missing`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveWaitAllAdmissionAcceptedIdle`
+- From: `Idle`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operations_tracked`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Idle`
+
+### `ResolveWaitAllAdmissionAcceptedAttached`
+- From: `Attached`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operations_tracked`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Attached`
+
+### `ResolveWaitAllAdmissionAcceptedRunning`
+- From: `Running`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operations_tracked`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Running`
+
+### `ResolveWaitAllAdmissionAcceptedRetired`
+- From: `Retired`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operations_tracked`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Retired`
+
+### `ResolveWaitAllAdmissionAcceptedStopped`
+- From: `Stopped`
+- On: `ResolveWaitAllAdmission`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens, duplicate_operation_id, not_found_operation_id)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operations_tracked`
+- Emits: `WaitAllAdmissionResolved`
+- To: `Stopped`
+
 ### `RequestWaitAllIdle`
 - From: `Idle`
-- On: `RequestWaitAll`(wait_request_id, operation_ids, operation_id_tokens)
+- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operations_tracked`
 - To: `Idle`
 
 ### `RequestWaitAllAttached`
 - From: `Attached`
-- On: `RequestWaitAll`(wait_request_id, operation_ids, operation_id_tokens)
+- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operations_tracked`
 - To: `Attached`
 
 ### `RequestWaitAllRunning`
 - From: `Running`
-- On: `RequestWaitAll`(wait_request_id, operation_ids, operation_id_tokens)
+- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operations_tracked`
 - To: `Running`
 
 ### `RequestWaitAllRetired`
 - From: `Retired`
-- On: `RequestWaitAll`(wait_request_id, operation_ids, operation_id_tokens)
+- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operations_tracked`
 - To: `Retired`
 
 ### `RequestWaitAllStopped`
 - From: `Stopped`
-- On: `RequestWaitAll`(wait_request_id, operation_ids, operation_id_tokens)
+- On: `RequestWaitAll`(wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens)
+- Guards:
+  - `no_duplicate_observed`
+  - `wait_inactive`
+  - `operations_tracked`
 - To: `Stopped`
 
 ### `SatisfyWaitAllIdle`

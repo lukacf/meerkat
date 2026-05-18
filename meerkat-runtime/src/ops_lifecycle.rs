@@ -425,6 +425,20 @@ impl ShellState {
         mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl.0, input).map(|_transition| ())
     }
 
+    fn dsl_apply_with_effects(
+        &mut self,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, OpsLifecycleError> {
+        let transition =
+            mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl.0, input).map_err(|err| {
+                OpsLifecycleError::Internal(format!(
+                    "DSL rejected ops transition ({context}): {err:?}"
+                ))
+            })?;
+        Ok(transition.effects)
+    }
+
     /// Split a domain terminal outcome into a `(discriminant, payload)` pair
     /// suitable for the DSL's typed `op_terminal_outcomes` +
     /// `op_terminal_payload` fields.
@@ -703,6 +717,7 @@ impl ShellState {
     }
 
     /// Whether the DSL has a barrier wait active.
+    #[cfg(test)]
     fn wait_active(&self) -> bool {
         self.dsl.0.state.wait_active
     }
@@ -749,6 +764,152 @@ impl ShellState {
         Ok(satisfied)
     }
 
+    fn parse_wait_all_operation_id(
+        raw: &str,
+        context: &str,
+    ) -> Result<OperationId, OpsLifecycleError> {
+        serde_json::from_str::<OperationId>(raw).map_err(|err| {
+            OpsLifecycleError::Internal(format!(
+                "generated wait_all authority emitted invalid {context} operation id '{raw}': {err}"
+            ))
+        })
+    }
+
+    fn duplicate_wait_operation_id(operation_ids: &[OperationId]) -> Option<OperationId> {
+        let mut seen = HashSet::new();
+        operation_ids
+            .iter()
+            .find(|operation_id| !seen.insert((*operation_id).clone()))
+            .cloned()
+    }
+
+    fn wait_all_admission_error_from_effects(
+        wait_request_id: &WaitRequestId,
+        effects: &[mm_dsl::MeerkatMachineEffect],
+    ) -> Result<Option<OpsLifecycleError>, OpsLifecycleError> {
+        let mut admission = None;
+        for effect in effects {
+            let mm_dsl::MeerkatMachineEffect::WaitAllAdmissionResolved {
+                wait_request_id: resolved_wait_request_id,
+                result,
+                reject_reason,
+                rejected_operation_id,
+            } = effect
+            else {
+                continue;
+            };
+            if admission.is_some() {
+                return Err(OpsLifecycleError::Internal(
+                    "generated wait_all authority emitted multiple admission results".into(),
+                ));
+            }
+            let resolved_uuid =
+                uuid::Uuid::parse_str(&resolved_wait_request_id.0).map_err(|err| {
+                    OpsLifecycleError::Internal(format!(
+                        "generated wait_all authority emitted invalid wait request id '{}': {err}",
+                        resolved_wait_request_id.0
+                    ))
+                })?;
+            let resolved_wait_request_id = WaitRequestId::from_uuid(resolved_uuid);
+            if &resolved_wait_request_id != wait_request_id {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated wait_all authority resolved wait request {resolved_wait_request_id} while shell requested {wait_request_id}"
+                )));
+            }
+            admission = Some(match result {
+                mm_dsl::WaitAllAdmissionResultKind::Accept => {
+                    if reject_reason.is_some() || rejected_operation_id.is_some() {
+                        return Err(OpsLifecycleError::Internal(
+                            "generated wait_all authority accepted with rejection payload".into(),
+                        ));
+                    }
+                    None
+                }
+                mm_dsl::WaitAllAdmissionResultKind::Reject => {
+                    let reason = reject_reason.ok_or_else(|| {
+                        OpsLifecycleError::Internal(
+                            "generated wait_all authority rejected without reason".into(),
+                        )
+                    })?;
+                    let error = match reason {
+                        mm_dsl::WaitAllRejectReasonKind::DuplicateOperation => {
+                            let raw = rejected_operation_id.as_deref().ok_or_else(|| {
+                                OpsLifecycleError::Internal(
+                                    "generated wait_all authority rejected duplicate without operation id"
+                                        .into(),
+                                )
+                            })?;
+                            OpsLifecycleError::DuplicateWaitOperation(
+                                Self::parse_wait_all_operation_id(raw, "duplicate")?,
+                            )
+                        }
+                        mm_dsl::WaitAllRejectReasonKind::WaitAlreadyActive => {
+                            if rejected_operation_id.is_some() {
+                                return Err(OpsLifecycleError::Internal(
+                                    "generated wait_all authority rejected active wait with operation id"
+                                        .into(),
+                                ));
+                            }
+                            OpsLifecycleError::WaitAlreadyActive
+                        }
+                        mm_dsl::WaitAllRejectReasonKind::OperationNotFound => {
+                            let raw = rejected_operation_id.as_deref().ok_or_else(|| {
+                                OpsLifecycleError::Internal(
+                                    "generated wait_all authority rejected missing operation without operation id"
+                                        .into(),
+                                )
+                            })?;
+                            OpsLifecycleError::NotFound(Self::parse_wait_all_operation_id(
+                                raw, "missing",
+                            )?)
+                        }
+                    };
+                    Some(error)
+                }
+            });
+        }
+        admission.ok_or_else(|| {
+            OpsLifecycleError::Internal(
+                "generated wait_all authority emitted no admission result".into(),
+            )
+        })
+    }
+
+    fn resolve_wait_all_admission(
+        &mut self,
+        wait_request_id: &WaitRequestId,
+        operation_ids: &[OperationId],
+        dsl_ids: &std::collections::BTreeSet<String>,
+        dsl_id_tokens: &std::collections::BTreeSet<mm_dsl::OperationId>,
+    ) -> Result<(), OpsLifecycleError> {
+        let duplicate = Self::duplicate_wait_operation_id(operation_ids)
+            .map(|operation_id| mm_dsl::OperationId::from_domain(&operation_id).0);
+        let not_found = operation_ids
+            .iter()
+            .find(|operation_id| !self.contains(operation_id))
+            .map(|operation_id| mm_dsl::OperationId::from_domain(operation_id).0);
+        let dsl_id_sequence: Vec<String> = operation_ids
+            .iter()
+            .map(|id| mm_dsl::OperationId::from_domain(id).0)
+            .collect();
+        let effects = self.dsl_apply_with_effects(
+            mm_dsl::MeerkatMachineInput::ResolveWaitAllAdmission {
+                wait_request_id: mm_dsl::WaitRequestId::from_domain(wait_request_id),
+                operation_id_sequence: dsl_id_sequence,
+                operation_ids: dsl_ids.clone(),
+                operation_id_tokens: dsl_id_tokens.clone(),
+                duplicate_operation_id: duplicate,
+                not_found_operation_id: not_found,
+            },
+            "ResolveWaitAllAdmission",
+        )?;
+        if let Some(error) = Self::wait_all_admission_error_from_effects(wait_request_id, &effects)?
+        {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn try_satisfy_wait_all_authority(
         &mut self,
     ) -> Result<Option<WaitAllSatisfied>, OpsLifecycleError> {
@@ -785,25 +946,6 @@ impl ShellState {
         wait_request_id: &WaitRequestId,
         operation_ids: &[OperationId],
     ) -> Result<WaitAllAuthorityPlan, OpsLifecycleError> {
-        let mut seen = HashSet::new();
-        for operation_id in operation_ids {
-            if !seen.insert(operation_id.clone()) {
-                return Err(OpsLifecycleError::DuplicateWaitOperation(
-                    operation_id.clone(),
-                ));
-            }
-        }
-
-        if self.wait_active() {
-            return Err(OpsLifecycleError::WaitAlreadyActive);
-        }
-
-        for operation_id in operation_ids {
-            if !self.contains(operation_id) {
-                return Err(OpsLifecycleError::NotFound(operation_id.clone()));
-            }
-        }
-
         let dsl_ids: std::collections::BTreeSet<String> = operation_ids
             .iter()
             .map(|id| mm_dsl::OperationId::from_domain(id).0)
@@ -812,9 +954,14 @@ impl ShellState {
             .iter()
             .map(mm_dsl::OperationId::from_domain)
             .collect();
+        self.resolve_wait_all_admission(wait_request_id, operation_ids, &dsl_ids, &dsl_id_tokens)?;
         self.dsl_apply(
             mm_dsl::MeerkatMachineInput::RequestWaitAll {
                 wait_request_id: mm_dsl::WaitRequestId::from_domain(wait_request_id),
+                operation_id_sequence: operation_ids
+                    .iter()
+                    .map(|id| mm_dsl::OperationId::from_domain(id).0)
+                    .collect(),
                 operation_ids: dsl_ids,
                 operation_id_tokens: dsl_id_tokens,
             },
@@ -864,24 +1011,27 @@ impl ShellState {
                 return;
             }
         };
-        let wait_id = match self.wait_request_id.clone() {
-            Some(id) => id,
-            None => return,
-        };
-        if satisfied.wait_request_id != wait_id {
+        let shell_wait_id = self.wait_request_id.take();
+        if shell_wait_id
+            .as_ref()
+            .is_some_and(|id| id != &satisfied.wait_request_id)
+        {
             tracing::error!(
-                shell_wait_request_id = %wait_id,
+                shell_wait_request_id = ?shell_wait_id,
                 authority_wait_request_id = %satisfied.wait_request_id,
                 "generated wait_all authority satisfied a different wait request"
             );
-            return;
         }
-        self.wait_request_id = None;
         if let Some(pending) = self.pending_wait.take() {
-            if pending.wait_request_id == wait_id {
+            if pending.wait_request_id == satisfied.wait_request_id {
                 let _ = pending.sender.send(satisfied);
-            } else {
-                self.pending_wait = Some(pending);
+            } else if let Some(shell_wait_id) = shell_wait_id {
+                tracing::error!(
+                    shell_wait_request_id = %shell_wait_id,
+                    pending_wait_request_id = %pending.wait_request_id,
+                    authority_wait_request_id = %satisfied.wait_request_id,
+                    "generated wait_all authority satisfied without a matching pending waiter"
+                );
             }
         }
     }
@@ -1386,7 +1536,6 @@ enum WaitAllFutureState {
 struct WaitAllFuture<'a> {
     registry: &'a RuntimeOpsLifecycleRegistry,
     wait_request_id: WaitRequestId,
-    operation_ids: Vec<OperationId>,
     state: WaitAllFutureState,
 }
 
@@ -1408,7 +1557,7 @@ impl Future for WaitAllFuture<'_> {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Ok(satisfied)) => {
                     let outcomes = match self.registry.read_state() {
-                        Ok(state) => state.collect_wait_outcomes(&self.operation_ids),
+                        Ok(state) => state.collect_wait_outcomes(&satisfied.operation_ids),
                         Err(err) => Err(err),
                     };
                     self.state = WaitAllFutureState::Done;
@@ -1923,7 +2072,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                     Ok(WaitAllAuthorityPlan::AlreadySatisfied(satisfied)) => {
                         let outcomes =
                             state
-                                .collect_wait_outcomes(&owned_ids)
+                                .collect_wait_outcomes(&satisfied.operation_ids)
                                 .map(|outcomes| WaitAllResult {
                                     outcomes,
                                     satisfied,
@@ -1944,7 +2093,6 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                             return Box::pin(WaitAllFuture {
                                 registry: self,
                                 wait_request_id,
-                                operation_ids: owned_ids,
                                 state: WaitAllFutureState::Ready(Some(Err(match rollback {
                                     Ok(()) => OpsLifecycleError::Internal(
                                         "wait_all started while a pending wait sender already existed"
@@ -1971,7 +2119,6 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         Box::pin(WaitAllFuture {
             registry: self,
             wait_request_id,
-            operation_ids: owned_ids,
             state,
         })
     }
@@ -2178,6 +2325,65 @@ mod tests {
             !state.wait_active(),
             "already-satisfied wait_all must be cleared by generated satisfaction authority"
         );
+        assert!(state.wait_operation_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_all_duplicate_rejection_is_generated() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("duplicate-wait");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+
+        let result = registry
+            .wait_all(&test_run_id(), &[op_id.clone(), op_id.clone()])
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(OpsLifecycleError::DuplicateWaitOperation(id)) if id == op_id
+        ));
+        let state = registry.read_state().unwrap();
+        assert!(
+            !state.wait_active(),
+            "duplicate wait rejection must not create a shell or machine barrier"
+        );
+        assert!(state.wait_operation_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_all_active_rejection_is_generated() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("active-wait");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+
+        let active_wait = registry.wait_all(&test_run_id(), std::slice::from_ref(&op_id));
+        let result = registry
+            .wait_all(&test_run_id(), std::slice::from_ref(&op_id))
+            .await;
+
+        assert!(matches!(result, Err(OpsLifecycleError::WaitAlreadyActive)));
+        drop(active_wait);
+        let state = registry.read_state().unwrap();
+        assert!(!state.wait_active());
+        assert!(state.wait_operation_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_all_unknown_operation_rejection_is_generated() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let op_id = OperationId::new();
+
+        let result = registry
+            .wait_all(&test_run_id(), std::slice::from_ref(&op_id))
+            .await;
+
+        assert!(matches!(result, Err(OpsLifecycleError::NotFound(id)) if id == op_id));
+        let state = registry.read_state().unwrap();
+        assert!(!state.wait_active());
         assert!(state.wait_operation_ids().is_empty());
     }
 

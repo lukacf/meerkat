@@ -1062,6 +1062,21 @@ pub enum AdmissionRejectReasonKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WaitAllAdmissionResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WaitAllRejectReasonKind {
+    #[default]
+    DuplicateOperation,
+    WaitAlreadyActive,
+    OperationNotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RecoveredInputObservedPhase {
     Accepted,
     #[default]
@@ -2089,7 +2104,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             RecoverOpsCompletionCursor { next_completion_seq: u64 },
             EvictCompletedOp { operation_id: String },
             CollectCompletedOp { operation_id: String },
-            RequestWaitAll { wait_request_id: WaitRequestId, operation_ids: Set<String>, operation_id_tokens: Set<OperationId> },
+            ResolveWaitAllAdmission {
+                wait_request_id: WaitRequestId,
+                operation_id_sequence: Seq<String>,
+                operation_ids: Set<String>,
+                operation_id_tokens: Set<OperationId>,
+                duplicate_operation_id: Option<String>,
+                not_found_operation_id: Option<String>,
+            },
+            RequestWaitAll {
+                wait_request_id: WaitRequestId,
+                operation_id_sequence: Seq<String>,
+                operation_ids: Set<String>,
+                operation_id_tokens: Set<OperationId>,
+            },
             SatisfyWaitAll { wait_request_id: WaitRequestId, operation_id_tokens: Set<OperationId> },
             CancelWaitAll,
             // Comms drain inputs
@@ -2407,6 +2435,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             RetainTerminalRecord { operation_id: String },
             EvictCompletedRecord { operation_id: String },
             CompletionProduced { seq: u64, operation_id: OperationId, kind: OperationKind },
+            WaitAllAdmissionResolved {
+                wait_request_id: WaitRequestId,
+                result: Enum<WaitAllAdmissionResultKind>,
+                reject_reason: Option<Enum<WaitAllRejectReasonKind>>,
+                rejected_operation_id: Option<String>,
+            },
             WaitAllSatisfied { wait_request_id: WaitRequestId, operation_ids: Set<OperationId> },
             CollectCompletedResult,
             EnqueueClassifiedEntry,
@@ -2536,6 +2570,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition RetainTerminalRecord => local,
         disposition EvictCompletedRecord => local,
         disposition CompletionProduced => local,
+        disposition WaitAllAdmissionResolved => local,
         disposition WaitAllSatisfied => external handoff ops_barrier_satisfaction,
         disposition CollectCompletedResult => local,
         disposition EnqueueClassifiedEntry => local,
@@ -8976,13 +9011,123 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit CollectCompletedResult
         }
 
+        // ResolveWaitAllAdmission: generated wait-all admission/result-class
+        // authority. The shell supplies raw request shape plus candidate detail
+        // IDs; the machine reads canonical operation and wait state, then emits
+        // the typed public result class.
+        transition ResolveWaitAllAdmissionDuplicateRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveWaitAllAdmission {
+                wait_request_id,
+                operation_id_sequence,
+                operation_ids,
+                operation_id_tokens,
+                duplicate_operation_id,
+                not_found_operation_id
+            }
+            guard "duplicate_observed" { operation_id_sequence.len() > operation_ids.len() }
+            guard "duplicate_witness_present" { duplicate_operation_id != None }
+            guard "duplicate_witness_requested" { operation_id_sequence.contains(duplicate_operation_id.get("value")) }
+            update {}
+            to Idle
+            emit WaitAllAdmissionResolved {
+                wait_request_id: wait_request_id,
+                result: WaitAllAdmissionResultKind::Reject,
+                reject_reason: Some(WaitAllRejectReasonKind::DuplicateOperation),
+                rejected_operation_id: duplicate_operation_id
+            }
+        }
+
+        transition ResolveWaitAllAdmissionActiveRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveWaitAllAdmission {
+                wait_request_id,
+                operation_id_sequence,
+                operation_ids,
+                operation_id_tokens,
+                duplicate_operation_id,
+                not_found_operation_id
+            }
+            guard "no_duplicate_observed" { operation_id_sequence.len() == operation_ids.len() }
+            guard "wait_already_active" { self.wait_active == true }
+            update {}
+            to Idle
+            emit WaitAllAdmissionResolved {
+                wait_request_id: wait_request_id,
+                result: WaitAllAdmissionResultKind::Reject,
+                reject_reason: Some(WaitAllRejectReasonKind::WaitAlreadyActive),
+                rejected_operation_id: None
+            }
+        }
+
+        transition ResolveWaitAllAdmissionNotFoundRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveWaitAllAdmission {
+                wait_request_id,
+                operation_id_sequence,
+                operation_ids,
+                operation_id_tokens,
+                duplicate_operation_id,
+                not_found_operation_id
+            }
+            guard "no_duplicate_observed" { operation_id_sequence.len() == operation_ids.len() }
+            guard "wait_inactive" { self.wait_active == false }
+            guard "operation_missing" {
+                for_all(operation_id in operation_ids,
+                    self.op_statuses.contains_key(operation_id)) == false
+            }
+            guard "not_found_witness_present" { not_found_operation_id != None }
+            guard "not_found_witness_requested" { operation_ids.contains(not_found_operation_id.get("value")) }
+            guard "not_found_witness_missing" { !self.op_statuses.contains_key(not_found_operation_id.get("value")) }
+            update {}
+            to Idle
+            emit WaitAllAdmissionResolved {
+                wait_request_id: wait_request_id,
+                result: WaitAllAdmissionResultKind::Reject,
+                reject_reason: Some(WaitAllRejectReasonKind::OperationNotFound),
+                rejected_operation_id: not_found_operation_id
+            }
+        }
+
+        transition ResolveWaitAllAdmissionAccepted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveWaitAllAdmission {
+                wait_request_id,
+                operation_id_sequence,
+                operation_ids,
+                operation_id_tokens,
+                duplicate_operation_id,
+                not_found_operation_id
+            }
+            guard "no_duplicate_observed" { operation_id_sequence.len() == operation_ids.len() }
+            guard "wait_inactive" { self.wait_active == false }
+            guard "operations_tracked" {
+                for_all(operation_id in operation_ids,
+                    self.op_statuses.contains_key(operation_id))
+            }
+            update {}
+            to Idle
+            emit WaitAllAdmissionResolved {
+                wait_request_id: wait_request_id,
+                result: WaitAllAdmissionResultKind::Accept,
+                reject_reason: None,
+                rejected_operation_id: None
+            }
+        }
+
         // RequestWaitAll: activate wait-all barrier with explicit membership.
         // `wait_request_id`, `wait_operation_ids`, and the typed
         // `wait_operation_id_tokens` handoff payload are DSL-owned; shell must
         // not mirror them as canonical truth.
         transition RequestWaitAll {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RequestWaitAll { wait_request_id, operation_ids, operation_id_tokens }
+            on input RequestWaitAll { wait_request_id, operation_id_sequence, operation_ids, operation_id_tokens }
+            guard "no_duplicate_observed" { operation_id_sequence.len() == operation_ids.len() }
+            guard "wait_inactive" { self.wait_active == false }
+            guard "operations_tracked" {
+                for_all(operation_id in operation_ids,
+                    self.op_statuses.contains_key(operation_id))
+            }
             update {
                 self.wait_active = true;
                 self.wait_request_id = Some(wait_request_id);

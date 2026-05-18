@@ -1789,6 +1789,66 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CollectCompletedOpStopped`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionDuplicateRejectedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionDuplicateRejectedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionDuplicateRejectedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionDuplicateRejectedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionDuplicateRejectedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionActiveRejectedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionActiveRejectedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionActiveRejectedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionActiveRejectedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionActiveRejectedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionNotFoundRejectedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionNotFoundRejectedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionNotFoundRejectedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionNotFoundRejectedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionNotFoundRejectedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionAcceptedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionAcceptedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionAcceptedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionAcceptedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveWaitAllAdmissionAcceptedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `RequestWaitAllIdle`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -2581,6 +2641,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `CompletionProduced`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `WaitAllAdmissionResolved`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `WaitAllSatisfied`

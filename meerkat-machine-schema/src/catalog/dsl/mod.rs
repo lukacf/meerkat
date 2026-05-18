@@ -316,6 +316,15 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 "AdmissionIdempotencyResultKind",
                 &["Accept", "Deduplicated"],
             ),
+            NamedTypeBinding::string_enum("WaitAllAdmissionResultKind", &["Accept", "Reject"]),
+            NamedTypeBinding::string_enum(
+                "WaitAllRejectReasonKind",
+                &[
+                    "DuplicateOperation",
+                    "WaitAlreadyActive",
+                    "OperationNotFound",
+                ],
+            ),
             NamedTypeBinding::string_enum(
                 "RecoveredInputObservedPhase",
                 &[

@@ -4987,6 +4987,112 @@ impl std::fmt::Display for TurnTerminalOutcome {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WaitAllAdmissionResultKind {
+    #[default]
+    #[serde(rename = "Accept")]
+    Accept,
+    #[serde(rename = "Reject")]
+    Reject,
+}
+impl WaitAllAdmissionResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accept => "Accept",
+            Self::Reject => "Reject",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WaitAllAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accept" => Ok(Self::Accept),
+            "Reject" => Ok(Self::Reject),
+            other => Err(format!(
+                "invalid WaitAllAdmissionResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WaitAllAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WaitAllAdmissionResultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WaitAllRejectReasonKind {
+    #[default]
+    #[serde(rename = "DuplicateOperation")]
+    DuplicateOperation,
+    #[serde(rename = "WaitAlreadyActive")]
+    WaitAlreadyActive,
+    #[serde(rename = "OperationNotFound")]
+    OperationNotFound,
+}
+impl WaitAllRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DuplicateOperation => "DuplicateOperation",
+            Self::WaitAlreadyActive => "WaitAlreadyActive",
+            Self::OperationNotFound => "OperationNotFound",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WaitAllRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "DuplicateOperation" => Ok(Self::DuplicateOperation),
+            "WaitAlreadyActive" => Ok(Self::WaitAlreadyActive),
+            "OperationNotFound" => Ok(Self::OperationNotFound),
+            other => Err(format!("invalid WaitAllRejectReasonKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WaitAllRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WaitAllRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -5843,8 +5949,18 @@ pub mod inputs {
         pub operation_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveWaitAllAdmission {
+        pub wait_request_id: WaitRequestId,
+        pub operation_id_sequence: Vec<String>,
+        pub operation_ids: std::collections::BTreeSet<String>,
+        pub operation_id_tokens: std::collections::BTreeSet<OperationId>,
+        pub duplicate_operation_id: Option<String>,
+        pub not_found_operation_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestWaitAll {
         pub wait_request_id: WaitRequestId,
+        pub operation_id_sequence: Vec<String>,
         pub operation_ids: std::collections::BTreeSet<String>,
         pub operation_id_tokens: std::collections::BTreeSet<OperationId>,
     }
@@ -6217,6 +6333,7 @@ pub enum Input {
     RecoverOpsCompletionCursor(inputs::RecoverOpsCompletionCursor),
     EvictCompletedOp(inputs::EvictCompletedOp),
     CollectCompletedOp(inputs::CollectCompletedOp),
+    ResolveWaitAllAdmission(inputs::ResolveWaitAllAdmission),
     RequestWaitAll(inputs::RequestWaitAll),
     SatisfyWaitAll(inputs::SatisfyWaitAll),
     CancelWaitAll(inputs::CancelWaitAll),
@@ -6401,6 +6518,7 @@ impl Input {
             Self::RecoverOpsCompletionCursor(_) => InputKind::RecoverOpsCompletionCursor,
             Self::EvictCompletedOp(_) => InputKind::EvictCompletedOp,
             Self::CollectCompletedOp(_) => InputKind::CollectCompletedOp,
+            Self::ResolveWaitAllAdmission(_) => InputKind::ResolveWaitAllAdmission,
             Self::RequestWaitAll(_) => InputKind::RequestWaitAll,
             Self::SatisfyWaitAll(_) => InputKind::SatisfyWaitAll,
             Self::CancelWaitAll(_) => InputKind::CancelWaitAll,
@@ -6584,6 +6702,7 @@ pub enum InputKind {
     RecoverOpsCompletionCursor,
     EvictCompletedOp,
     CollectCompletedOp,
+    ResolveWaitAllAdmission,
     RequestWaitAll,
     SatisfyWaitAll,
     CancelWaitAll,
@@ -6918,6 +7037,13 @@ pub mod effects {
         pub kind: OperationKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct WaitAllAdmissionResolved {
+        pub wait_request_id: WaitRequestId,
+        pub result: WaitAllAdmissionResultKind,
+        pub reject_reason: Option<WaitAllRejectReasonKind>,
+        pub rejected_operation_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WaitAllSatisfied {
         pub wait_request_id: WaitRequestId,
         pub operation_ids: std::collections::BTreeSet<OperationId>,
@@ -7080,6 +7206,7 @@ pub enum Effect {
     RetainTerminalRecord(effects::RetainTerminalRecord),
     EvictCompletedRecord(effects::EvictCompletedRecord),
     CompletionProduced(effects::CompletionProduced),
+    WaitAllAdmissionResolved(effects::WaitAllAdmissionResolved),
     WaitAllSatisfied(effects::WaitAllSatisfied),
     CollectCompletedResult(effects::CollectCompletedResult),
     EnqueueClassifiedEntry(effects::EnqueueClassifiedEntry),
@@ -7155,6 +7282,7 @@ pub enum EffectKind {
     RetainTerminalRecord,
     EvictCompletedRecord,
     CompletionProduced,
+    WaitAllAdmissionResolved,
     WaitAllSatisfied,
     CollectCompletedResult,
     EnqueueClassifiedEntry,
@@ -7770,6 +7898,26 @@ pub enum TransitionId {
     CollectCompletedOpRunning,
     CollectCompletedOpRetired,
     CollectCompletedOpStopped,
+    ResolveWaitAllAdmissionDuplicateRejectedIdle,
+    ResolveWaitAllAdmissionDuplicateRejectedAttached,
+    ResolveWaitAllAdmissionDuplicateRejectedRunning,
+    ResolveWaitAllAdmissionDuplicateRejectedRetired,
+    ResolveWaitAllAdmissionDuplicateRejectedStopped,
+    ResolveWaitAllAdmissionActiveRejectedIdle,
+    ResolveWaitAllAdmissionActiveRejectedAttached,
+    ResolveWaitAllAdmissionActiveRejectedRunning,
+    ResolveWaitAllAdmissionActiveRejectedRetired,
+    ResolveWaitAllAdmissionActiveRejectedStopped,
+    ResolveWaitAllAdmissionNotFoundRejectedIdle,
+    ResolveWaitAllAdmissionNotFoundRejectedAttached,
+    ResolveWaitAllAdmissionNotFoundRejectedRunning,
+    ResolveWaitAllAdmissionNotFoundRejectedRetired,
+    ResolveWaitAllAdmissionNotFoundRejectedStopped,
+    ResolveWaitAllAdmissionAcceptedIdle,
+    ResolveWaitAllAdmissionAcceptedAttached,
+    ResolveWaitAllAdmissionAcceptedRunning,
+    ResolveWaitAllAdmissionAcceptedRetired,
+    ResolveWaitAllAdmissionAcceptedStopped,
     RequestWaitAllIdle,
     RequestWaitAllAttached,
     RequestWaitAllRunning,

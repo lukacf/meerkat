@@ -80,11 +80,11 @@ impl MobSupervisorBridge {
                 "failed to initialize supervisor bridge authority '{participant_name}': {error}"
             ))
         })?;
+        let session_id =
+            meerkat_runtime::meerkat_machine::dsl::SessionId::from(participant_name.to_string());
         dsl.apply_input(
             meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
-                session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
-                    participant_name.to_string(),
-                ),
+                session_id: session_id.clone(),
             },
             "mob_supervisor_bridge::register",
         )
@@ -93,7 +93,22 @@ impl MobSupervisorBridge {
                 "failed to register supervisor bridge authority '{participant_name}': {error}"
             ))
         })?;
+        dsl.apply_input(
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::EnsureSessionWithExecutor {
+                session_id,
+            },
+            "mob_supervisor_bridge::ensure_executor",
+        )
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "failed to attach supervisor bridge authority '{participant_name}': {error}"
+            ))
+        })?;
 
+        runtime.install_peer_comms_handle(Arc::new(meerkat_runtime::RuntimePeerCommsHandle::new(
+            Arc::clone(&dsl),
+        )));
+        runtime.require_peer_comms_machine_authority();
         runtime.install_peer_request_response_authority(
             meerkat_comms::PeerRequestResponseAuthority::new(
                 Arc::new(meerkat_runtime::RuntimePeerInteractionHandle::new(
@@ -244,7 +259,10 @@ impl MobSupervisorBridge {
         request_envelope_id: uuid::Uuid,
         timeout: Duration,
     ) -> Result<serde_json::Value, MobError> {
-        if let Some(result) = self.take_buffered_response(request_envelope_id).await? {
+        if let Some(result) = self
+            .take_buffered_response(runtime, request_envelope_id)
+            .await?
+        {
             return Ok(result);
         }
 
@@ -252,7 +270,7 @@ impl MobSupervisorBridge {
         loop {
             let drained = runtime.drain_peer_input_candidates().await;
             if let Some(result) = self
-                .buffer_and_extract(drained, request_envelope_id)
+                .buffer_and_extract(runtime, drained, request_envelope_id)
                 .await?
             {
                 return Ok(result);
@@ -260,6 +278,7 @@ impl MobSupervisorBridge {
 
             let remaining = deadline.remaining();
             if remaining.is_zero() {
+                Self::record_request_timed_out(runtime, request_envelope_id)?;
                 return Err(MobError::Internal(format!(
                     "supervisor request '{request_envelope_id}' timed out after {}ms",
                     timeout.as_millis()
@@ -270,6 +289,7 @@ impl MobSupervisorBridge {
                 .await
                 .is_err()
             {
+                Self::record_request_timed_out(runtime, request_envelope_id)?;
                 return Err(MobError::Internal(format!(
                     "supervisor request '{request_envelope_id}' timed out after {}ms",
                     timeout.as_millis()
@@ -280,6 +300,7 @@ impl MobSupervisorBridge {
 
     async fn take_buffered_response(
         &self,
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
         request_envelope_id: uuid::Uuid,
     ) -> Result<Option<serde_json::Value>, MobError> {
         let mut buffered = self.buffered_candidates.lock().await;
@@ -287,9 +308,18 @@ impl MobSupervisorBridge {
         let mut matched = None;
 
         while let Some(candidate) = buffered.pop_front() {
-            match Self::response_value(&candidate, request_envelope_id)? {
-                Some(value) if matched.is_none() => matched = Some(value),
-                _ => retained.push_back(candidate),
+            match Self::response_outcome(&candidate, request_envelope_id)? {
+                Some(SupervisorResponseOutcome::Terminal { value, disposition })
+                    if matched.is_none() =>
+                {
+                    Self::record_response_terminal(runtime, request_envelope_id, disposition)?;
+                    matched = Some(value);
+                }
+                Some(SupervisorResponseOutcome::Progress) => {
+                    Self::record_response_progress(runtime, request_envelope_id)?;
+                }
+                Some(SupervisorResponseOutcome::Terminal { .. }) => {}
+                None => retained.push_back(candidate),
             }
         }
 
@@ -299,6 +329,7 @@ impl MobSupervisorBridge {
 
     async fn buffer_and_extract(
         &self,
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
         drained: Vec<PeerInputCandidate>,
         request_envelope_id: uuid::Uuid,
     ) -> Result<Option<serde_json::Value>, MobError> {
@@ -306,9 +337,18 @@ impl MobSupervisorBridge {
         let mut matched = None;
 
         for candidate in drained {
-            match Self::response_value(&candidate, request_envelope_id)? {
-                Some(value) if matched.is_none() => matched = Some(value),
-                _ => buffered.push_back(candidate),
+            match Self::response_outcome(&candidate, request_envelope_id)? {
+                Some(SupervisorResponseOutcome::Terminal { value, disposition })
+                    if matched.is_none() =>
+                {
+                    Self::record_response_terminal(runtime, request_envelope_id, disposition)?;
+                    matched = Some(value);
+                }
+                Some(SupervisorResponseOutcome::Progress) => {
+                    Self::record_response_progress(runtime, request_envelope_id)?;
+                }
+                Some(SupervisorResponseOutcome::Terminal { .. }) => {}
+                None => buffered.push_back(candidate),
             }
         }
 
@@ -324,6 +364,18 @@ impl MobSupervisorBridge {
         candidate: &PeerInputCandidate,
         request_envelope_id: uuid::Uuid,
     ) -> Result<Option<serde_json::Value>, MobError> {
+        Ok(
+            match Self::response_outcome(candidate, request_envelope_id)? {
+                Some(SupervisorResponseOutcome::Terminal { value, .. }) => Some(value),
+                Some(SupervisorResponseOutcome::Progress) | None => None,
+            },
+        )
+    }
+
+    fn response_outcome(
+        candidate: &PeerInputCandidate,
+        request_envelope_id: uuid::Uuid,
+    ) -> Result<Option<SupervisorResponseOutcome>, MobError> {
         let InteractionContent::Response {
             in_reply_to,
             status: _,
@@ -340,15 +392,23 @@ impl MobSupervisorBridge {
 
         match candidate.response_terminality {
             Some(TerminalityClass::Terminal { disposition }) => match disposition {
-                meerkat_core::interaction::TerminalDisposition::Completed
-                | meerkat_core::interaction::TerminalDisposition::Failed => {
-                    Ok(Some(result.clone()))
+                meerkat_core::interaction::TerminalDisposition::Completed => {
+                    Ok(Some(SupervisorResponseOutcome::Terminal {
+                        value: result.clone(),
+                        disposition: meerkat_core::handles::PeerTerminalDisposition::Completed,
+                    }))
+                }
+                meerkat_core::interaction::TerminalDisposition::Failed => {
+                    Ok(Some(SupervisorResponseOutcome::Terminal {
+                        value: result.clone(),
+                        disposition: meerkat_core::handles::PeerTerminalDisposition::Failed,
+                    }))
                 }
                 _ => Err(MobError::Internal(format!(
                     "supervisor bridge received response for {request_envelope_id} with unsupported terminal disposition"
                 ))),
             },
-            Some(TerminalityClass::Progress) => Ok(None),
+            Some(TerminalityClass::Progress) => Ok(Some(SupervisorResponseOutcome::Progress)),
             None => Err(MobError::Internal(format!(
                 "supervisor bridge received response for {request_envelope_id} without machine terminality"
             ))),
@@ -357,6 +417,65 @@ impl MobSupervisorBridge {
             ))),
         }
     }
+
+    fn peer_interaction_handle(
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+        request_envelope_id: uuid::Uuid,
+    ) -> Result<Arc<dyn meerkat_core::handles::PeerInteractionHandle>, MobError> {
+        runtime.peer_interaction_handle().ok_or_else(|| {
+            MobError::Internal(format!(
+                "supervisor request '{request_envelope_id}' has no peer-interaction authority"
+            ))
+        })
+    }
+
+    fn record_response_progress(
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+        request_envelope_id: uuid::Uuid,
+    ) -> Result<(), MobError> {
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(request_envelope_id);
+        let handle = Self::peer_interaction_handle(runtime, request_envelope_id)?;
+        handle.response_progress(corr_id).map_err(|error| {
+            MobError::Internal(format!(
+                "supervisor request '{request_envelope_id}' progress rejected by machine authority: {error}"
+            ))
+        })
+    }
+
+    fn record_response_terminal(
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+        request_envelope_id: uuid::Uuid,
+        disposition: meerkat_core::handles::PeerTerminalDisposition,
+    ) -> Result<(), MobError> {
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(request_envelope_id);
+        let handle = Self::peer_interaction_handle(runtime, request_envelope_id)?;
+        handle.response_terminal(corr_id, disposition).map_err(|error| {
+            MobError::Internal(format!(
+                "supervisor request '{request_envelope_id}' terminal response rejected by machine authority: {error}"
+            ))
+        })
+    }
+
+    fn record_request_timed_out(
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+        request_envelope_id: uuid::Uuid,
+    ) -> Result<(), MobError> {
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(request_envelope_id);
+        let handle = Self::peer_interaction_handle(runtime, request_envelope_id)?;
+        handle.request_timed_out(corr_id).map_err(|error| {
+            MobError::Internal(format!(
+                "supervisor request '{request_envelope_id}' timeout rejected by machine authority: {error}"
+            ))
+        })
+    }
+}
+
+enum SupervisorResponseOutcome {
+    Progress,
+    Terminal {
+        value: serde_json::Value,
+        disposition: meerkat_core::handles::PeerTerminalDisposition,
+    },
 }
 
 #[derive(Debug)]
@@ -387,6 +506,7 @@ mod tests {
     use super::*;
 
     use meerkat_core::PeerIngressMachinePolicy;
+    use meerkat_core::handles::PeerInteractionHandle as _;
     use meerkat_core::interaction::{InboxInteraction, InteractionId, ResponseStatus};
 
     fn response_candidate(
@@ -432,6 +552,90 @@ mod tests {
             lifecycle_peer: None,
             response_terminality: classification.response_terminality,
         }
+    }
+
+    #[test]
+    fn supervisor_runtime_installs_generated_peer_comms_authority() {
+        let authority = SupervisorAuthorityRecord::generate(
+            meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
+            ),
+        );
+        let runtime =
+            MobSupervisorBridge::build_runtime("mob/__mob_supervisor__/authority-test", &authority)
+                .expect("supervisor runtime should build");
+
+        assert!(
+            runtime.peer_comms_machine_authority_required(),
+            "supervisor bridge ingress must fail closed without generated peer-comms authority"
+        );
+        assert!(
+            runtime.peer_comms_handle().is_some(),
+            "supervisor bridge ingress terminality must come from generated peer-comms authority"
+        );
+        assert!(
+            runtime.peer_interaction_handle().is_some(),
+            "supervisor bridge request lifecycle must use generated peer-interaction authority"
+        );
+    }
+
+    #[test]
+    fn supervisor_terminal_response_cleans_pending_request_via_authority() {
+        let authority = SupervisorAuthorityRecord::generate(
+            meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
+            ),
+        );
+        let runtime =
+            MobSupervisorBridge::build_runtime("mob/__mob_supervisor__/terminal-test", &authority)
+                .expect("supervisor runtime should build");
+        let request_envelope_id = uuid::Uuid::new_v4();
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(request_envelope_id);
+        let handle = runtime
+            .peer_interaction_handle()
+            .expect("supervisor runtime installs peer interaction authority");
+        handle
+            .request_sent(corr_id, "worker-peer".to_string())
+            .expect("request should be recorded by generated authority");
+
+        MobSupervisorBridge::record_response_terminal(
+            &runtime,
+            request_envelope_id,
+            meerkat_core::handles::PeerTerminalDisposition::Completed,
+        )
+        .expect("terminal response should be recorded by generated authority");
+
+        assert_eq!(
+            handle.outbound_state(corr_id),
+            None,
+            "generated terminal transition should clean up pending supervisor request truth"
+        );
+    }
+
+    #[test]
+    fn supervisor_request_timeout_cleans_pending_request_via_authority() {
+        let authority = SupervisorAuthorityRecord::generate(
+            meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
+            ),
+        );
+        let runtime =
+            MobSupervisorBridge::build_runtime("mob/__mob_supervisor__/timeout-test", &authority)
+                .expect("supervisor runtime should build");
+        let request_envelope_id = uuid::Uuid::new_v4();
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(request_envelope_id);
+        let handle = runtime
+            .peer_interaction_handle()
+            .expect("supervisor runtime installs peer interaction authority");
+        handle
+            .request_sent(corr_id, "worker-peer".to_string())
+            .expect("request should be recorded by generated authority");
+
+        MobSupervisorBridge::record_request_timed_out(&runtime, request_envelope_id)
+            .expect("timeout should be recorded by generated authority");
+
+        assert_eq!(
+            handle.outbound_state(corr_id),
+            None,
+            "generated timeout transition should clean up pending supervisor request truth"
+        );
     }
 
     #[test]

@@ -2299,6 +2299,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PeerResponseTerminalArrivedFailedStopped`
   - anchors: `meerkat_machine`
   - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
+- `PeerResponseRejectedIdle`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `recycle_and_compaction`
+- `PeerResponseRejectedAttached`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`
+- `PeerResponseRejectedRunning`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `ops_completion_and_waiters`
+- `PeerResponseRejectedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+- `PeerResponseRejectedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`
 - `PeerRequestTimedOutIdle`
   - anchors: `meerkat_machine`
   - scenarios: `peer_reachability_probe`, `recycle_and_compaction`, `model_routing_and_image_operation`

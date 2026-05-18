@@ -165,6 +165,11 @@ pub fn spawn_comms_drain(
                                     Some(meerkat_core::handles::PeerTerminalDisposition::Failed)
                                 }
                                 _ => {
+                                    reject_peer_response_observation_via_authority(
+                                        &comms_runtime,
+                                        &candidate,
+                                        "unsupported terminal disposition",
+                                    );
                                     tracing::warn!(
                                         class = ?candidate_class,
                                         disposition = ?disposition,
@@ -179,6 +184,11 @@ pub fn spawn_comms_drain(
                                 Some(meerkat_core::interaction::TerminalityClass::Progress),
                             ) => None,
                             (class, terminality) => {
+                                reject_peer_response_observation_via_authority(
+                                    &comms_runtime,
+                                    &candidate,
+                                    "missing or inconsistent machine terminality",
+                                );
                                 tracing::warn!(
                                     class = ?class,
                                     terminality = ?terminality,
@@ -419,6 +429,40 @@ pub fn spawn_comms_drain(
             }
         }
     })
+}
+
+fn reject_peer_response_observation_via_authority(
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    candidate: &PeerInputCandidate,
+    reason: &'static str,
+) {
+    let InteractionContent::Response { in_reply_to, .. } = &candidate.interaction.content else {
+        tracing::warn!(
+            reason = reason,
+            interaction_id = %candidate.interaction.id,
+            "comms_drain: cannot reject malformed peer response observation without response correlation"
+        );
+        return;
+    };
+    let corr_id = meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0);
+    let Some(handle) = comms_runtime.peer_interaction_handle() else {
+        tracing::warn!(
+            reason = reason,
+            corr_id = %corr_id,
+            interaction_id = %candidate.interaction.id,
+            "comms_drain: malformed peer response observation has no peer-interaction authority"
+        );
+        return;
+    };
+    if let Err(err) = handle.response_rejected(corr_id) {
+        tracing::warn!(
+            error = %err,
+            reason = reason,
+            corr_id = %corr_id,
+            interaction_id = %candidate.interaction.id,
+            "PeerInteractionHandle::response_rejected rejected malformed peer response observation"
+        );
+    }
 }
 
 fn bridge_peer_identity(
@@ -1969,6 +2013,7 @@ mod tests {
     struct CountingPeerInteractionHandle {
         inbound: std::sync::Mutex<HashSet<meerkat_core::PeerCorrelationId>>,
         request_received_count: std::sync::atomic::AtomicUsize,
+        response_rejected_count: std::sync::atomic::AtomicUsize,
         response_replied_count: std::sync::atomic::AtomicUsize,
         reject_request_received: std::sync::atomic::AtomicBool,
     }
@@ -2001,6 +2046,11 @@ mod tests {
             self.response_replied_count
                 .load(std::sync::atomic::Ordering::SeqCst)
         }
+
+        fn response_rejected_count(&self) -> usize {
+            self.response_rejected_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
 
     impl meerkat_core::handles::PeerInteractionHandle for CountingPeerInteractionHandle {
@@ -2024,6 +2074,15 @@ mod tests {
             _corr_id: meerkat_core::PeerCorrelationId,
             _disposition: meerkat_core::handles::PeerTerminalDisposition,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            Ok(())
+        }
+
+        fn response_rejected(
+            &self,
+            _corr_id: meerkat_core::PeerCorrelationId,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            self.response_rejected_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
 
@@ -2302,6 +2361,46 @@ mod tests {
         assert_eq!(
             snapshot.ledger.input_count, 0,
             "missing terminality must fail closed before runtime admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_response_terminality_rejects_pending_peer_truth_via_authority() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        let peer_handle = Arc::new(CountingPeerInteractionHandle::default());
+        let peer_authority: Arc<dyn meerkat_core::handles::PeerInteractionHandle> =
+            peer_handle.clone();
+        let runtime = Arc::new(OneShotPeerRequestRuntime::new(
+            response_candidate(PeerInputClass::ResponseTerminal, None),
+            Some(peer_authority),
+        ));
+        let drain = spawn_comms_drain(
+            adapter.clone(),
+            session_id.clone(),
+            runtime.clone(),
+            Some(Duration::from_millis(10)),
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), drain)
+            .await
+            .expect("drain should exit after one malformed response candidate")
+            .expect("drain task should not panic");
+
+        assert_eq!(
+            peer_handle.response_rejected_count(),
+            1,
+            "malformed response observations must terminalize pending peer truth through generated authority"
+        );
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .expect("registered session snapshot");
+        assert_eq!(
+            snapshot.ledger.input_count, 0,
+            "malformed response terminality must fail closed before runtime admission"
         );
     }
 

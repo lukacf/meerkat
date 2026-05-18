@@ -6514,6 +6514,10 @@ pub mod inputs {
         pub disposition: PeerTerminalDisposition,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PeerResponseRejected {
+        pub corr_id: PeerCorrelationId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerRequestTimedOut {
         pub corr_id: PeerCorrelationId,
     }
@@ -6780,6 +6784,7 @@ pub enum Input {
     PeerRequestSent(inputs::PeerRequestSent),
     PeerResponseProgressArrived(inputs::PeerResponseProgressArrived),
     PeerResponseTerminalArrived(inputs::PeerResponseTerminalArrived),
+    PeerResponseRejected(inputs::PeerResponseRejected),
     PeerRequestTimedOut(inputs::PeerRequestTimedOut),
     PeerRequestReceived(inputs::PeerRequestReceived),
     PeerResponseReplied(inputs::PeerResponseReplied),
@@ -6972,6 +6977,7 @@ impl Input {
             Self::PeerRequestSent(_) => InputKind::PeerRequestSent,
             Self::PeerResponseProgressArrived(_) => InputKind::PeerResponseProgressArrived,
             Self::PeerResponseTerminalArrived(_) => InputKind::PeerResponseTerminalArrived,
+            Self::PeerResponseRejected(_) => InputKind::PeerResponseRejected,
             Self::PeerRequestTimedOut(_) => InputKind::PeerRequestTimedOut,
             Self::PeerRequestReceived(_) => InputKind::PeerRequestReceived,
             Self::PeerResponseReplied(_) => InputKind::PeerResponseReplied,
@@ -7159,6 +7165,7 @@ pub enum InputKind {
     PeerRequestSent,
     PeerResponseProgressArrived,
     PeerResponseTerminalArrived,
+    PeerResponseRejected,
     PeerRequestTimedOut,
     PeerRequestReceived,
     PeerResponseReplied,
@@ -8524,6 +8531,11 @@ pub enum TransitionId {
     PeerResponseTerminalArrivedFailedRunning,
     PeerResponseTerminalArrivedFailedRetired,
     PeerResponseTerminalArrivedFailedStopped,
+    PeerResponseRejectedIdle,
+    PeerResponseRejectedAttached,
+    PeerResponseRejectedRunning,
+    PeerResponseRejectedRetired,
+    PeerResponseRejectedStopped,
     PeerRequestTimedOutIdle,
     PeerRequestTimedOutAttached,
     PeerRequestTimedOutRunning,

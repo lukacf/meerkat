@@ -127,6 +127,16 @@ impl meerkat_core::handles::PeerInteractionHandle for TestPeerInteractionHandle 
         Ok(())
     }
 
+    fn response_rejected(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
+        if self.outbound.lock().remove(&corr_id).is_none() {
+            return Err(Self::rejection(
+                "PeerInteractionHandle::response_rejected",
+                corr_id,
+            ));
+        }
+        Ok(())
+    }
+
     fn request_timed_out(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
         if self.outbound.lock().remove(&corr_id).is_none() {
             return Err(Self::rejection(

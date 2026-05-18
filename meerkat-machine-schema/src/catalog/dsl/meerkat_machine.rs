@@ -2278,6 +2278,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             PeerRequestSent { corr_id: PeerCorrelationId, to: String },
             PeerResponseProgressArrived { corr_id: PeerCorrelationId },
             PeerResponseTerminalArrived { corr_id: PeerCorrelationId, disposition: PeerTerminalDisposition },
+            PeerResponseRejected { corr_id: PeerCorrelationId },
             PeerRequestTimedOut { corr_id: PeerCorrelationId },
             PeerRequestReceived { corr_id: PeerCorrelationId },
             PeerResponseReplied { corr_id: PeerCorrelationId },
@@ -9979,6 +9980,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input PeerResponseTerminalArrived { corr_id, disposition }
             guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
             guard "failed" { disposition == PeerTerminalDisposition::Failed }
+            update {
+                self.pending_peer_requests.remove(corr_id);
+            }
+            to Idle
+            emit PeerInteractionStateChanged { corr_id: corr_id, new_state: OutboundPeerRequestState::Failed }
+            emit PeerInteractionCleanup { corr_id: corr_id }
+        }
+
+        transition PeerResponseRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PeerResponseRejected { corr_id }
+            guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
             update {
                 self.pending_peer_requests.remove(corr_id);
             }

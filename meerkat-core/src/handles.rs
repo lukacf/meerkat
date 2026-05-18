@@ -1276,6 +1276,15 @@ pub trait PeerInteractionHandle: Send + Sync {
         disposition: PeerTerminalDisposition,
     ) -> Result<(), DslTransitionError>;
 
+    /// Fire `PeerResponseRejected { corr_id }`.
+    ///
+    /// Guard: `corr_id` is in `pending_peer_requests`. This is used when
+    /// peer ingress produced a response observation that cannot be admitted
+    /// as progress or terminal because the generated terminality feedback is
+    /// missing or inconsistent. The DSL owns the terminal cleanup; callers do
+    /// not substitute a response disposition.
+    fn response_rejected(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+
     /// Fire `PeerRequestTimedOut { corr_id }`.
     ///
     /// Guard: `corr_id` is in `pending_peer_requests`. Like `response_terminal`,

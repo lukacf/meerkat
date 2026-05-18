@@ -111,6 +111,25 @@ fn terminal_failed_removes_entry() {
 }
 
 #[test]
+fn response_rejected_removes_entry() {
+    let handle = new_handle();
+    let corr_id = PeerCorrelationId::new();
+    handle.request_sent(corr_id, "peer-a".into()).unwrap();
+    handle.response_rejected(corr_id).unwrap();
+    assert!(handle.outbound_state(corr_id).is_none());
+}
+
+#[test]
+fn response_rejected_rejects_unknown_corr_id() {
+    let handle = new_handle();
+    let corr_id = PeerCorrelationId::new();
+    let err = handle
+        .response_rejected(corr_id)
+        .expect_err("rejection on unknown corr_id must reject");
+    assert_eq!(err.context, "PeerInteractionHandle::response_rejected");
+}
+
+#[test]
 fn timeout_removes_entry_and_emits_cleanup() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();

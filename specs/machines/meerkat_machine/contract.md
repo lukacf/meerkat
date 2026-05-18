@@ -306,6 +306,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PeerRequestSent`(corr_id: PeerCorrelationId, to: String)
 - `PeerResponseProgressArrived`(corr_id: PeerCorrelationId)
 - `PeerResponseTerminalArrived`(corr_id: PeerCorrelationId, disposition: PeerTerminalDisposition)
+- `PeerResponseRejected`(corr_id: PeerCorrelationId)
 - `PeerRequestTimedOut`(corr_id: PeerCorrelationId)
 - `PeerRequestReceived`(corr_id: PeerCorrelationId)
 - `PeerResponseReplied`(corr_id: PeerCorrelationId)
@@ -6860,6 +6861,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `pending_exists`
   - `failed`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Stopped`
+
+### `PeerResponseRejectedIdle`
+- From: `Idle`
+- On: `PeerResponseRejected`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Idle`
+
+### `PeerResponseRejectedAttached`
+- From: `Attached`
+- On: `PeerResponseRejected`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Attached`
+
+### `PeerResponseRejectedRunning`
+- From: `Running`
+- On: `PeerResponseRejected`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Running`
+
+### `PeerResponseRejectedRetired`
+- From: `Retired`
+- On: `PeerResponseRejected`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Retired`
+
+### `PeerResponseRejectedStopped`
+- From: `Stopped`
+- On: `PeerResponseRejected`(corr_id)
+- Guards:
+  - `pending_exists`
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Stopped`
 

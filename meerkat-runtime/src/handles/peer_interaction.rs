@@ -179,6 +179,15 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
         )
     }
 
+    fn response_rejected(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
+        self.apply_input_and_dispatch_cleanup(
+            mm_dsl::MeerkatMachineInput::PeerResponseRejected {
+                corr_id: corr_id.into(),
+            },
+            "PeerInteractionHandle::response_rejected",
+        )
+    }
+
     fn request_timed_out(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
         self.apply_input_and_dispatch_cleanup(
             mm_dsl::MeerkatMachineInput::PeerRequestTimedOut {

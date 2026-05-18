@@ -3118,6 +3118,20 @@ mod tests {
             Ok(())
         }
 
+        fn response_rejected(
+            &self,
+            corr_id: meerkat_core::PeerCorrelationId,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            if self.outbound.lock().remove(&corr_id).is_none() {
+                return Err(Self::guard_rejected(
+                    "PeerInteractionHandle::response_rejected",
+                    corr_id,
+                ));
+            }
+            self.notify_cleanup(corr_id);
+            Ok(())
+        }
+
         fn request_timed_out(
             &self,
             corr_id: meerkat_core::PeerCorrelationId,

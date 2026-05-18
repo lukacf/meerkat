@@ -1159,6 +1159,9 @@ impl SessionService for MockSessionService {
                     memory: build
                         .map(|b| b.override_memory)
                         .unwrap_or(ToolCategoryOverride::from_effective(false)),
+                    schedule: build
+                        .map(|b| b.override_schedule)
+                        .unwrap_or(ToolCategoryOverride::Inherit),
                     workgraph: build
                         .map(|b| b.override_workgraph)
                         .unwrap_or(ToolCategoryOverride::Inherit),
@@ -2827,6 +2830,7 @@ fn sample_definition() -> MobDefinition {
                 shell: false,
                 comms: true,
                 memory: false,
+                workgraph: false,
                 mob: true,
                 schedule: false,
                 image_generation: false,
@@ -12640,6 +12644,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 comms: ToolCategoryOverride::Enable,
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
@@ -24514,13 +24519,10 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
     service.set_keep_alive_turns_complete_immediately(true);
 
-    let sid_a = handle
+    handle
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
-        .expect("spawn lead")
-        .bridge_session_id()
-        .expect("session-backed")
-        .clone();
+        .expect("spawn lead");
     let sid_b = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
@@ -24528,6 +24530,23 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
         .bridge_session_id()
         .expect("session-backed")
         .clone();
+
+    let unwired = handle
+        .send_peer_message(
+            AgentIdentity::from("l-1"),
+            AgentIdentity::from("w-1"),
+            "unwired peer send should fail",
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await;
+    assert!(
+        matches!(
+            unwired,
+            Err(MobError::WiringError(ref message))
+                if message.contains("requires wired members")
+        ),
+        "sender-aware peer send must enforce mob wiring before delivery: {unwired:?}"
+    );
 
     handle
         .wire(AgentIdentity::from("l-1"), MeerkatId::from("w-1"))
@@ -24537,13 +24556,11 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
     tokio::time::sleep(Duration::from_millis(50)).await;
     let baseline_prompts = service.applied_runtime_prompts(&sid_b).await.len();
 
-    let comms_a = service.real_comms(&sid_a).await.expect("comms for l-1");
-    let receipt = CoreCommsRuntime::send(
-        &*comms_a,
-        CommsCommand::PeerMessage {
-            to: test_peer_route(&*comms_a, &test_comms_name("worker", "w-1")).await,
-            body: "body: please inspect this image".to_string(),
-            blocks: Some(vec![
+    let receipt = handle
+        .send_peer_message(
+            AgentIdentity::from("l-1"),
+            AgentIdentity::from("w-1"),
+            meerkat_core::types::ContentInput::Blocks(vec![
                 meerkat_core::types::ContentBlock::Text {
                     text: "caption: this block text should survive".to_string(),
                 },
@@ -24552,14 +24569,15 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
                     data: "aGVsbG8=".into(),
                 },
             ]),
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
-        },
-    )
-    .await
-    .expect("PeerMessage should succeed");
-    assert!(
-        matches!(receipt, SendReceipt::PeerMessageSent { .. }),
-        "expected PeerMessageSent receipt, got: {receipt:?}"
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect("MobHandle peer message should succeed");
+    assert_eq!(receipt.from, AgentIdentity::from("l-1"));
+    assert_eq!(receipt.to, AgentIdentity::from("w-1"));
+    assert_eq!(
+        receipt.handling_mode,
+        meerkat_core::types::HandlingMode::Queue
     );
 
     let delivered = tokio::time::timeout(Duration::from_secs(2), async {
@@ -24570,9 +24588,7 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
                 .skip(baseline_prompts)
                 .find(|prompt| {
                     let text = prompt.text_content();
-                    prompt.has_images()
-                        || text.contains("body: please inspect this image")
-                        || text.contains("caption: this block text should survive")
+                    prompt.has_images() || text.contains("caption: this block text should survive")
                 })
                 .cloned()
             {

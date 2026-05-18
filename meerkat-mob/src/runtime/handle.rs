@@ -22,7 +22,8 @@ use crate::runtime::terminalization::{TerminalizationOutcome, TerminalizationTar
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::comms::{
-    PeerDirectoryEntry, PeerId, PeerReachability, PeerReachabilityReason, TrustedPeerDescriptor,
+    CommsCommand, PeerDirectoryEntry, PeerId, PeerReachability, PeerReachabilityReason,
+    SendReceipt, TrustedPeerDescriptor,
 };
 use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
@@ -576,6 +577,22 @@ pub struct MemberDeliveryReceipt {
     /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
     #[serde(skip)]
     pub(crate) fence_token: FenceToken,
+}
+
+/// Receipt returned by sender-aware mob peer-message delivery.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct PeerMessageReceipt {
+    /// Sender mob-member identity.
+    pub from: AgentIdentity,
+    /// Recipient mob-member identity.
+    pub to: AgentIdentity,
+    /// Transport envelope id for the typed peer message.
+    pub envelope_id: uuid::Uuid,
+    /// Whether the transport reported an acknowledgement.
+    pub acked: bool,
+    /// How the recipient should handle the peer message.
+    pub handling_mode: HandlingMode,
 }
 
 /// Receipt confirming that a unit of work was accepted by the work lane.
@@ -2759,6 +2776,41 @@ impl MobHandle {
         }
     }
 
+    /// Send typed peer communication from one mob member to another.
+    ///
+    /// This uses the sender member's comms runtime and the mob's installed
+    /// wiring/trust state. It is deliberately distinct from
+    /// [`MemberHandle::send`], which submits anonymous external work.
+    pub async fn send_peer_message(
+        &self,
+        from: AgentIdentity,
+        to: AgentIdentity,
+        content: impl Into<meerkat_core::types::ContentInput>,
+        handling_mode: HandlingMode,
+    ) -> Result<PeerMessageReceipt, MobError> {
+        let receipt = self
+            .send_actor_command(|reply_tx| MobCommand::SendPeerMessage {
+                from: MeerkatId::from(&from),
+                to: MeerkatId::from(&to),
+                content: content.into(),
+                handling_mode,
+                reply_tx,
+            })
+            .await??;
+        match receipt {
+            SendReceipt::PeerMessageSent { envelope_id, acked } => Ok(PeerMessageReceipt {
+                from,
+                to,
+                envelope_id,
+                acked,
+                handling_mode,
+            }),
+            other => Err(MobError::Internal(format!(
+                "unexpected peer-message receipt variant: {other:?}"
+            ))),
+        }
+    }
+
     /// Unwire a local member from either another local member or an external peer.
     pub async fn unwire<T>(&self, local: AgentIdentity, target: T) -> Result<(), MobError>
     where
@@ -3891,6 +3943,21 @@ impl MemberHandle {
             fence_token: snapshot.fence_token,
             handling_mode,
         })
+    }
+
+    /// Send typed peer communication from this member to another mob member.
+    ///
+    /// Unlike [`Self::send`], this preserves sender/recipient attribution by
+    /// routing through this member's comms runtime.
+    pub async fn send_peer_message(
+        &self,
+        to: AgentIdentity,
+        content: impl Into<meerkat_core::types::ContentInput>,
+        handling_mode: HandlingMode,
+    ) -> Result<PeerMessageReceipt, MobError> {
+        self.mob
+            .send_peer_message(self.identity(), to, content, handling_mode)
+            .await
     }
 
     /// Submit internal work to this member without external addressability checks.

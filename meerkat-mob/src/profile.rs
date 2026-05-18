@@ -25,6 +25,9 @@ pub struct ToolConfig {
     /// Enable memory/semantic search tools.
     #[serde(default)]
     pub memory: bool,
+    /// Expose the realm-scoped WorkGraph commitment tools to this member.
+    #[serde(default)]
+    pub workgraph: bool,
     /// Enable mob management tools (spawn, retire, wire, unwire, list).
     #[serde(default)]
     pub mob: bool,
@@ -206,6 +209,7 @@ mod tests {
             shell: false,
             comms: true,
             memory: false,
+            workgraph: true,
             mob: true,
             schedule: true,
             image_generation: true,
@@ -224,6 +228,7 @@ mod tests {
             shell: true,
             comms: false,
             memory: false,
+            workgraph: false,
             mob: false,
             schedule: false,
             image_generation: false,
@@ -245,6 +250,7 @@ mod tests {
                 shell: false,
                 comms: true,
                 memory: false,
+                workgraph: true,
                 mob: true,
                 schedule: false,
                 image_generation: false,
@@ -274,6 +280,7 @@ mod tests {
                 shell: true,
                 comms: true,
                 memory: false,
+                workgraph: false,
                 mob: false,
                 schedule: false,
                 image_generation: false,
@@ -300,6 +307,7 @@ mod tests {
         assert!(!config.shell);
         assert!(!config.comms);
         assert!(!config.memory);
+        assert!(!config.workgraph);
         assert!(!config.mob);
         assert!(!config.schedule);
         assert!(config.mcp.is_empty());

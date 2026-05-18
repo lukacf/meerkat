@@ -200,6 +200,18 @@ pub(super) enum MobCommand {
         payload: Box<SubmitWorkPayload>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Sender-aware peer communication between mob members.
+    ///
+    /// This is not work-lane ingress. The actor resolves the sender member's
+    /// comms runtime and the recipient peer route from the mob wiring graph,
+    /// then submits a typed `CommsCommand::PeerMessage`.
+    SendPeerMessage {
+        from: MeerkatId,
+        to: MeerkatId,
+        content: ContentInput,
+        handling_mode: meerkat_core::types::HandlingMode,
+        reply_tx: oneshot::Sender<Result<meerkat_core::comms::SendReceipt, MobError>>,
+    },
     /// Unified work-lane cancellation: the MobMachine DSL owns live-runtime
     /// membership and phase legality via the `CancelAllWork` transition;
     /// fence-token freshness is a shell-level concurrency invariant. The

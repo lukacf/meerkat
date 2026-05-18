@@ -679,6 +679,7 @@ pub struct ResumeOverrideMask {
     pub override_builtins: bool,
     pub override_shell: bool,
     pub override_memory: bool,
+    pub override_schedule: bool,
     pub override_workgraph: bool,
     pub override_mob: bool,
     pub override_image_generation: bool,

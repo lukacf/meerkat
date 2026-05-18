@@ -1057,7 +1057,8 @@ async fn build_agent_with_resume_uses_stored_metadata() {
             comms: ToolCategoryOverride::Disable,
             mob: ToolCategoryOverride::Disable,
             memory: ToolCategoryOverride::Disable,
-            workgraph: ToolCategoryOverride::Inherit,
+            schedule: ToolCategoryOverride::Enable,
+            workgraph: ToolCategoryOverride::Enable,
             image_generation: ToolCategoryOverride::Inherit,
             web_search: ToolCategoryOverride::Inherit,
             active_skills: None,
@@ -1109,6 +1110,16 @@ async fn build_agent_with_resume_uses_stored_metadata() {
         "resumed durable comms identity should win over current build defaults"
     );
     assert_eq!(
+        metadata.tooling.schedule,
+        ToolCategoryOverride::Enable,
+        "resumed durable schedule exposure intent should survive the factory metadata merge"
+    );
+    assert_eq!(
+        metadata.tooling.workgraph,
+        ToolCategoryOverride::Enable,
+        "resumed durable WorkGraph exposure intent should survive the factory metadata merge"
+    );
+    assert_eq!(
         metadata
             .peer_meta
             .as_ref()
@@ -1142,6 +1153,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
                 comms: ToolCategoryOverride::Disable,
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
@@ -1231,6 +1243,7 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
                 comms: ToolCategoryOverride::Disable,
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
@@ -1288,7 +1301,8 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
                 comms: ToolCategoryOverride::Inherit,
                 mob: ToolCategoryOverride::Inherit,
                 memory: ToolCategoryOverride::Inherit,
-                workgraph: ToolCategoryOverride::Inherit,
+                schedule: ToolCategoryOverride::Enable,
+                workgraph: ToolCategoryOverride::Enable,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 active_skills: None,
@@ -1308,9 +1322,13 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
         llm_client_override: Some(Arc::new(MockLlmClient)),
         resume_session: Some(session),
         override_builtins: ToolCategoryOverride::Inherit,
+        override_schedule: ToolCategoryOverride::Disable,
+        override_workgraph: ToolCategoryOverride::Disable,
         ..AgentBuildConfig::new("gpt-5.4")
     };
     build_config.resume_override_mask.override_builtins = true;
+    build_config.resume_override_mask.override_schedule = true;
+    build_config.resume_override_mask.override_workgraph = true;
 
     let agent = factory.build_agent(build_config, &config).await.unwrap();
     let metadata = agent
@@ -1319,6 +1337,8 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
         .expect("session should have metadata");
 
     assert_eq!(metadata.tooling.builtins, ToolCategoryOverride::Inherit);
+    assert_eq!(metadata.tooling.schedule, ToolCategoryOverride::Disable);
+    assert_eq!(metadata.tooling.workgraph, ToolCategoryOverride::Disable);
 }
 
 #[cfg(feature = "comms")]
@@ -1345,6 +1365,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
                 comms: ToolCategoryOverride::Enable,
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
@@ -1427,6 +1448,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
                 comms: ToolCategoryOverride::Enable,
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
@@ -1763,6 +1785,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
                 comms: ToolCategoryOverride::Disable,
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
@@ -1911,6 +1934,7 @@ async fn resume_with_inherit_mob_allows_factory_default() {
                 comms: ToolCategoryOverride::Disable,
                 mob: ToolCategoryOverride::Inherit, // <-- key: no opinion
                 memory: ToolCategoryOverride::Inherit,
+                schedule: ToolCategoryOverride::Inherit,
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
@@ -1967,6 +1991,7 @@ async fn resume_with_disable_mob_stays_disabled() {
                 comms: ToolCategoryOverride::Disable,
                 mob: ToolCategoryOverride::Disable, // <-- explicitly off
                 memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
@@ -2021,6 +2046,7 @@ async fn resume_with_enable_mob_stays_enabled() {
                 comms: ToolCategoryOverride::Disable,
                 mob: ToolCategoryOverride::Enable, // <-- explicitly on
                 memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
@@ -2097,6 +2123,7 @@ async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
                 comms: ToolCategoryOverride::Disable,
                 mob: ToolCategoryOverride::Enable,
                 memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
@@ -2241,6 +2268,7 @@ async fn resumed_explicit_mob_override_generates_create_only_operator_capabiliti
                 comms: ToolCategoryOverride::Disable,
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
@@ -2338,6 +2366,7 @@ async fn resumed_persisted_mob_authority_is_forwarded_to_mob_tools_factory() {
                 comms: ToolCategoryOverride::Disable,
                 mob: ToolCategoryOverride::Inherit,
                 memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,

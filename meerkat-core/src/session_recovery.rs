@@ -41,6 +41,7 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub override_builtins: Option<bool>,
     pub override_shell: Option<bool>,
     pub override_memory: Option<bool>,
+    pub override_schedule: Option<bool>,
     pub override_workgraph: Option<bool>,
     pub override_mob: Option<bool>,
     pub override_image_generation: Option<bool>,
@@ -215,6 +216,8 @@ pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides
         || overrides.override_builtins.is_some()
         || overrides.override_shell.is_some()
         || overrides.override_memory.is_some()
+        || overrides.override_schedule.is_some()
+        || overrides.override_workgraph.is_some()
         || overrides.override_mob.is_some()
         || overrides.override_image_generation.is_some()
         || overrides.override_web_search.is_some()
@@ -320,6 +323,7 @@ pub fn resolve_effective_turn_config(
         override_builtins: overrides.override_builtins.is_some(),
         override_shell: overrides.override_shell.is_some(),
         override_memory: overrides.override_memory.is_some(),
+        override_schedule: overrides.override_schedule.is_some(),
         override_workgraph: overrides.override_workgraph.is_some(),
         override_mob: overrides.override_mob.is_some(),
         override_image_generation: overrides.override_image_generation.is_some(),
@@ -401,7 +405,10 @@ pub fn resolve_effective_turn_config(
             .override_memory
             .map(ToolCategoryOverride::from_effective)
             .unwrap_or(metadata.tooling.memory),
-        override_schedule: ToolCategoryOverride::Inherit,
+        override_schedule: overrides
+            .override_schedule
+            .map(ToolCategoryOverride::from_effective)
+            .unwrap_or(metadata.tooling.schedule),
         override_workgraph: overrides
             .override_workgraph
             .map(ToolCategoryOverride::from_effective)
@@ -528,7 +535,8 @@ mod tests {
                     comms: ToolCategoryOverride::Inherit,
                     mob: ToolCategoryOverride::Inherit,
                     memory: ToolCategoryOverride::Enable,
-                    workgraph: ToolCategoryOverride::Inherit,
+                    schedule: ToolCategoryOverride::Enable,
+                    workgraph: ToolCategoryOverride::Enable,
                     image_generation: ToolCategoryOverride::Inherit,
                     web_search: ToolCategoryOverride::Inherit,
                     active_skills: Some(vec![skill_key("persisted-skill")]),
@@ -630,6 +638,11 @@ mod tests {
         assert_eq!(effective.build.override_builtins, metadata.tooling.builtins);
         assert_eq!(effective.build.override_shell, metadata.tooling.shell);
         assert_eq!(effective.build.override_memory, metadata.tooling.memory);
+        assert_eq!(effective.build.override_schedule, metadata.tooling.schedule);
+        assert_eq!(
+            effective.build.override_workgraph,
+            metadata.tooling.workgraph
+        );
         assert_eq!(
             effective.build.override_mob,
             ToolCategoryOverride::Enable,
@@ -877,6 +890,8 @@ mod tests {
                 override_builtins: Some(true),
                 override_shell: Some(false),
                 override_memory: Some(false),
+                override_schedule: Some(false),
+                override_workgraph: Some(false),
                 override_mob: Some(true),
                 preload_skills: Some(vec![skill_key("override-skill")]),
                 app_context: Some(json!({ "surface": "override" })),
@@ -911,6 +926,8 @@ mod tests {
         assert_eq!(build.override_builtins, ToolCategoryOverride::Enable);
         assert_eq!(build.override_shell, ToolCategoryOverride::Disable);
         assert_eq!(build.override_memory, ToolCategoryOverride::Disable);
+        assert_eq!(build.override_schedule, ToolCategoryOverride::Disable);
+        assert_eq!(build.override_workgraph, ToolCategoryOverride::Disable);
         assert_eq!(build.override_mob, ToolCategoryOverride::Enable);
         assert_eq!(
             build.preload_skills,
@@ -1122,6 +1139,20 @@ mod tests {
         assert!(
             has_materialization_overrides(&overrides),
             "tooling overrides require recovery/materialization"
+        );
+
+        overrides.override_builtins = None;
+        overrides.override_schedule = Some(true);
+        assert!(
+            has_materialization_overrides(&overrides),
+            "schedule tooling overrides require recovery/materialization"
+        );
+
+        overrides.override_schedule = None;
+        overrides.override_workgraph = Some(true);
+        assert!(
+            has_materialization_overrides(&overrides),
+            "WorkGraph tooling overrides require recovery/materialization"
         );
     }
 

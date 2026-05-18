@@ -99,6 +99,7 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
             shell: input.tools.shell,
             comms: input.tools.comms,
             memory: input.tools.memory,
+            workgraph: input.tools.workgraph,
             mob: input.tools.mob,
             schedule: input.tools.schedule,
             image_generation: input.tools.image_generation,
@@ -367,6 +368,7 @@ mod tests {
                 skills: vec!["triage".to_string()],
                 tools: MobToolConfigInput {
                     comms: true,
+                    workgraph: true,
                     mob: true,
                     ..MobToolConfigInput::default()
                 },
@@ -474,6 +476,7 @@ mod tests {
             .expect("lead profile should be inline");
         assert_eq!(lead.backend, Some(MobBackendKind::External));
         assert_eq!(lead.runtime_mode, MobRuntimeMode::TurnDriven);
+        assert!(lead.tools.workgraph);
         assert_eq!(lead.tools.rust_bundles, Vec::<String>::new());
 
         let flow = definition

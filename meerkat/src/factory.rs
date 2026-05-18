@@ -2306,6 +2306,12 @@ impl AgentFactory {
         if !mask.override_memory {
             build_config.override_memory = metadata.tooling.memory;
         }
+        if !mask.override_schedule {
+            build_config.override_schedule = metadata.tooling.schedule;
+        }
+        if !mask.override_workgraph {
+            build_config.override_workgraph = metadata.tooling.workgraph;
+        }
         if !mask.override_mob {
             build_config.override_mob = metadata.tooling.mob;
             build_config.mob_tool_authority_context = build_config
@@ -3207,6 +3213,10 @@ impl AgentFactory {
             !matches!(build_config.override_shell, ToolCategoryOverride::Inherit);
         build_config.resume_override_mask.override_memory |=
             !matches!(build_config.override_memory, ToolCategoryOverride::Inherit);
+        build_config.resume_override_mask.override_schedule |= !matches!(
+            build_config.override_schedule,
+            ToolCategoryOverride::Inherit
+        );
         build_config.resume_override_mask.override_workgraph |= !matches!(
             build_config.override_workgraph,
             ToolCategoryOverride::Inherit
@@ -4575,6 +4585,7 @@ impl AgentFactory {
             // (metadata.tooling.comms is left unchanged)
             metadata.tooling.mob = build_config.override_mob;
             metadata.tooling.memory = build_config.override_memory;
+            metadata.tooling.schedule = build_config.override_schedule;
             metadata.tooling.workgraph = build_config.override_workgraph;
             metadata.tooling.image_generation = build_config.override_image_generation;
             metadata.tooling.web_search = build_config.override_web_search;
@@ -4605,6 +4616,7 @@ impl AgentFactory {
                     comms: ToolCategoryOverride::Inherit,
                     mob: build_config.override_mob,
                     memory: build_config.override_memory,
+                    schedule: build_config.override_schedule,
                     workgraph: build_config.override_workgraph,
                     image_generation: build_config.override_image_generation,
                     web_search: build_config.override_web_search,

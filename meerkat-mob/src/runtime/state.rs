@@ -213,10 +213,9 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<meerkat_core::comms::SendReceipt, MobError>>,
     },
     /// Unified work-lane cancellation: the MobMachine DSL owns live-runtime
-    /// membership and phase legality via the `CancelAllWork` transition;
-    /// fence-token freshness is a shell-level concurrency invariant. The
-    /// actor feeds the machine, then interrupts the member when the
-    /// transition lands.
+    /// membership, fence-token freshness, and phase legality via the
+    /// `CancelAllWork` transition. The actor feeds the machine, then
+    /// interrupts the member when the transition lands.
     CancelAllWork {
         runtime_id: AgentRuntimeId,
         fence_token: FenceToken,

@@ -147,9 +147,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveSubmitWorkRejectionMemberNotFound`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
-- `ResolveSubmitWorkRejectionMemberRetiring`
+- `ResolveSubmitWorkRejectionCurrentRuntimeNotLive`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionStaleFenceToken`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionRetiringAsMemberNotFound`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 - `ResolveSubmitWorkRejectionNotExternallyAddressable`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -591,6 +597,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CancelAllWorkRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
+- `ResolveCancelAllWorkRejectionStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveCancelAllWorkRejectionCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveCancelAllWorkRejectionDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveCancelAllWorkRejectionMemberNotFound`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `ResolveCancelAllWorkRejectionCurrentRuntimeNotLive`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveCancelAllWorkRejectionStaleFenceToken`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 
 ### Effects
 - `RequestRuntimeBinding`
@@ -602,6 +626,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SubmitWorkRejected`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `flow-and-run-lifecycle`
+- `CancelAllWorkRejected`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 - `RequestRuntimeRetire`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`

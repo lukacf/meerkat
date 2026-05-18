@@ -957,6 +957,10 @@ pub fn dsl_mob_machine_production_schema() -> MachineSchema {
 pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
+            NamedTypeBinding::string_enum(
+                "CancelAllWorkRejectReasonKind",
+                &["MobNotRunning", "MemberNotFound", "StaleFenceToken"],
+            ),
             NamedTypeBinding::string_enum("CollectionPolicyKind", &["All", "Any", "Quorum"]),
             NamedTypeBinding::string_enum("DependencyMode", &["All", "Any"]),
             NamedTypeBinding::u64("FenceToken"),
@@ -1112,7 +1116,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 &[
                     "MobNotRunning",
                     "MemberNotFound",
-                    "MemberRetiring",
+                    "StaleFenceToken",
                     "NotExternallyAddressable",
                 ],
             ),

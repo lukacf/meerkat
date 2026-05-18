@@ -129,10 +129,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `UnwireExternalPeer`(edge: ExternalPeerEdge)
 - `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
-- `SubmitWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
-- `ResolveSubmitWorkRejection`(agent_runtime_id: AgentRuntimeId, origin: WorkOrigin)
+- `SubmitWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
+- `ResolveSubmitWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, origin: WorkOrigin)
 - `CancelWork`(work_id: WorkId)
-- `CancelAllWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `CancelAllWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `ResolveCancelAllWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `Stop`
 - `Resume`
 - `Complete`
@@ -216,7 +217,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Effects
 - `RequestRuntimeBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId)
 - `RequestRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
-- `SubmitWorkRejected`(agent_runtime_id: AgentRuntimeId, origin: WorkOrigin, reason: SubmitWorkRejectReasonKind)
+- `SubmitWorkRejected`(agent_runtime_id: AgentRuntimeId, origin: WorkOrigin, reason: SubmitWorkRejectReasonKind, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>)
+- `CancelAllWorkRejected`(agent_runtime_id: AgentRuntimeId, reason: CancelAllWorkRejectReasonKind, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>)
 - `RequestRuntimeRetire`(session_id: SessionId)
 - `RequestRuntimeDestroy`(session_id: SessionId)
 - `RequestSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
@@ -330,7 +332,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ObserveRuntimeReady`(agent_runtime_id, fence_token)
 - Guards:
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - To: `Running`
 
 ### `StartupMarkReadyRunning`
@@ -338,7 +340,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartupMarkReady`(agent_runtime_id, fence_token)
 - Guards:
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - To: `Running`
 
 ### `StartupMarkReadyStopped`
@@ -346,7 +348,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartupMarkReady`(agent_runtime_id, fence_token)
 - Guards:
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - To: `Stopped`
 
 ### `StartupMarkReadyCompleted`
@@ -354,7 +356,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartupMarkReady`(agent_runtime_id, fence_token)
 - Guards:
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - To: `Completed`
 
 ### `KickoffMarkPendingRunning`
@@ -518,10 +520,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SubmitWorkRunningExternal`
 - From: `Running`
-- On: `SubmitWork`(agent_runtime_id, fence_token, work_id, origin)
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin)
 - Guards:
   - `active_members_present`
+  - `identity_binding_matches`
   - `current_binding_matches`
+  - `fence_token_matches`
   - `member_not_retiring`
   - `external_origin`
   - `runtime_externally_addressable`
@@ -530,10 +534,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SubmitWorkRunningInternal`
 - From: `Running`
-- On: `SubmitWork`(agent_runtime_id, fence_token, work_id, origin)
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin)
 - Guards:
   - `active_members_present`
+  - `identity_binding_matches`
   - `current_binding_matches`
+  - `fence_token_matches`
   - `member_not_retiring`
   - `internal_origin`
 - Emits: `RequestRuntimeIngress`
@@ -541,44 +547,67 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSubmitWorkRejectionStopped`
 - From: `Stopped`
-- On: `ResolveSubmitWorkRejection`(agent_runtime_id, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
 - Emits: `SubmitWorkRejected`
 - To: `Stopped`
 
 ### `ResolveSubmitWorkRejectionCompleted`
 - From: `Completed`
-- On: `ResolveSubmitWorkRejection`(agent_runtime_id, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
 - Emits: `SubmitWorkRejected`
 - To: `Completed`
 
 ### `ResolveSubmitWorkRejectionDestroyed`
 - From: `Destroyed`
-- On: `ResolveSubmitWorkRejection`(agent_runtime_id, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
 - Emits: `SubmitWorkRejected`
 - To: `Destroyed`
 
 ### `ResolveSubmitWorkRejectionMemberNotFound`
 - From: `Running`
-- On: `ResolveSubmitWorkRejection`(agent_runtime_id, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
 - Guards:
-  - `runtime_not_live`
+  - `identity_absent`
 - Emits: `SubmitWorkRejected`
 - To: `Running`
 
-### `ResolveSubmitWorkRejectionMemberRetiring`
+### `ResolveSubmitWorkRejectionCurrentRuntimeNotLive`
 - From: `Running`
-- On: `ResolveSubmitWorkRejection`(agent_runtime_id, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
 - Guards:
+  - `identity_present`
+  - `current_runtime_not_live`
+- Emits: `SubmitWorkRejected`
+- To: `Running`
+
+### `ResolveSubmitWorkRejectionStaleFenceToken`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- Guards:
+  - `identity_present`
+  - `current_runtime_live`
+  - `runtime_or_fence_stale`
+- Emits: `SubmitWorkRejected`
+- To: `Running`
+
+### `ResolveSubmitWorkRejectionRetiringAsMemberNotFound`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- Guards:
+  - `identity_binding_matches`
   - `runtime_live`
+  - `fence_token_matches`
   - `member_retiring`
 - Emits: `SubmitWorkRejected`
 - To: `Running`
 
 ### `ResolveSubmitWorkRejectionNotExternallyAddressable`
 - From: `Running`
-- On: `ResolveSubmitWorkRejection`(agent_runtime_id, origin)
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
 - Guards:
+  - `identity_binding_matches`
   - `runtime_live`
+  - `fence_token_matches`
   - `member_not_retiring`
   - `external_origin`
   - `runtime_not_externally_addressable`
@@ -590,7 +619,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RetireMember`(agent_runtime_id, fence_token, session_id)
 - Guards:
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - Emits: `RequestRuntimeRetire`
 - To: `Running`
 
@@ -599,7 +628,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ObserveRuntimeRetired`(agent_runtime_id, fence_token)
 - Guards:
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Running`
 
@@ -646,7 +675,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ObserveRuntimeDestroyed`(agent_runtime_id, fence_token)
 - Guards:
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Destroyed`
 
@@ -1861,12 +1890,58 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CancelAllWorkRunning`
 - From: `Running`
-- On: `CancelAllWork`(agent_runtime_id, fence_token)
+- On: `CancelAllWork`(agent_identity, agent_runtime_id, fence_token)
 - Guards:
   - `active_members_present`
+  - `identity_binding_matches`
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - Emits: `FlowTerminalized`
+- To: `Running`
+
+### `ResolveCancelAllWorkRejectionStopped`
+- From: `Stopped`
+- On: `ResolveCancelAllWorkRejection`(agent_identity, agent_runtime_id, fence_token)
+- Emits: `CancelAllWorkRejected`
+- To: `Stopped`
+
+### `ResolveCancelAllWorkRejectionCompleted`
+- From: `Completed`
+- On: `ResolveCancelAllWorkRejection`(agent_identity, agent_runtime_id, fence_token)
+- Emits: `CancelAllWorkRejected`
+- To: `Completed`
+
+### `ResolveCancelAllWorkRejectionDestroyed`
+- From: `Destroyed`
+- On: `ResolveCancelAllWorkRejection`(agent_identity, agent_runtime_id, fence_token)
+- Emits: `CancelAllWorkRejected`
+- To: `Destroyed`
+
+### `ResolveCancelAllWorkRejectionMemberNotFound`
+- From: `Running`
+- On: `ResolveCancelAllWorkRejection`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_absent`
+- Emits: `CancelAllWorkRejected`
+- To: `Running`
+
+### `ResolveCancelAllWorkRejectionCurrentRuntimeNotLive`
+- From: `Running`
+- On: `ResolveCancelAllWorkRejection`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_present`
+  - `current_runtime_not_live`
+- Emits: `CancelAllWorkRejected`
+- To: `Running`
+
+### `ResolveCancelAllWorkRejectionStaleFenceToken`
+- From: `Running`
+- On: `ResolveCancelAllWorkRejection`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_present`
+  - `current_runtime_live`
+  - `runtime_or_fence_stale`
+- Emits: `CancelAllWorkRejected`
 - To: `Running`
 
 ## Coverage

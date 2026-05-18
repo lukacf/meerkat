@@ -1426,10 +1426,9 @@ impl MobHandle {
             } => {
                 // Identity derivation is a projection, not a decision: the
                 // MobMachine DSL CancelAllWork guards own live-runtime
-                // membership legality; the fence check is a shell-level
-                // concurrency freshness invariant. The actor's unified
-                // `handle_cancel_all_work` forwards both to the DSL and
-                // then dispatches the interrupt when the machine accepts.
+                // membership, fence-token freshness, and phase legality. The
+                // actor's unified `handle_cancel_all_work` forwards both to
+                // the DSL and then dispatches the interrupt when accepted.
                 self.send_actor_command(|reply_tx| MobCommand::CancelAllWork {
                     runtime_id,
                     fence_token,

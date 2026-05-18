@@ -35,7 +35,16 @@ impl<T: Into<String>> From<T> for AgentIdentity {
 /// The real `AgentRuntimeId` is a struct `{ identity: AgentIdentity, generation: Generation }`.
 /// The DSL uses a single string key `"identity:generation"` for Set/Map operations.
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 pub struct AgentRuntimeId(pub String);
 
@@ -612,8 +621,17 @@ pub enum SubmitWorkRejectReasonKind {
     #[default]
     MobNotRunning,
     MemberNotFound,
-    MemberRetiring,
+    StaleFenceToken,
     NotExternallyAddressable,
+}
+
+/// Typed public rejection class for [`MobMachineInput::CancelAllWork`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CancelAllWorkRejectReasonKind {
+    #[default]
+    MobNotRunning,
+    MemberNotFound,
+    StaleFenceToken,
 }
 
 /// Typed work-origin classification for
@@ -1047,7 +1065,11 @@ mod tests {
         .expect("CreateRunSeed should be accepted before child seed");
     }
 
-    fn seed_live_member(authority: &mut MobMachineAuthority, runtime_id: &AgentRuntimeId) {
+    fn seed_live_member(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        runtime_id: &AgentRuntimeId,
+    ) {
         authority.state.live_runtime_ids.insert(runtime_id.clone());
         authority
             .state
@@ -1057,6 +1079,10 @@ mod tests {
             .state
             .runtime_fence_tokens
             .insert(runtime_id.clone(), FenceToken(7));
+        authority
+            .state
+            .identity_to_runtime
+            .insert(identity.clone(), runtime_id.clone());
     }
 
     fn seed_root_frame(
@@ -1154,12 +1180,14 @@ mod tests {
     #[test]
     fn submit_work_rejects_retiring_runtime() {
         let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("worker");
         let runtime_id = AgentRuntimeId::from("worker:1");
-        seed_live_member(&mut authority, &runtime_id);
+        seed_live_member(&mut authority, &identity, &runtime_id);
 
         MobMachineMutator::apply(
             &mut authority,
             MobMachineInput::SubmitWork {
+                agent_identity: identity.clone(),
                 agent_runtime_id: runtime_id.clone(),
                 fence_token: FenceToken(7),
                 work_id: WorkId::from("before-retire"),
@@ -1176,7 +1204,8 @@ mod tests {
         let rejected = MobMachineMutator::apply(
             &mut authority,
             MobMachineInput::SubmitWork {
-                agent_runtime_id: runtime_id,
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
                 fence_token: FenceToken(7),
                 work_id: WorkId::from("during-retire"),
                 origin: WorkOrigin::External,
@@ -1190,7 +1219,9 @@ mod tests {
         let rejection = MobMachineMutator::apply(
             &mut authority,
             MobMachineInput::ResolveSubmitWorkRejection {
-                agent_runtime_id: AgentRuntimeId::from("worker:1"),
+                agent_identity: identity,
+                agent_runtime_id: runtime_id,
+                fence_token: FenceToken(7),
                 origin: WorkOrigin::External,
             },
         )
@@ -1199,11 +1230,57 @@ mod tests {
             rejection.effects.iter().any(|effect| matches!(
                 effect,
                 MobMachineEffect::SubmitWorkRejected {
-                    reason: SubmitWorkRejectReasonKind::MemberRetiring,
+                    reason: SubmitWorkRejectReasonKind::MemberNotFound,
                     ..
                 }
             )),
             "SubmitWork rejection public class must be owned by generated feedback"
+        );
+    }
+
+    #[test]
+    fn submit_work_rejects_stale_fence_token_with_typed_feedback() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("worker");
+        let runtime_id = AgentRuntimeId::from("worker:1");
+        seed_live_member(&mut authority, &identity, &runtime_id);
+
+        let rejected = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SubmitWork {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: FenceToken(99),
+                work_id: WorkId::from("stale"),
+                origin: WorkOrigin::Internal,
+            },
+        );
+        assert!(
+            rejected.is_err(),
+            "stale fence token must be rejected by generated SubmitWork guards"
+        );
+
+        let rejection = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ResolveSubmitWorkRejection {
+                agent_identity: identity,
+                agent_runtime_id: runtime_id,
+                fence_token: FenceToken(99),
+                origin: WorkOrigin::Internal,
+            },
+        )
+        .expect("stale SubmitWork rejection should have typed machine feedback");
+        assert!(
+            rejection.effects.iter().any(|effect| matches!(
+                effect,
+                MobMachineEffect::SubmitWorkRejected {
+                    reason: SubmitWorkRejectReasonKind::StaleFenceToken,
+                    expected_fence_token: Some(FenceToken(7)),
+                    actual_fence_token: Some(FenceToken(99)),
+                    ..
+                }
+            )),
+            "stale SubmitWork public class and fence payload must be generated feedback"
         );
     }
 

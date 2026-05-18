@@ -352,10 +352,11 @@ macro_rules! mob_catalog_machine_dsl {
             UnwireExternalPeer { edge: ExternalPeerEdge },
             SessionIngressDetachedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
             SessionIngressDetachFailedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String },
-            SubmitWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
-            ResolveSubmitWorkRejection { agent_runtime_id: AgentRuntimeId, origin: Enum<WorkOrigin> },
+            SubmitWork { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
+            ResolveSubmitWorkRejection { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, origin: Enum<WorkOrigin> },
             CancelWork { work_id: WorkId },
-            CancelAllWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            CancelAllWork { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            ResolveCancelAllWorkRejection { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             Stop,
             Resume,
             Complete,
@@ -442,7 +443,8 @@ macro_rules! mob_catalog_machine_dsl {
         effect MobMachineEffect {
             RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
             RequestRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
-            SubmitWorkRejected { agent_runtime_id: AgentRuntimeId, origin: Enum<WorkOrigin>, reason: Enum<SubmitWorkRejectReasonKind> },
+            SubmitWorkRejected { agent_runtime_id: AgentRuntimeId, origin: Enum<WorkOrigin>, reason: Enum<SubmitWorkRejectReasonKind>, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken> },
+            CancelAllWorkRejected { agent_runtime_id: AgentRuntimeId, reason: Enum<CancelAllWorkRejectReasonKind>, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken> },
             RequestRuntimeRetire { session_id: SessionId },
             RequestRuntimeDestroy { session_id: SessionId },
             RequestSessionIngressDetachForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
@@ -493,6 +495,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
         disposition RequestRuntimeIngress => routed [MeerkatMachine],
         disposition SubmitWorkRejected => local,
+        disposition CancelAllWorkRejected => local,
         disposition RequestRuntimeRetire => routed [MeerkatMachine],
         disposition RequestRuntimeDestroy => routed [MeerkatMachine],
         disposition RequestSessionIngressDetachForMobDestroy => external handoff mob_destroying_session_ingress,
@@ -731,7 +734,7 @@ macro_rules! mob_catalog_machine_dsl {
             on signal ObserveRuntimeReady { agent_runtime_id, fence_token }
             guard { self.lifecycle_phase == Phase::Running }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "fence_token_present" { fence_token == fence_token }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             update {
                 self.member_startup_binding_requested.remove(agent_runtime_id);
                 self.member_startup_runtime_ready.insert(agent_runtime_id);
@@ -744,7 +747,7 @@ macro_rules! mob_catalog_machine_dsl {
             per_phase [Running, Stopped, Completed]
             on input StartupMarkReady { agent_runtime_id, fence_token }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "fence_token_present" { fence_token == fence_token }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             update {
                 self.member_startup_binding_requested.remove(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
@@ -892,10 +895,12 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition SubmitWorkRunningExternal {
-            on input SubmitWork { agent_runtime_id, fence_token, work_id, origin }
+            on input SubmitWork { agent_identity, agent_runtime_id, fence_token, work_id, origin }
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
             guard "external_origin" { origin == WorkOrigin::External }
             guard "runtime_externally_addressable" { self.externally_addressable_runtime_ids.contains(agent_runtime_id) }
@@ -905,10 +910,12 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition SubmitWorkRunningInternal {
-            on input SubmitWork { agent_runtime_id, fence_token, work_id, origin }
+            on input SubmitWork { agent_identity, agent_runtime_id, fence_token, work_id, origin }
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
             guard "internal_origin" { origin == WorkOrigin::Internal }
             update {}
@@ -917,72 +924,122 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition ResolveSubmitWorkRejectionStopped {
-            on input ResolveSubmitWorkRejection { agent_runtime_id, origin }
+            on input ResolveSubmitWorkRejection { agent_identity, agent_runtime_id, fence_token, origin }
             guard { self.lifecycle_phase == Phase::Stopped }
             update {}
             to Stopped
             emit SubmitWorkRejected {
                 agent_runtime_id: agent_runtime_id,
                 origin: origin,
-                reason: SubmitWorkRejectReasonKind::MobNotRunning
+                reason: SubmitWorkRejectReasonKind::MobNotRunning,
+                expected_fence_token: None,
+                actual_fence_token: None
             }
         }
 
         transition ResolveSubmitWorkRejectionCompleted {
-            on input ResolveSubmitWorkRejection { agent_runtime_id, origin }
+            on input ResolveSubmitWorkRejection { agent_identity, agent_runtime_id, fence_token, origin }
             guard { self.lifecycle_phase == Phase::Completed }
             update {}
             to Completed
             emit SubmitWorkRejected {
                 agent_runtime_id: agent_runtime_id,
                 origin: origin,
-                reason: SubmitWorkRejectReasonKind::MobNotRunning
+                reason: SubmitWorkRejectReasonKind::MobNotRunning,
+                expected_fence_token: None,
+                actual_fence_token: None
             }
         }
 
         transition ResolveSubmitWorkRejectionDestroyed {
-            on input ResolveSubmitWorkRejection { agent_runtime_id, origin }
+            on input ResolveSubmitWorkRejection { agent_identity, agent_runtime_id, fence_token, origin }
             guard { self.lifecycle_phase == Phase::Destroyed }
             update {}
             to Destroyed
             emit SubmitWorkRejected {
                 agent_runtime_id: agent_runtime_id,
                 origin: origin,
-                reason: SubmitWorkRejectReasonKind::MobNotRunning
+                reason: SubmitWorkRejectReasonKind::MobNotRunning,
+                expected_fence_token: None,
+                actual_fence_token: None
             }
         }
 
         transition ResolveSubmitWorkRejectionMemberNotFound {
-            on input ResolveSubmitWorkRejection { agent_runtime_id, origin }
+            on input ResolveSubmitWorkRejection { agent_identity, agent_runtime_id, fence_token, origin }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "runtime_not_live" { !self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "identity_absent" { !self.identity_to_runtime.contains_key(agent_identity) }
             update {}
             to Running
             emit SubmitWorkRejected {
                 agent_runtime_id: agent_runtime_id,
                 origin: origin,
-                reason: SubmitWorkRejectReasonKind::MemberNotFound
+                reason: SubmitWorkRejectReasonKind::MemberNotFound,
+                expected_fence_token: None,
+                actual_fence_token: None
             }
         }
 
-        transition ResolveSubmitWorkRejectionMemberRetiring {
-            on input ResolveSubmitWorkRejection { agent_runtime_id, origin }
+        transition ResolveSubmitWorkRejectionCurrentRuntimeNotLive {
+            on input ResolveSubmitWorkRejection { agent_identity, agent_runtime_id, fence_token, origin }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) }
+            guard "current_runtime_not_live" { !self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            update {}
+            to Running
+            emit SubmitWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                origin: origin,
+                reason: SubmitWorkRejectReasonKind::MemberNotFound,
+                expected_fence_token: None,
+                actual_fence_token: None
+            }
+        }
+
+        transition ResolveSubmitWorkRejectionStaleFenceToken {
+            on input ResolveSubmitWorkRejection { agent_identity, agent_runtime_id, fence_token, origin }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) }
+            guard "current_runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            guard "runtime_or_fence_stale" {
+                self.identity_to_runtime.get_cloned(agent_identity) != Some(agent_runtime_id)
+                || self.runtime_fence_tokens.get_copied(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(fence_token)
+            }
+            update {}
+            to Running
+            emit SubmitWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                origin: origin,
+                reason: SubmitWorkRejectReasonKind::StaleFenceToken,
+                expected_fence_token: self.runtime_fence_tokens.get_copied(self.identity_to_runtime.get_cloned(agent_identity).get("value")),
+                actual_fence_token: Some(fence_token)
+            }
+        }
+
+        transition ResolveSubmitWorkRejectionRetiringAsMemberNotFound {
+            on input ResolveSubmitWorkRejection { agent_identity, agent_runtime_id, fence_token, origin }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
             update {}
             to Running
             emit SubmitWorkRejected {
                 agent_runtime_id: agent_runtime_id,
                 origin: origin,
-                reason: SubmitWorkRejectReasonKind::MemberRetiring
+                reason: SubmitWorkRejectReasonKind::MemberNotFound,
+                expected_fence_token: None,
+                actual_fence_token: None
             }
         }
 
         transition ResolveSubmitWorkRejectionNotExternallyAddressable {
-            on input ResolveSubmitWorkRejection { agent_runtime_id, origin }
+            on input ResolveSubmitWorkRejection { agent_identity, agent_runtime_id, fence_token, origin }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
             guard "external_origin" { origin == WorkOrigin::External }
             guard "runtime_not_externally_addressable" { !self.externally_addressable_runtime_ids.contains(agent_runtime_id) }
@@ -991,7 +1048,9 @@ macro_rules! mob_catalog_machine_dsl {
             emit SubmitWorkRejected {
                 agent_runtime_id: agent_runtime_id,
                 origin: origin,
-                reason: SubmitWorkRejectReasonKind::NotExternallyAddressable
+                reason: SubmitWorkRejectReasonKind::NotExternallyAddressable,
+                expected_fence_token: None,
+                actual_fence_token: None
             }
         }
 
@@ -999,7 +1058,7 @@ macro_rules! mob_catalog_machine_dsl {
             on signal RetireMember { agent_runtime_id, fence_token, session_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "fence_token_present" { fence_token == fence_token }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
             }
@@ -1011,7 +1070,7 @@ macro_rules! mob_catalog_machine_dsl {
             on signal ObserveRuntimeRetired { agent_runtime_id, fence_token }
             guard { self.lifecycle_phase == Phase::Running }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "fence_token_present" { fence_token == fence_token }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             update {
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.externally_addressable_runtime_ids.remove(agent_runtime_id);
@@ -1152,7 +1211,7 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.lifecycle_phase == Phase::Destroyed
             }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "fence_token_present" { fence_token == fence_token }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             update {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
@@ -3070,16 +3129,104 @@ macro_rules! mob_catalog_machine_dsl {
         // =====================================================================
 
         transition CancelAllWorkRunning {
-            on input CancelAllWork { agent_runtime_id, fence_token }
+            on input CancelAllWork { agent_identity, agent_runtime_id, fence_token }
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "fence_token_present" { fence_token == fence_token }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             update {
                 self.active_run_count = 0;
             }
             to Running
             emit FlowTerminalized
+        }
+
+        transition ResolveCancelAllWorkRejectionStopped {
+            on input ResolveCancelAllWorkRejection { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            update {}
+            to Stopped
+            emit CancelAllWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                reason: CancelAllWorkRejectReasonKind::MobNotRunning,
+                expected_fence_token: None,
+                actual_fence_token: None
+            }
+        }
+
+        transition ResolveCancelAllWorkRejectionCompleted {
+            on input ResolveCancelAllWorkRejection { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Completed }
+            update {}
+            to Completed
+            emit CancelAllWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                reason: CancelAllWorkRejectReasonKind::MobNotRunning,
+                expected_fence_token: None,
+                actual_fence_token: None
+            }
+        }
+
+        transition ResolveCancelAllWorkRejectionDestroyed {
+            on input ResolveCancelAllWorkRejection { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
+            emit CancelAllWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                reason: CancelAllWorkRejectReasonKind::MobNotRunning,
+                expected_fence_token: None,
+                actual_fence_token: None
+            }
+        }
+
+        transition ResolveCancelAllWorkRejectionMemberNotFound {
+            on input ResolveCancelAllWorkRejection { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_absent" { !self.identity_to_runtime.contains_key(agent_identity) }
+            update {}
+            to Running
+            emit CancelAllWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                reason: CancelAllWorkRejectReasonKind::MemberNotFound,
+                expected_fence_token: None,
+                actual_fence_token: None
+            }
+        }
+
+        transition ResolveCancelAllWorkRejectionCurrentRuntimeNotLive {
+            on input ResolveCancelAllWorkRejection { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) }
+            guard "current_runtime_not_live" { !self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            update {}
+            to Running
+            emit CancelAllWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                reason: CancelAllWorkRejectReasonKind::MemberNotFound,
+                expected_fence_token: None,
+                actual_fence_token: None
+            }
+        }
+
+        transition ResolveCancelAllWorkRejectionStaleFenceToken {
+            on input ResolveCancelAllWorkRejection { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) }
+            guard "current_runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            guard "runtime_or_fence_stale" {
+                self.identity_to_runtime.get_cloned(agent_identity) != Some(agent_runtime_id)
+                || self.runtime_fence_tokens.get_copied(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(fence_token)
+            }
+            update {}
+            to Running
+            emit CancelAllWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                reason: CancelAllWorkRejectReasonKind::StaleFenceToken,
+                expected_fence_token: self.runtime_fence_tokens.get_copied(self.identity_to_runtime.get_cloned(agent_identity).get("value")),
+                actual_fence_token: Some(fence_token)
+            }
         }
 
     }
@@ -3295,7 +3442,16 @@ impl<T: Into<String>> From<T> for AgentIdentity {
 /// The real `AgentRuntimeId` is a struct `{ identity: AgentIdentity, generation: Generation }`.
 /// The DSL uses a single string key `"identity:generation"` for Set/Map operations.
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 pub struct AgentRuntimeId(pub String);
 
@@ -3766,8 +3922,17 @@ pub enum SubmitWorkRejectReasonKind {
     #[default]
     MobNotRunning,
     MemberNotFound,
-    MemberRetiring,
+    StaleFenceToken,
     NotExternallyAddressable,
+}
+
+/// Typed public rejection class for [`MobMachineInput::CancelAllWork`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CancelAllWorkRejectReasonKind {
+    #[default]
+    MobNotRunning,
+    MemberNotFound,
+    StaleFenceToken,
 }
 
 /// Typed work-origin classification for

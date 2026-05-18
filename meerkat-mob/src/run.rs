@@ -137,6 +137,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ResolveSubmitWorkRejection { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }
             | mob_dsl::MobMachineInput::CancelAllWork { .. }
+            | mob_dsl::MobMachineInput::ResolveCancelAllWorkRejection { .. }
             | mob_dsl::MobMachineInput::Stop
             | mob_dsl::MobMachineInput::Resume
             | mob_dsl::MobMachineInput::Complete
@@ -1208,6 +1209,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ResolveSubmitWorkRejection { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }
             | mob_dsl::MobMachineInput::CancelAllWork { .. }
+            | mob_dsl::MobMachineInput::ResolveCancelAllWorkRejection { .. }
             | mob_dsl::MobMachineInput::Stop
             | mob_dsl::MobMachineInput::Resume
             | mob_dsl::MobMachineInput::Complete

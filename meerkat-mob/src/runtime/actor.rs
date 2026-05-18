@@ -2386,7 +2386,10 @@ impl MobActor {
 
     fn resolve_submit_work_rejection_in_authority(
         authority: &mut mob_dsl::MobMachineAuthority,
+        dsl_identity: &mob_dsl::AgentIdentity,
         dsl_runtime_id: &mob_dsl::AgentRuntimeId,
+        dsl_fence_token: mob_dsl::FenceToken,
+        runtime_id: &AgentRuntimeId,
         origin: WorkOrigin,
         agent_identity: &MeerkatId,
         current_state: MobState,
@@ -2395,7 +2398,9 @@ impl MobActor {
         let transition = match mob_dsl::MobMachineMutator::apply(
             authority,
             mob_dsl::MobMachineInput::ResolveSubmitWorkRejection {
+                agent_identity: dsl_identity.clone(),
                 agent_runtime_id: dsl_runtime_id.clone(),
+                fence_token: dsl_fence_token,
                 origin: dsl_origin,
             },
         ) {
@@ -2413,26 +2418,141 @@ impl MobActor {
                 mob_dsl::MobMachineEffect::SubmitWorkRejected {
                     agent_runtime_id,
                     reason,
+                    expected_fence_token,
+                    actual_fence_token,
                     ..
-                } if agent_runtime_id == *dsl_runtime_id => Some(reason),
+                } if agent_runtime_id == *dsl_runtime_id => {
+                    Some((reason, expected_fence_token, actual_fence_token))
+                }
                 _ => None,
             });
         match reason {
-            Some(mob_dsl::SubmitWorkRejectReasonKind::MobNotRunning) => {
+            Some((mob_dsl::SubmitWorkRejectReasonKind::MobNotRunning, _, _)) => {
                 MobError::InvalidTransition {
                     from: current_state,
                     to: MobState::Running,
                 }
             }
-            Some(
-                mob_dsl::SubmitWorkRejectReasonKind::MemberNotFound
-                | mob_dsl::SubmitWorkRejectReasonKind::MemberRetiring,
-            ) => MobError::MemberNotFound(agent_identity.clone()),
-            Some(mob_dsl::SubmitWorkRejectReasonKind::NotExternallyAddressable) => {
+            Some((mob_dsl::SubmitWorkRejectReasonKind::MemberNotFound, _, _)) => {
+                MobError::MemberNotFound(agent_identity.clone())
+            }
+            Some((
+                mob_dsl::SubmitWorkRejectReasonKind::StaleFenceToken,
+                Some(expected),
+                Some(actual),
+            )) => MobError::StaleFenceToken {
+                runtime_id: runtime_id.clone(),
+                expected: FenceToken::new(expected.0),
+                actual: FenceToken::new(actual.0),
+            },
+            Some((mob_dsl::SubmitWorkRejectReasonKind::StaleFenceToken, _, _)) => {
+                MobError::Internal(
+                    "MobMachine rejected SubmitWork as stale without fence-token feedback".into(),
+                )
+            }
+            Some((mob_dsl::SubmitWorkRejectReasonKind::NotExternallyAddressable, _, _)) => {
                 MobError::NotExternallyAddressable(agent_identity.clone())
             }
             None => MobError::Internal(
                 "MobMachine rejected SubmitWork without typed rejection feedback".into(),
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_submit_work_projection_missing_or_rejection(
+        authority: &mut mob_dsl::MobMachineAuthority,
+        declared_submit_work_admitted: bool,
+        dsl_identity: &mob_dsl::AgentIdentity,
+        dsl_runtime_id: &mob_dsl::AgentRuntimeId,
+        dsl_fence_token: mob_dsl::FenceToken,
+        runtime_id: &AgentRuntimeId,
+        origin: WorkOrigin,
+        agent_identity: &MeerkatId,
+        current_state: MobState,
+    ) -> MobError {
+        if declared_submit_work_admitted {
+            return MobError::Internal(format!(
+                "MobMachine admitted SubmitWork for '{agent_identity}' but the roster projection has no member entry"
+            ));
+        }
+        Self::resolve_submit_work_rejection_in_authority(
+            authority,
+            dsl_identity,
+            dsl_runtime_id,
+            dsl_fence_token,
+            runtime_id,
+            origin,
+            agent_identity,
+            current_state,
+        )
+    }
+
+    fn resolve_cancel_all_work_rejection_in_authority(
+        authority: &mut mob_dsl::MobMachineAuthority,
+        dsl_identity: &mob_dsl::AgentIdentity,
+        dsl_runtime_id: &mob_dsl::AgentRuntimeId,
+        dsl_fence_token: mob_dsl::FenceToken,
+        runtime_id: &AgentRuntimeId,
+        agent_identity: &MeerkatId,
+        current_state: MobState,
+    ) -> MobError {
+        let transition = match mob_dsl::MobMachineMutator::apply(
+            authority,
+            mob_dsl::MobMachineInput::ResolveCancelAllWorkRejection {
+                agent_identity: dsl_identity.clone(),
+                agent_runtime_id: dsl_runtime_id.clone(),
+                fence_token: dsl_fence_token,
+            },
+        ) {
+            Ok(transition) => transition,
+            Err(err) => {
+                return MobError::Internal(format!(
+                    "MobMachine rejected CancelAllWork and failed to resolve typed rejection: {err}"
+                ));
+            }
+        };
+        let reason = transition
+            .effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::CancelAllWorkRejected {
+                    agent_runtime_id,
+                    reason,
+                    expected_fence_token,
+                    actual_fence_token,
+                } if agent_runtime_id == *dsl_runtime_id => {
+                    Some((reason, expected_fence_token, actual_fence_token))
+                }
+                _ => None,
+            });
+        match reason {
+            Some((mob_dsl::CancelAllWorkRejectReasonKind::MobNotRunning, _, _)) => {
+                MobError::InvalidTransition {
+                    from: current_state,
+                    to: MobState::Running,
+                }
+            }
+            Some((mob_dsl::CancelAllWorkRejectReasonKind::MemberNotFound, _, _)) => {
+                MobError::MemberNotFound(agent_identity.clone())
+            }
+            Some((
+                mob_dsl::CancelAllWorkRejectReasonKind::StaleFenceToken,
+                Some(expected),
+                Some(actual),
+            )) => MobError::StaleFenceToken {
+                runtime_id: runtime_id.clone(),
+                expected: FenceToken::new(expected.0),
+                actual: FenceToken::new(actual.0),
+            },
+            Some((mob_dsl::CancelAllWorkRejectReasonKind::StaleFenceToken, _, _)) => {
+                MobError::Internal(
+                    "MobMachine rejected CancelAllWork as stale without fence-token feedback"
+                        .into(),
+                )
+            }
+            None => MobError::Internal(
+                "MobMachine rejected CancelAllWork without typed rejection feedback".into(),
             ),
         }
     }
@@ -2459,7 +2579,7 @@ impl MobActor {
         let mut authority =
             mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
         let spawn = mob_dsl::MobMachineInput::Spawn {
-            agent_identity: dsl_identity,
+            agent_identity: dsl_identity.clone(),
             agent_runtime_id: dsl_runtime_id.clone(),
             fence_token: dsl_fence_token,
             generation: mob_dsl::Generation::from_domain(crate::ids::Generation::INITIAL),
@@ -2474,6 +2594,7 @@ impl MobActor {
         mob_dsl::MobMachineMutator::apply(
             &mut authority,
             mob_dsl::MobMachineInput::SubmitWork {
+                agent_identity: dsl_identity.clone(),
                 agent_runtime_id: dsl_runtime_id.clone(),
                 fence_token: dsl_fence_token,
                 work_id: mob_dsl::WorkId::from_work_ref(work_ref),
@@ -2484,7 +2605,10 @@ impl MobActor {
         .map_err(|_| {
             Self::resolve_submit_work_rejection_in_authority(
                 &mut authority,
+                &dsl_identity,
                 &dsl_runtime_id,
+                dsl_fence_token,
+                &domain_runtime_id,
                 origin,
                 agent_identity,
                 self.state(),
@@ -10236,7 +10360,6 @@ impl MobActor {
     /// [`WorkOrigin`] to the DSL and lets the guards accept or reject.
     ///
     /// Shell-owned pre-work (shell is the only place that can do these):
-    ///   * Fence-token freshness (concurrency invariant, not legality).
     ///   * Auto-spawn via the roster's [`SpawnPolicy`] when the target member
     ///     is absent but a policy resolves a spec. Only meaningful for
     ///     externally-originated work — internal origins never auto-spawn.
@@ -10262,44 +10385,44 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("handle_submit_work preflight")?;
 
         let agent_identity = MeerkatId::from(&runtime_id.identity);
+        let domain_identity = AgentIdentity::from(agent_identity.as_str());
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
+        let declared_dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&runtime_id);
+        let declared_dsl_fence_token = mob_dsl::FenceToken::from_domain(fence_token);
 
         // SubmitWork admission belongs to MobMachine even when the shell may
         // need to auto-spawn an absent external target. Probe the declared
         // command before policy resolution so stopped/completed mobs reject
         // without staging spawn side effects.
-        if let Err(error) = self.probe_command_admission(
+        let declared_submit_work_admitted = match self.probe_command_admission(
             mob_dsl::MobMachineInput::SubmitWork {
-                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&runtime_id),
-                fence_token: mob_dsl::FenceToken::from_domain(fence_token),
+                agent_identity: dsl_identity.clone(),
+                agent_runtime_id: declared_dsl_runtime_id.clone(),
+                fence_token: declared_dsl_fence_token,
                 work_id: mob_dsl::WorkId::from_work_ref(&work_ref),
                 origin: mob_dsl::WorkOrigin::from(origin),
             },
             MobState::Running,
             "submit_work_command_admission",
         ) {
-            if self.state() != MobState::Running {
-                return Err(error);
+            Ok(()) => true,
+            Err(error) => {
+                if self.state() != MobState::Running {
+                    return Err(error);
+                }
+                false
             }
-        }
+        };
 
-        // Resolve entry + validate fence freshness in a single roster read.
-        // Fence-token freshness is a shell-owned concurrency invariant (a
-        // stale token means the caller is talking to a superseded
-        // incarnation); auto-spawn is an external-only policy seam that
-        // runs when the target member is absent and a `SpawnPolicy` is set.
+        // Auto-spawn is an external-only policy seam that runs when the target
+        // member is absent and a `SpawnPolicy` is set. For existing members,
+        // the caller's runtime/fence pair is forwarded into MobMachine so
+        // generated authority owns stale-incarnation rejection.
         let initial_entry = {
             let roster = self.roster.read().await;
             roster.get(&agent_identity).cloned()
         };
-        if let Some(ref entry) = initial_entry
-            && entry.fence_token != fence_token
-        {
-            return Err(MobError::StaleFenceToken {
-                runtime_id,
-                expected: entry.fence_token,
-                actual: fence_token,
-            });
-        }
+        let initial_entry_present = initial_entry.is_some();
         let entry = match initial_entry {
             Some(e) => {
                 self.ensure_member_not_broken(&e.agent_identity).await?;
@@ -10307,7 +10430,18 @@ impl MobActor {
             }
             None => {
                 if matches!(origin, WorkOrigin::Internal) {
-                    return Err(MobError::MemberNotFound(agent_identity));
+                    let current_state = self.state();
+                    return Err(Self::resolve_submit_work_projection_missing_or_rejection(
+                        &mut self.dsl_authority,
+                        declared_submit_work_admitted,
+                        &dsl_identity,
+                        &declared_dsl_runtime_id,
+                        declared_dsl_fence_token,
+                        &runtime_id,
+                        origin,
+                        &agent_identity,
+                        current_state,
+                    ));
                 }
                 let identity = AgentIdentity::from(agent_identity.as_str());
                 if let Some(spec) = self.spawn_policy.resolve(&identity).await {
@@ -10339,24 +10473,50 @@ impl MobActor {
                     })?;
                     spawned_entry
                 } else {
-                    return Err(MobError::MemberNotFound(agent_identity));
+                    let current_state = self.state();
+                    return Err(Self::resolve_submit_work_projection_missing_or_rejection(
+                        &mut self.dsl_authority,
+                        declared_submit_work_admitted,
+                        &dsl_identity,
+                        &declared_dsl_runtime_id,
+                        declared_dsl_fence_token,
+                        &runtime_id,
+                        origin,
+                        &agent_identity,
+                        current_state,
+                    ));
                 }
             }
         };
 
-        // Project the caller's identifiers into DSL bridging types.
-        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
-        let dsl_fence_token = mob_dsl::FenceToken::from_domain(entry.fence_token);
+        let admission_runtime_id = if initial_entry_present {
+            runtime_id.clone()
+        } else {
+            entry.agent_runtime_id.clone()
+        };
+        let admission_fence_token = if initial_entry_present {
+            fence_token
+        } else {
+            entry.fence_token
+        };
+
+        // Project the caller's identifiers into DSL bridging types. Existing
+        // members use the caller-supplied runtime/fence so MobMachine can
+        // reject stale generations; auto-spawned members use the generated
+        // runtime/fence created by the spawn authority path.
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&admission_runtime_id);
+        let dsl_fence_token = mob_dsl::FenceToken::from_domain(admission_fence_token);
         let dsl_work_id = mob_dsl::WorkId::from_work_ref(&work_ref);
         let dsl_origin = mob_dsl::WorkOrigin::from(origin);
 
-        // Apply the DSL SubmitWork input. The MobMachine owns work-origin
-        // legality: `SubmitWorkRunningExternal` / `SubmitWorkRunningInternal`
-        // encode the origin + addressability + live-runtime + phase guards.
-        // A rejection is a state-legality violation, not a freshness issue.
+        // Apply the DSL SubmitWork input. The MobMachine owns work-origin and
+        // fence-token legality: `SubmitWorkRunningExternal` /
+        // `SubmitWorkRunningInternal` encode origin, addressability,
+        // live-runtime, fence-token, and phase guards.
         let transition = match mob_dsl::MobMachineMutator::apply(
             &mut self.dsl_authority,
             mob_dsl::MobMachineInput::SubmitWork {
+                agent_identity: dsl_identity.clone(),
                 agent_runtime_id: dsl_runtime_id.clone(),
                 fence_token: dsl_fence_token,
                 work_id: dsl_work_id,
@@ -10368,7 +10528,10 @@ impl MobActor {
                 let current_state = self.state();
                 return Err(Self::resolve_submit_work_rejection_in_authority(
                     &mut self.dsl_authority,
+                    &dsl_identity,
                     &dsl_runtime_id,
+                    dsl_fence_token,
+                    &admission_runtime_id,
                     origin,
                     &agent_identity,
                     current_state,
@@ -10421,17 +10584,16 @@ impl MobActor {
             let roster = self.roster.read().await;
             roster.get(agent_identity).cloned()
         }
-        .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
-        if entry.fence_token != fence_token {
-            return Err(MobError::StaleFenceToken {
-                runtime_id: agent_runtime_id.clone(),
-                expected: entry.fence_token,
-                actual: fence_token,
-            });
-        }
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "turn-driven spawn initial SubmitWork for '{agent_identity}' had no roster projection after Spawn admission"
+            ))
+        })?;
 
         let work_ref = WorkRef::new();
         let origin = WorkOrigin::Internal;
+        let domain_identity = AgentIdentity::from(agent_identity.as_str());
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
         let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id);
         let dsl_fence_token = mob_dsl::FenceToken::from_domain(fence_token);
         let dsl_work_id = mob_dsl::WorkId::from_work_ref(&work_ref);
@@ -10439,6 +10601,7 @@ impl MobActor {
         let transition = match mob_dsl::MobMachineMutator::apply(
             &mut self.dsl_authority,
             mob_dsl::MobMachineInput::SubmitWork {
+                agent_identity: dsl_identity.clone(),
                 agent_runtime_id: dsl_runtime_id.clone(),
                 fence_token: dsl_fence_token,
                 work_id: dsl_work_id,
@@ -10450,7 +10613,10 @@ impl MobActor {
                 let current_state = self.state();
                 return Err(Self::resolve_submit_work_rejection_in_authority(
                     &mut self.dsl_authority,
+                    &dsl_identity,
                     &dsl_runtime_id,
+                    dsl_fence_token,
+                    agent_runtime_id,
                     origin,
                     agent_identity,
                     current_state,
@@ -10488,16 +10654,17 @@ impl MobActor {
     /// Unified work-lane cancel entry.
     ///
     /// The MobMachine DSL `CancelAllWork` transition owns live-runtime
-    /// membership + phase legality; fence-token freshness is a shell-owned
-    /// concurrency invariant (matches the submit-work pattern). Once the
-    /// machine accepts, the shell dispatches `interrupt_member` on the
-    /// current bridge session.
+    /// membership, fence-token freshness, and phase legality. Once the machine
+    /// accepts, the shell dispatches `interrupt_member` on the current bridge
+    /// session.
     async fn handle_cancel_all_work(
         &mut self,
         runtime_id: AgentRuntimeId,
         fence_token: FenceToken,
     ) -> Result<(), MobError> {
         let agent_identity = MeerkatId::from(&runtime_id.identity);
+        let domain_identity = AgentIdentity::from(agent_identity.as_str());
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
         let entry = {
             let roster = self.roster.read().await;
             roster.get(&agent_identity).cloned()
@@ -10507,47 +10674,33 @@ impl MobActor {
         let prepared = self
             .prepare_dsl_input(
                 mob_dsl::MobMachineInput::CancelAllWork {
+                    agent_identity: dsl_identity.clone(),
                     agent_runtime_id: dsl_runtime_id.clone(),
                     fence_token: dsl_fence_token,
                 },
                 "handle_cancel_all_work",
             )
             .map_err(|_| {
-                if self.state() != MobState::Running {
-                    return self.invalid_transition_to(MobState::Running);
-                }
-                if let Some(entry) = &entry
-                    && entry.fence_token != fence_token
-                {
-                    return MobError::StaleFenceToken {
-                        runtime_id: runtime_id.clone(),
-                        expected: entry.fence_token,
-                        actual: fence_token,
-                    };
-                }
-                if !self
-                    .dsl_authority
-                    .state
-                    .live_runtime_ids
-                    .contains(&dsl_runtime_id)
-                {
-                    return MobError::MemberNotFound(agent_identity.clone());
-                }
-                self.invalid_transition_to(MobState::Running)
+                let current_state = self.state();
+                Self::resolve_cancel_all_work_rejection_in_authority(
+                    &mut self.dsl_authority,
+                    &dsl_identity,
+                    &dsl_runtime_id,
+                    dsl_fence_token,
+                    &runtime_id,
+                    &agent_identity,
+                    current_state,
+                )
             })?;
 
-        let entry = entry.ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
-        if entry.fence_token != fence_token {
-            return Err(MobError::StaleFenceToken {
-                runtime_id,
-                expected: entry.fence_token,
-                actual: fence_token,
-            });
-        }
+        let entry = entry.ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine accepted CancelAllWork for '{agent_identity}' but the roster projection has no member entry"
+            ))
+        })?;
 
-        // Feed the DSL CancelAllWork input. Guards enforce live-runtime
-        // membership + phase == Running. A rejection here is a state
-        // legality violation.
+        // Feed the DSL CancelAllWork input. Guards have already accepted the
+        // runtime binding, fence token, and phase.
         self.commit_prepared_dsl_input(prepared);
 
         // Dispatch the interrupt now that the machine has authorized.

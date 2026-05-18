@@ -110,6 +110,62 @@ impl std::fmt::Display for BranchId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum CancelAllWorkRejectReasonKind {
+    #[default]
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+    #[serde(rename = "MemberNotFound")]
+    MemberNotFound,
+    #[serde(rename = "StaleFenceToken")]
+    StaleFenceToken,
+}
+impl CancelAllWorkRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MobNotRunning => "MobNotRunning",
+            Self::MemberNotFound => "MemberNotFound",
+            Self::StaleFenceToken => "StaleFenceToken",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CancelAllWorkRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            "MemberNotFound" => Ok(Self::MemberNotFound),
+            "StaleFenceToken" => Ok(Self::StaleFenceToken),
+            other => Err(format!(
+                "invalid CancelAllWorkRejectReasonKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CancelAllWorkRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CancelAllWorkRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum CollectionPolicyKind {
     #[default]
     #[serde(rename = "All")]
@@ -1572,8 +1628,8 @@ pub enum SubmitWorkRejectReasonKind {
     MobNotRunning,
     #[serde(rename = "MemberNotFound")]
     MemberNotFound,
-    #[serde(rename = "MemberRetiring")]
-    MemberRetiring,
+    #[serde(rename = "StaleFenceToken")]
+    StaleFenceToken,
     #[serde(rename = "NotExternallyAddressable")]
     NotExternallyAddressable,
 }
@@ -1582,7 +1638,7 @@ impl SubmitWorkRejectReasonKind {
         match self {
             Self::MobNotRunning => "MobNotRunning",
             Self::MemberNotFound => "MemberNotFound",
-            Self::MemberRetiring => "MemberRetiring",
+            Self::StaleFenceToken => "StaleFenceToken",
             Self::NotExternallyAddressable => "NotExternallyAddressable",
         }
     }
@@ -1593,7 +1649,7 @@ impl std::convert::TryFrom<&str> for SubmitWorkRejectReasonKind {
         match value {
             "MobNotRunning" => Ok(Self::MobNotRunning),
             "MemberNotFound" => Ok(Self::MemberNotFound),
-            "MemberRetiring" => Ok(Self::MemberRetiring),
+            "StaleFenceToken" => Ok(Self::StaleFenceToken),
             "NotExternallyAddressable" => Ok(Self::NotExternallyAddressable),
             other => Err(format!(
                 "invalid SubmitWorkRejectReasonKind value `{other}`"
@@ -2099,6 +2155,7 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SubmitWork {
+        pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
         pub work_id: WorkId,
@@ -2106,7 +2163,9 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveSubmitWorkRejection {
+        pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
         pub origin: WorkOrigin,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2115,6 +2174,13 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelAllWork {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveCancelAllWorkRejection {
+        pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
     }
@@ -2224,6 +2290,7 @@ pub enum Input {
     ResolveSubmitWorkRejection(inputs::ResolveSubmitWorkRejection),
     CancelWork(inputs::CancelWork),
     CancelAllWork(inputs::CancelAllWork),
+    ResolveCancelAllWorkRejection(inputs::ResolveCancelAllWorkRejection),
     Stop(inputs::Stop),
     Resume(inputs::Resume),
     Complete(inputs::Complete),
@@ -2292,6 +2359,7 @@ impl Input {
             Self::ResolveSubmitWorkRejection(_) => InputKind::ResolveSubmitWorkRejection,
             Self::CancelWork(_) => InputKind::CancelWork,
             Self::CancelAllWork(_) => InputKind::CancelAllWork,
+            Self::ResolveCancelAllWorkRejection(_) => InputKind::ResolveCancelAllWorkRejection,
             Self::Stop(_) => InputKind::Stop,
             Self::Resume(_) => InputKind::Resume,
             Self::Complete(_) => InputKind::Complete,
@@ -2353,6 +2421,7 @@ pub enum InputKind {
     ResolveSubmitWorkRejection,
     CancelWork,
     CancelAllWork,
+    ResolveCancelAllWorkRejection,
     Stop,
     Resume,
     Complete,
@@ -2668,6 +2737,15 @@ pub mod effects {
         pub agent_runtime_id: AgentRuntimeId,
         pub origin: WorkOrigin,
         pub reason: SubmitWorkRejectReasonKind,
+        pub expected_fence_token: Option<FenceToken>,
+        pub actual_fence_token: Option<FenceToken>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CancelAllWorkRejected {
+        pub agent_runtime_id: AgentRuntimeId,
+        pub reason: CancelAllWorkRejectReasonKind,
+        pub expected_fence_token: Option<FenceToken>,
+        pub actual_fence_token: Option<FenceToken>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestRuntimeRetire {
@@ -2750,6 +2828,7 @@ pub enum Effect {
     RequestRuntimeBinding(effects::RequestRuntimeBinding),
     RequestRuntimeIngress(effects::RequestRuntimeIngress),
     SubmitWorkRejected(effects::SubmitWorkRejected),
+    CancelAllWorkRejected(effects::CancelAllWorkRejected),
     RequestRuntimeRetire(effects::RequestRuntimeRetire),
     RequestRuntimeDestroy(effects::RequestRuntimeDestroy),
     RequestSessionIngressDetachForMobDestroy(effects::RequestSessionIngressDetachForMobDestroy),
@@ -2777,6 +2856,7 @@ pub enum EffectKind {
     RequestRuntimeBinding,
     RequestRuntimeIngress,
     SubmitWorkRejected,
+    CancelAllWorkRejected,
     RequestRuntimeRetire,
     RequestRuntimeDestroy,
     RequestSessionIngressDetachForMobDestroy,
@@ -2845,7 +2925,9 @@ pub enum TransitionId {
     ResolveSubmitWorkRejectionCompleted,
     ResolveSubmitWorkRejectionDestroyed,
     ResolveSubmitWorkRejectionMemberNotFound,
-    ResolveSubmitWorkRejectionMemberRetiring,
+    ResolveSubmitWorkRejectionCurrentRuntimeNotLive,
+    ResolveSubmitWorkRejectionStaleFenceToken,
+    ResolveSubmitWorkRejectionRetiringAsMemberNotFound,
     ResolveSubmitWorkRejectionNotExternallyAddressable,
     RetireMember,
     ObserveRuntimeRetired,
@@ -2993,6 +3075,12 @@ pub enum TransitionId {
     DestroyFromAny,
     RespawnRunning,
     CancelAllWorkRunning,
+    ResolveCancelAllWorkRejectionStopped,
+    ResolveCancelAllWorkRejectionCompleted,
+    ResolveCancelAllWorkRejectionDestroyed,
+    ResolveCancelAllWorkRejectionMemberNotFound,
+    ResolveCancelAllWorkRejectionCurrentRuntimeNotLive,
+    ResolveCancelAllWorkRejectionStaleFenceToken,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

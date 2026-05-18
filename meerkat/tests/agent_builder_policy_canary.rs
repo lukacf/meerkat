@@ -391,8 +391,10 @@ fn downstream_unsafe_code_cannot_enter_factory_policy_finalizer() -> std::io::Re
         r#"async-trait = "0.1"
 futures = "0.3"
 inventory = "0.3"
-meerkat-core = {{ path = "{}" }}"#,
-        repo_root().join("meerkat-core").display()
+meerkat-core = {{ path = "{}" }}
+meerkat-runtime = {{ path = "{}" }}"#,
+        repo_root().join("meerkat-core").display(),
+        repo_root().join("meerkat-runtime").display()
     );
     let Some(output) = run_downstream_cargo_fixture(
         "downstream_unsafe_code_cannot_enter_factory_policy_finalizer",
@@ -626,6 +628,37 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
         "factory build authority must not be publicly mintable from \
          meerkat_core::AgentBuilder"
     );
+}
+
+#[test]
+fn core_test_turn_state_handle_is_not_public_authority() {
+    let agent_mod = repo_file("meerkat-core/src/agent.rs");
+    assert!(
+        agent_mod.contains("#[cfg(test)]\n#[doc(hidden)]\npub(crate) mod test_turn_state_handle;"),
+        "core test turn-state handle must be cfg(test) and crate-private so downstream \
+         crates cannot substitute a handwritten lifecycle reducer for runtime machine authority"
+    );
+
+    let test_handle = repo_file("meerkat-core/src/agent/test_turn_state_handle.rs");
+    assert!(
+        test_handle.contains("pub(crate) struct TestTurnStateHandle")
+            && !test_handle.contains("pub struct TestTurnStateHandle")
+            && test_handle.contains("pub(crate) fn new()"),
+        "TestTurnStateHandle must remain a crate-private unit-test adapter, not a public \
+         TurnStateHandle implementation"
+    );
+
+    for fixture in [
+        "meerkat/tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
+        "meerkat/tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+    ] {
+        let source = repo_file(fixture);
+        assert!(
+            !source.contains("test_turn_state_handle") && !source.contains("TestTurnStateHandle"),
+            "{fixture} must not use the core unit-test turn-state reducer as a downstream \
+             construction path"
+        );
+    }
 }
 
 #[test]

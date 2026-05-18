@@ -2,7 +2,7 @@
 //!
 //! This module intentionally does not define or export a handwritten
 //! authority/state-machine surface. It holds the stable enums and transition
-//! payloads shared by the standalone core fallback and runtime-backed handles.
+//! payloads shared by core unit-test adapters and runtime-backed handles.
 
 use crate::budget::{BudgetDimension, BudgetExceeded};
 use crate::error::AgentError;

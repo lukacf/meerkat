@@ -1,5 +1,5 @@
-//! Test-only in-process `TurnStateHandle` implementation for `meerkat-core`
-//! tests.
+//! Crate-private, test-only `TurnStateHandle` implementation for
+//! `meerkat-core` unit tests.
 //!
 //! ## Why this exists
 //!
@@ -9,6 +9,10 @@
 //! DSL-backed [`RuntimeTurnStateHandle`] through
 //! `MeerkatMachine::prepare_bindings`, so the `turn_state_handle` slot on
 //! `Agent` is always `Some` in production.
+//!
+//! This module is compiled only for `meerkat-core` unit tests and remains
+//! crate-private. It is not a public or downstream-substitutable authority
+//! path for turn lifecycle facts.
 //!
 //! Tests inside `meerkat-core` cannot reach for the production
 //! `RuntimeTurnStateHandle` because `meerkat-runtime` depends on
@@ -636,10 +640,10 @@ fn active_run_or_err(state: &LocalState, context: &str) -> Result<RunId, DslTran
     })
 }
 
-/// Test-only `TurnStateHandle` that tracks phase via the deleted-wave-a
+/// Core unit-test `TurnStateHandle` that tracks phase via the deleted-wave-a
 /// `LocalTurnExecutionState` transition logic.
 #[derive(Debug)]
-pub struct TestTurnStateHandle {
+pub(crate) struct TestTurnStateHandle {
     state: Mutex<LocalState>,
     run_completed_effects: AtomicUsize,
     run_failed_effects: AtomicUsize,
@@ -647,7 +651,7 @@ pub struct TestTurnStateHandle {
 }
 
 impl TestTurnStateHandle {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: Mutex::new(LocalState::new()),
             run_completed_effects: AtomicUsize::new(0),
@@ -665,20 +669,20 @@ impl TestTurnStateHandle {
         })
     }
 
-    pub fn run_completed_effect_count(&self) -> usize {
+    pub(crate) fn run_completed_effect_count(&self) -> usize {
         self.run_completed_effects.load(Ordering::SeqCst)
     }
 
-    pub fn run_failed_effect_count(&self) -> usize {
+    pub(crate) fn run_failed_effect_count(&self) -> usize {
         self.run_failed_effects.load(Ordering::SeqCst)
     }
 
-    pub fn suppress_terminal_cause_snapshots_for_test(&self) {
+    pub(crate) fn suppress_terminal_cause_snapshots_for_test(&self) {
         self.suppress_terminal_cause_snapshots
             .store(true, Ordering::SeqCst);
     }
 
-    pub fn force_next_llm_terminal_failed_for_test(
+    pub(crate) fn force_next_llm_terminal_failed_for_test(
         &self,
         cause_kind: Option<TurnTerminalCauseKind>,
     ) -> Result<(), DslTransitionError> {
@@ -688,7 +692,7 @@ impl TestTurnStateHandle {
         Ok(())
     }
 
-    pub fn force_terminal_cause_kind_for_test(
+    pub(crate) fn force_terminal_cause_kind_for_test(
         &self,
         cause_kind: Option<TurnTerminalCauseKind>,
     ) -> Result<(), DslTransitionError> {

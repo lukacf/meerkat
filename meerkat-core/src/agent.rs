@@ -12,8 +12,9 @@ mod hooks_behavior_tests;
 mod runner;
 pub mod skills;
 mod state;
+#[cfg(test)]
 #[doc(hidden)]
-pub mod test_turn_state_handle;
+pub(crate) mod test_turn_state_handle;
 use crate::budget::Budget;
 use crate::comms::{
     CommsCommand, EventStream, PeerDirectoryEntry, PeerId, SendAndStreamError, SendError,

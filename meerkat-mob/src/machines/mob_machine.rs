@@ -1042,16 +1042,6 @@ impl MobMachineState {
 mod tests {
     use super::*;
 
-    fn mutate_authority_state(
-        authority: &mut MobMachineAuthority,
-        mutate: impl FnOnce(&mut MobMachineState),
-    ) {
-        let mut state = authority.state().clone();
-        mutate(&mut state);
-        *authority = MobMachineAuthority::recover_from_state(state)
-            .expect("test MobMachine state must be recoverable");
-    }
-
     fn seed_run(authority: &mut MobMachineAuthority, run_id: &RunId) {
         MobMachineMutator::apply(
             authority,
@@ -1079,19 +1069,22 @@ mod tests {
         authority: &mut MobMachineAuthority,
         identity: &AgentIdentity,
         runtime_id: &AgentRuntimeId,
-    ) {
-        mutate_authority_state(authority, |state| {
-            state.live_runtime_ids.insert(runtime_id.clone());
-            state
-                .externally_addressable_runtime_ids
-                .insert(runtime_id.clone());
-            state
-                .runtime_fence_tokens
-                .insert(runtime_id.clone(), FenceToken(7));
-            state
-                .identity_to_runtime
-                .insert(identity.clone(), runtime_id.clone());
-        });
+    ) -> SessionId {
+        let bridge_session_id = SessionId::from(format!("session-{}", identity.0.as_str()));
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::Spawn {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: FenceToken(7),
+                generation: Generation(1),
+                external_addressable: true,
+                bridge_session_id: bridge_session_id.clone(),
+                replacing: None,
+            },
+        )
+        .expect("Spawn should seed a live member through machine authority");
+        bridge_session_id
     }
 
     fn seed_root_frame(
@@ -1130,6 +1123,36 @@ mod tests {
             },
         )
         .expect("CreateFrameSeed should be accepted before child loop seed");
+    }
+
+    fn seed_body_frame(
+        authority: &mut MobMachineAuthority,
+        run_id: &RunId,
+        frame_id: &FrameId,
+        loop_instance_id: &LoopInstanceId,
+        iteration: u32,
+    ) {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::CreateFrameSeed {
+                run_id: run_id.clone(),
+                frame_id: frame_id.clone(),
+                frame_scope: FrameScope::Body,
+                loop_instance_id: Some(loop_instance_id.clone()),
+                iteration,
+                tracked_nodes: Default::default(),
+                ordered_nodes: Vec::new(),
+                node_kind: Default::default(),
+                node_dependencies: Default::default(),
+                node_dependency_modes: Default::default(),
+                node_branches: Default::default(),
+                node_step_ids: Default::default(),
+                node_loop_ids: Default::default(),
+                node_status: Default::default(),
+                ready_queue: Vec::new(),
+            },
+        )
+        .expect("CreateFrameSeed should activate a loop body frame");
     }
 
     #[test]
@@ -1194,7 +1217,7 @@ mod tests {
         let mut authority = MobMachineAuthority::new();
         let identity = AgentIdentity::from("worker");
         let runtime_id = AgentRuntimeId::from("worker:1");
-        seed_live_member(&mut authority, &identity, &runtime_id);
+        let session_id = seed_live_member(&mut authority, &identity, &runtime_id);
 
         MobMachineMutator::apply(
             &mut authority,
@@ -1208,11 +1231,13 @@ mod tests {
         )
         .expect("live externally addressable member should accept work");
 
-        mutate_authority_state(&mut authority, |state| {
-            state
-                .member_state_markers
-                .insert(runtime_id.clone(), MobMemberState::Retiring);
-        });
+        authority
+            .apply_signal(MobMachineSignal::RetireMember {
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: FenceToken(7),
+                session_id,
+            })
+            .expect("RetireMember should mark the live member as retiring");
 
         let rejected = MobMachineMutator::apply(
             &mut authority,
@@ -1413,15 +1438,11 @@ mod tests {
     #[test]
     fn loop_until_feedback_is_recorded_by_mob_machine() {
         let mut authority = MobMachineAuthority::new();
+        let run_id = RunId::from("run-1");
         let loop_instance_id = LoopInstanceId::from("loop-1");
         let parent_frame_id = FrameId::from("frame-root");
         let parent_node_id = FlowNodeId::from("loop-node");
-        seed_root_frame(
-            &mut authority,
-            &RunId::from("run-1"),
-            &parent_frame_id,
-            &parent_node_id,
-        );
+        seed_root_frame(&mut authority, &run_id, &parent_frame_id, &parent_node_id);
 
         MobMachineMutator::apply(
             &mut authority,
@@ -1435,12 +1456,13 @@ mod tests {
             },
         )
         .expect("CreateLoopSeed should be accepted");
-        mutate_authority_state(&mut authority, |state| {
-            state.loop_stage.insert(
-                loop_instance_id.clone(),
-                LoopIterationStage::BodyFrameActive,
-            );
-        });
+        seed_body_frame(
+            &mut authority,
+            &run_id,
+            &FrameId::from("frame-body-0"),
+            &loop_instance_id,
+            0,
+        );
 
         MobMachineMutator::apply(
             &mut authority,
@@ -1475,12 +1497,13 @@ mod tests {
             Some(&LoopIterationStage::AwaitingBodyFrame)
         );
 
-        mutate_authority_state(&mut authority, |state| {
-            state.loop_stage.insert(
-                loop_instance_id.clone(),
-                LoopIterationStage::BodyFrameActive,
-            );
-        });
+        seed_body_frame(
+            &mut authority,
+            &run_id,
+            &FrameId::from("frame-body-1"),
+            &loop_instance_id,
+            1,
+        );
         MobMachineMutator::apply(
             &mut authority,
             MobMachineInput::RecordLoopBodyFrameCompleted {
@@ -1509,22 +1532,18 @@ mod tests {
         let identity = AgentIdentity::from("worker");
         let runtime_id = AgentRuntimeId::from("worker:1");
         let fence_token = FenceToken(7);
-        mutate_authority_state(&mut authority, |state| {
-            state
-                .identity_to_runtime
-                .insert(identity.clone(), runtime_id.clone());
-            state.live_runtime_ids.insert(runtime_id.clone());
-            state
-                .externally_addressable_runtime_ids
-                .insert(runtime_id.clone());
-            state
-                .runtime_fence_tokens
-                .insert(runtime_id.clone(), fence_token);
-            state
-                .member_state_markers
-                .insert(runtime_id.clone(), MobMemberState::Retiring);
-            state.active_run_count = 3;
-        });
+        let session_id = seed_live_member(&mut authority, &identity, &runtime_id);
+        authority
+            .apply_signal(MobMachineSignal::RetireMember {
+                agent_runtime_id: runtime_id.clone(),
+                fence_token,
+                session_id,
+            })
+            .expect("RetireMember should mark the live member as retiring");
+        authority
+            .apply_signal(MobMachineSignal::StartRun)
+            .expect("StartRun should increment active run count");
+        assert_eq!(authority.state().active_run_count, 1);
 
         let transition = authority
             .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
@@ -1602,12 +1621,7 @@ mod tests {
             }
         );
 
-        mutate_authority_state(&mut authority, |state| {
-            state
-                .identity_to_runtime
-                .insert(identity.clone(), runtime_id.clone());
-            state.live_runtime_ids.insert(runtime_id.clone());
-        });
+        let session_id = seed_live_member(&mut authority, &identity, &runtime_id);
         let active = authority.state().member_lifecycle_for_identity(&identity);
         assert_eq!(
             active,
@@ -1619,11 +1633,13 @@ mod tests {
         );
         assert!(!active.is_terminal());
 
-        mutate_authority_state(&mut authority, |state| {
-            state
-                .member_state_markers
-                .insert(runtime_id.clone(), MobMemberState::Retiring);
-        });
+        authority
+            .apply_signal(MobMachineSignal::RetireMember {
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: FenceToken(7),
+                session_id,
+            })
+            .expect("RetireMember should mark the live member as retiring");
         let retiring = authority.state().member_lifecycle_for_identity(&identity);
         assert_eq!(
             retiring,
@@ -1635,10 +1651,19 @@ mod tests {
         );
         assert!(!retiring.is_terminal());
 
-        mutate_authority_state(&mut authority, |state| {
-            state.member_state_markers.remove(&runtime_id);
-            state.live_runtime_ids.remove(&runtime_id);
-        });
+        authority
+            .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: FenceToken(7),
+            })
+            .expect("runtime retire observation should remove runtime liveness");
+        authority
+            .apply_signal(MobMachineSignal::ObserveMemberRetirementArchived {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: FenceToken(7),
+            })
+            .expect("archive completion should clear retiring marker");
         let completed = authority.state().member_lifecycle_for_identity(&identity);
         assert_eq!(
             completed,
@@ -1657,15 +1682,13 @@ mod tests {
         let identity = AgentIdentity::from("worker");
         let runtime_id = AgentRuntimeId::from("worker:1");
 
-        mutate_authority_state(&mut authority, |state| {
-            state
-                .identity_to_runtime
-                .insert(identity.clone(), runtime_id.clone());
-            state.live_runtime_ids.insert(runtime_id);
-            state
-                .member_restore_failures
-                .insert(identity.clone(), "missing durable session".to_string());
-        });
+        seed_live_member(&mut authority, &identity, &runtime_id);
+        authority
+            .apply_signal(MobMachineSignal::RecoverMemberRestoreFailure {
+                agent_identity: identity.clone(),
+                reason: "missing durable session".to_string(),
+            })
+            .expect("restore failure should be recorded by machine authority");
 
         assert_eq!(
             authority.state().member_lifecycle_for_identity(&identity),

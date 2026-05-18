@@ -12507,26 +12507,39 @@ mod runtime_observation_tests {
 
     #[test]
     fn foreign_runtime_observations_are_identified_for_log_downgrade() {
-        let state = mob_dsl::MobMachineState::default();
+        let authority = mob_dsl::MobMachineAuthority::new();
         let signal = mob_dsl::MobMachineSignal::ObserveRuntimeReady {
             agent_runtime_id: mob_dsl::AgentRuntimeId("rt:session:parent".to_string()),
             fence_token: mob_dsl::FenceToken(0),
         };
 
-        assert!(foreign_runtime_observation(&state, &signal).is_some());
+        assert!(foreign_runtime_observation(authority.state(), &signal).is_some());
     }
 
     #[test]
     fn live_member_runtime_observations_remain_machine_owned() {
+        let mut authority = mob_dsl::MobMachineAuthority::new();
+        let identity = mob_dsl::AgentIdentity("member".to_string());
         let runtime_id = mob_dsl::AgentRuntimeId("member:0".to_string());
-        let mut state = mob_dsl::MobMachineState::default();
-        state.live_runtime_ids.insert(runtime_id.clone());
+        mob_dsl::MobMachineMutator::apply(
+            &mut authority,
+            mob_dsl::MobMachineInput::Spawn {
+                agent_identity: identity,
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: mob_dsl::FenceToken(1),
+                generation: mob_dsl::Generation(0),
+                external_addressable: true,
+                bridge_session_id: mob_dsl::SessionId("member-session".to_string()),
+                replacing: None,
+            },
+        )
+        .expect("Spawn should seed live runtime ownership");
         let signal = mob_dsl::MobMachineSignal::ObserveRuntimeReady {
             agent_runtime_id: runtime_id,
             fence_token: mob_dsl::FenceToken(1),
         };
 
-        assert!(foreign_runtime_observation(&state, &signal).is_none());
+        assert!(foreign_runtime_observation(authority.state(), &signal).is_none());
     }
 }
 

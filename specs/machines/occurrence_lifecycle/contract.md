@@ -20,6 +20,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `missing_target_policy`: `MissingTargetPolicy`
 - `missing_target_policy_key`: `String`
 - `due_at_utc_ms`: `u64`
+- `misfire_deadline_utc_ms`: `u64`
 - `claimed_by`: `Option<String>`
 - `lease_expires_at_utc_ms`: `Option<u64>`
 - `claimed_at_utc_ms`: `Option<u64>`
@@ -35,9 +36,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `superseded_by_revision`: `Option<u64>`
 
 ## Inputs
-- `PlanOccurrence`(occurrence_id: OccurrenceId, schedule_id: ScheduleId, schedule_revision: u64, occurrence_ordinal: u64, trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, due_at_utc_ms: u64)
+- `PlanOccurrence`(occurrence_id: OccurrenceId, schedule_id: ScheduleId, schedule_revision: u64, occurrence_ordinal: u64, trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, due_at_utc_ms: u64, misfire_deadline_utc_ms: u64)
 - `SyncTargetSnapshot`(target_binding_key: String)
 - `RecordReceipt`(receipt: DeliveryReceipt, runtime_outcome_key: Option<String>)
+- `ClassifyDue`(now_utc_ms: u64)
 - `Claim`(owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken)
 - `DispatchStarted`(correlation_id: Option<String>, at_utc_ms: u64)
 - `AwaitCompletion`(at_utc_ms: u64)
@@ -59,6 +61,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Misfired`
 - `Superseded`
 - `OccurrencesSuperseded`(occurrence_id: OccurrenceId, superseding_revision: u64)
+- `DueNoAction`
+- `DueClaimEligible`
+- `DueMisfireRequired`
+- `DueLeaseExpired`
 - `DeliveryFailed`
 - `LeaseExpired`
 
@@ -69,14 +75,117 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_claim_requires_owner`
 - `superseded_records_revision`
 - `delivery_failed_records_failure_class`
+- `misfire_deadline_not_before_due`
 
 ## Transitions
 ### `PlanOccurrenceFromPending`
 - From: `Pending`
-- On: `PlanOccurrence`(occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms)
+- On: `PlanOccurrence`(occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms)
 - Guards:
   - ``
 - To: `Pending`
+
+### `ClassifyDuePendingFuture`
+- From: `Pending`
+- On: `ClassifyDue`(now_utc_ms)
+- Guards:
+  - ``
+- Emits: `DueNoAction`
+- To: `Pending`
+
+### `ClassifyDuePendingMisfire`
+- From: `Pending`
+- On: `ClassifyDue`(now_utc_ms)
+- Guards:
+  - ``
+- Emits: `DueMisfireRequired`
+- To: `Pending`
+
+### `ClassifyDuePendingClaimEligible`
+- From: `Pending`
+- On: `ClassifyDue`(now_utc_ms)
+- Guards:
+  - ``
+- Emits: `DueClaimEligible`
+- To: `Pending`
+
+### `ClassifyDueClaimedLeaseExpired`
+- From: `Claimed`
+- On: `ClassifyDue`(now_utc_ms)
+- Guards:
+  - ``
+- Emits: `DueLeaseExpired`
+- To: `Claimed`
+
+### `ClassifyDueDispatchingLeaseExpired`
+- From: `Dispatching`
+- On: `ClassifyDue`(now_utc_ms)
+- Guards:
+  - ``
+- Emits: `DueLeaseExpired`
+- To: `Dispatching`
+
+### `ClassifyDueAwaitingCompletionLeaseExpired`
+- From: `AwaitingCompletion`
+- On: `ClassifyDue`(now_utc_ms)
+- Guards:
+  - ``
+- Emits: `DueLeaseExpired`
+- To: `AwaitingCompletion`
+
+### `ClassifyDueClaimedLeaseCurrent`
+- From: `Claimed`
+- On: `ClassifyDue`(now_utc_ms)
+- Guards:
+  - ``
+- Emits: `DueNoAction`
+- To: `Claimed`
+
+### `ClassifyDueDispatchingLeaseCurrent`
+- From: `Dispatching`
+- On: `ClassifyDue`(now_utc_ms)
+- Guards:
+  - ``
+- Emits: `DueNoAction`
+- To: `Dispatching`
+
+### `ClassifyDueAwaitingCompletionLeaseCurrent`
+- From: `AwaitingCompletion`
+- On: `ClassifyDue`(now_utc_ms)
+- Guards:
+  - ``
+- Emits: `DueNoAction`
+- To: `AwaitingCompletion`
+
+### `ClassifyDueCompletedNoAction`
+- From: `Completed`
+- On: `ClassifyDue`(now_utc_ms)
+- Emits: `DueNoAction`
+- To: `Completed`
+
+### `ClassifyDueSkippedNoAction`
+- From: `Skipped`
+- On: `ClassifyDue`(now_utc_ms)
+- Emits: `DueNoAction`
+- To: `Skipped`
+
+### `ClassifyDueMisfiredNoAction`
+- From: `Misfired`
+- On: `ClassifyDue`(now_utc_ms)
+- Emits: `DueNoAction`
+- To: `Misfired`
+
+### `ClassifyDueSupersededNoAction`
+- From: `Superseded`
+- On: `ClassifyDue`(now_utc_ms)
+- Emits: `DueNoAction`
+- To: `Superseded`
+
+### `ClassifyDueDeliveryFailedNoAction`
+- From: `DeliveryFailed`
+- On: `ClassifyDue`(now_utc_ms)
+- Emits: `DueNoAction`
+- To: `DeliveryFailed`
 
 ### `SyncTargetSnapshotPending`
 - From: `Pending`
@@ -136,6 +245,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `ClaimPending`
 - From: `Pending`
 - On: `Claim`(owner_id, at_utc_ms, lease_expires_at_utc_ms, claim_token)
+- Guards:
+  - ``
 - Emits: `Claimed`
 - To: `Claimed`
 
@@ -201,10 +312,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-schedule/src/lifecycle.rs` — Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
+- `meerkat-schedule/src/lifecycle.rs` — Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, classify due no action, due claim eligible, due misfire required, due lease expired, claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
 
 ### Scenarios
 - `occurrence_start_complete_fail` — occurrence transitions through pending, running, and terminal lifecycle states
 - `occurrence_claim_dispatch_completion` — plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, and record claimed/dispatch/awaiting/completed effects
 - `occurrence_terminal_classification` — skip/skipped, misfire/misfired, supersede/superseded, delivery failed, occurrences superseded, records revision and explicit failure class for terminal occurrence outcomes
-- `occurrence_lease_recovery` — lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery
+- `occurrence_lease_recovery` — classify due no action, due claim eligible, due misfire required, due lease expired, and lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery

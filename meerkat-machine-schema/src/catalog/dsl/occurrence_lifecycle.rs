@@ -1,3 +1,4 @@
+use super::OptionValueExt;
 use meerkat_machine_dsl::machine;
 
 machine! {
@@ -20,6 +21,7 @@ machine! {
             missing_target_policy: Enum<MissingTargetPolicy>,
             missing_target_policy_key: String,
             due_at_utc_ms: u64,
+            misfire_deadline_utc_ms: u64,
             claimed_by: Option<String>,
             lease_expires_at_utc_ms: Option<u64>,
             claimed_at_utc_ms: Option<u64>,
@@ -49,6 +51,7 @@ machine! {
             missing_target_policy = MissingTargetPolicy::MarkMisfired,
             missing_target_policy_key = "missing_target:mark_misfired",
             due_at_utc_ms = 1,
+            misfire_deadline_utc_ms = 1,
             claimed_by = None,
             lease_expires_at_utc_ms = None,
             claimed_at_utc_ms = None,
@@ -93,9 +96,11 @@ machine! {
                 missing_target_policy: Enum<MissingTargetPolicy>,
                 missing_target_policy_key: String,
                 due_at_utc_ms: u64,
+                misfire_deadline_utc_ms: u64,
             },
             SyncTargetSnapshot { target_binding_key: String },
             RecordReceipt { receipt: DeliveryReceipt, runtime_outcome_key: Option<String> },
+            ClassifyDue { now_utc_ms: u64 },
             Claim { owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken },
             DispatchStarted { correlation_id: Option<String>, at_utc_ms: u64 },
             AwaitCompletion { at_utc_ms: u64 },
@@ -122,6 +127,10 @@ machine! {
             // superseded (instead of firing a one-way Supersede and
             // hoping).
             OccurrencesSuperseded { occurrence_id: OccurrenceId, superseding_revision: u64 },
+            DueNoAction,
+            DueClaimEligible,
+            DueMisfireRequired,
+            DueLeaseExpired,
             DeliveryFailed,
             LeaseExpired,
         }
@@ -142,6 +151,10 @@ machine! {
             self.lifecycle_phase != Phase::DeliveryFailed || self.failure_class != None
         }
 
+        invariant misfire_deadline_not_before_due {
+            self.misfire_deadline_utc_ms >= self.due_at_utc_ms
+        }
+
         disposition Claimed => external,
         disposition DispatchStarted => external,
         disposition AwaitingCompletion => external,
@@ -150,6 +163,10 @@ machine! {
         disposition Misfired => external,
         disposition Superseded => external,
         disposition OccurrencesSuperseded => routed [ScheduleLifecycleMachine],
+        disposition DueNoAction => local,
+        disposition DueClaimEligible => local,
+        disposition DueMisfireRequired => local,
+        disposition DueLeaseExpired => local,
         disposition DeliveryFailed => external,
         disposition LeaseExpired => external,
 
@@ -175,7 +192,8 @@ machine! {
                 overlap_policy_key,
                 missing_target_policy,
                 missing_target_policy_key,
-                due_at_utc_ms
+                due_at_utc_ms,
+                misfire_deadline_utc_ms
             }
             guard {
                 self.lifecycle_phase == Phase::Pending
@@ -185,6 +203,7 @@ machine! {
                 && self.delivery_correlation_id == None
                 && self.completed_at_utc_ms == None
                 && self.superseded_by_revision == None
+                && misfire_deadline_utc_ms >= due_at_utc_ms
             }
             update {
                 self.occurrence_id = occurrence_id;
@@ -200,6 +219,7 @@ machine! {
                 self.missing_target_policy = missing_target_policy;
                 self.missing_target_policy_key = missing_target_policy_key;
                 self.due_at_utc_ms = due_at_utc_ms;
+                self.misfire_deadline_utc_ms = misfire_deadline_utc_ms;
                 self.claimed_by = None;
                 self.lease_expires_at_utc_ms = None;
                 self.claimed_at_utc_ms = None;
@@ -215,6 +235,148 @@ machine! {
                 self.superseded_by_revision = None;
             }
             to Pending
+        }
+
+        // --- Due classification ---
+        //
+        // Store shells observe time and durable ordering, but occurrence
+        // authority classifies due admission, pending misfire, and expired
+        // lease reclaimability.
+
+        transition ClassifyDuePendingFuture {
+            on input ClassifyDue { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Pending && now_utc_ms < self.due_at_utc_ms }
+            to Pending
+            emit DueNoAction
+        }
+
+        transition ClassifyDuePendingMisfire {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.due_at_utc_ms <= now_utc_ms
+                && self.misfire_deadline_utc_ms < now_utc_ms
+            }
+            to Pending
+            emit DueMisfireRequired
+        }
+
+        transition ClassifyDuePendingClaimEligible {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.due_at_utc_ms <= now_utc_ms
+                && now_utc_ms <= self.misfire_deadline_utc_ms
+            }
+            to Pending
+            emit DueClaimEligible
+        }
+
+        transition ClassifyDueClaimedLeaseExpired {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Claimed
+                && self.lease_expires_at_utc_ms != None
+                && self.lease_expires_at_utc_ms.get("value") <= now_utc_ms
+            }
+            to Claimed
+            emit DueLeaseExpired
+        }
+
+        transition ClassifyDueDispatchingLeaseExpired {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Dispatching
+                && self.lease_expires_at_utc_ms != None
+                && self.lease_expires_at_utc_ms.get("value") <= now_utc_ms
+            }
+            to Dispatching
+            emit DueLeaseExpired
+        }
+
+        transition ClassifyDueAwaitingCompletionLeaseExpired {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::AwaitingCompletion
+                && self.lease_expires_at_utc_ms != None
+                && self.lease_expires_at_utc_ms.get("value") <= now_utc_ms
+            }
+            to AwaitingCompletion
+            emit DueLeaseExpired
+        }
+
+        transition ClassifyDueClaimedLeaseCurrent {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Claimed
+                && (
+                    self.lease_expires_at_utc_ms == None
+                    || now_utc_ms < self.lease_expires_at_utc_ms.get("value")
+                )
+            }
+            to Claimed
+            emit DueNoAction
+        }
+
+        transition ClassifyDueDispatchingLeaseCurrent {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Dispatching
+                && (
+                    self.lease_expires_at_utc_ms == None
+                    || now_utc_ms < self.lease_expires_at_utc_ms.get("value")
+                )
+            }
+            to Dispatching
+            emit DueNoAction
+        }
+
+        transition ClassifyDueAwaitingCompletionLeaseCurrent {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::AwaitingCompletion
+                && (
+                    self.lease_expires_at_utc_ms == None
+                    || now_utc_ms < self.lease_expires_at_utc_ms.get("value")
+                )
+            }
+            to AwaitingCompletion
+            emit DueNoAction
+        }
+
+        transition ClassifyDueCompletedNoAction {
+            on input ClassifyDue { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Completed }
+            to Completed
+            emit DueNoAction
+        }
+
+        transition ClassifyDueSkippedNoAction {
+            on input ClassifyDue { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Skipped }
+            to Skipped
+            emit DueNoAction
+        }
+
+        transition ClassifyDueMisfiredNoAction {
+            on input ClassifyDue { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Misfired }
+            to Misfired
+            emit DueNoAction
+        }
+
+        transition ClassifyDueSupersededNoAction {
+            on input ClassifyDue { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            to Superseded
+            emit DueNoAction
+        }
+
+        transition ClassifyDueDeliveryFailedNoAction {
+            on input ClassifyDue { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::DeliveryFailed }
+            to DeliveryFailed
+            emit DueNoAction
         }
 
         // --- Target snapshot sync ---
@@ -337,7 +499,11 @@ machine! {
 
         transition ClaimPending {
             on input Claim { owner_id, at_utc_ms, lease_expires_at_utc_ms, claim_token }
-            guard { self.lifecycle_phase == Phase::Pending }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.due_at_utc_ms <= at_utc_ms
+                && at_utc_ms <= self.misfire_deadline_utc_ms
+            }
             update {
                 self.claimed_by = Some(owner_id);
                 self.lease_expires_at_utc_ms = Some(lease_expires_at_utc_ms);

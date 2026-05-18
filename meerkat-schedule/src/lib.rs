@@ -24,9 +24,9 @@ pub use driver::{
 };
 pub use error::{ScheduleDomainError, ScheduleStoreError};
 pub use lifecycle::{
-    OccurrenceLifecycleEffect, OccurrenceLifecycleError, OccurrenceLifecycleInput,
-    OccurrenceLifecycleMutator, ScheduleLifecycleEffect, ScheduleLifecycleError,
-    ScheduleLifecycleInput, ScheduleLifecycleMutator,
+    OccurrenceDueAction, OccurrenceLifecycleEffect, OccurrenceLifecycleError,
+    OccurrenceLifecycleInput, OccurrenceLifecycleMutator, ScheduleLifecycleEffect,
+    ScheduleLifecycleError, ScheduleLifecycleInput, ScheduleLifecycleMutator,
 };
 pub use service::ScheduleService;
 pub use store::{

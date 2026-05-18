@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use meerkat_schedule::{
     ClaimDueRequest, ClaimDueResult, DeliveryReceipt, DeliveryReceiptStage, Occurrence,
-    OccurrenceFailureClass, OccurrenceFilter, OccurrenceId, OccurrenceLifecycleEffect,
-    OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator,
-    OccurrencePhase, PendingSupersession, Schedule, ScheduleFilter, ScheduleStore,
-    ScheduleStoreError, ScheduleStoreKind, apply_supersession_feedback,
+    OccurrenceDueAction, OccurrenceFailureClass, OccurrenceFilter, OccurrenceId,
+    OccurrenceLifecycleEffect, OccurrenceLifecycleError, OccurrenceLifecycleInput,
+    OccurrenceLifecycleMutator, OccurrencePhase, PendingSupersession, Schedule, ScheduleFilter,
+    ScheduleStore, ScheduleStoreError, ScheduleStoreKind, apply_supersession_feedback,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -303,8 +303,8 @@ impl SqliteScheduleStore {
             let store_now_ms = select_store_now_ms(&tx)?;
             let store_now_utc = utc_from_millis(store_now_ms);
 
-            let limit = i64::try_from(request.limit).unwrap_or(i64::MAX);
-            let mut candidates = Vec::new();
+            let limit = request.limit;
+            let mut occurrences = Vec::new();
             {
                 let mut stmt = tx.prepare(
                     r"
@@ -320,62 +320,73 @@ impl SqliteScheduleStore {
                     let bytes = row?;
                     let occurrence: Occurrence =
                         serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
-                    if occurrence.is_claimable_at(store_now_utc) {
-                        candidates.push(occurrence);
-                    }
+                    occurrences.push(occurrence);
                 }
             }
-            candidates.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
 
             let mut claimed = Vec::new();
-            for occurrence in candidates {
-                let occurrence = if occurrence.is_reclaimable_at(store_now_utc) {
-                    let expired = occurrence
-                        .apply(OccurrenceLifecycleInput::LeaseExpired {
-                            at_utc: store_now_utc,
-                        })
-                        .map_err(|error: OccurrenceLifecycleError| {
-                            StoreError::Internal(error.to_string())
-                        })?
-                        .into_occurrence();
-                    let mut receipt = DeliveryReceipt::new(
-                        expired.occurrence_id.clone(),
-                        expired.attempt_count,
-                        DeliveryReceiptStage::LeaseExpired,
-                    );
-                    receipt.failure_class = Some(OccurrenceFailureClass::LeaseLost);
-                    receipt.detail = Some("lease expired before completion".to_string());
-                    let expired = expired
-                        .apply(OccurrenceLifecycleInput::RecordReceipt {
-                            runtime_outcome: receipt.runtime_outcome.clone(),
-                            receipt: receipt.clone(),
-                        })
-                        .map_err(|error: OccurrenceLifecycleError| {
-                            StoreError::Internal(error.to_string())
-                        })?
-                        .into_occurrence();
-                    write_receipt_in_txn(&tx, &receipt)?;
-                    write_occurrence_in_txn(&tx, &expired)?;
-                    expired
-                } else {
-                    occurrence
-                };
-
-                let claim_token = Uuid::now_v7();
-                let lease_expires_at_utc = store_now_utc + request.lease_duration;
-                let claimed_occurrence = occurrence
-                    .apply(OccurrenceLifecycleInput::Claim {
-                        owner_id: request.owner_id.clone(),
-                        at_utc: store_now_utc,
-                        lease_expires_at_utc,
-                        claim_token,
-                    })
-                    .map_err(|error: OccurrenceLifecycleError| {
-                        StoreError::Internal(error.to_string())
-                    })?
-                    .into_occurrence();
-                write_occurrence_in_txn(&tx, &claimed_occurrence)?;
-                claimed.push(claimed_occurrence);
+            for occurrence in occurrences {
+                let action = occurrence.classify_due_action(store_now_utc).map_err(
+                    |error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()),
+                )?;
+                match action {
+                    Some(OccurrenceDueAction::MisfireRequired) => {
+                        let detail = Some(occurrence.due_misfire_detail_at(store_now_utc));
+                        let mut updated = occurrence
+                            .apply(OccurrenceLifecycleInput::Misfire {
+                                detail: detail.clone(),
+                                failure_class: None,
+                                at_utc: store_now_utc,
+                            })
+                            .map_err(|error: OccurrenceLifecycleError| {
+                                StoreError::Internal(error.to_string())
+                            })?
+                            .into_occurrence();
+                        let mut receipt = DeliveryReceipt::new(
+                            updated.occurrence_id.clone(),
+                            updated.attempt_count,
+                            DeliveryReceiptStage::Misfired,
+                        );
+                        receipt.detail = detail;
+                        updated = updated
+                            .apply(OccurrenceLifecycleInput::RecordReceipt {
+                                runtime_outcome: receipt.runtime_outcome.clone(),
+                                receipt: receipt.clone(),
+                            })
+                            .map_err(|error: OccurrenceLifecycleError| {
+                                StoreError::Internal(error.to_string())
+                            })?
+                            .into_occurrence();
+                        write_receipt_in_txn(&tx, &receipt)?;
+                        write_occurrence_in_txn(&tx, &updated)?;
+                    }
+                    Some(OccurrenceDueAction::ClaimEligible) => {
+                        if claimed.len() >= limit {
+                            continue;
+                        }
+                        let claimed_occurrence =
+                            claim_occurrence_for_sqlite(occurrence, &request, store_now_utc)?;
+                        write_occurrence_in_txn(&tx, &claimed_occurrence)?;
+                        claimed.push(claimed_occurrence);
+                    }
+                    Some(OccurrenceDueAction::LeaseExpired) => {
+                        if claimed.len() >= limit {
+                            continue;
+                        }
+                        let (expired, receipt) =
+                            expire_occurrence_lease_for_sqlite(occurrence, store_now_utc)?;
+                        write_receipt_in_txn(&tx, &receipt)?;
+                        write_occurrence_in_txn(&tx, &expired)?;
+                        let Ok(claimed_occurrence) =
+                            claim_occurrence_for_sqlite(expired, &request, store_now_utc)
+                        else {
+                            continue;
+                        };
+                        write_occurrence_in_txn(&tx, &claimed_occurrence)?;
+                        claimed.push(claimed_occurrence);
+                    }
+                    None => {}
+                }
             }
 
             tx.commit()?;
@@ -686,6 +697,47 @@ fn write_receipt_in_txn(
         ],
     )?;
     Ok(())
+}
+
+fn expire_occurrence_lease_for_sqlite(
+    occurrence: Occurrence,
+    at_utc: DateTime<Utc>,
+) -> Result<(Occurrence, DeliveryReceipt), StoreError> {
+    let expired = occurrence
+        .apply(OccurrenceLifecycleInput::LeaseExpired { at_utc })
+        .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
+        .into_occurrence();
+    let mut receipt = DeliveryReceipt::new(
+        expired.occurrence_id.clone(),
+        expired.attempt_count,
+        DeliveryReceiptStage::LeaseExpired,
+    );
+    receipt.failure_class = Some(OccurrenceFailureClass::LeaseLost);
+    receipt.detail = Some("lease expired before completion".to_string());
+    let expired = expired
+        .apply(OccurrenceLifecycleInput::RecordReceipt {
+            runtime_outcome: receipt.runtime_outcome.clone(),
+            receipt: receipt.clone(),
+        })
+        .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
+        .into_occurrence();
+    Ok((expired, receipt))
+}
+
+fn claim_occurrence_for_sqlite(
+    occurrence: Occurrence,
+    request: &ClaimDueRequest,
+    at_utc: DateTime<Utc>,
+) -> Result<Occurrence, StoreError> {
+    occurrence
+        .apply(OccurrenceLifecycleInput::Claim {
+            owner_id: request.owner_id.clone(),
+            at_utc,
+            lease_expires_at_utc: at_utc + request.lease_duration,
+            claim_token: Uuid::now_v7(),
+        })
+        .map(OccurrenceLifecycleMutator::into_occurrence)
+        .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))
 }
 
 fn supersede_pending_occurrences_in_txn(

@@ -461,6 +461,7 @@ pub struct State {
     pub missing_target_policy: MissingTargetPolicy,
     pub missing_target_policy_key: String,
     pub due_at_utc_ms: u64,
+    pub misfire_deadline_utc_ms: u64,
     pub claimed_by: Option<String>,
     pub lease_expires_at_utc_ms: Option<u64>,
     pub claimed_at_utc_ms: Option<u64>,
@@ -499,6 +500,7 @@ pub mod inputs {
         pub missing_target_policy: MissingTargetPolicy,
         pub missing_target_policy_key: String,
         pub due_at_utc_ms: u64,
+        pub misfire_deadline_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SyncTargetSnapshot {
@@ -508,6 +510,10 @@ pub mod inputs {
     pub struct RecordReceipt {
         pub receipt: DeliveryReceipt,
         pub runtime_outcome_key: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyDue {
+        pub now_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Claim {
@@ -565,6 +571,7 @@ pub enum Input {
     PlanOccurrence(inputs::PlanOccurrence),
     SyncTargetSnapshot(inputs::SyncTargetSnapshot),
     RecordReceipt(inputs::RecordReceipt),
+    ClassifyDue(inputs::ClassifyDue),
     Claim(inputs::Claim),
     DispatchStarted(inputs::DispatchStarted),
     AwaitCompletion(inputs::AwaitCompletion),
@@ -581,6 +588,7 @@ impl Input {
             Self::PlanOccurrence(_) => InputKind::PlanOccurrence,
             Self::SyncTargetSnapshot(_) => InputKind::SyncTargetSnapshot,
             Self::RecordReceipt(_) => InputKind::RecordReceipt,
+            Self::ClassifyDue(_) => InputKind::ClassifyDue,
             Self::Claim(_) => InputKind::Claim,
             Self::DispatchStarted(_) => InputKind::DispatchStarted,
             Self::AwaitCompletion(_) => InputKind::AwaitCompletion,
@@ -598,6 +606,7 @@ pub enum InputKind {
     PlanOccurrence,
     SyncTargetSnapshot,
     RecordReceipt,
+    ClassifyDue,
     Claim,
     DispatchStarted,
     AwaitCompletion,
@@ -632,6 +641,14 @@ pub mod effects {
         pub superseding_revision: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DueNoAction {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DueClaimEligible {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DueMisfireRequired {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DueLeaseExpired {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DeliveryFailed {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LeaseExpired {}
@@ -647,6 +664,10 @@ pub enum Effect {
     Misfired(effects::Misfired),
     Superseded(effects::Superseded),
     OccurrencesSuperseded(effects::OccurrencesSuperseded),
+    DueNoAction(effects::DueNoAction),
+    DueClaimEligible(effects::DueClaimEligible),
+    DueMisfireRequired(effects::DueMisfireRequired),
+    DueLeaseExpired(effects::DueLeaseExpired),
     DeliveryFailed(effects::DeliveryFailed),
     LeaseExpired(effects::LeaseExpired),
 }
@@ -660,6 +681,10 @@ pub enum EffectKind {
     Misfired,
     Superseded,
     OccurrencesSuperseded,
+    DueNoAction,
+    DueClaimEligible,
+    DueMisfireRequired,
+    DueLeaseExpired,
     DeliveryFailed,
     LeaseExpired,
 }
@@ -668,6 +693,20 @@ pub enum EffectKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
     PlanOccurrenceFromPending,
+    ClassifyDuePendingFuture,
+    ClassifyDuePendingMisfire,
+    ClassifyDuePendingClaimEligible,
+    ClassifyDueClaimedLeaseExpired,
+    ClassifyDueDispatchingLeaseExpired,
+    ClassifyDueAwaitingCompletionLeaseExpired,
+    ClassifyDueClaimedLeaseCurrent,
+    ClassifyDueDispatchingLeaseCurrent,
+    ClassifyDueAwaitingCompletionLeaseCurrent,
+    ClassifyDueCompletedNoAction,
+    ClassifyDueSkippedNoAction,
+    ClassifyDueMisfiredNoAction,
+    ClassifyDueSupersededNoAction,
+    ClassifyDueDeliveryFailedNoAction,
     SyncTargetSnapshotPending,
     SyncTargetSnapshotClaimed,
     RecordReceiptPending,
@@ -775,6 +814,7 @@ pub fn initial_state() -> State {
         missing_target_policy: MissingTargetPolicy::MarkMisfired,
         missing_target_policy_key: "missing_target:mark_misfired".to_string(),
         due_at_utc_ms: 1,
+        misfire_deadline_utc_ms: 1,
         claimed_by: None,
         lease_expires_at_utc_ms: None,
         claimed_at_utc_ms: None,

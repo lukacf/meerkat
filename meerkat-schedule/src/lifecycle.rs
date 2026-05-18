@@ -137,6 +137,9 @@ pub enum OccurrenceLifecycleInput {
         receipt: DeliveryReceipt,
         runtime_outcome: Option<RuntimeDeliveryOutcome>,
     },
+    ClassifyDue {
+        now_utc: DateTime<Utc>,
+    },
     Claim {
         owner_id: String,
         at_utc: DateTime<Utc>,
@@ -192,7 +195,18 @@ pub enum OccurrenceLifecycleEffect {
         occurrence_id: crate::types::OccurrenceId,
         superseding_revision: ScheduleRevision,
     },
+    DueNoAction,
+    DueClaimEligible,
+    DueMisfireRequired,
+    DueLeaseExpired,
     DeliveryFailed,
+    LeaseExpired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OccurrenceDueAction {
+    ClaimEligible,
+    MisfireRequired,
     LeaseExpired,
 }
 
@@ -228,12 +242,18 @@ pub enum OccurrenceLifecycleError {
     TargetSyncRejected,
     #[error("generated occurrence authority rejected receipt/result projection")]
     ReceiptRecordRejected,
+    #[error("generated occurrence authority rejected due classification")]
+    DueClassificationRejected,
     #[error("OccurrenceLifecycleMachine emitted invalid occurrence id `{id}`: {source}")]
     InvalidOccurrenceId { id: String, source: uuid::Error },
     #[error("OccurrenceLifecycleMachine emitted invalid schedule id `{id}`: {source}")]
     InvalidScheduleId { id: String, source: uuid::Error },
     #[error("OccurrenceLifecycleMachine emitted invalid due timestamp millis `{millis}`")]
     InvalidDueAtUtcMillis { millis: u64 },
+    #[error(
+        "OccurrenceLifecycleMachine emitted invalid misfire deadline timestamp millis `{millis}`"
+    )]
+    InvalidMisfireDeadlineUtcMillis { millis: u64 },
     #[error("OccurrenceLifecycleMachine emitted invalid {field} timestamp millis `{millis}`")]
     InvalidTimestampMillis { field: &'static str, millis: u64 },
     #[error("OccurrenceLifecycleMachine emitted invalid claim token `{token}`: {source}")]
@@ -256,6 +276,8 @@ pub enum OccurrenceLifecycleError {
         machine_key: Option<String>,
         snapshot_key: Option<String>,
     },
+    #[error("OccurrenceLifecycleMachine emitted ambiguous due classification effects: {effects:?}")]
+    AmbiguousDueClassification { effects: Vec<&'static str> },
 }
 
 // ===========================================================================
@@ -327,6 +349,16 @@ impl Occurrence {
             effects,
         })
     }
+
+    pub fn classify_due_action(
+        &self,
+        now_utc: DateTime<Utc>,
+    ) -> Result<Option<OccurrenceDueAction>, OccurrenceLifecycleError> {
+        let mutator = self
+            .clone()
+            .apply(OccurrenceLifecycleInput::ClassifyDue { now_utc })?;
+        due_action_from_effects(&mutator.effects)
+    }
 }
 
 /// Project a domain `Occurrence` into the DSL flat state struct.
@@ -360,6 +392,10 @@ fn project_occurrence(
         missing_target_policy: to_occ_dsl_missing_target_policy(&occ.missing_target_policy),
         missing_target_policy_key: missing_target_policy_authority_key(&occ.missing_target_policy),
         due_at_utc_ms: occurrence_datetime_to_millis(occ.due_at_utc, "due_at_utc")?,
+        misfire_deadline_utc_ms: occurrence_misfire_deadline_to_millis(
+            &occ.misfire_policy,
+            occ.due_at_utc,
+        )?,
         claimed_by: occ.claimed_by.clone(),
         lease_expires_at_utc_ms: optional_occurrence_datetime_to_millis(
             occ.lease_expires_at_utc,
@@ -512,6 +548,10 @@ fn convert_occurrence_input(
             missing_target_policy: to_occ_dsl_missing_target_policy(missing_target_policy),
             missing_target_policy_key: missing_target_policy_authority_key(missing_target_policy),
             due_at_utc_ms: occurrence_datetime_to_millis(*due_at_utc, "due_at_utc")?,
+            misfire_deadline_utc_ms: occurrence_misfire_deadline_to_millis(
+                misfire_policy,
+                *due_at_utc,
+            )?,
         },
         OccurrenceLifecycleInput::SyncTargetSnapshot { target_snapshot } => {
             occ_dsl::OccurrenceLifecycleInput::SyncTargetSnapshot {
@@ -525,6 +565,11 @@ fn convert_occurrence_input(
             receipt: receipt_to_dsl(receipt),
             runtime_outcome_key: runtime_outcome.as_ref().map(runtime_outcome_authority_key),
         },
+        OccurrenceLifecycleInput::ClassifyDue { now_utc } => {
+            occ_dsl::OccurrenceLifecycleInput::ClassifyDue {
+                now_utc_ms: occurrence_datetime_to_millis(*now_utc, "now_utc")?,
+            }
+        }
         OccurrenceLifecycleInput::Claim {
             owner_id,
             at_utc,
@@ -774,6 +819,9 @@ fn map_occurrence_error(
         OccurrenceLifecycleInput::RecordReceipt { .. } => {
             OccurrenceLifecycleError::ReceiptRecordRejected
         }
+        OccurrenceLifecycleInput::ClassifyDue { .. } => {
+            OccurrenceLifecycleError::DueClassificationRejected
+        }
         OccurrenceLifecycleInput::Claim { .. } => OccurrenceLifecycleError::NotPendingForClaim,
         OccurrenceLifecycleInput::DispatchStarted { .. } => OccurrenceLifecycleError::NotClaimed,
         OccurrenceLifecycleInput::AwaitCompletion { .. } => {
@@ -813,11 +861,52 @@ fn map_occurrence_effect(
             occurrence_id: occurrence_id_from_dsl(occurrence_id)?,
             superseding_revision: ScheduleRevision(*superseding_revision),
         },
+        occ_dsl::OccurrenceLifecycleEffect::DueNoAction => OccurrenceLifecycleEffect::DueNoAction,
+        occ_dsl::OccurrenceLifecycleEffect::DueClaimEligible => {
+            OccurrenceLifecycleEffect::DueClaimEligible
+        }
+        occ_dsl::OccurrenceLifecycleEffect::DueMisfireRequired => {
+            OccurrenceLifecycleEffect::DueMisfireRequired
+        }
+        occ_dsl::OccurrenceLifecycleEffect::DueLeaseExpired => {
+            OccurrenceLifecycleEffect::DueLeaseExpired
+        }
         occ_dsl::OccurrenceLifecycleEffect::DeliveryFailed => {
             OccurrenceLifecycleEffect::DeliveryFailed
         }
         occ_dsl::OccurrenceLifecycleEffect::LeaseExpired => OccurrenceLifecycleEffect::LeaseExpired,
     })
+}
+
+fn due_action_from_effects(
+    effects: &[OccurrenceLifecycleEffect],
+) -> Result<Option<OccurrenceDueAction>, OccurrenceLifecycleError> {
+    let mut classifications = effects.iter().filter_map(|effect| match effect {
+        OccurrenceLifecycleEffect::DueNoAction => Some(("DueNoAction", None)),
+        OccurrenceLifecycleEffect::DueClaimEligible => {
+            Some(("DueClaimEligible", Some(OccurrenceDueAction::ClaimEligible)))
+        }
+        OccurrenceLifecycleEffect::DueMisfireRequired => Some((
+            "DueMisfireRequired",
+            Some(OccurrenceDueAction::MisfireRequired),
+        )),
+        OccurrenceLifecycleEffect::DueLeaseExpired => {
+            Some(("DueLeaseExpired", Some(OccurrenceDueAction::LeaseExpired)))
+        }
+        _ => None,
+    });
+
+    let Some((first_name, first_action)) = classifications.next() else {
+        return Err(OccurrenceLifecycleError::AmbiguousDueClassification {
+            effects: Vec::new(),
+        });
+    };
+    if let Some((second_name, _)) = classifications.next() {
+        return Err(OccurrenceLifecycleError::AmbiguousDueClassification {
+            effects: vec![first_name, second_name],
+        });
+    }
+    Ok(first_action)
 }
 
 // ===========================================================================
@@ -1451,6 +1540,19 @@ fn occurrence_datetime_to_millis(
         .map_err(|millis| OccurrenceLifecycleError::InvalidInputTimestampMillis { field, millis })
 }
 
+fn occurrence_misfire_deadline_to_millis(
+    policy: &crate::types::MisfirePolicy,
+    due_at_utc: DateTime<Utc>,
+) -> Result<u64, OccurrenceLifecycleError> {
+    let deadline = policy.misfire_deadline_utc(due_at_utc).ok_or(
+        OccurrenceLifecycleError::InvalidInputTimestampMillis {
+            field: "misfire_deadline_utc",
+            millis: due_at_utc.timestamp_millis(),
+        },
+    )?;
+    occurrence_datetime_to_millis(deadline, "misfire_deadline_utc")
+}
+
 fn optional_occurrence_datetime_to_millis(
     dt: Option<DateTime<Utc>>,
     field: &'static str,
@@ -1696,6 +1798,55 @@ mod tests {
                 "claim should reject occurrences already in phase {phase:?}"
             );
         }
+    }
+
+    #[test]
+    fn due_classification_comes_from_occurrence_authority() {
+        let now = Utc::now();
+        let claimable =
+            Occurrence::planned_from_schedule(&sample_schedule(), crate::OccurrenceOrdinal(0), now)
+                .expect("claimable occurrence planning should pass generated authority");
+        assert_eq!(
+            claimable
+                .classify_due_action(now)
+                .expect("due classification should pass"),
+            Some(OccurrenceDueAction::ClaimEligible)
+        );
+
+        let future = Occurrence::planned_from_schedule(
+            &sample_schedule(),
+            crate::OccurrenceOrdinal(1),
+            now + Duration::minutes(5),
+        )
+        .expect("future occurrence planning should pass generated authority");
+        assert_eq!(
+            future
+                .classify_due_action(now)
+                .expect("future classification should pass"),
+            None
+        );
+        assert!(matches!(
+            future.apply(OccurrenceLifecycleInput::Claim {
+                owner_id: "owner".into(),
+                at_utc: now,
+                lease_expires_at_utc: now + Duration::seconds(30),
+                claim_token: Uuid::now_v7(),
+            }),
+            Err(OccurrenceLifecycleError::NotPendingForClaim)
+        ));
+
+        let overdue = Occurrence::planned_from_schedule(
+            &sample_schedule(),
+            crate::OccurrenceOrdinal(2),
+            now - Duration::seconds(60),
+        )
+        .expect("overdue occurrence planning should pass generated authority");
+        assert_eq!(
+            overdue
+                .classify_due_action(now)
+                .expect("overdue classification should pass"),
+            Some(OccurrenceDueAction::MisfireRequired)
+        );
     }
 
     #[test]

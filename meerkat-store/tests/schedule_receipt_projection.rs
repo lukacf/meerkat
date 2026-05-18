@@ -45,7 +45,7 @@ fn sample_in_flight_occurrence(schedule: &Schedule) -> Occurrence {
     let occurrence = Occurrence::planned_from_schedule(
         schedule,
         OccurrenceOrdinal(0),
-        Utc::now() + Duration::minutes(1),
+        Utc::now() - Duration::seconds(1),
     )
     .expect("sample occurrence planning should pass generated authority");
     let claim_token = Uuid::now_v7();

@@ -228,7 +228,7 @@ pub enum MisfirePolicy {
 }
 
 impl MisfirePolicy {
-    fn catch_up_window(&self) -> Option<Duration> {
+    pub(crate) fn catch_up_window(&self) -> Option<Duration> {
         match self {
             Self::Skip => Some(Duration::seconds(DEFAULT_SKIP_MISFIRE_GRACE_SECONDS)),
             Self::CatchUpWithin { window_seconds } => {
@@ -238,20 +238,16 @@ impl MisfirePolicy {
         }
     }
 
-    fn allows_pending_delivery_at(
+    pub(crate) fn misfire_deadline_utc(&self, due_at_utc: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.catch_up_window()
+            .and_then(|window| due_at_utc.checked_add_signed(window))
+    }
+
+    pub(crate) fn misfire_detail(
         &self,
         due_at_utc: DateTime<Utc>,
         now_utc: DateTime<Utc>,
-    ) -> bool {
-        if now_utc <= due_at_utc {
-            return true;
-        }
-        self.catch_up_window()
-            .and_then(|window| due_at_utc.checked_add_signed(window))
-            .is_some_and(|deadline| now_utc <= deadline)
-    }
-
-    fn misfire_detail(&self, due_at_utc: DateTime<Utc>, now_utc: DateTime<Utc>) -> String {
+    ) -> String {
         let lateness_seconds = now_utc
             .signed_duration_since(due_at_utc)
             .num_seconds()
@@ -992,29 +988,8 @@ pub struct Occurrence {
 }
 
 impl Occurrence {
-    pub fn is_claimable_at(&self, now_utc: DateTime<Utc>) -> bool {
-        self.due_at_utc <= now_utc
-            && (self.phase == OccurrencePhase::Pending || self.is_reclaimable_at(now_utc))
-    }
-
-    pub fn should_misfire_at(&self, now_utc: DateTime<Utc>) -> bool {
-        self.phase == OccurrencePhase::Pending
-            && self.due_at_utc <= now_utc
-            && !self
-                .misfire_policy
-                .allows_pending_delivery_at(self.due_at_utc, now_utc)
-    }
-
-    pub fn misfire_detail_at(&self, now_utc: DateTime<Utc>) -> Option<String> {
-        self.should_misfire_at(now_utc)
-            .then(|| self.misfire_policy.misfire_detail(self.due_at_utc, now_utc))
-    }
-
-    pub fn is_reclaimable_at(&self, now_utc: DateTime<Utc>) -> bool {
-        self.phase.holds_active_lease()
-            && self
-                .lease_expires_at_utc
-                .is_some_and(|expires_at| expires_at <= now_utc)
+    pub fn due_misfire_detail_at(&self, now_utc: DateTime<Utc>) -> String {
+        self.misfire_policy.misfire_detail(self.due_at_utc, now_utc)
     }
 
     pub fn claim_token(&self) -> Option<Uuid> {

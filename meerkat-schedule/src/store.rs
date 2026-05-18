@@ -1,7 +1,7 @@
 use crate::error::ScheduleStoreError;
 use crate::lifecycle::{
-    OccurrenceLifecycleEffect, OccurrenceLifecycleInput, OccurrenceLifecycleMutator,
-    ScheduleLifecycleInput,
+    OccurrenceDueAction, OccurrenceLifecycleEffect, OccurrenceLifecycleError,
+    OccurrenceLifecycleInput, OccurrenceLifecycleMutator, ScheduleLifecycleInput,
 };
 use crate::types::{
     DeliveryReceipt, DeliveryReceiptStage, Occurrence, OccurrenceFailureClass, OccurrenceId,
@@ -102,6 +102,53 @@ pub fn apply_supersession_feedback(
         .into_schedule();
     }
     Ok(schedule)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExpiredOccurrenceLease {
+    pub(crate) occurrence: Occurrence,
+    pub(crate) receipt: DeliveryReceipt,
+}
+
+pub(crate) fn expire_occurrence_lease(
+    occurrence: Occurrence,
+    at_utc: DateTime<Utc>,
+) -> Result<ExpiredOccurrenceLease, OccurrenceLifecycleError> {
+    let expired = occurrence
+        .apply(OccurrenceLifecycleInput::LeaseExpired { at_utc })?
+        .into_occurrence();
+    let mut receipt = DeliveryReceipt::new(
+        expired.occurrence_id.clone(),
+        expired.attempt_count,
+        DeliveryReceiptStage::LeaseExpired,
+    );
+    receipt.failure_class = Some(OccurrenceFailureClass::LeaseLost);
+    receipt.detail = Some("lease expired before completion".to_string());
+    let expired = expired
+        .apply(OccurrenceLifecycleInput::RecordReceipt {
+            runtime_outcome: receipt.runtime_outcome.clone(),
+            receipt: receipt.clone(),
+        })?
+        .into_occurrence();
+    Ok(ExpiredOccurrenceLease {
+        occurrence: expired,
+        receipt,
+    })
+}
+
+pub(crate) fn claim_occurrence(
+    occurrence: Occurrence,
+    request: &ClaimDueRequest,
+    at_utc: DateTime<Utc>,
+) -> Result<Occurrence, OccurrenceLifecycleError> {
+    occurrence
+        .apply(OccurrenceLifecycleInput::Claim {
+            owner_id: request.owner_id.clone(),
+            at_utc,
+            lease_expires_at_utc: at_utc + request.lease_duration,
+            claim_token: Uuid::now_v7(),
+        })
+        .map(OccurrenceLifecycleMutator::into_occurrence)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -516,138 +563,106 @@ impl ScheduleStore for MemoryScheduleStore {
             .map(|(schedule_id, schedule)| (schedule_id.clone(), schedule.phase))
             .collect();
 
-        let misfired_ids: Vec<OccurrenceId> = state
+        let mut occurrence_order: Vec<_> = state
             .occurrences
             .values()
             .filter(|occurrence| {
                 active_schedules
                     .get(&occurrence.schedule_id)
                     .is_some_and(|phase| *phase == SchedulePhase::Active)
-                    && occurrence.should_misfire_at(store_now_utc)
             })
-            .map(|occurrence| occurrence.occurrence_id.clone())
-            .collect();
-
-        for occurrence_id in misfired_ids {
-            let Some(existing) = state.occurrences.get(&occurrence_id).cloned() else {
-                continue;
-            };
-            let detail = existing.misfire_detail_at(store_now_utc);
-            let mut updated = existing
-                .apply(OccurrenceLifecycleInput::Misfire {
-                    detail: detail.clone(),
-                    failure_class: None,
-                    at_utc: store_now_utc,
-                })
-                .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
-                .into_occurrence();
-            let mut receipt = DeliveryReceipt::new(
-                updated.occurrence_id.clone(),
-                updated.attempt_count,
-                DeliveryReceiptStage::Misfired,
-            );
-            receipt.detail = detail;
-            state
-                .receipts
-                .entry(updated.occurrence_id.clone())
-                .or_default()
-                .push(receipt.clone());
-            updated = updated
-                .apply(OccurrenceLifecycleInput::RecordReceipt {
-                    runtime_outcome: receipt.runtime_outcome.clone(),
-                    receipt,
-                })
-                .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
-                .into_occurrence();
-            state
-                .occurrences
-                .insert(updated.occurrence_id.clone(), updated);
-        }
-
-        let mut candidate_ids: Vec<OccurrenceId> = state
-            .occurrences
-            .values()
-            .filter(|occurrence| {
-                active_schedules
-                    .get(&occurrence.schedule_id)
-                    .is_some_and(|phase| *phase == SchedulePhase::Active)
-                    && occurrence.is_claimable_at(store_now_utc)
-            })
-            .map(|occurrence| occurrence.occurrence_id.clone())
-            .collect();
-
-        candidate_ids.sort_by_key(|occurrence_id| {
-            state
-                .occurrences
-                .get(occurrence_id)
-                .map(|occurrence| {
+            .map(|occurrence| {
+                (
                     (
                         occurrence.due_at_utc,
                         occurrence.schedule_revision,
                         occurrence.occurrence_ordinal,
-                    )
-                })
-                .unwrap_or((
-                    Utc::now(),
-                    crate::types::ScheduleRevision(0),
-                    crate::types::OccurrenceOrdinal(0),
-                ))
-        });
-        candidate_ids.truncate(request.limit);
+                    ),
+                    occurrence.occurrence_id.clone(),
+                )
+            })
+            .collect();
+        occurrence_order.sort_by_key(|(key, _)| *key);
 
         let mut claimed = Vec::new();
-        for occurrence_id in candidate_ids {
+        for (_, occurrence_id) in occurrence_order {
             let Some(existing) = state.occurrences.get(&occurrence_id).cloned() else {
                 continue;
             };
-            let existing = if existing.is_reclaimable_at(store_now_utc) {
-                let lease_expired = existing
-                    .apply(OccurrenceLifecycleInput::LeaseExpired {
-                        at_utc: store_now_utc,
-                    })
-                    .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
-                    .into_occurrence();
-                let mut receipt = DeliveryReceipt::new(
-                    lease_expired.occurrence_id.clone(),
-                    lease_expired.attempt_count,
-                    DeliveryReceiptStage::LeaseExpired,
-                );
-                receipt.failure_class = Some(OccurrenceFailureClass::LeaseLost);
-                receipt.detail = Some("lease expired before completion".to_string());
-                state
-                    .receipts
-                    .entry(lease_expired.occurrence_id.clone())
-                    .or_default()
-                    .push(receipt.clone());
-                let lease_expired = lease_expired
-                    .apply(OccurrenceLifecycleInput::RecordReceipt {
-                        runtime_outcome: receipt.runtime_outcome.clone(),
-                        receipt,
-                    })
-                    .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
-                    .into_occurrence();
-                state
-                    .occurrences
-                    .insert(lease_expired.occurrence_id.clone(), lease_expired.clone());
-                lease_expired
-            } else {
-                existing
-            };
-            let lease_expires_at_utc = store_now_utc + request.lease_duration;
-            let claim_token = Uuid::now_v7();
-            let updated = existing
-                .apply(OccurrenceLifecycleInput::Claim {
-                    owner_id: request.owner_id.clone(),
-                    at_utc: store_now_utc,
-                    lease_expires_at_utc,
-                    claim_token,
-                })
-                .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
-                .into_occurrence();
-            state
-                .occurrences
-                .insert(updated.occurrence_id.clone(), updated.clone());
-            claimed.push(updated);
+            let action = existing
+                .classify_due_action(store_now_utc)
+                .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
+            match action {
+                Some(OccurrenceDueAction::MisfireRequired) => {
+                    let detail = Some(existing.due_misfire_detail_at(store_now_utc));
+                    let mut updated = existing
+                        .apply(OccurrenceLifecycleInput::Misfire {
+                            detail: detail.clone(),
+                            failure_class: None,
+                            at_utc: store_now_utc,
+                        })
+                        .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
+                        .into_occurrence();
+                    let mut receipt = DeliveryReceipt::new(
+                        updated.occurrence_id.clone(),
+                        updated.attempt_count,
+                        DeliveryReceiptStage::Misfired,
+                    );
+                    receipt.detail = detail;
+                    state
+                        .receipts
+                        .entry(updated.occurrence_id.clone())
+                        .or_default()
+                        .push(receipt.clone());
+                    updated = updated
+                        .apply(OccurrenceLifecycleInput::RecordReceipt {
+                            runtime_outcome: receipt.runtime_outcome.clone(),
+                            receipt,
+                        })
+                        .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
+                        .into_occurrence();
+                    state
+                        .occurrences
+                        .insert(updated.occurrence_id.clone(), updated);
+                }
+                Some(OccurrenceDueAction::ClaimEligible) => {
+                    if claimed.len() >= request.limit {
+                        continue;
+                    }
+                    let updated = claim_occurrence(existing, &request, store_now_utc)
+                        .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
+                    state
+                        .occurrences
+                        .insert(updated.occurrence_id.clone(), updated.clone());
+                    claimed.push(updated);
+                }
+                Some(OccurrenceDueAction::LeaseExpired) => {
+                    if claimed.len() >= request.limit {
+                        continue;
+                    }
+                    let lease_expired = expire_occurrence_lease(existing, store_now_utc)
+                        .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
+                    state
+                        .receipts
+                        .entry(lease_expired.receipt.occurrence_id.clone())
+                        .or_default()
+                        .push(lease_expired.receipt.clone());
+                    state.occurrences.insert(
+                        lease_expired.occurrence.occurrence_id.clone(),
+                        lease_expired.occurrence.clone(),
+                    );
+                    let Ok(updated) =
+                        claim_occurrence(lease_expired.occurrence, &request, store_now_utc)
+                    else {
+                        continue;
+                    };
+                    state
+                        .occurrences
+                        .insert(updated.occurrence_id.clone(), updated.clone());
+                    claimed.push(updated);
+                }
+                None => {}
+            }
         }
 
         Ok(ClaimDueResult {

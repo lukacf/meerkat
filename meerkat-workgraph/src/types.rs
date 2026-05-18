@@ -110,12 +110,6 @@ pub enum WorkStatus {
     Failed,
 }
 
-impl WorkStatus {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Cancelled | Self::Failed)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]

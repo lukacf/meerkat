@@ -300,6 +300,55 @@ ClassifyBlockerUnsatisfiedFailed ==
     /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
+ClassifyTerminalityAbsent ==
+    /\ phase = "Absent"
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyTerminalityOpen ==
+    /\ phase = "Open"
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyTerminalityInProgress ==
+    /\ phase = "InProgress"
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyTerminalityBlocked ==
+    /\ phase = "Blocked"
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyTerminalityCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyTerminalityCancelled ==
+    /\ phase = "Cancelled"
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
+ClassifyTerminalityFailed ==
+    /\ phase = "Failed"
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+
 ValidateLink(kind, from_item_key, to_item_key, edge_key, reverse_path_key) ==
     /\ phase = "Absent"
     /\ (from_item_key \in topology_item_keys)
@@ -640,6 +689,13 @@ Next ==
     \/ ClassifyBlockerUnsatisfiedBlocked
     \/ ClassifyBlockerUnsatisfiedCancelled
     \/ ClassifyBlockerUnsatisfiedFailed
+    \/ ClassifyTerminalityAbsent
+    \/ ClassifyTerminalityOpen
+    \/ ClassifyTerminalityInProgress
+    \/ ClassifyTerminalityBlocked
+    \/ ClassifyTerminalityCompleted
+    \/ ClassifyTerminalityCancelled
+    \/ ClassifyTerminalityFailed
     \/ \E kind \in WorkEdgeKindValues : \E from_item_key \in WorkItemKeyValues : \E to_item_key \in WorkItemKeyValues : \E edge_key \in WorkEdgeKeyValues : \E reverse_path_key \in WorkDependencyPathKeyValues : ValidateLink(kind, from_item_key, to_item_key, edge_key, reverse_path_key)
     \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CloseOpenDefaultOrCompleted(expected_revision, at_utc_ms, requested_status)
     \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CloseInProgressDefaultOrCompleted(expected_revision, at_utc_ms, requested_status)

@@ -159,16 +159,7 @@ fn bind_running(driver: &mut EphemeralRuntimeDriver, run_id: RunId, pre_run_phas
 async fn retire_runtime(
     driver: &mut PersistentRuntimeDriver,
 ) -> Result<meerkat_runtime::RetireReport, meerkat_runtime::RuntimeDriverError> {
-    let pending = driver
-        .active_input_ids()
-        .into_iter()
-        .filter(|input_id| {
-            driver
-                .input_phase(input_id)
-                .map(|phase| !phase.is_terminal())
-                .unwrap_or(false)
-        })
-        .count();
+    let pending = driver.active_input_ids().len();
     Ok(meerkat_runtime::RetireReport {
         inputs_abandoned: 0,
         inputs_pending_drain: pending,

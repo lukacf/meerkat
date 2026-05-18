@@ -310,6 +310,15 @@ impl WorkGraphMachine {
         blocker_satisfaction_from_effects(&applied.effects)
     }
 
+    pub(crate) fn is_terminal(item: &WorkItem) -> Result<bool, WorkGraphError> {
+        let applied = apply_item_dsl(
+            item,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyTerminality,
+            None,
+        )?;
+        terminality_from_effects(&applied.effects)
+    }
+
     pub fn ready_items(items: Vec<WorkItem>, now: DateTime<Utc>) -> Vec<WorkItem> {
         items
             .into_iter()
@@ -699,7 +708,9 @@ fn event_kind_from_effects(
             wg_dsl::WorkGraphLifecycleEffect::Released => Some(WorkGraphEventKind::Released),
             wg_dsl::WorkGraphLifecycleEffect::Blocked => Some(WorkGraphEventKind::Blocked),
             wg_dsl::WorkGraphLifecycleEffect::BlockerSatisfied
-            | wg_dsl::WorkGraphLifecycleEffect::BlockerUnsatisfied => None,
+            | wg_dsl::WorkGraphLifecycleEffect::BlockerUnsatisfied
+            | wg_dsl::WorkGraphLifecycleEffect::LifecycleTerminal
+            | wg_dsl::WorkGraphLifecycleEffect::LifecycleNonTerminal => None,
             wg_dsl::WorkGraphLifecycleEffect::LinkValidated => Some(WorkGraphEventKind::Linked),
             wg_dsl::WorkGraphLifecycleEffect::Closed { .. } => Some(WorkGraphEventKind::Closed),
             wg_dsl::WorkGraphLifecycleEffect::EvidenceAdded => {
@@ -730,10 +741,34 @@ fn effect_label(effect: &wg_dsl::WorkGraphLifecycleEffect) -> &'static str {
         wg_dsl::WorkGraphLifecycleEffect::Blocked => "Blocked",
         wg_dsl::WorkGraphLifecycleEffect::BlockerSatisfied => "BlockerSatisfied",
         wg_dsl::WorkGraphLifecycleEffect::BlockerUnsatisfied => "BlockerUnsatisfied",
+        wg_dsl::WorkGraphLifecycleEffect::LifecycleTerminal => "LifecycleTerminal",
+        wg_dsl::WorkGraphLifecycleEffect::LifecycleNonTerminal => "LifecycleNonTerminal",
         wg_dsl::WorkGraphLifecycleEffect::LinkValidated => "LinkValidated",
         wg_dsl::WorkGraphLifecycleEffect::Closed { .. } => "Closed",
         wg_dsl::WorkGraphLifecycleEffect::EvidenceAdded => "EvidenceAdded",
     }
+}
+
+fn terminality_from_effects(
+    effects: &[wg_dsl::WorkGraphLifecycleEffect],
+) -> Result<bool, WorkGraphError> {
+    let mut terminal = None;
+    for effect in effects {
+        match effect {
+            wg_dsl::WorkGraphLifecycleEffect::LifecycleTerminal => terminal = Some(true),
+            wg_dsl::WorkGraphLifecycleEffect::LifecycleNonTerminal => terminal = Some(false),
+            other => {
+                return Err(WorkGraphError::InvalidTransition(format!(
+                    "unexpected terminality effect: {other:?}"
+                )));
+            }
+        }
+    }
+    terminal.ok_or_else(|| {
+        WorkGraphError::InvalidTransition(
+            "generated WorkGraphLifecycle transition produced no terminality effect".to_string(),
+        )
+    })
 }
 
 fn blocker_satisfaction_from_effects(

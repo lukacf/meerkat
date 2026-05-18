@@ -6404,6 +6404,19 @@ pub mod inputs {
         pub completion_sequence: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyOperationTerminality {
+        pub operation_id: String,
+        pub status: OperationStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyRecoveredOperationRecord {
+        pub operation_id: String,
+        pub status: OperationStatus,
+        pub terminal_outcome_present: bool,
+        pub terminal_payload_present: bool,
+        pub completion_sequence_present: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverOpsCompletionCursor {
         pub next_completion_seq: u64,
     }
@@ -6808,6 +6821,8 @@ pub enum Input {
     TerminateOp(inputs::TerminateOp),
     ResolveOpLifecycleTransitionRejection(inputs::ResolveOpLifecycleTransitionRejection),
     RecoverOpRecord(inputs::RecoverOpRecord),
+    ClassifyOperationTerminality(inputs::ClassifyOperationTerminality),
+    ClassifyRecoveredOperationRecord(inputs::ClassifyRecoveredOperationRecord),
     RecoverOpsCompletionCursor(inputs::RecoverOpsCompletionCursor),
     EvictCompletedOp(inputs::EvictCompletedOp),
     CollectCompletedOp(inputs::CollectCompletedOp),
@@ -7001,6 +7016,10 @@ impl Input {
                 InputKind::ResolveOpLifecycleTransitionRejection
             }
             Self::RecoverOpRecord(_) => InputKind::RecoverOpRecord,
+            Self::ClassifyOperationTerminality(_) => InputKind::ClassifyOperationTerminality,
+            Self::ClassifyRecoveredOperationRecord(_) => {
+                InputKind::ClassifyRecoveredOperationRecord
+            }
             Self::RecoverOpsCompletionCursor(_) => InputKind::RecoverOpsCompletionCursor,
             Self::EvictCompletedOp(_) => InputKind::EvictCompletedOp,
             Self::CollectCompletedOp(_) => InputKind::CollectCompletedOp,
@@ -7189,6 +7208,8 @@ pub enum InputKind {
     TerminateOp,
     ResolveOpLifecycleTransitionRejection,
     RecoverOpRecord,
+    ClassifyOperationTerminality,
+    ClassifyRecoveredOperationRecord,
     RecoverOpsCompletionCursor,
     EvictCompletedOp,
     CollectCompletedOp,
@@ -7528,6 +7549,18 @@ pub mod effects {
         pub operation_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DiscardRecoveredOperationRecord {
+        pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OperationTerminal {
+        pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OperationNonTerminal {
+        pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EvictCompletedRecord {
         pub operation_id: String,
     }
@@ -7722,6 +7755,9 @@ pub enum Effect {
     NotifyOpWatcher(effects::NotifyOpWatcher),
     ExposeOperationPeer(effects::ExposeOperationPeer),
     RetainTerminalRecord(effects::RetainTerminalRecord),
+    DiscardRecoveredOperationRecord(effects::DiscardRecoveredOperationRecord),
+    OperationTerminal(effects::OperationTerminal),
+    OperationNonTerminal(effects::OperationNonTerminal),
     EvictCompletedRecord(effects::EvictCompletedRecord),
     CompletionProduced(effects::CompletionProduced),
     OpRegistrationAdmissionResolved(effects::OpRegistrationAdmissionResolved),
@@ -7802,6 +7838,9 @@ pub enum EffectKind {
     NotifyOpWatcher,
     ExposeOperationPeer,
     RetainTerminalRecord,
+    DiscardRecoveredOperationRecord,
+    OperationTerminal,
+    OperationNonTerminal,
     EvictCompletedRecord,
     CompletionProduced,
     OpRegistrationAdmissionResolved,
@@ -8452,6 +8491,10 @@ pub enum TransitionId {
     RecoverOpRecordRunning,
     RecoverOpRecordRetired,
     RecoverOpRecordStopped,
+    ClassifyOperationTerminalityTerminalIdle,
+    ClassifyOperationTerminalityNonTerminalIdle,
+    ClassifyRecoveredOperationRecordRetainIdle,
+    ClassifyRecoveredOperationRecordDiscardIdle,
     RecoverOpsCompletionCursorIdle,
     RecoverOpsCompletionCursorAttached,
     RecoverOpsCompletionCursorRunning,

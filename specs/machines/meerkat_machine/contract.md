@@ -269,6 +269,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TerminateOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
 - `ResolveOpLifecycleTransitionRejection`(operation_id: String, action: OpLifecycleActionKind)
 - `RecoverOpRecord`(operation_id: String, status: OperationStatus, kind: OperationKind, peer_ready: Bool, progress_count: u64, terminal_outcome: Option<OperationTerminalOutcomeKind>, terminal_payload: Option<String>, completion_sequence: Option<u64>)
+- `ClassifyOperationTerminality`(operation_id: String, status: OperationStatus)
+- `ClassifyRecoveredOperationRecord`(operation_id: String, status: OperationStatus, terminal_outcome_present: Bool, terminal_payload_present: Bool, completion_sequence_present: Bool)
 - `RecoverOpsCompletionCursor`(next_completion_seq: u64)
 - `EvictCompletedOp`(operation_id: String)
 - `CollectCompletedOp`(operation_id: String)
@@ -401,6 +403,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `NotifyOpWatcher`(operation_id: String)
 - `ExposeOperationPeer`(operation_id: String)
 - `RetainTerminalRecord`(operation_id: String)
+- `DiscardRecoveredOperationRecord`(operation_id: String)
+- `OperationTerminal`(operation_id: String)
+- `OperationNonTerminal`(operation_id: String)
 - `EvictCompletedRecord`(operation_id: String)
 - `CompletionProduced`(seq: u64, operation_id: OperationId, kind: OperationKind)
 - `OpRegistrationAdmissionResolved`(operation_id: String, result: OpRegistrationAdmissionResultKind, reject_reason: Option<OpRegistrationRejectReasonKind>, max_concurrent_limit: Option<u64>, active_op_count: u64)
@@ -5692,6 +5697,40 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RetainTerminalRecord`
 - To: `Stopped`
 
+### `ClassifyOperationTerminalityTerminalIdle`
+- From: `Idle`
+- On: `ClassifyOperationTerminality`(operation_id, status)
+- Guards:
+  - `status_terminal`
+- Emits: `OperationTerminal`
+- To: `Idle`
+
+### `ClassifyOperationTerminalityNonTerminalIdle`
+- From: `Idle`
+- On: `ClassifyOperationTerminality`(operation_id, status)
+- Guards:
+  - `status_non_terminal`
+- Emits: `OperationNonTerminal`
+- To: `Idle`
+
+### `ClassifyRecoveredOperationRecordRetainIdle`
+- From: `Idle`
+- On: `ClassifyRecoveredOperationRecord`(operation_id, status, terminal_outcome_present, terminal_payload_present, completion_sequence_present)
+- Guards:
+  - `status_terminal`
+  - `terminal_witnesses_present`
+- Emits: `RetainTerminalRecord`
+- To: `Idle`
+
+### `ClassifyRecoveredOperationRecordDiscardIdle`
+- From: `Idle`
+- On: `ClassifyRecoveredOperationRecord`(operation_id, status, terminal_outcome_present, terminal_payload_present, completion_sequence_present)
+- Guards:
+  - `status_non_terminal`
+  - `no_terminal_witnesses`
+- Emits: `DiscardRecoveredOperationRecord`
+- To: `Idle`
+
 ### `RecoverOpsCompletionCursorIdle`
 - From: `Idle`
 - On: `RecoverOpsCompletionCursor`(next_completion_seq)
@@ -7813,7 +7852,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, recover ops completion cursor, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
+- `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
 - `meerkat/src/meerkat_machine.rs` — MeerkatMachine snapshot/diagnostic facade
 - `meerkat-comms/src/peer_directory_reachability_authority.rs` — peer directory reachability state now owned as a MeerkatMachine-internal region
 
@@ -7825,7 +7864,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `peer_reachability_probe` — resolved peer directory updates and send outcomes mutate Meerkat-owned peer reachability state
 - `session_registration_and_binding` — initialize, recover initializing, register, unregister, reconfigure session identity, prepare bindings, ensure executor, attach session ingress, detach ingress, drain exit, and runtime bound/retired/destroyed notices
 - `input_admission_and_queueing` — ingest and publish event, accept input with or without completion, classify external envelope or plain event, prepare run work, primitive applied conversation or immediate, enter extraction, extraction validation passed, recoverable or fatal failure, budget exhausted, steer accepted, increment attempt count, consume on accept, enqueue classified entry, resolve admission, submit admitted ingress effect, post admission signal, and input or ingress notices
-- `ops_completion_and_waiters` — abort, wait, abort all, request cancellation at boundary, completion produced/resolved, wait all satisfied, collect completed result, recover op record, recover ops completion cursor, evict completed op, collect completed op, submit op event, resolve op lifecycle transition rejected feedback, notify op watcher, reject surface call, retain or evict completed terminal records
+- `ops_completion_and_waiters` — abort, wait, abort all, request cancellation at boundary, completion produced/resolved, wait all satisfied, collect completed result, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, evict completed op, collect completed op, submit op event, resolve op lifecycle transition rejected feedback, notify op watcher, reject surface call, retain discard or evict completed terminal records
 - `realtime_connection_projection` — project realtime intent, begin replace detach binding, require reattach, publish signal, reconnect progress, MCP server connect/connected/failed/disconnected/reload, advance session context, interaction stream reserved/attached/completed/expired/closed early, freshness, policy, and binding rotation
 - `product_turn_streaming` — product turn in flight, committed, output started, interrupted, terminal, realtime projection advance/refreshed/reset, client input submitted, mid turn activity, and turn terminated classification
 - `recycle_and_compaction` — recycle from idle or retired, initiate recycle, check compaction, and re-enter ready runtime ownership without preserving stale completed records

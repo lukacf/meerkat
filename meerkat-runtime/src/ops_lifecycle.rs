@@ -271,6 +271,12 @@ enum WaitAllAuthorityPlan {
     ActivateBarrier,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveredOperationRecordDisposition {
+    Retain,
+    Discard,
+}
+
 impl ShellRecord {
     fn new(spec: OperationSpec) -> Self {
         Self {
@@ -988,12 +994,121 @@ impl ShellState {
         Ok(WaitAllAuthorityPlan::ActivateBarrier)
     }
 
-    fn owner_termination_targets(&self) -> Vec<(OperationId, OperationStatus)> {
-        self.operation_ids()
-            .into_iter()
-            .filter_map(|id| self.status(&id).map(|status| (id, status)))
-            .filter(|(_, status)| !status.is_terminal())
-            .collect()
+    fn owner_termination_targets(
+        &self,
+    ) -> Result<Vec<(OperationId, OperationStatus)>, OpsLifecycleError> {
+        let mut targets = Vec::new();
+        for id in self.operation_ids() {
+            let Some(status) = self.status(&id) else {
+                continue;
+            };
+            if !Self::operation_status_is_terminal(&id, status)? {
+                targets.push((id, status));
+            }
+        }
+        Ok(targets)
+    }
+
+    fn operation_status_is_terminal(
+        operation_id: &OperationId,
+        status: OperationStatus,
+    ) -> Result<bool, OpsLifecycleError> {
+        let operation_id_key = mm_dsl::OperationId::from_domain(operation_id).0;
+        let effects = Self::apply_stateless_classifier(
+            mm_dsl::MeerkatMachineInput::ClassifyOperationTerminality {
+                operation_id: operation_id_key.clone(),
+                status: mm_dsl::OperationStatus::from(status),
+            },
+            "ClassifyOperationTerminality",
+        )?;
+        let mut terminal = None;
+        for effect in effects {
+            match effect {
+                mm_dsl::MeerkatMachineEffect::OperationTerminal { operation_id }
+                    if operation_id == operation_id_key =>
+                {
+                    terminal = Some(true)
+                }
+                mm_dsl::MeerkatMachineEffect::OperationNonTerminal { operation_id }
+                    if operation_id == operation_id_key =>
+                {
+                    terminal = Some(false)
+                }
+                other => {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "unexpected generated operation terminality effect: {other:?}"
+                    )));
+                }
+            }
+        }
+        terminal.ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated operation terminality authority emitted no effect for {operation_id}"
+            ))
+        })
+    }
+
+    fn recovered_operation_record_disposition(
+        operation_id: &OperationId,
+        status: OperationStatus,
+        terminal_outcome_present: bool,
+        terminal_payload_present: bool,
+        completion_sequence_present: bool,
+    ) -> Result<RecoveredOperationRecordDisposition, OpsLifecycleError> {
+        let operation_id_key = mm_dsl::OperationId::from_domain(operation_id).0;
+        let effects = Self::apply_stateless_classifier(
+            mm_dsl::MeerkatMachineInput::ClassifyRecoveredOperationRecord {
+                operation_id: operation_id_key.clone(),
+                status: mm_dsl::OperationStatus::from(status),
+                terminal_outcome_present,
+                terminal_payload_present,
+                completion_sequence_present,
+            },
+            "ClassifyRecoveredOperationRecord",
+        )?;
+        let mut disposition = None;
+        for effect in effects {
+            match effect {
+                mm_dsl::MeerkatMachineEffect::RetainTerminalRecord { operation_id }
+                    if operation_id == operation_id_key =>
+                {
+                    disposition = Some(RecoveredOperationRecordDisposition::Retain)
+                }
+                mm_dsl::MeerkatMachineEffect::DiscardRecoveredOperationRecord { operation_id }
+                    if operation_id == operation_id_key =>
+                {
+                    disposition = Some(RecoveredOperationRecordDisposition::Discard)
+                }
+                other => {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "unexpected generated recovered-operation classification effect: {other:?}"
+                    )));
+                }
+            }
+        }
+        disposition.ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated recovered-operation classifier emitted no effect for {operation_id}"
+            ))
+        })
+    }
+
+    fn apply_stateless_classifier(
+        input: mm_dsl::MeerkatMachineInput,
+        label: &'static str,
+    ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, OpsLifecycleError> {
+        let mut authority =
+            mm_dsl::MeerkatMachineAuthority::from_state(mm_dsl::MeerkatMachineState {
+                lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
+                ..mm_dsl::MeerkatMachineState::default()
+            });
+        let transition =
+            mm_dsl::MeerkatMachineMutator::apply(&mut authority, input).map_err(|err| {
+                OpsLifecycleError::Internal(format!(
+                    "DSL rejected ops transition ({label}): {err:?}"
+                ))
+            })?;
+        Ok(transition.effects)
     }
 
     /// Check whether a pending barrier wait is now satisfied and resolve it.
@@ -1317,19 +1432,22 @@ impl RuntimeOpsLifecycleRegistry {
         // projected into shell/public feed state.
         let mut retained_ids: HashSet<OperationId> = HashSet::new();
         for (op_id, op_state) in authority_state.operations {
-            let requires_terminal_recovery = op_state.status.is_terminal()
-                || op_state.terminal_outcome.is_some()
-                || completion_sequences.contains_key(&op_id);
-            if !requires_terminal_recovery {
-                continue;
-            }
-
             let (terminal_outcome, terminal_payload) = op_state
                 .terminal_outcome
                 .as_ref()
                 .map(ShellState::split_outcome)
                 .map(|(kind, payload)| (Some(kind), Some(payload)))
                 .unwrap_or((None, None));
+            let disposition = ShellState::recovered_operation_record_disposition(
+                &op_id,
+                op_state.status,
+                terminal_outcome.is_some(),
+                terminal_payload.is_some(),
+                completion_sequences.contains_key(&op_id),
+            )?;
+            if disposition == RecoveredOperationRecordDisposition::Discard {
+                continue;
+            }
             let recovery = mm_dsl::MeerkatMachineInput::RecoverOpRecord {
                 operation_id: mm_dsl::OperationId::from_domain(&op_id).0,
                 status: mm_dsl::OperationStatus::from(op_state.status),
@@ -2106,7 +2224,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn terminate_owner(&self, reason: String) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let to_terminate = state.owner_termination_targets();
+        let to_terminate = state.owner_termination_targets()?;
 
         for (op_id, _status) in &to_terminate {
             let terminal_outcome = OperationTerminalOutcome::Terminated {
@@ -2792,7 +2910,7 @@ mod tests {
             Err(err) => err,
         };
         assert!(
-            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("RecoverOpRecord")),
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("ClassifyRecoveredOperationRecord")),
             "unexpected recovery error: {err:?}"
         );
     }

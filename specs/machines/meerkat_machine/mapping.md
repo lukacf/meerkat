@@ -8,7 +8,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `MeerkatMachine`
 
 ### Code Anchors
-- `meerkat_machine`: `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, recover ops completion cursor, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
+- `meerkat_machine`: `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
 - `meerkat_public_surface`: `meerkat/src/meerkat_machine.rs` — MeerkatMachine snapshot/diagnostic facade
 - `peer_directory_reachability_authority`: `meerkat-comms/src/peer_directory_reachability_authority.rs` — peer directory reachability state now owned as a MeerkatMachine-internal region
 
@@ -20,7 +20,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `peer_reachability_probe` — resolved peer directory updates and send outcomes mutate Meerkat-owned peer reachability state
 - `session_registration_and_binding` — initialize, recover initializing, register, unregister, reconfigure session identity, prepare bindings, ensure executor, attach session ingress, detach ingress, drain exit, and runtime bound/retired/destroyed notices
 - `input_admission_and_queueing` — ingest and publish event, accept input with or without completion, classify external envelope or plain event, prepare run work, primitive applied conversation or immediate, enter extraction, extraction validation passed, recoverable or fatal failure, budget exhausted, steer accepted, increment attempt count, consume on accept, enqueue classified entry, resolve admission, submit admitted ingress effect, post admission signal, and input or ingress notices
-- `ops_completion_and_waiters` — abort, wait, abort all, request cancellation at boundary, completion produced/resolved, wait all satisfied, collect completed result, recover op record, recover ops completion cursor, evict completed op, collect completed op, submit op event, resolve op lifecycle transition rejected feedback, notify op watcher, reject surface call, retain or evict completed terminal records
+- `ops_completion_and_waiters` — abort, wait, abort all, request cancellation at boundary, completion produced/resolved, wait all satisfied, collect completed result, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, evict completed op, collect completed op, submit op event, resolve op lifecycle transition rejected feedback, notify op watcher, reject surface call, retain discard or evict completed terminal records
 - `realtime_connection_projection` — project realtime intent, begin replace detach binding, require reattach, publish signal, reconnect progress, MCP server connect/connected/failed/disconnected/reload, advance session context, interaction stream reserved/attached/completed/expired/closed early, freshness, policy, and binding rotation
 - `product_turn_streaming` — product turn in flight, committed, output started, interrupted, terminal, realtime projection advance/refreshed/reset, client input submitted, mid turn activity, and turn terminated classification
 - `recycle_and_compaction` — recycle from idle or retired, initiate recycle, check compaction, and re-enter ready runtime ownership without preserving stale completed records
@@ -633,22 +633,22 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `input_admission_and_queueing`
 - `NormalizeRecoveredInputStagedInitializing`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`
+  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
 - `NormalizeRecoveredInputStagedIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`
 - `NormalizeRecoveredInputStagedAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`
 - `NormalizeRecoveredInputStagedRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `product_turn_streaming`
+  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
 - `NormalizeRecoveredInputStagedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`
 - `NormalizeRecoveredInputStagedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `product_turn_streaming`
+  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
 - `NormalizeRecoveredInputAppliedCommittedInitializing`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
@@ -705,22 +705,22 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `input_admission_and_queueing`
 - `NormalizeRecoveredInputQueuedInitializing`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
 - `NormalizeRecoveredInputQueuedIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`
 - `NormalizeRecoveredInputQueuedAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`
 - `NormalizeRecoveredInputQueuedRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `product_turn_streaming`
+  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
 - `NormalizeRecoveredInputQueuedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`
 - `NormalizeRecoveredInputQueuedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
 - `ResolveInputPublicLifecycleAcceptedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -891,13 +891,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `input_admission_and_queueing`
 - `ResolveAdmissionPlanOperationIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `ResolveAdmissionPlanOperationAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `ResolveAdmissionPlanOperationRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `ClassifyExternalEnvelopeMessageAttached`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -1879,6 +1879,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverOpRecordStopped`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ClassifyOperationTerminalityTerminalIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyOperationTerminalityNonTerminalIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyRecoveredOperationRecordRetainIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyRecoveredOperationRecordDiscardIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `RecoverOpsCompletionCursorIdle`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -2744,7 +2756,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `RecoveredInputLifecycleNormalized`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+  - scenarios: `ops_completion_and_waiters`
 - `InputPublicLifecycleResolved`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -2789,10 +2801,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `ops_completion_and_waiters`
 - `ExposeOperationPeer`
   - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `model_routing_and_image_operation`
+  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
 - `RetainTerminalRecord`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
+- `DiscardRecoveredOperationRecord`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `OperationTerminal`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `OperationNonTerminal`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
 - `EvictCompletedRecord`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`

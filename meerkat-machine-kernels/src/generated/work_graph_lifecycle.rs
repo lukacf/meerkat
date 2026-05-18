@@ -325,6 +325,8 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyBlockerSatisfaction {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyTerminality {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ValidateLink {
         pub kind: WorkEdgeKind,
         pub from_item_key: WorkItemKey,
@@ -370,6 +372,7 @@ pub enum Input {
     Block(inputs::Block),
     RefreshEligibility(inputs::RefreshEligibility),
     ClassifyBlockerSatisfaction(inputs::ClassifyBlockerSatisfaction),
+    ClassifyTerminality(inputs::ClassifyTerminality),
     ValidateLink(inputs::ValidateLink),
     Close(inputs::Close),
     CloseCompleted(inputs::CloseCompleted),
@@ -389,6 +392,7 @@ impl Input {
             Self::Block(_) => InputKind::Block,
             Self::RefreshEligibility(_) => InputKind::RefreshEligibility,
             Self::ClassifyBlockerSatisfaction(_) => InputKind::ClassifyBlockerSatisfaction,
+            Self::ClassifyTerminality(_) => InputKind::ClassifyTerminality,
             Self::ValidateLink(_) => InputKind::ValidateLink,
             Self::Close(_) => InputKind::Close,
             Self::CloseCompleted(_) => InputKind::CloseCompleted,
@@ -409,6 +413,7 @@ pub enum InputKind {
     Block,
     RefreshEligibility,
     ClassifyBlockerSatisfaction,
+    ClassifyTerminality,
     ValidateLink,
     Close,
     CloseCompleted,
@@ -437,6 +442,10 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BlockerUnsatisfied {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LifecycleTerminal {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LifecycleNonTerminal {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LinkValidated {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Closed {
@@ -455,6 +464,8 @@ pub enum Effect {
     Blocked(effects::Blocked),
     BlockerSatisfied(effects::BlockerSatisfied),
     BlockerUnsatisfied(effects::BlockerUnsatisfied),
+    LifecycleTerminal(effects::LifecycleTerminal),
+    LifecycleNonTerminal(effects::LifecycleNonTerminal),
     LinkValidated(effects::LinkValidated),
     Closed(effects::Closed),
     EvidenceAdded(effects::EvidenceAdded),
@@ -468,6 +479,8 @@ pub enum EffectKind {
     Blocked,
     BlockerSatisfied,
     BlockerUnsatisfied,
+    LifecycleTerminal,
+    LifecycleNonTerminal,
     LinkValidated,
     Closed,
     EvidenceAdded,
@@ -499,6 +512,13 @@ pub enum TransitionId {
     ClassifyBlockerUnsatisfiedBlocked,
     ClassifyBlockerUnsatisfiedCancelled,
     ClassifyBlockerUnsatisfiedFailed,
+    ClassifyTerminalityAbsent,
+    ClassifyTerminalityOpen,
+    ClassifyTerminalityInProgress,
+    ClassifyTerminalityBlocked,
+    ClassifyTerminalityCompleted,
+    ClassifyTerminalityCancelled,
+    ClassifyTerminalityFailed,
     ValidateLink,
     CloseOpenDefaultOrCompleted,
     CloseInProgressDefaultOrCompleted,

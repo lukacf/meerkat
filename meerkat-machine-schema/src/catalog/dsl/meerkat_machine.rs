@@ -2195,6 +2195,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                 terminal_payload: Option<String>,
                 completion_sequence: Option<u64>,
             },
+            ClassifyOperationTerminality {
+                operation_id: String,
+                status: Enum<OperationStatus>,
+            },
+            ClassifyRecoveredOperationRecord {
+                operation_id: String,
+                status: Enum<OperationStatus>,
+                terminal_outcome_present: bool,
+                terminal_payload_present: bool,
+                completion_sequence_present: bool,
+            },
             RecoverOpsCompletionCursor { next_completion_seq: u64 },
             EvictCompletedOp { operation_id: String },
             CollectCompletedOp { operation_id: String },
@@ -2540,6 +2551,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             NotifyOpWatcher { operation_id: String },
             ExposeOperationPeer { operation_id: String },
             RetainTerminalRecord { operation_id: String },
+            DiscardRecoveredOperationRecord { operation_id: String },
+            OperationTerminal { operation_id: String },
+            OperationNonTerminal { operation_id: String },
             EvictCompletedRecord { operation_id: String },
             CompletionProduced { seq: u64, operation_id: OperationId, kind: OperationKind },
             OpRegistrationAdmissionResolved {
@@ -2690,6 +2704,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition NotifyOpWatcher => local,
         disposition ExposeOperationPeer => local,
         disposition RetainTerminalRecord => local,
+        disposition DiscardRecoveredOperationRecord => local,
+        disposition OperationTerminal => local,
+        disposition OperationNonTerminal => local,
         disposition EvictCompletedRecord => local,
         disposition CompletionProduced => local,
         disposition OpRegistrationAdmissionResolved => local,
@@ -9421,6 +9438,88 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit RetainTerminalRecord { operation_id: operation_id }
+        }
+
+        transition ClassifyOperationTerminalityTerminal {
+            per_phase [Idle]
+            on input ClassifyOperationTerminality { operation_id, status }
+            guard "status_terminal" {
+                status == OperationStatus::Completed
+                || status == OperationStatus::Failed
+                || status == OperationStatus::Aborted
+                || status == OperationStatus::Cancelled
+                || status == OperationStatus::Retired
+                || status == OperationStatus::Terminated
+            }
+            update {}
+            to Idle
+            emit OperationTerminal { operation_id: operation_id }
+        }
+
+        transition ClassifyOperationTerminalityNonTerminal {
+            per_phase [Idle]
+            on input ClassifyOperationTerminality { operation_id, status }
+            guard "status_non_terminal" {
+                status == OperationStatus::Absent
+                || status == OperationStatus::Provisioning
+                || status == OperationStatus::Running
+                || status == OperationStatus::Retiring
+            }
+            update {}
+            to Idle
+            emit OperationNonTerminal { operation_id: operation_id }
+        }
+
+        transition ClassifyRecoveredOperationRecordRetain {
+            per_phase [Idle]
+            on input ClassifyRecoveredOperationRecord {
+                operation_id,
+                status,
+                terminal_outcome_present,
+                terminal_payload_present,
+                completion_sequence_present
+            }
+            guard "status_terminal" {
+                status == OperationStatus::Completed
+                || status == OperationStatus::Failed
+                || status == OperationStatus::Aborted
+                || status == OperationStatus::Cancelled
+                || status == OperationStatus::Retired
+                || status == OperationStatus::Terminated
+            }
+            guard "terminal_witnesses_present" {
+                terminal_outcome_present == true
+                && terminal_payload_present == true
+                && completion_sequence_present == true
+            }
+            update {}
+            to Idle
+            emit RetainTerminalRecord { operation_id: operation_id }
+        }
+
+        transition ClassifyRecoveredOperationRecordDiscard {
+            per_phase [Idle]
+            on input ClassifyRecoveredOperationRecord {
+                operation_id,
+                status,
+                terminal_outcome_present,
+                terminal_payload_present,
+                completion_sequence_present
+            }
+            guard "status_non_terminal" {
+                status == OperationStatus::Absent
+                || status == OperationStatus::Provisioning
+                || status == OperationStatus::Running
+                || status == OperationStatus::Retiring
+            }
+            guard "no_terminal_witnesses" {
+                terminal_outcome_present == false
+                && terminal_payload_present == false
+                && completion_sequence_present == false
+            }
+            update {}
+            to Idle
+            emit DiscardRecoveredOperationRecord { operation_id: operation_id }
         }
 
         // RecoverOpsCompletionCursor: restore the persisted completion-feed

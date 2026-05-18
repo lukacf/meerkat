@@ -190,6 +190,16 @@ impl DriverEntry {
         }
     }
 
+    pub(crate) fn input_is_terminal_by_authority(
+        &self,
+        input_id: &InputId,
+    ) -> Result<bool, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.input_is_terminal_by_authority(input_id),
+            DriverEntry::Persistent(d) => d.inner_ref().input_is_terminal_by_authority(input_id),
+        }
+    }
+
     /// Set the silent comms intents for the underlying driver.
     pub(crate) fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
         match self {
@@ -1521,7 +1531,9 @@ pub(crate) fn machine_apply_recovered_input_normalization(
     let mut delta = MachineRecoveryDelta::default();
     let StoredInputState { state, seed } = bundle;
 
-    if seed.phase.is_terminal() {
+    if crate::meerkat_machine::input_seed_terminality_via_authority(&state.input_id, seed)
+        .map_err(RuntimeDriverError::Internal)?
+    {
         return Ok(delta);
     }
 
@@ -1595,11 +1607,12 @@ pub(crate) fn machine_apply_recovered_input_normalization(
 
     let next_phase = lifecycle_from_normalized_phase(normalized_phase);
     let next_terminal = terminal_from_normalized_kind(terminal_kind)?;
-    if next_phase.is_terminal() != next_terminal.is_some() {
-        return Err(RuntimeDriverError::Internal(format!(
-            "NormalizeRecoveredInputLifecycle emitted incoherent phase {next_phase:?} and terminal {next_terminal:?} for '{input_id}'"
-        )));
-    }
+    crate::meerkat_machine::input_phase_terminality_via_authority(
+        &state.input_id,
+        next_phase,
+        next_terminal.clone(),
+    )
+    .map_err(RuntimeDriverError::Internal)?;
 
     let from = seed.phase;
     if history_reason.is_none()
@@ -1766,14 +1779,12 @@ pub(crate) async fn machine_recover_persistent_driver(
         }
 
         if driver.input_state(&bundle.state.input_id).is_none() {
-            if bundle.seed.phase.is_terminal() != bundle.seed.terminal_outcome.is_some() {
-                return Err(RuntimeDriverError::Internal(format!(
-                    "store corruption: recovered input '{}' phase {:?} has incoherent terminal outcome {:?}",
-                    bundle.state.input_id, bundle.seed.phase, bundle.seed.terminal_outcome
-                )));
-            }
-
-            if bundle.seed.phase.is_terminal() {
+            if crate::meerkat_machine::input_seed_terminality_via_authority(
+                &bundle.state.input_id,
+                &bundle.seed,
+            )
+            .map_err(RuntimeDriverError::Internal)?
+            {
                 driver.recover_terminal_input_lifecycle(
                     &bundle.state.input_id,
                     &bundle.seed,

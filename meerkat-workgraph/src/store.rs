@@ -263,12 +263,12 @@ impl WorkGraphStore for MemoryWorkGraphStore {
 
     async fn list_items(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError> {
         let guard = self.inner.read().await;
-        let mut items = guard
-            .items
-            .values()
-            .filter(|item| item_matches_filter(item, &filter))
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut items = Vec::new();
+        for item in guard.items.values() {
+            if item_matches_filter(item, &filter)? {
+                items.push(item.clone());
+            }
+        }
         items.sort_by(|left, right| {
             left.updated_at
                 .cmp(&right.updated_at)
@@ -343,28 +343,28 @@ fn item_key(
     (realm_id.to_string(), namespace.clone(), id.clone())
 }
 
-fn item_matches_filter(item: &WorkItem, filter: &WorkItemFilter) -> bool {
+fn item_matches_filter(item: &WorkItem, filter: &WorkItemFilter) -> Result<bool, WorkGraphError> {
     if let Some(realm_id) = &filter.realm_id
         && &item.realm_id != realm_id
     {
-        return false;
+        return Ok(false);
     }
     if !filter.all_namespaces
         && let Some(namespace) = &filter.namespace
         && &item.namespace != namespace
     {
-        return false;
+        return Ok(false);
     }
     if !filter.statuses.is_empty() && !filter.statuses.contains(&item.status) {
-        return false;
+        return Ok(false);
     }
-    if !filter.include_terminal && item.status.is_terminal() {
-        return false;
+    if !filter.include_terminal && WorkGraphMachine::is_terminal(item)? {
+        return Ok(false);
     }
-    filter
+    Ok(filter
         .labels
         .iter()
-        .all(|label| item.labels.contains(label))
+        .all(|label| item.labels.contains(label)))
 }
 
 fn event_matches_filter(event: &WorkGraphEvent, filter: &WorkGraphEventFilter) -> bool {
@@ -779,7 +779,7 @@ fn list_sqlite_items(
     let mut items = Vec::new();
     for row in rows {
         let item = row.map_err(|err| WorkGraphError::Store(err.to_string()))?;
-        if item_matches_filter(&item, filter) {
+        if item_matches_filter(&item, filter)? {
             items.push(item);
             if filter.limit.is_some_and(|limit| items.len() >= limit) {
                 break;

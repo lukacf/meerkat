@@ -847,7 +847,20 @@ impl MeerkatMachine {
                 let lifecycle = driver
                     .input_phase(input_id)
                     .unwrap_or(InputLifecycleState::Accepted);
-                if !lifecycle.is_terminal() {
+                let terminal = crate::meerkat_machine::input_phase_terminality_via_authority(
+                    input_id,
+                    lifecycle,
+                    driver.input_terminal_outcome(input_id),
+                )
+                .unwrap_or_else(|err| {
+                    tracing::error!(
+                        input_id = %input_id,
+                        error = %err,
+                        "generated input terminality authority rejected ledger snapshot classification"
+                    );
+                    true
+                });
+                if !terminal {
                     snapshot.non_terminal_count += 1;
                 }
                 match lifecycle {

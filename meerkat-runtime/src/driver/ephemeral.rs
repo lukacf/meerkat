@@ -524,6 +524,35 @@ impl EphemeralRuntimeDriver {
         }
     }
 
+    pub(crate) fn input_is_terminal_by_authority(
+        &self,
+        input_id: &InputId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let Some(phase) = self.input_phase(input_id) else {
+            return Ok(true);
+        };
+        crate::meerkat_machine::input_phase_terminality_via_authority(
+            input_id,
+            phase,
+            self.input_terminal_outcome(input_id),
+        )
+        .map_err(RuntimeDriverError::Internal)
+    }
+
+    fn input_is_non_terminal_by_authority(&self, input_id: &InputId) -> bool {
+        match self.input_is_terminal_by_authority(input_id) {
+            Ok(terminal) => !terminal,
+            Err(err) => {
+                tracing::error!(
+                    input_id = %input_id,
+                    error = %err,
+                    "generated input terminality authority rejected non-terminal filter"
+                );
+                false
+            }
+        }
+    }
+
     /// Read the attempt count for an input from the DSL.
     pub fn input_attempt_count(&self, input_id: &InputId) -> u32 {
         let key = Self::dsl_key(input_id);
@@ -783,10 +812,14 @@ impl EphemeralRuntimeDriver {
         recovered_seed: &InputStateSeed,
         idempotency_key: Option<&IdempotencyKey>,
     ) -> Result<(), RuntimeDriverError> {
-        debug_assert!(
-            recovered_seed.phase.is_terminal(),
-            "terminal recovery path must only be used for terminal input phases"
-        );
+        let terminal =
+            crate::meerkat_machine::input_seed_terminality_via_authority(work_id, recovered_seed)
+                .map_err(RuntimeDriverError::Internal)?;
+        if !terminal {
+            return Err(RuntimeDriverError::Internal(format!(
+                "terminal recovery path received non-terminal input '{work_id}'"
+            )));
+        }
         self.apply_recovered_lifecycle(work_id, recovered_seed, None)?;
         self.register_accepted_idempotency(work_id, idempotency_key)
     }
@@ -819,12 +852,8 @@ impl EphemeralRuntimeDriver {
     ) -> Result<(), RuntimeDriverError> {
         let key = Self::dsl_key(work_id);
         let lifecycle_state = recovered_seed.phase;
-        if lifecycle_state.is_terminal() != recovered_seed.terminal_outcome.is_some() {
-            return Err(RuntimeDriverError::Internal(format!(
-                "store corruption: recovered input '{work_id}' phase {lifecycle_state:?} has incoherent terminal outcome {:?}",
-                recovered_seed.terminal_outcome
-            )));
-        }
+        crate::meerkat_machine::input_seed_terminality_via_authority(work_id, recovered_seed)
+            .map_err(RuntimeDriverError::Internal)?;
         let (terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count) =
             match recovered_seed.terminal_outcome.clone() {
                 Some(InputTerminalOutcome::Consumed) => (
@@ -1810,11 +1839,7 @@ impl EphemeralRuntimeDriver {
         let inputs_pending_drain = self
             .ledger
             .iter()
-            .filter(|(id, _)| {
-                self.input_phase(id)
-                    .map(|phase| !phase.is_terminal())
-                    .unwrap_or(false)
-            })
+            .filter(|(id, _)| self.input_is_non_terminal_by_authority(id))
             .count();
         RetireReport {
             inputs_abandoned: 0,
@@ -1866,11 +1891,7 @@ impl EphemeralRuntimeDriver {
         let transferred = self
             .ledger
             .iter()
-            .filter(|(id, _)| {
-                self.input_phase(id)
-                    .map(|phase| !phase.is_terminal())
-                    .unwrap_or(false)
-            })
+            .filter(|(id, _)| self.input_is_non_terminal_by_authority(id))
             .count();
         let runtime_id = self.runtime_id.clone();
         let silent_comms_intents = self.silent_comms_intents.clone();
@@ -2633,11 +2654,7 @@ impl EphemeralRuntimeDriver {
             .ledger
             .iter()
             .filter_map(|(id, _)| {
-                if self
-                    .input_phase(id)
-                    .map(|phase| !phase.is_terminal())
-                    .unwrap_or(false)
-                {
+                if self.input_is_non_terminal_by_authority(id) {
                     Some(id.clone())
                 } else {
                     None
@@ -2906,9 +2923,9 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     fn active_input_ids(&self) -> Vec<InputId> {
         self.ledger
             .iter()
-            .filter_map(|(id, _)| match self.input_phase(id) {
-                Some(phase) if !phase.is_terminal() => Some(id.clone()),
-                _ => None,
+            .filter_map(|(id, _)| {
+                self.input_is_non_terminal_by_authority(id)
+                    .then(|| id.clone())
             })
             .collect()
     }
@@ -3439,7 +3456,7 @@ mod tests {
             .recover_terminal_input_lifecycle(&input_id, &seed, None)
             .expect_err("terminal recovery without terminal outcome must fail closed");
         assert!(
-            matches!(&err, RuntimeDriverError::Internal(message) if message.contains("incoherent terminal outcome")),
+            matches!(&err, RuntimeDriverError::Internal(message) if message.contains("public terminal projection")),
             "unexpected recovery error: {err:?}"
         );
 

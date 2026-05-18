@@ -213,6 +213,7 @@ machine! {
             Block { expected_revision: u64 },
             RefreshEligibility { unresolved_blocker_count: u64 },
             ClassifyBlockerSatisfaction,
+            ClassifyTerminality,
             ValidateLink {
                 kind: WorkEdgeKind,
                 from_item_key: WorkItemKey,
@@ -235,6 +236,8 @@ machine! {
             Blocked,
             BlockerSatisfied,
             BlockerUnsatisfied,
+            LifecycleTerminal,
+            LifecycleNonTerminal,
             LinkValidated,
             Closed { terminal_state: WorkLifecycleState },
             EvidenceAdded,
@@ -279,6 +282,8 @@ machine! {
         disposition Blocked => local,
         disposition BlockerSatisfied => local,
         disposition BlockerUnsatisfied => local,
+        disposition LifecycleTerminal => local,
+        disposition LifecycleNonTerminal => local,
         disposition LinkValidated => local,
         disposition Closed => local,
         disposition EvidenceAdded => local,
@@ -549,6 +554,55 @@ machine! {
             guard { self.lifecycle_phase == Phase::Failed }
             to Failed
             emit BlockerUnsatisfied
+        }
+
+        transition ClassifyTerminalityAbsent {
+            on input ClassifyTerminality
+            guard { self.lifecycle_phase == Phase::Absent }
+            to Absent
+            emit LifecycleNonTerminal
+        }
+
+        transition ClassifyTerminalityOpen {
+            on input ClassifyTerminality
+            guard { self.lifecycle_phase == Phase::Open }
+            to Open
+            emit LifecycleNonTerminal
+        }
+
+        transition ClassifyTerminalityInProgress {
+            on input ClassifyTerminality
+            guard { self.lifecycle_phase == Phase::InProgress }
+            to InProgress
+            emit LifecycleNonTerminal
+        }
+
+        transition ClassifyTerminalityBlocked {
+            on input ClassifyTerminality
+            guard { self.lifecycle_phase == Phase::Blocked }
+            to Blocked
+            emit LifecycleNonTerminal
+        }
+
+        transition ClassifyTerminalityCompleted {
+            on input ClassifyTerminality
+            guard { self.lifecycle_phase == Phase::Completed }
+            to Completed
+            emit LifecycleTerminal
+        }
+
+        transition ClassifyTerminalityCancelled {
+            on input ClassifyTerminality
+            guard { self.lifecycle_phase == Phase::Cancelled }
+            to Cancelled
+            emit LifecycleTerminal
+        }
+
+        transition ClassifyTerminalityFailed {
+            on input ClassifyTerminality
+            guard { self.lifecycle_phase == Phase::Failed }
+            to Failed
+            emit LifecycleTerminal
         }
 
         transition ValidateLink {

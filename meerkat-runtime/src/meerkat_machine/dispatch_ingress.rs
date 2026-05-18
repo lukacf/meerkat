@@ -134,11 +134,8 @@ impl MeerkatMachine {
                     match &result {
                         AcceptOutcome::Accepted { input_id, .. } => {
                             let accepted_input_id = input_id.clone();
-                            let is_terminal = driver
-                                .as_driver()
-                                .input_phase(&accepted_input_id)
-                                .map(|phase| phase.is_terminal())
-                                .unwrap_or(true);
+                            let is_terminal =
+                                driver.input_is_terminal_by_authority(&accepted_input_id)?;
                             let handle = if is_terminal {
                                 None
                             } else {
@@ -156,11 +153,7 @@ impl MeerkatMachine {
                             )
                         }
                         AcceptOutcome::Deduplicated { existing_id, .. } => {
-                            let is_terminal = driver
-                                .as_driver()
-                                .input_phase(existing_id)
-                                .map(|phase| phase.is_terminal())
-                                .unwrap_or(true);
+                            let is_terminal = driver.input_is_terminal_by_authority(existing_id)?;
 
                             if is_terminal {
                                 (

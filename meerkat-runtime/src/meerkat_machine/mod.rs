@@ -131,6 +131,29 @@ pub fn resolve_input_public_state_projection(
     })
 }
 
+pub(crate) fn input_seed_terminality_via_authority(
+    input_id: &InputId,
+    seed: &InputStateSeed,
+) -> Result<bool, String> {
+    resolve_input_public_terminal_projection(input_id, seed).map(|terminal| terminal.is_some())
+}
+
+pub(crate) fn input_phase_terminality_via_authority(
+    input_id: &InputId,
+    phase: InputLifecycleState,
+    terminal_outcome: Option<InputTerminalOutcome>,
+) -> Result<bool, String> {
+    let seed = InputStateSeed {
+        phase,
+        last_run_id: None,
+        last_boundary_sequence: None,
+        admission_sequence: None,
+        terminal_outcome,
+        attempt_count: 0,
+    };
+    input_seed_terminality_via_authority(input_id, &seed)
+}
+
 fn resolve_input_public_terminal_projection(
     input_id: &InputId,
     seed: &InputStateSeed,

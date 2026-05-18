@@ -37,15 +37,6 @@ pub enum InputLifecycleState {
     Abandoned,
 }
 
-impl InputLifecycleState {
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Consumed | Self::Superseded | Self::Coalesced | Self::Abandoned
-        )
-    }
-}
-
 /// Why an input was abandoned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -376,20 +367,6 @@ mod tests {
         assert!(seed.admission_sequence.is_none());
         assert!(seed.terminal_outcome.is_none());
         assert_eq!(seed.attempt_count, 0);
-    }
-
-    #[test]
-    fn lifecycle_state_terminal() {
-        assert!(InputLifecycleState::Consumed.is_terminal());
-        assert!(InputLifecycleState::Superseded.is_terminal());
-        assert!(InputLifecycleState::Coalesced.is_terminal());
-        assert!(InputLifecycleState::Abandoned.is_terminal());
-
-        assert!(!InputLifecycleState::Accepted.is_terminal());
-        assert!(!InputLifecycleState::Queued.is_terminal());
-        assert!(!InputLifecycleState::Staged.is_terminal());
-        assert!(!InputLifecycleState::Applied.is_terminal());
-        assert!(!InputLifecycleState::AppliedPendingConsumption.is_terminal());
     }
 
     #[test]

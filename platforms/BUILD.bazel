@@ -112,7 +112,6 @@ platform(
     exec_properties = {
         "Arch": "amd64",
         "OSFamily": "Windows",
-        "Pool": "meerkat-ci",
         "use-self-hosted-executors": "true",
         "recycle-runner": "true",
         "preserve-workspace": "true",

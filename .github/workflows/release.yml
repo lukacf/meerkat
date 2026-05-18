@@ -488,12 +488,9 @@ jobs:
       - name: Use BuildBuddy Windows release endpoint
         if: ${{ matrix.target == 'x86_64-pc-windows-msvc' }}
         shell: bash
-        env:
-          BUILDBUDDY_EXECUTOR_POOL: ${{ vars.MEERKAT_BUILDBUDDY_EXECUTOR_POOL || 'meerkat-ci' }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os
           from pathlib import Path
 
           path = Path("scripts/buildbuddy-bazel-poc")
@@ -505,17 +502,6 @@ jobs:
           replacement = "      --compilation_mode=opt\n      --verbose_failures\n"
           if replacement not in block:
               block = block.replace(needle, replacement, 1)
-              text = text[:start] + block + text[end:]
-          path.write_text(text, encoding="utf-8")
-
-          path = Path("platforms/BUILD.bazel")
-          text = path.read_text(encoding="utf-8")
-          start = text.index('    name = "windows_x86_64",')
-          end = text.index("    parents =", start)
-          block = text[start:end]
-          pool_line = f'        "Pool": "{os.environ["BUILDBUDDY_EXECUTOR_POOL"]}",\n'
-          if '"Pool":' not in block:
-              block = block.replace('        "OSFamily": "Windows",\n', '        "OSFamily": "Windows",\n' + pool_line, 1)
               text = text[:start] + block + text[end:]
           path.write_text(text, encoding="utf-8")
           PY

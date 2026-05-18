@@ -887,6 +887,61 @@ pub enum PeerIngressResponseTerminality {
     TerminalFailed,
 }
 
+/// DSL-owned public peer-ingress authority phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressAuthorityPhaseClass {
+    #[default]
+    Absent,
+    Received,
+    Dropped,
+    Delivered,
+}
+
+impl From<PeerIngressAuthorityPhaseClass> for meerkat_core::PeerIngressAuthorityPhase {
+    fn from(phase: PeerIngressAuthorityPhaseClass) -> Self {
+        match phase {
+            PeerIngressAuthorityPhaseClass::Absent => Self::Absent,
+            PeerIngressAuthorityPhaseClass::Received => Self::Received,
+            PeerIngressAuthorityPhaseClass::Dropped => Self::Dropped,
+            PeerIngressAuthorityPhaseClass::Delivered => Self::Delivered,
+        }
+    }
+}
+
+/// DSL-owned receive/admission result for classified peer ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressReceiveOutcomeClass {
+    #[default]
+    Admitted,
+    DroppedUntrustedSender,
+}
+
+impl From<PeerIngressReceiveOutcomeClass> for meerkat_core::PeerIngressReceiveOutcome {
+    fn from(outcome: PeerIngressReceiveOutcomeClass) -> Self {
+        match outcome {
+            PeerIngressReceiveOutcomeClass::Admitted => Self::Admitted,
+            PeerIngressReceiveOutcomeClass::DroppedUntrustedSender => Self::DroppedUntrustedSender,
+        }
+    }
+}
+
+/// DSL-owned admission diagnostic copy emitted with receive authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressAdmissionDiagnosticClass {
+    #[default]
+    TrustedAtAdmission,
+    UntrustedAtAdmission,
+}
+
+impl From<PeerIngressAdmissionDiagnosticClass> for meerkat_core::PeerIngressAdmissionDiagnostic {
+    fn from(diagnostic: PeerIngressAdmissionDiagnosticClass) -> Self {
+        match diagnostic {
+            PeerIngressAdmissionDiagnosticClass::TrustedAtAdmission => Self::TrustedAtAdmission,
+            PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission => Self::UntrustedAtAdmission,
+        }
+    }
+}
+
 /// Peer-ingress transport capability ownership kind (W2-G / issue #264).
 ///
 /// Paired with `peer_ingress_comms_runtime_id` and `peer_ingress_mob_id` in

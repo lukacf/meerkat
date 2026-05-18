@@ -484,6 +484,28 @@ mod tests {
             }
         }
 
+        fn resolve_peer_ingress_receive(
+            &self,
+            facts: meerkat_core::PeerIngressReceiveFacts,
+        ) -> Result<
+            meerkat_core::PeerIngressReceiveAuthority,
+            meerkat_core::handles::DslTransitionError,
+        > {
+            Ok(self.policy.resolve_receive_authority(facts))
+        }
+
+        fn resolve_peer_ingress_dequeue(
+            &self,
+            facts: meerkat_core::PeerIngressDequeueFacts,
+        ) -> Result<
+            meerkat_core::PeerIngressDequeueAuthority,
+            meerkat_core::handles::DslTransitionError,
+        > {
+            Ok(self
+                .policy
+                .resolve_dequeue_authority(meerkat_core::PeerIngressAuthorityPhase::Absent, facts))
+        }
+
         fn set_peer_ingress_context(
             &self,
             _keep_alive: bool,

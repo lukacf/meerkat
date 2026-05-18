@@ -2918,6 +2918,58 @@ pub type PeerEndpoint = meerkat_machine_schema::catalog::dsl::meerkat_machine::P
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum PeerIngressAdmissionDiagnosticClass {
+    #[default]
+    #[serde(rename = "TrustedAtAdmission")]
+    TrustedAtAdmission,
+    #[serde(rename = "UntrustedAtAdmission")]
+    UntrustedAtAdmission,
+}
+impl PeerIngressAdmissionDiagnosticClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TrustedAtAdmission => "TrustedAtAdmission",
+            Self::UntrustedAtAdmission => "UntrustedAtAdmission",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressAdmissionDiagnosticClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "TrustedAtAdmission" => Ok(Self::TrustedAtAdmission),
+            "UntrustedAtAdmission" => Ok(Self::UntrustedAtAdmission),
+            other => Err(format!(
+                "invalid PeerIngressAdmissionDiagnosticClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressAdmissionDiagnosticClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressAdmissionDiagnosticClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum PeerIngressAdmittedKind {
     #[default]
     #[serde(rename = "Message")]
@@ -3012,6 +3064,66 @@ impl std::convert::TryFrom<String> for PeerIngressAuthClass {
     }
 }
 impl std::fmt::Display for PeerIngressAuthClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressAuthorityPhaseClass {
+    #[default]
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "Received")]
+    Received,
+    #[serde(rename = "Dropped")]
+    Dropped,
+    #[serde(rename = "Delivered")]
+    Delivered,
+}
+impl PeerIngressAuthorityPhaseClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::Received => "Received",
+            Self::Dropped => "Dropped",
+            Self::Delivered => "Delivered",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressAuthorityPhaseClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Absent" => Ok(Self::Absent),
+            "Received" => Ok(Self::Received),
+            "Dropped" => Ok(Self::Dropped),
+            "Delivered" => Ok(Self::Delivered),
+            other => Err(format!(
+                "invalid PeerIngressAuthorityPhaseClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressAuthorityPhaseClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressAuthorityPhaseClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -3264,6 +3376,58 @@ impl std::convert::TryFrom<String> for PeerIngressOwnerKind {
     }
 }
 impl std::fmt::Display for PeerIngressOwnerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressReceiveOutcomeClass {
+    #[default]
+    #[serde(rename = "Admitted")]
+    Admitted,
+    #[serde(rename = "DroppedUntrustedSender")]
+    DroppedUntrustedSender,
+}
+impl PeerIngressReceiveOutcomeClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Admitted => "Admitted",
+            Self::DroppedUntrustedSender => "DroppedUntrustedSender",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressReceiveOutcomeClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Admitted" => Ok(Self::Admitted),
+            "DroppedUntrustedSender" => Ok(Self::DroppedUntrustedSender),
+            other => Err(format!(
+                "invalid PeerIngressReceiveOutcomeClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressReceiveOutcomeClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressReceiveOutcomeClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -5982,6 +6146,7 @@ pub struct State {
     pub peer_ingress_owner_kind: PeerIngressOwnerKind,
     pub peer_ingress_comms_runtime_id: Option<CommsRuntimeId>,
     pub peer_ingress_mob_id: Option<MobId>,
+    pub peer_ingress_authority_phase: PeerIngressAuthorityPhaseClass,
     pub supervisor_binding_kind: SupervisorBindingKind,
     pub supervisor_bound_name: Option<String>,
     pub supervisor_bound_peer_id: Option<String>,
@@ -6033,6 +6198,19 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SetPeerIngressContext {
         pub keep_alive: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolvePeerIngressReceive {
+        pub auth_required: bool,
+        pub auth_exempt: bool,
+        pub trusted: bool,
+        pub queued_work_present: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolvePeerIngressDequeue {
+        pub kind: PeerIngressAdmittedKind,
+        pub auth: PeerIngressAuthClass,
+        pub queued_work_remaining: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct NotifyDrainExited {
@@ -6893,6 +7071,8 @@ pub enum Input {
     ReconfigureSessionLlmIdentity(inputs::ReconfigureSessionLlmIdentity),
     PrepareBindings(inputs::PrepareBindings),
     SetPeerIngressContext(inputs::SetPeerIngressContext),
+    ResolvePeerIngressReceive(inputs::ResolvePeerIngressReceive),
+    ResolvePeerIngressDequeue(inputs::ResolvePeerIngressDequeue),
     NotifyDrainExited(inputs::NotifyDrainExited),
     InterruptCurrentRun(inputs::InterruptCurrentRun),
     CancelAfterBoundary(inputs::CancelAfterBoundary),
@@ -7082,6 +7262,8 @@ impl Input {
             Self::ReconfigureSessionLlmIdentity(_) => InputKind::ReconfigureSessionLlmIdentity,
             Self::PrepareBindings(_) => InputKind::PrepareBindings,
             Self::SetPeerIngressContext(_) => InputKind::SetPeerIngressContext,
+            Self::ResolvePeerIngressReceive(_) => InputKind::ResolvePeerIngressReceive,
+            Self::ResolvePeerIngressDequeue(_) => InputKind::ResolvePeerIngressDequeue,
             Self::NotifyDrainExited(_) => InputKind::NotifyDrainExited,
             Self::InterruptCurrentRun(_) => InputKind::InterruptCurrentRun,
             Self::CancelAfterBoundary(_) => InputKind::CancelAfterBoundary,
@@ -7286,6 +7468,8 @@ pub enum InputKind {
     ReconfigureSessionLlmIdentity,
     PrepareBindings,
     SetPeerIngressContext,
+    ResolvePeerIngressReceive,
+    ResolvePeerIngressDequeue,
     NotifyDrainExited,
     InterruptCurrentRun,
     CancelAfterBoundary,
@@ -7816,6 +8000,16 @@ pub mod effects {
         pub response_terminality: Option<PeerIngressResponseTerminality>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PeerIngressReceiveResolved {
+        pub outcome: PeerIngressReceiveOutcomeClass,
+        pub admission_diagnostic: PeerIngressAdmissionDiagnosticClass,
+        pub phase: PeerIngressAuthorityPhaseClass,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PeerIngressDequeueResolved {
+        pub phase: PeerIngressAuthorityPhaseClass,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnDrainTask {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ScheduleSurfaceCompletion {
@@ -7973,6 +8167,8 @@ pub enum Effect {
     CollectCompletedResult(effects::CollectCompletedResult),
     EnqueueClassifiedEntry(effects::EnqueueClassifiedEntry),
     PeerIngressClassified(effects::PeerIngressClassified),
+    PeerIngressReceiveResolved(effects::PeerIngressReceiveResolved),
+    PeerIngressDequeueResolved(effects::PeerIngressDequeueResolved),
     SpawnDrainTask(effects::SpawnDrainTask),
     ScheduleSurfaceCompletion(effects::ScheduleSurfaceCompletion),
     RefreshVisibleSurfaceSet(effects::RefreshVisibleSurfaceSet),
@@ -8058,6 +8254,8 @@ pub enum EffectKind {
     CollectCompletedResult,
     EnqueueClassifiedEntry,
     PeerIngressClassified,
+    PeerIngressReceiveResolved,
+    PeerIngressDequeueResolved,
     SpawnDrainTask,
     ScheduleSurfaceCompletion,
     RefreshVisibleSurfaceSet,
@@ -8178,6 +8376,51 @@ pub enum TransitionId {
     SetPeerIngressContextRunning,
     SetPeerIngressContextRetired,
     SetPeerIngressContextStopped,
+    ResolvePeerIngressReceiveTrustedIdle,
+    ResolvePeerIngressReceiveTrustedAttached,
+    ResolvePeerIngressReceiveTrustedRunning,
+    ResolvePeerIngressReceiveTrustedRetired,
+    ResolvePeerIngressReceiveTrustedStopped,
+    ResolvePeerIngressReceiveAuthExemptUntrustedIdle,
+    ResolvePeerIngressReceiveAuthExemptUntrustedAttached,
+    ResolvePeerIngressReceiveAuthExemptUntrustedRunning,
+    ResolvePeerIngressReceiveAuthExemptUntrustedRetired,
+    ResolvePeerIngressReceiveAuthExemptUntrustedStopped,
+    ResolvePeerIngressReceiveAuthOpenUntrustedIdle,
+    ResolvePeerIngressReceiveAuthOpenUntrustedAttached,
+    ResolvePeerIngressReceiveAuthOpenUntrustedRunning,
+    ResolvePeerIngressReceiveAuthOpenUntrustedRetired,
+    ResolvePeerIngressReceiveAuthOpenUntrustedStopped,
+    ResolvePeerIngressReceiveUntrustedQueuedDropIdle,
+    ResolvePeerIngressReceiveUntrustedQueuedDropAttached,
+    ResolvePeerIngressReceiveUntrustedQueuedDropRunning,
+    ResolvePeerIngressReceiveUntrustedQueuedDropRetired,
+    ResolvePeerIngressReceiveUntrustedQueuedDropStopped,
+    ResolvePeerIngressReceiveUntrustedEmptyDropIdle,
+    ResolvePeerIngressReceiveUntrustedEmptyDropAttached,
+    ResolvePeerIngressReceiveUntrustedEmptyDropRunning,
+    ResolvePeerIngressReceiveUntrustedEmptyDropRetired,
+    ResolvePeerIngressReceiveUntrustedEmptyDropStopped,
+    ResolvePeerIngressDequeuePlainEventIdle,
+    ResolvePeerIngressDequeuePlainEventAttached,
+    ResolvePeerIngressDequeuePlainEventRunning,
+    ResolvePeerIngressDequeuePlainEventRetired,
+    ResolvePeerIngressDequeuePlainEventStopped,
+    ResolvePeerIngressDequeueAuthExemptExternalIdle,
+    ResolvePeerIngressDequeueAuthExemptExternalAttached,
+    ResolvePeerIngressDequeueAuthExemptExternalRunning,
+    ResolvePeerIngressDequeueAuthExemptExternalRetired,
+    ResolvePeerIngressDequeueAuthExemptExternalStopped,
+    ResolvePeerIngressDequeueRequiredRemainingIdle,
+    ResolvePeerIngressDequeueRequiredRemainingAttached,
+    ResolvePeerIngressDequeueRequiredRemainingRunning,
+    ResolvePeerIngressDequeueRequiredRemainingRetired,
+    ResolvePeerIngressDequeueRequiredRemainingStopped,
+    ResolvePeerIngressDequeueRequiredEmptyIdle,
+    ResolvePeerIngressDequeueRequiredEmptyAttached,
+    ResolvePeerIngressDequeueRequiredEmptyRunning,
+    ResolvePeerIngressDequeueRequiredEmptyRetired,
+    ResolvePeerIngressDequeueRequiredEmptyStopped,
     NotifyDrainExitedIdle,
     NotifyDrainExitedAttached,
     NotifyDrainExitedRunning,
@@ -9179,6 +9422,7 @@ pub fn initial_state() -> State {
         peer_ingress_owner_kind: PeerIngressOwnerKind::Unattached,
         peer_ingress_comms_runtime_id: None,
         peer_ingress_mob_id: None,
+        peer_ingress_authority_phase: PeerIngressAuthorityPhaseClass::Absent,
         supervisor_binding_kind: SupervisorBindingKind::Unbound,
         supervisor_bound_name: None,
         supervisor_bound_peer_id: None,

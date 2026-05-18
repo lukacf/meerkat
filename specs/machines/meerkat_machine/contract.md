@@ -138,6 +138,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `peer_ingress_owner_kind`: `PeerIngressOwnerKind`
 - `peer_ingress_comms_runtime_id`: `Option<CommsRuntimeId>`
 - `peer_ingress_mob_id`: `Option<MobId>`
+- `peer_ingress_authority_phase`: `PeerIngressAuthorityPhaseClass`
 - `supervisor_binding_kind`: `SupervisorBindingKind`
 - `supervisor_bound_name`: `Option<String>`
 - `supervisor_bound_peer_id`: `Option<String>`
@@ -155,6 +156,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId)
 - `SetPeerIngressContext`(keep_alive: Bool)
+- `ResolvePeerIngressReceive`(auth_required: Bool, auth_exempt: Bool, trusted: Bool, queued_work_present: Bool)
+- `ResolvePeerIngressDequeue`(kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, queued_work_remaining: Bool)
 - `NotifyDrainExited`(reason: DrainExitReason)
 - `InterruptCurrentRun`
 - `CancelAfterBoundary`(reason: String)
@@ -419,6 +422,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CollectCompletedResult`
 - `EnqueueClassifiedEntry`
 - `PeerIngressClassified`(class: PeerIngressInputClass, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
+- `PeerIngressReceiveResolved`(outcome: PeerIngressReceiveOutcomeClass, admission_diagnostic: PeerIngressAdmissionDiagnosticClass, phase: PeerIngressAuthorityPhaseClass)
+- `PeerIngressDequeueResolved`(phase: PeerIngressAuthorityPhaseClass)
 - `SpawnDrainTask`
 - `ScheduleSurfaceCompletion`(surface_id: String, operation: ExternalToolSurfaceDeltaOperation, pending_task_sequence: u64, staged_intent_sequence: u64, applied_at_turn: u64)
 - `RefreshVisibleSurfaceSet`(snapshot_epoch: u64)
@@ -1214,6 +1219,481 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SetPeerIngressContext`(keep_alive)
 - Guards:
   - `session_registered`
+- To: `Stopped`
+
+### `ResolvePeerIngressReceiveTrustedIdle`
+- From: `Idle`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `trusted_sender`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Idle`
+
+### `ResolvePeerIngressReceiveTrustedAttached`
+- From: `Attached`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `trusted_sender`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Attached`
+
+### `ResolvePeerIngressReceiveTrustedRunning`
+- From: `Running`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `trusted_sender`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Running`
+
+### `ResolvePeerIngressReceiveTrustedRetired`
+- From: `Retired`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `trusted_sender`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Retired`
+
+### `ResolvePeerIngressReceiveTrustedStopped`
+- From: `Stopped`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `trusted_sender`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Stopped`
+
+### `ResolvePeerIngressReceiveAuthExemptUntrustedIdle`
+- From: `Idle`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_exempt`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Idle`
+
+### `ResolvePeerIngressReceiveAuthExemptUntrustedAttached`
+- From: `Attached`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_exempt`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Attached`
+
+### `ResolvePeerIngressReceiveAuthExemptUntrustedRunning`
+- From: `Running`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_exempt`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Running`
+
+### `ResolvePeerIngressReceiveAuthExemptUntrustedRetired`
+- From: `Retired`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_exempt`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Retired`
+
+### `ResolvePeerIngressReceiveAuthExemptUntrustedStopped`
+- From: `Stopped`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_exempt`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Stopped`
+
+### `ResolvePeerIngressReceiveAuthOpenUntrustedIdle`
+- From: `Idle`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required_disabled`
+  - `auth_not_exempt`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Idle`
+
+### `ResolvePeerIngressReceiveAuthOpenUntrustedAttached`
+- From: `Attached`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required_disabled`
+  - `auth_not_exempt`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Attached`
+
+### `ResolvePeerIngressReceiveAuthOpenUntrustedRunning`
+- From: `Running`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required_disabled`
+  - `auth_not_exempt`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Running`
+
+### `ResolvePeerIngressReceiveAuthOpenUntrustedRetired`
+- From: `Retired`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required_disabled`
+  - `auth_not_exempt`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Retired`
+
+### `ResolvePeerIngressReceiveAuthOpenUntrustedStopped`
+- From: `Stopped`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required_disabled`
+  - `auth_not_exempt`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Stopped`
+
+### `ResolvePeerIngressReceiveUntrustedQueuedDropIdle`
+- From: `Idle`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required`
+  - `auth_not_exempt`
+  - `queued_work_present`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Idle`
+
+### `ResolvePeerIngressReceiveUntrustedQueuedDropAttached`
+- From: `Attached`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required`
+  - `auth_not_exempt`
+  - `queued_work_present`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Attached`
+
+### `ResolvePeerIngressReceiveUntrustedQueuedDropRunning`
+- From: `Running`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required`
+  - `auth_not_exempt`
+  - `queued_work_present`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Running`
+
+### `ResolvePeerIngressReceiveUntrustedQueuedDropRetired`
+- From: `Retired`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required`
+  - `auth_not_exempt`
+  - `queued_work_present`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Retired`
+
+### `ResolvePeerIngressReceiveUntrustedQueuedDropStopped`
+- From: `Stopped`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required`
+  - `auth_not_exempt`
+  - `queued_work_present`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Stopped`
+
+### `ResolvePeerIngressReceiveUntrustedEmptyDropIdle`
+- From: `Idle`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required`
+  - `auth_not_exempt`
+  - `queued_work_empty`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Idle`
+
+### `ResolvePeerIngressReceiveUntrustedEmptyDropAttached`
+- From: `Attached`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required`
+  - `auth_not_exempt`
+  - `queued_work_empty`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Attached`
+
+### `ResolvePeerIngressReceiveUntrustedEmptyDropRunning`
+- From: `Running`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required`
+  - `auth_not_exempt`
+  - `queued_work_empty`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Running`
+
+### `ResolvePeerIngressReceiveUntrustedEmptyDropRetired`
+- From: `Retired`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required`
+  - `auth_not_exempt`
+  - `queued_work_empty`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Retired`
+
+### `ResolvePeerIngressReceiveUntrustedEmptyDropStopped`
+- From: `Stopped`
+- On: `ResolvePeerIngressReceive`(auth_required, auth_exempt, trusted, queued_work_present)
+- Guards:
+  - `session_registered`
+  - `untrusted_sender`
+  - `auth_required`
+  - `auth_not_exempt`
+  - `queued_work_empty`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Stopped`
+
+### `ResolvePeerIngressDequeuePlainEventIdle`
+- From: `Idle`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `plain_event`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Idle`
+
+### `ResolvePeerIngressDequeuePlainEventAttached`
+- From: `Attached`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `plain_event`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Attached`
+
+### `ResolvePeerIngressDequeuePlainEventRunning`
+- From: `Running`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `plain_event`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Running`
+
+### `ResolvePeerIngressDequeuePlainEventRetired`
+- From: `Retired`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `plain_event`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Retired`
+
+### `ResolvePeerIngressDequeuePlainEventStopped`
+- From: `Stopped`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `plain_event`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Stopped`
+
+### `ResolvePeerIngressDequeueAuthExemptExternalIdle`
+- From: `Idle`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_exempt`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Idle`
+
+### `ResolvePeerIngressDequeueAuthExemptExternalAttached`
+- From: `Attached`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_exempt`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Attached`
+
+### `ResolvePeerIngressDequeueAuthExemptExternalRunning`
+- From: `Running`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_exempt`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Running`
+
+### `ResolvePeerIngressDequeueAuthExemptExternalRetired`
+- From: `Retired`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_exempt`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Retired`
+
+### `ResolvePeerIngressDequeueAuthExemptExternalStopped`
+- From: `Stopped`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_exempt`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Stopped`
+
+### `ResolvePeerIngressDequeueRequiredRemainingIdle`
+- From: `Idle`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_required`
+  - `queued_work_remaining`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Idle`
+
+### `ResolvePeerIngressDequeueRequiredRemainingAttached`
+- From: `Attached`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_required`
+  - `queued_work_remaining`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Attached`
+
+### `ResolvePeerIngressDequeueRequiredRemainingRunning`
+- From: `Running`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_required`
+  - `queued_work_remaining`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Running`
+
+### `ResolvePeerIngressDequeueRequiredRemainingRetired`
+- From: `Retired`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_required`
+  - `queued_work_remaining`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Retired`
+
+### `ResolvePeerIngressDequeueRequiredRemainingStopped`
+- From: `Stopped`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_required`
+  - `queued_work_remaining`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Stopped`
+
+### `ResolvePeerIngressDequeueRequiredEmptyIdle`
+- From: `Idle`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_required`
+  - `queued_work_empty`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Idle`
+
+### `ResolvePeerIngressDequeueRequiredEmptyAttached`
+- From: `Attached`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_required`
+  - `queued_work_empty`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Attached`
+
+### `ResolvePeerIngressDequeueRequiredEmptyRunning`
+- From: `Running`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_required`
+  - `queued_work_empty`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Running`
+
+### `ResolvePeerIngressDequeueRequiredEmptyRetired`
+- From: `Retired`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_required`
+  - `queued_work_empty`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Retired`
+
+### `ResolvePeerIngressDequeueRequiredEmptyStopped`
+- From: `Stopped`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_required`
+  - `queued_work_empty`
+- Emits: `PeerIngressDequeueResolved`
 - To: `Stopped`
 
 ### `NotifyDrainExitedIdle`

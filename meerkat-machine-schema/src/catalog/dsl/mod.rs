@@ -543,6 +543,18 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["PeerAdded", "PeerRetired", "PeerUnwired"],
             ),
             NamedTypeBinding::string_enum(
+                "PeerIngressAuthorityPhaseClass",
+                &["Absent", "Received", "Dropped", "Delivered"],
+            ),
+            NamedTypeBinding::string_enum(
+                "PeerIngressReceiveOutcomeClass",
+                &["Admitted", "DroppedUntrustedSender"],
+            ),
+            NamedTypeBinding::string_enum(
+                "PeerIngressAdmissionDiagnosticClass",
+                &["TrustedAtAdmission", "UntrustedAtAdmission"],
+            ),
+            NamedTypeBinding::string_enum(
                 "PeerIngressOwnerKind",
                 &["Unattached", "SessionOwned", "MobOwned"],
             ),

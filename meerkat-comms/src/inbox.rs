@@ -10,18 +10,19 @@ use crate::tokio;
 use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Notify, mpsc};
 
-use crate::classify::IngressClassificationContext;
-use crate::classify::PreparedIngressItem;
+use crate::classify::{IngressClassificationContext, PeerCommsHandleSlot, PreparedIngressItem};
 use crate::peer_types::PeerIngressState;
 use crate::trust::TrustedPeers;
 use crate::types::{Envelope, InboxItem};
 use meerkat_core::{
     InteractionId, PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision,
-    PeerIngressDiagnosticDisplay, PeerIngressEntrySnapshot, PeerIngressFact, PeerIngressKind,
-    PeerIngressQueueSnapshot, PeerInputClass, TerminalityClass,
+    PeerIngressDequeueAuthority, PeerIngressDequeueFacts, PeerIngressDiagnosticDisplay,
+    PeerIngressEntrySnapshot, PeerIngressFact, PeerIngressKind, PeerIngressMachinePolicy,
+    PeerIngressQueueSnapshot, PeerIngressReceiveAuthority, PeerIngressReceiveFacts,
+    PeerIngressReceiveOutcome, PeerInputClass, TerminalityClass,
 };
 
 const DEFAULT_INBOX_CAPACITY: usize = 1024;
@@ -115,7 +116,6 @@ pub(crate) struct AdmissionDecision {
     pub(crate) admission_diagnostic: Option<PeerIngressAdmissionDiagnostic>,
 }
 
-#[derive(Debug)]
 struct ClassifiedInboxQueue {
     capacity: usize,
     closed: bool,
@@ -131,19 +131,34 @@ struct ClassifiedInboxQueue {
     /// classification (T0) and admission (T2) cannot admit an envelope
     /// that was no longer trusted at T2 — see C-H3.
     trusted_peers: Arc<RwLock<TrustedPeers>>,
+    /// Standalone compatibility mirror used only when no generated session
+    /// authority is required. Runtime-backed ingress uses `peer_comms_handle`.
+    ingress_policy: Arc<PeerIngressMachinePolicy>,
+    peer_comms_handle: PeerCommsHandleSlot,
+    require_machine_authority: Arc<AtomicBool>,
     phase: PeerIngressState,
     dropped_count: Arc<AtomicU64>,
     capacity_notify: Arc<Notify>,
 }
 
 impl ClassifiedInboxQueue {
-    fn new(capacity: usize, auth_required: bool, trusted_peers: Arc<RwLock<TrustedPeers>>) -> Self {
+    fn new(
+        capacity: usize,
+        auth_required: bool,
+        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        ingress_policy: Arc<PeerIngressMachinePolicy>,
+        peer_comms_handle: PeerCommsHandleSlot,
+        require_machine_authority: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             capacity,
             closed: false,
             entries: VecDeque::new(),
             auth_required,
             trusted_peers,
+            ingress_policy,
+            peer_comms_handle,
+            require_machine_authority,
             phase: PeerIngressState::Absent,
             dropped_count: Arc::new(AtomicU64::new(0)),
             capacity_notify: Arc::new(Notify::new()),
@@ -158,15 +173,70 @@ impl ClassifiedInboxQueue {
         self.capacity_notify.clone()
     }
 
+    fn resolve_receive_authority(
+        &self,
+        facts: PeerIngressReceiveFacts,
+    ) -> Option<PeerIngressReceiveAuthority> {
+        let handle = self.peer_comms_handle.read().clone();
+        let Some(handle) = handle else {
+            if self.require_machine_authority.load(Ordering::SeqCst) {
+                tracing::warn!(
+                    "runtime-backed peer ingress has no machine receive authority; rejecting external envelope"
+                );
+                return None;
+            }
+            return Some(self.ingress_policy.resolve_receive_authority(facts));
+        };
+
+        match handle.resolve_peer_ingress_receive(facts) {
+            Ok(authority) => Some(authority),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "peer ingress receive rejected by machine authority"
+                );
+                None
+            }
+        }
+    }
+
+    fn resolve_dequeue_authority(
+        &self,
+        facts: PeerIngressDequeueFacts,
+    ) -> Option<PeerIngressDequeueAuthority> {
+        let handle = self.peer_comms_handle.read().clone();
+        let Some(handle) = handle else {
+            if self.require_machine_authority.load(Ordering::SeqCst) {
+                tracing::warn!(
+                    "runtime-backed peer ingress has no machine dequeue authority; leaving phase projection unchanged"
+                );
+                return None;
+            }
+            return Some(
+                self.ingress_policy
+                    .resolve_dequeue_authority(self.phase.into(), facts),
+            );
+        };
+
+        match handle.resolve_peer_ingress_dequeue(facts) {
+            Ok(authority) => Some(authority),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "peer ingress dequeue rejected by machine authority"
+                );
+                None
+            }
+        }
+    }
+
     /// Admit a prepared item into the peer-ingress lifecycle.
     ///
     /// Returns a typed `AdmissionDecision`:
     /// - Plain events are always admitted, with no trust diagnostic.
-    /// - External envelopes consult the canonical trust set
-    ///   (`Arc<RwLock<TrustedPeers>>` shared with the router) plus the
-    ///   auth-required policy. Untrusted senders with auth required are
-    ///   `Dropped { reason: UntrustedSender }`; the trust diagnostic still
-    ///   records the decision for queue visibility.
+    /// - External envelopes pass admission-time observations to the generated
+    ///   peer-ingress authority, which emits the admission outcome,
+    ///   diagnostic, and public phase.
     ///
     /// C-H3 — the trust check is re-read from the canonical
     /// `trusted_peers` store **inside** this queue's `Mutex` scope, not
@@ -177,17 +247,8 @@ impl ClassifiedInboxQueue {
     /// observation said trusted. The prepared bool is retained for
     /// diagnostics only (TOCTOU observability).
     ///
-    /// Auth-exempt items (bridge bootstrap / idempotency-ack) bypass the
-    /// peer-trust gate unconditionally so bootstrapping can complete
-    /// before trust edges exist. The typed auth decision flows from
-    /// the prepared item so this single admission seam can distinguish
-    /// "admit as trusted" from "admit as exempt" — no parallel outer
-    /// branch, no classification-time bool that can drift.
-    ///
-    /// Updates `phase` to track the observable lifecycle:
-    /// `Absent → Received` (admitted), `Received → Received` (more work),
-    /// `Absent → Dropped` (untrusted with empty queue), untrusted with queued
-    /// work keeps `Received`.
+    /// The queue stores only the emitted phase projection for snapshots; it
+    /// does not derive phase or trust/admission legality locally.
     fn admit_peer_receive(&mut self, prepared: &PreparedIngressItem) -> AdmissionDecision {
         let InboxItem::External { envelope } = &prepared.item else {
             return AdmissionDecision {
@@ -200,51 +261,45 @@ impl ClassifiedInboxQueue {
         // concurrent `router.{add,remove}_trusted_peer` serializes with
         // this check — classification's stale view is ignored.
         let trusted = self.trusted_peers.read().is_trusted(&envelope.from);
-        // Auth-exempt items always admit; otherwise admission is gated by
-        // the authoritative trust read against the require_peer_auth
-        // policy. The prepared classification observation is NOT consulted
-        // here — only the admission-time read is authoritative.
-        let admitted = prepared.auth.is_exempt() || trusted || !self.auth_required;
         let had_queued_work = !self.entries.is_empty();
-
-        if admitted {
-            self.phase = PeerIngressState::Received;
-            AdmissionDecision {
-                outcome: AdmissionOutcome::Admitted,
-                admission_diagnostic: Some(PeerIngressAdmissionDiagnostic::from_trusted(trusted)),
-            }
-        } else {
-            if had_queued_work {
-                self.phase = PeerIngressState::Received;
-            } else {
-                self.phase = PeerIngressState::Dropped;
-            }
-            AdmissionDecision {
+        let Some(authority) = self.resolve_receive_authority(PeerIngressReceiveFacts {
+            auth_required: self.auth_required,
+            auth_exempt: prepared.auth.is_exempt(),
+            trusted,
+            queued_work_present: had_queued_work,
+        }) else {
+            return AdmissionDecision {
                 outcome: AdmissionOutcome::Dropped {
-                    reason: DropReason::UntrustedSender,
+                    reason: DropReason::ClassificationRejected,
                 },
-                admission_diagnostic: Some(PeerIngressAdmissionDiagnostic::UntrustedAtAdmission),
-            }
+                admission_diagnostic: None,
+            };
+        };
+
+        self.phase = authority.authority_phase.into();
+        let outcome = match authority.outcome {
+            PeerIngressReceiveOutcome::Admitted => AdmissionOutcome::Admitted,
+            PeerIngressReceiveOutcome::DroppedUntrustedSender => AdmissionOutcome::Dropped {
+                reason: DropReason::UntrustedSender,
+            },
+        };
+        AdmissionDecision {
+            outcome,
+            admission_diagnostic: Some(authority.admission_diagnostic),
         }
     }
 
-    /// Advance `phase` on dequeue.
+    /// Project the generated peer-ingress authority phase after dequeue.
     ///
-    /// External items drive the transition: an empty queue after dequeue moves
-    /// to `Delivered`; otherwise we stay in `Received`. Plain events do not
-    /// drive the peer-ingress phase. Auth-exempt entries (bridge bootstrap
-    /// / idempotency-ack envelopes) bypass the phase machinery entirely.
+    /// The queue supplies the generated ingress kind/auth fact plus remaining
+    /// occupancy. The machine decides whether the public phase changes.
     fn note_peer_dequeue(&mut self, entry: &ClassifiedInboxEntry) {
-        if entry.auth.is_exempt() {
-            return;
-        }
-        let InboxItem::External { .. } = &entry.item else {
-            return;
-        };
-        if self.entries.is_empty() {
-            self.phase = PeerIngressState::Delivered;
-        } else {
-            self.phase = PeerIngressState::Received;
+        if let Some(authority) = self.resolve_dequeue_authority(PeerIngressDequeueFacts {
+            kind: entry.kind,
+            auth: entry.auth,
+            queued_work_remaining: !self.entries.is_empty(),
+        }) {
+            self.phase = authority.authority_phase.into();
         }
     }
 
@@ -415,6 +470,9 @@ impl Inbox {
             DEFAULT_INBOX_CAPACITY,
             context.require_peer_auth,
             context.trusted_peers.clone(),
+            context.ingress_policy.clone(),
+            context.peer_comms_handle.clone(),
+            context.require_machine_authority.clone(),
         );
         let dropped_count = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
@@ -1231,6 +1289,20 @@ mod tests {
         })
     }
 
+    fn make_classified_queue(
+        capacity: usize,
+        ctx: &Arc<IngressClassificationContext>,
+    ) -> ClassifiedInboxQueue {
+        ClassifiedInboxQueue::new(
+            capacity,
+            ctx.require_peer_auth,
+            ctx.trusted_peers.clone(),
+            ctx.ingress_policy.clone(),
+            ctx.peer_comms_handle.clone(),
+            ctx.require_machine_authority.clone(),
+        )
+    }
+
     fn make_trusted(name: &str, pubkey: &PubKey) -> TrustedPeers {
         TrustedPeers {
             peers: vec![TrustedPeer {
@@ -1277,6 +1349,27 @@ mod tests {
         ) -> Result<meerkat_core::PeerIngressAdmission, meerkat_core::handles::DslTransitionError>
         {
             Ok(PeerIngressMachinePolicy::default().classify_plain_event_facts(&facts))
+        }
+
+        fn resolve_peer_ingress_receive(
+            &self,
+            facts: meerkat_core::PeerIngressReceiveFacts,
+        ) -> Result<
+            meerkat_core::PeerIngressReceiveAuthority,
+            meerkat_core::handles::DslTransitionError,
+        > {
+            Ok(PeerIngressMachinePolicy::default().resolve_receive_authority(facts))
+        }
+
+        fn resolve_peer_ingress_dequeue(
+            &self,
+            facts: meerkat_core::PeerIngressDequeueFacts,
+        ) -> Result<
+            meerkat_core::PeerIngressDequeueAuthority,
+            meerkat_core::handles::DslTransitionError,
+        > {
+            Ok(PeerIngressMachinePolicy::default()
+                .resolve_dequeue_authority(meerkat_core::PeerIngressAuthorityPhase::Absent, facts))
         }
 
         fn set_peer_ingress_context(
@@ -1829,7 +1922,7 @@ mod tests {
         // directly and then driving it.
         let actionable_notify = Arc::new(Notify::new());
         let notify = Arc::new(Notify::new());
-        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         let (tx, _rx) = mpsc::channel::<InboxItem>(1);
@@ -1866,7 +1959,7 @@ mod tests {
         let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
         let actionable_notify = Arc::new(Notify::new());
         let notify = Arc::new(Notify::new());
-        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         let (tx, _rx) = mpsc::channel::<InboxItem>(1);
@@ -1918,7 +2011,7 @@ mod tests {
         let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), true);
         let actionable_notify = Arc::new(Notify::new());
         let notify = Arc::new(Notify::new());
-        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         let (tx, _rx) = mpsc::channel::<InboxItem>(1);
@@ -1979,8 +2072,7 @@ mod tests {
         let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), true);
         let actionable_notify = Arc::new(Notify::new());
         let notify = Arc::new(Notify::new());
-        let queue =
-            ClassifiedInboxQueue::new(CAPACITY, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let queue = make_classified_queue(CAPACITY, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         let (tx, _rx) = mpsc::channel::<InboxItem>(CAPACITY);

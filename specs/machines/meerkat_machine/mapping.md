@@ -316,6 +316,141 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SetPeerIngressContextStopped`
   - anchors: `meerkat_machine`
   - scenarios: `retire-reset-destroy`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
+- `ResolvePeerIngressReceiveTrustedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveTrustedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveTrustedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveTrustedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveTrustedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveAuthExemptUntrustedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveAuthExemptUntrustedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveAuthExemptUntrustedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveAuthExemptUntrustedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveAuthExemptUntrustedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveAuthOpenUntrustedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveAuthOpenUntrustedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveAuthOpenUntrustedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveAuthOpenUntrustedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveAuthOpenUntrustedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveUntrustedQueuedDropIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveUntrustedQueuedDropAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveUntrustedQueuedDropRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveUntrustedQueuedDropRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveUntrustedQueuedDropStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveUntrustedEmptyDropIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveUntrustedEmptyDropAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveUntrustedEmptyDropRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveUntrustedEmptyDropRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+- `ResolvePeerIngressReceiveUntrustedEmptyDropStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressDequeuePlainEventIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressDequeuePlainEventAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressDequeuePlainEventRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressDequeuePlainEventRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressDequeuePlainEventStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueAuthExemptExternalIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueAuthExemptExternalAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueAuthExemptExternalRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueAuthExemptExternalRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueAuthExemptExternalStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueRequiredRemainingIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueRequiredRemainingAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueRequiredRemainingRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueRequiredRemainingRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueRequiredRemainingStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueRequiredEmptyIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueRequiredEmptyAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueRequiredEmptyRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueRequiredEmptyRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+- `ResolvePeerIngressDequeueRequiredEmptyStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
 - `NotifyDrainExitedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
@@ -2898,6 +3033,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PeerIngressClassified`
   - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
   - scenarios: `input_admission_and_queueing`
+- `PeerIngressReceiveResolved`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`
+- `PeerIngressDequeueResolved`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`
 - `SpawnDrainTask`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`

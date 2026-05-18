@@ -427,6 +427,32 @@ pub enum PeerIngressResponseTerminality {
     TerminalFailed,
 }
 
+/// DSL-owned public peer-ingress authority phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressAuthorityPhaseClass {
+    #[default]
+    Absent,
+    Received,
+    Dropped,
+    Delivered,
+}
+
+/// DSL-owned receive/admission result for classified peer ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressReceiveOutcomeClass {
+    #[default]
+    Admitted,
+    DroppedUntrustedSender,
+}
+
+/// DSL-owned admission diagnostic copy emitted with receive authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressAdmissionDiagnosticClass {
+    #[default]
+    TrustedAtAdmission,
+    UntrustedAtAdmission,
+}
+
 /// Peer-ingress transport capability ownership kind (W2-G / issue #264).
 ///
 /// Paired with `peer_ingress_comms_runtime_id` and `peer_ingress_mob_id` in
@@ -1758,6 +1784,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             peer_ingress_owner_kind: Enum<PeerIngressOwnerKind>,
             peer_ingress_comms_runtime_id: Option<CommsRuntimeId>,
             peer_ingress_mob_id: Option<MobId>,
+            // Public peer-ingress lifecycle/admission phase. The classified
+            // queue stores only a projection of this generated fact for
+            // snapshots; receive and dequeue observations must pass through
+            // `ResolvePeerIngressReceive` / `ResolvePeerIngressDequeue`.
+            peer_ingress_authority_phase: Enum<PeerIngressAuthorityPhaseClass>,
 
             // --- Supervisor-bridge authorization (Wave 3 D Row 21) ---
             //
@@ -1940,6 +1971,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached,
             peer_ingress_comms_runtime_id = None,
             peer_ingress_mob_id = None,
+            peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Absent,
             supervisor_binding_kind = SupervisorBindingKind::Unbound,
             supervisor_bound_name = None,
             supervisor_bound_peer_id = None,
@@ -1983,6 +2015,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             },
             PrepareBindings { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
             SetPeerIngressContext { keep_alive: bool },
+            ResolvePeerIngressReceive {
+                auth_required: bool,
+                auth_exempt: bool,
+                trusted: bool,
+                queued_work_present: bool,
+            },
+            ResolvePeerIngressDequeue {
+                kind: Enum<PeerIngressAdmittedKind>,
+                auth: Enum<PeerIngressAuthClass>,
+                queued_work_remaining: bool,
+            },
             NotifyDrainExited { reason: Enum<DrainExitReason> },
             InterruptCurrentRun,
             CancelAfterBoundary { reason: String },
@@ -2638,6 +2681,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 request_id: Option<String>,
                 response_terminality: Option<Enum<PeerIngressResponseTerminality>>,
             },
+            PeerIngressReceiveResolved {
+                outcome: Enum<PeerIngressReceiveOutcomeClass>,
+                admission_diagnostic: Enum<PeerIngressAdmissionDiagnosticClass>,
+                phase: Enum<PeerIngressAuthorityPhaseClass>,
+            },
+            PeerIngressDequeueResolved {
+                phase: Enum<PeerIngressAuthorityPhaseClass>,
+            },
             SpawnDrainTask,
             // `surface_id` stays `String`: it's an opaque surface identity,
             // not a closed classifier. `operation` is the same typed
@@ -2769,6 +2820,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition CollectCompletedResult => local,
         disposition EnqueueClassifiedEntry => local,
         disposition PeerIngressClassified => local,
+        disposition PeerIngressReceiveResolved => local,
+        disposition PeerIngressDequeueResolved => local,
         disposition SpawnDrainTask => local,
         disposition ScheduleSurfaceCompletion => external handoff surface_completion,
         disposition RefreshVisibleSurfaceSet => external handoff surface_snapshot_alignment,
@@ -3551,6 +3604,151 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "session_registered" { self.session_id != None }
             update {}
             to Idle
+        }
+
+        // 8b. Peer-ingress receive/dequeue authority.
+        //
+        // The classified queue supplies only admission-time observations:
+        // auth requirement, generated auth exemption, current trust read, and
+        // queue occupancy. MeerkatMachine owns the derived public admission
+        // result and peer-ingress authority phase. The queue may project the
+        // emitted phase for snapshots, but it must not derive these facts.
+        transition ResolvePeerIngressReceiveTrusted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive { auth_required, auth_exempt, trusted, queued_work_present }
+            guard "session_registered" { self.session_id != None }
+            guard "trusted_sender" { trusted == true }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
+            }
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::Admitted,
+                admission_diagnostic: PeerIngressAdmissionDiagnosticClass::TrustedAtAdmission,
+                phase: PeerIngressAuthorityPhaseClass::Received
+            }
+        }
+        transition ResolvePeerIngressReceiveAuthExemptUntrusted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive { auth_required, auth_exempt, trusted, queued_work_present }
+            guard "session_registered" { self.session_id != None }
+            guard "untrusted_sender" { trusted == false }
+            guard "auth_exempt" { auth_exempt == true }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
+            }
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::Admitted,
+                admission_diagnostic: PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission,
+                phase: PeerIngressAuthorityPhaseClass::Received
+            }
+        }
+        transition ResolvePeerIngressReceiveAuthOpenUntrusted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive { auth_required, auth_exempt, trusted, queued_work_present }
+            guard "session_registered" { self.session_id != None }
+            guard "untrusted_sender" { trusted == false }
+            guard "auth_required_disabled" { auth_required == false }
+            guard "auth_not_exempt" { auth_exempt == false }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
+            }
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::Admitted,
+                admission_diagnostic: PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission,
+                phase: PeerIngressAuthorityPhaseClass::Received
+            }
+        }
+        transition ResolvePeerIngressReceiveUntrustedQueuedDrop {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive { auth_required, auth_exempt, trusted, queued_work_present }
+            guard "session_registered" { self.session_id != None }
+            guard "untrusted_sender" { trusted == false }
+            guard "auth_required" { auth_required == true }
+            guard "auth_not_exempt" { auth_exempt == false }
+            guard "queued_work_present" { queued_work_present == true }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
+            }
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::DroppedUntrustedSender,
+                admission_diagnostic: PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission,
+                phase: PeerIngressAuthorityPhaseClass::Received
+            }
+        }
+        transition ResolvePeerIngressReceiveUntrustedEmptyDrop {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive { auth_required, auth_exempt, trusted, queued_work_present }
+            guard "session_registered" { self.session_id != None }
+            guard "untrusted_sender" { trusted == false }
+            guard "auth_required" { auth_required == true }
+            guard "auth_not_exempt" { auth_exempt == false }
+            guard "queued_work_empty" { queued_work_present == false }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Dropped;
+            }
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::DroppedUntrustedSender,
+                admission_diagnostic: PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission,
+                phase: PeerIngressAuthorityPhaseClass::Dropped
+            }
+        }
+        transition ResolvePeerIngressDequeuePlainEvent {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressDequeue { kind, auth, queued_work_remaining }
+            guard "session_registered" { self.session_id != None }
+            guard "plain_event" { kind == PeerIngressAdmittedKind::PlainEvent }
+            update {}
+            to Idle
+            emit PeerIngressDequeueResolved {
+                phase: self.peer_ingress_authority_phase
+            }
+        }
+        transition ResolvePeerIngressDequeueAuthExemptExternal {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressDequeue { kind, auth, queued_work_remaining }
+            guard "session_registered" { self.session_id != None }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
+            guard "auth_exempt" { auth == PeerIngressAuthClass::SupervisorBridgeExempt }
+            update {}
+            to Idle
+            emit PeerIngressDequeueResolved {
+                phase: self.peer_ingress_authority_phase
+            }
+        }
+        transition ResolvePeerIngressDequeueRequiredRemaining {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressDequeue { kind, auth, queued_work_remaining }
+            guard "session_registered" { self.session_id != None }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
+            guard "auth_required" { auth == PeerIngressAuthClass::Required }
+            guard "queued_work_remaining" { queued_work_remaining == true }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
+            }
+            to Idle
+            emit PeerIngressDequeueResolved {
+                phase: PeerIngressAuthorityPhaseClass::Received
+            }
+        }
+        transition ResolvePeerIngressDequeueRequiredEmpty {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressDequeue { kind, auth, queued_work_remaining }
+            guard "session_registered" { self.session_id != None }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
+            guard "auth_required" { auth == PeerIngressAuthClass::Required }
+            guard "queued_work_empty" { queued_work_remaining == false }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Delivered;
+            }
+            to Idle
+            emit PeerIngressDequeueResolved {
+                phase: PeerIngressAuthorityPhaseClass::Delivered
+            }
         }
 
         // 9. NotifyDrainExited: per-phase self-loop, guard session_registered, emit RuntimeNotice

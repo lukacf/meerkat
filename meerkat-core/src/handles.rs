@@ -27,7 +27,9 @@ use std::sync::Arc;
 use crate::LoopState;
 use crate::comms::InputSource;
 use crate::interaction::{
-    PeerIngressAdmission, PeerIngressEnvelopeFacts, PeerIngressPlainEventFacts,
+    PeerIngressAdmission, PeerIngressDequeueAuthority, PeerIngressDequeueFacts,
+    PeerIngressEnvelopeFacts, PeerIngressPlainEventFacts, PeerIngressReceiveAuthority,
+    PeerIngressReceiveFacts,
 };
 use crate::lifecycle::run_primitive::ModelId;
 use crate::lifecycle::{InputId, RunId};
@@ -890,13 +892,13 @@ pub trait ExternalToolSurfaceHandle: Send + Sync {
 
 /// Peer comms ingress classification DSL handle.
 ///
-/// Covers the peer-envelope classification signals on the MeerkatMachine DSL.
-/// Runtime-backed comms ingress hands parsed transport facts to this handle
-/// and receives the complete typed admission/classification facts back. A
-/// rejection is authoritative and callers fail closed. Standalone comms
-/// runtimes may have no session DSL handle; those retain a local
-/// `PeerIngressMachinePolicy` adapter for wire-compatible operation without a
-/// session authority.
+/// Covers the peer-envelope classification and receive/dequeue authority
+/// signals on the MeerkatMachine DSL. Runtime-backed comms ingress hands
+/// parsed transport facts and queue observations to this handle and receives
+/// the complete typed classification/admission/phase facts back. A rejection
+/// is authoritative and callers fail closed. Standalone comms runtimes may
+/// have no session DSL handle; those retain a local `PeerIngressMachinePolicy`
+/// adapter for wire-compatible operation without a session authority.
 pub trait PeerCommsHandle: Send + Sync {
     /// Fire the `ClassifyExternalEnvelope` signal and return machine-owned
     /// admission facts for the parsed envelope.
@@ -911,6 +913,20 @@ pub trait PeerCommsHandle: Send + Sync {
         &self,
         facts: PeerIngressPlainEventFacts,
     ) -> Result<PeerIngressAdmission, DslTransitionError>;
+
+    /// Fire `ResolvePeerIngressReceive` and return the machine-owned
+    /// admission outcome plus authority phase for a classified peer envelope.
+    fn resolve_peer_ingress_receive(
+        &self,
+        facts: PeerIngressReceiveFacts,
+    ) -> Result<PeerIngressReceiveAuthority, DslTransitionError>;
+
+    /// Fire `ResolvePeerIngressDequeue` and return the machine-owned
+    /// authority phase for a classified queue dequeue observation.
+    fn resolve_peer_ingress_dequeue(
+        &self,
+        facts: PeerIngressDequeueFacts,
+    ) -> Result<PeerIngressDequeueAuthority, DslTransitionError>;
 
     /// Fire the `SetPeerIngressContext { keep_alive }` input.
     fn set_peer_ingress_context(&self, keep_alive: bool) -> Result<(), DslTransitionError>;

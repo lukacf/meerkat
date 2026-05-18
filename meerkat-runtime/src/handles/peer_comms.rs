@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use meerkat_core::handles::{DslTransitionError, PeerCommsHandle};
 use meerkat_core::interaction::{
-    PeerIngressAdmission, PeerIngressEnvelopeFacts, PeerIngressPlainEventFacts,
+    PeerIngressAdmission, PeerIngressDequeueAuthority, PeerIngressDequeueFacts,
+    PeerIngressEnvelopeFacts, PeerIngressPlainEventFacts, PeerIngressReceiveAuthority,
+    PeerIngressReceiveFacts,
 };
 
 use super::HandleDslAuthority;
@@ -99,6 +101,31 @@ fn terminality_from_dsl(
                 disposition: meerkat_core::TerminalDisposition::Failed,
             }
         }
+    }
+}
+
+fn phase_from_dsl(
+    phase: mm_dsl::PeerIngressAuthorityPhaseClass,
+) -> meerkat_core::PeerIngressAuthorityPhase {
+    phase.into()
+}
+
+fn kind_to_dsl(kind: meerkat_core::PeerIngressKind) -> mm_dsl::PeerIngressAdmittedKind {
+    match kind {
+        meerkat_core::PeerIngressKind::Message => mm_dsl::PeerIngressAdmittedKind::Message,
+        meerkat_core::PeerIngressKind::Request => mm_dsl::PeerIngressAdmittedKind::Request,
+        meerkat_core::PeerIngressKind::Response => mm_dsl::PeerIngressAdmittedKind::Response,
+        meerkat_core::PeerIngressKind::Ack => mm_dsl::PeerIngressAdmittedKind::Ack,
+        meerkat_core::PeerIngressKind::PlainEvent => mm_dsl::PeerIngressAdmittedKind::PlainEvent,
+    }
+}
+
+fn auth_to_dsl(auth: meerkat_core::PeerIngressAuthDecision) -> mm_dsl::PeerIngressAuthClass {
+    match auth {
+        meerkat_core::PeerIngressAuthDecision::Required => mm_dsl::PeerIngressAuthClass::Required,
+        meerkat_core::PeerIngressAuthDecision::Exempt(
+            meerkat_core::PeerIngressAuthExemption::SupervisorBridge,
+        ) => mm_dsl::PeerIngressAuthClass::SupervisorBridgeExempt,
     }
 }
 
@@ -215,6 +242,56 @@ fn classified_effect(
         })
 }
 
+struct PeerIngressReceiveResolvedEffect {
+    outcome: mm_dsl::PeerIngressReceiveOutcomeClass,
+    admission_diagnostic: mm_dsl::PeerIngressAdmissionDiagnosticClass,
+    phase: mm_dsl::PeerIngressAuthorityPhaseClass,
+}
+
+fn receive_resolved_effect(
+    effects: Vec<mm_dsl::MeerkatMachineEffect>,
+    context: &'static str,
+) -> Result<PeerIngressReceiveResolvedEffect, DslTransitionError> {
+    effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            mm_dsl::MeerkatMachineEffect::PeerIngressReceiveResolved {
+                outcome,
+                admission_diagnostic,
+                phase,
+            } => Some(PeerIngressReceiveResolvedEffect {
+                outcome,
+                admission_diagnostic,
+                phase,
+            }),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            DslTransitionError::guard_rejected(
+                context,
+                "machine transition did not emit PeerIngressReceiveResolved",
+            )
+        })
+}
+
+fn dequeue_resolved_effect(
+    effects: Vec<mm_dsl::MeerkatMachineEffect>,
+    context: &'static str,
+) -> Result<mm_dsl::PeerIngressAuthorityPhaseClass, DslTransitionError> {
+    effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            mm_dsl::MeerkatMachineEffect::PeerIngressDequeueResolved { phase } => Some(phase),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            DslTransitionError::guard_rejected(
+                context,
+                "machine transition did not emit PeerIngressDequeueResolved",
+            )
+        })
+}
+
 fn classification_from_effect(
     effect: &PeerIngressClassifiedEffect,
 ) -> meerkat_core::PeerIngressClassification {
@@ -308,6 +385,47 @@ impl PeerCommsHandle for RuntimePeerCommsHandle {
                 &facts.source_name,
                 Some(&facts.body),
             ),
+        })
+    }
+
+    fn resolve_peer_ingress_receive(
+        &self,
+        facts: PeerIngressReceiveFacts,
+    ) -> Result<PeerIngressReceiveAuthority, DslTransitionError> {
+        let context = "PeerCommsHandle::resolve_peer_ingress_receive";
+        let effects = self.dsl.apply_input_with_effects(
+            mm_dsl::MeerkatMachineInput::ResolvePeerIngressReceive {
+                auth_required: facts.auth_required,
+                auth_exempt: facts.auth_exempt,
+                trusted: facts.trusted,
+                queued_work_present: facts.queued_work_present,
+            },
+            context,
+        )?;
+        let effect = receive_resolved_effect(effects, context)?;
+        Ok(PeerIngressReceiveAuthority {
+            outcome: effect.outcome.into(),
+            admission_diagnostic: effect.admission_diagnostic.into(),
+            authority_phase: phase_from_dsl(effect.phase),
+        })
+    }
+
+    fn resolve_peer_ingress_dequeue(
+        &self,
+        facts: PeerIngressDequeueFacts,
+    ) -> Result<PeerIngressDequeueAuthority, DslTransitionError> {
+        let context = "PeerCommsHandle::resolve_peer_ingress_dequeue";
+        let effects = self.dsl.apply_input_with_effects(
+            mm_dsl::MeerkatMachineInput::ResolvePeerIngressDequeue {
+                kind: kind_to_dsl(facts.kind),
+                auth: auth_to_dsl(facts.auth),
+                queued_work_remaining: facts.queued_work_remaining,
+            },
+            context,
+        )?;
+        let phase = dequeue_resolved_effect(effects, context)?;
+        Ok(PeerIngressDequeueAuthority {
+            authority_phase: phase_from_dsl(phase),
         })
     }
 
@@ -540,6 +658,87 @@ mod tests {
                 "terminal cleanup admission must not accept new peer topology"
             );
         }
+    }
+
+    #[test]
+    fn runtime_peer_comms_handle_resolves_receive_authority_from_dsl() {
+        let handle = handle_for_phase(mm_dsl::MeerkatPhase::Attached);
+
+        let admitted = handle
+            .resolve_peer_ingress_receive(PeerIngressReceiveFacts {
+                auth_required: true,
+                auth_exempt: false,
+                trusted: true,
+                queued_work_present: false,
+            })
+            .expect("trusted receive should resolve");
+        assert_eq!(
+            admitted.outcome,
+            meerkat_core::PeerIngressReceiveOutcome::Admitted
+        );
+        assert_eq!(
+            admitted.admission_diagnostic,
+            meerkat_core::PeerIngressAdmissionDiagnostic::TrustedAtAdmission
+        );
+        assert_eq!(
+            admitted.authority_phase,
+            meerkat_core::PeerIngressAuthorityPhase::Received
+        );
+
+        let dropped = handle
+            .resolve_peer_ingress_receive(PeerIngressReceiveFacts {
+                auth_required: true,
+                auth_exempt: false,
+                trusted: false,
+                queued_work_present: false,
+            })
+            .expect("untrusted receive should resolve as a typed drop");
+        assert_eq!(
+            dropped.outcome,
+            meerkat_core::PeerIngressReceiveOutcome::DroppedUntrustedSender
+        );
+        assert_eq!(
+            dropped.authority_phase,
+            meerkat_core::PeerIngressAuthorityPhase::Dropped
+        );
+    }
+
+    #[test]
+    fn runtime_peer_comms_handle_resolves_dequeue_phase_from_dsl() {
+        let handle = handle_for_phase(mm_dsl::MeerkatPhase::Attached);
+
+        handle
+            .resolve_peer_ingress_receive(PeerIngressReceiveFacts {
+                auth_required: true,
+                auth_exempt: false,
+                trusted: true,
+                queued_work_present: false,
+            })
+            .expect("trusted receive should seed Received phase");
+
+        let retained = handle
+            .resolve_peer_ingress_dequeue(PeerIngressDequeueFacts {
+                kind: meerkat_core::PeerIngressKind::Request,
+                auth: meerkat_core::PeerIngressAuthDecision::Required,
+                queued_work_remaining: true,
+            })
+            .expect("dequeue with queued work should resolve");
+        assert_eq!(
+            retained.authority_phase,
+            meerkat_core::PeerIngressAuthorityPhase::Received
+        );
+
+        let delivered = handle
+            .resolve_peer_ingress_dequeue(PeerIngressDequeueFacts {
+                kind: meerkat_core::PeerIngressKind::Request,
+                auth: meerkat_core::PeerIngressAuthDecision::Required,
+                queued_work_remaining: false,
+            })
+            .expect("empty dequeue should resolve");
+        assert_eq!(
+            delivered.authority_phase,
+            meerkat_core::PeerIngressAuthorityPhase::Delivered
+        );
     }
 
     #[test]

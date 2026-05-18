@@ -4,7 +4,7 @@
 //! through the ingress pipeline. They carry no authority or transition
 //! semantics; DSL-owned classification state lives on the MeerkatMachine
 //! dispatched via [`meerkat_core::handles::PeerCommsHandle`], and shell-side
-//! mechanics (trust set, queue order, dequeue emission) live directly on
+//! mechanics (trust-set reads, queue order, dequeue emission) live directly on
 //! `ClassifiedInboxQueue` in `inbox.rs`.
 
 /// Shape of the content payload (used for downstream rendering decisions).
@@ -15,13 +15,12 @@ pub(crate) enum ContentShape {
     Mixed,
 }
 
-/// Observable lifecycle phase of the peer-ingress queue.
+/// Projection of the generated peer-ingress authority phase.
 ///
 /// Mirrors the shape exposed via `meerkat_core::PeerIngressAuthorityPhase` in
-/// runtime snapshots. Transitions are driven inline from the classified inbox:
-/// `new` → `Absent`; admitted external envelopes move to `Received`; untrusted
-/// external envelopes move to `Dropped` (or `Received` if work was already
-/// queued); a full queue drain moves to `Delivered`.
+/// runtime snapshots. The classified queue updates this copy only from
+/// `PeerCommsHandle` receive/dequeue authority effects; standalone runtimes
+/// without a required machine authority use the core compatibility policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PeerIngressState {
     /// No items have been received yet.
@@ -32,4 +31,26 @@ pub(crate) enum PeerIngressState {
     Dropped,
     /// All queued items have been submitted and delivered.
     Delivered,
+}
+
+impl From<meerkat_core::PeerIngressAuthorityPhase> for PeerIngressState {
+    fn from(phase: meerkat_core::PeerIngressAuthorityPhase) -> Self {
+        match phase {
+            meerkat_core::PeerIngressAuthorityPhase::Absent => Self::Absent,
+            meerkat_core::PeerIngressAuthorityPhase::Received => Self::Received,
+            meerkat_core::PeerIngressAuthorityPhase::Dropped => Self::Dropped,
+            meerkat_core::PeerIngressAuthorityPhase::Delivered => Self::Delivered,
+        }
+    }
+}
+
+impl From<PeerIngressState> for meerkat_core::PeerIngressAuthorityPhase {
+    fn from(phase: PeerIngressState) -> Self {
+        match phase {
+            PeerIngressState::Absent => Self::Absent,
+            PeerIngressState::Received => Self::Received,
+            PeerIngressState::Dropped => Self::Dropped,
+            PeerIngressState::Delivered => Self::Delivered,
+        }
+    }
 }

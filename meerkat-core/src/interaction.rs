@@ -643,14 +643,61 @@ pub struct PeerIngressAdmission {
     pub rendered_text: String,
 }
 
-/// Standalone compatibility adapter for peer ingress classification.
+/// Admission-time observations for one classified peer envelope.
+///
+/// The shell may observe these facts while holding the classified queue lock,
+/// but the peer-ingress authority owns the derived admission outcome and public
+/// phase emitted from them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerIngressReceiveFacts {
+    pub auth_required: bool,
+    pub auth_exempt: bool,
+    pub trusted: bool,
+    pub queued_work_present: bool,
+}
+
+/// Machine-owned receive/admission result for a classified peer envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerIngressReceiveAuthority {
+    pub outcome: PeerIngressReceiveOutcome,
+    pub admission_diagnostic: PeerIngressAdmissionDiagnostic,
+    pub authority_phase: PeerIngressAuthorityPhase,
+}
+
+/// Machine-owned admission outcome for peer ingress receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerIngressReceiveOutcome {
+    Admitted,
+    DroppedUntrustedSender,
+}
+
+/// Dequeue-time observations for one classified ingress entry.
+///
+/// These are queue mechanics only. The peer-ingress authority owns whether the
+/// observation changes the public phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerIngressDequeueFacts {
+    pub kind: PeerIngressKind,
+    pub auth: PeerIngressAuthDecision,
+    pub queued_work_remaining: bool,
+}
+
+/// Machine-owned phase result after a classified dequeue observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerIngressDequeueAuthority {
+    pub authority_phase: PeerIngressAuthorityPhase,
+}
+
+/// Standalone compatibility adapter for peer ingress classification and
+/// receive/dequeue authority projections.
 ///
 /// Runtime-backed comms must use the MeerkatMachine
-/// `PeerIngressClassified` effect as authority. This adapter exists only for
-/// standalone comms runtimes without a session DSL and for tests that need a
-/// wire-compatible projection of machine behavior. Raw inbox ingress and
-/// runtime-required classified ingress must not use it as a second authority
-/// for auth exemptions, lifecycle intent, or response terminality.
+/// effects as authority. This adapter exists only for standalone comms
+/// runtimes without a session DSL and for tests that need a wire-compatible
+/// projection of machine behavior. Raw inbox ingress and runtime-required
+/// classified ingress must not use it as a second authority for auth
+/// exemptions, lifecycle intent, response terminality, receive admission, or
+/// public peer-ingress phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerIngressMachinePolicy {
     silent_request_intents: BTreeSet<String>,
@@ -803,6 +850,54 @@ impl PeerIngressMachinePolicy {
             request_id: None,
             rendered_text: format_external_event_projection(&facts.source_name, Some(&facts.body)),
         }
+    }
+
+    /// Standalone compatibility projection of the generated receive authority.
+    ///
+    /// Runtime-backed comms must use `PeerCommsHandle`; this exists only for
+    /// embedded/standalone comms where no session machine authority is present.
+    pub fn resolve_receive_authority(
+        &self,
+        facts: PeerIngressReceiveFacts,
+    ) -> PeerIngressReceiveAuthority {
+        let admitted = facts.auth_exempt || facts.trusted || !facts.auth_required;
+        let authority_phase = if admitted || facts.queued_work_present {
+            PeerIngressAuthorityPhase::Received
+        } else {
+            PeerIngressAuthorityPhase::Dropped
+        };
+        let outcome = if admitted {
+            PeerIngressReceiveOutcome::Admitted
+        } else {
+            PeerIngressReceiveOutcome::DroppedUntrustedSender
+        };
+
+        PeerIngressReceiveAuthority {
+            outcome,
+            admission_diagnostic: PeerIngressAdmissionDiagnostic::from_trusted(facts.trusted),
+            authority_phase,
+        }
+    }
+
+    /// Standalone compatibility projection of the generated dequeue authority.
+    ///
+    /// Runtime-backed comms must use `PeerCommsHandle`; this exists only for
+    /// embedded/standalone comms where no session machine authority is present.
+    pub fn resolve_dequeue_authority(
+        &self,
+        current_phase: PeerIngressAuthorityPhase,
+        facts: PeerIngressDequeueFacts,
+    ) -> PeerIngressDequeueAuthority {
+        let authority_phase = if facts.kind == PeerIngressKind::PlainEvent || facts.auth.is_exempt()
+        {
+            current_phase
+        } else if facts.queued_work_remaining {
+            PeerIngressAuthorityPhase::Received
+        } else {
+            PeerIngressAuthorityPhase::Delivered
+        };
+
+        PeerIngressDequeueAuthority { authority_phase }
     }
 }
 

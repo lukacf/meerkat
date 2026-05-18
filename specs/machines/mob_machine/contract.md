@@ -130,6 +130,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
 - `SubmitWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
+- `ResolveSubmitWorkRejection`(agent_runtime_id: AgentRuntimeId, origin: WorkOrigin)
 - `CancelWork`(work_id: WorkId)
 - `CancelAllWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `Stop`
@@ -215,6 +216,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Effects
 - `RequestRuntimeBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId)
 - `RequestRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
+- `SubmitWorkRejected`(agent_runtime_id: AgentRuntimeId, origin: WorkOrigin, reason: SubmitWorkRejectReasonKind)
 - `RequestRuntimeRetire`(session_id: SessionId)
 - `RequestRuntimeDestroy`(session_id: SessionId)
 - `RequestSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
@@ -520,6 +522,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `active_members_present`
   - `current_binding_matches`
+  - `member_not_retiring`
   - `external_origin`
   - `runtime_externally_addressable`
 - Emits: `RequestRuntimeIngress`
@@ -531,8 +534,55 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `active_members_present`
   - `current_binding_matches`
+  - `member_not_retiring`
   - `internal_origin`
 - Emits: `RequestRuntimeIngress`
+- To: `Running`
+
+### `ResolveSubmitWorkRejectionStopped`
+- From: `Stopped`
+- On: `ResolveSubmitWorkRejection`(agent_runtime_id, origin)
+- Emits: `SubmitWorkRejected`
+- To: `Stopped`
+
+### `ResolveSubmitWorkRejectionCompleted`
+- From: `Completed`
+- On: `ResolveSubmitWorkRejection`(agent_runtime_id, origin)
+- Emits: `SubmitWorkRejected`
+- To: `Completed`
+
+### `ResolveSubmitWorkRejectionDestroyed`
+- From: `Destroyed`
+- On: `ResolveSubmitWorkRejection`(agent_runtime_id, origin)
+- Emits: `SubmitWorkRejected`
+- To: `Destroyed`
+
+### `ResolveSubmitWorkRejectionMemberNotFound`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_runtime_id, origin)
+- Guards:
+  - `runtime_not_live`
+- Emits: `SubmitWorkRejected`
+- To: `Running`
+
+### `ResolveSubmitWorkRejectionMemberRetiring`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_runtime_id, origin)
+- Guards:
+  - `runtime_live`
+  - `member_retiring`
+- Emits: `SubmitWorkRejected`
+- To: `Running`
+
+### `ResolveSubmitWorkRejectionNotExternallyAddressable`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_runtime_id, origin)
+- Guards:
+  - `runtime_live`
+  - `member_not_retiring`
+  - `external_origin`
+  - `runtime_not_externally_addressable`
+- Emits: `SubmitWorkRejected`
 - To: `Running`
 
 ### `RetireMember`

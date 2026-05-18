@@ -11867,7 +11867,7 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
     let machine_identity =
         crate::machines::mob_machine::AgentIdentity::from_domain(&AgentIdentity::from("w-1"));
     assert_eq!(
-        machine_state.member_lifecycle_for_identity(&machine_identity, true),
+        machine_state.member_lifecycle_for_identity(&machine_identity),
         crate::machines::mob_machine::MobMemberLifecycleMaterial {
             status: crate::machines::mob_machine::MobMemberLifecycleStatus::Broken,
             terminal_class: crate::machines::mob_machine::MobMemberTerminalClass::TerminalFailure,
@@ -19531,7 +19531,14 @@ async fn test_retiring_member_is_not_routable_before_disposal_completes() {
     );
 
     let start_turn_calls_before = service.start_turn_call_count();
-    let external_turn = handle.member(&AgentIdentity::from("w-1")).await;
+    let external_turn = handle
+        .submit_work(
+            all_members[0].agent_runtime_id.clone(),
+            all_members[0].fence_token,
+            WorkRef::new(),
+            WorkSpec::new("still there?".to_string(), WorkOrigin::External),
+        )
+        .await;
     assert!(matches!(external_turn, Err(MobError::MemberNotFound(id)) if id.as_str() == "w-1"));
 
     let internal_turn = handle

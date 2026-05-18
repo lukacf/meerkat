@@ -84,6 +84,7 @@ pub struct MemberFilter {
     pub labels: BTreeMap<String, String>,
     /// Required role (profile name).
     pub role: Option<ProfileName>,
-    /// Required roster state.
+    /// Required compatibility state, evaluated against the canonical
+    /// machine-projected member status.
     pub state: Option<MemberState>,
 }

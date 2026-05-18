@@ -134,6 +134,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::WireExternalPeer { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
             | mob_dsl::MobMachineInput::SubmitWork { .. }
+            | mob_dsl::MobMachineInput::ResolveSubmitWorkRejection { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }
             | mob_dsl::MobMachineInput::CancelAllWork { .. }
             | mob_dsl::MobMachineInput::Stop
@@ -1204,6 +1205,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::WireExternalPeer { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
             | mob_dsl::MobMachineInput::SubmitWork { .. }
+            | mob_dsl::MobMachineInput::ResolveSubmitWorkRejection { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }
             | mob_dsl::MobMachineInput::CancelAllWork { .. }
             | mob_dsl::MobMachineInput::Stop

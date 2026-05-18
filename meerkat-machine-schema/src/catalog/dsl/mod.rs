@@ -1108,6 +1108,15 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Running", "Stopped", "Completed", "Destroyed"],
             ),
             NamedTypeBinding::string_enum(
+                "SubmitWorkRejectReasonKind",
+                &[
+                    "MobNotRunning",
+                    "MemberNotFound",
+                    "MemberRetiring",
+                    "NotExternallyAddressable",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "NodeRunStatus",
                 &[
                     "Pending",

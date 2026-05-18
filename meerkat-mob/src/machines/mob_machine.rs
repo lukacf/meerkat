@@ -597,13 +597,23 @@ pub enum LoopIterationStage {
 }
 
 /// Per-runtime lifecycle marker tracking whether a member is actively serving
-/// work or draining toward retirement. Opaque to DSL guards — observed only
-/// at the shell layer for work-routing decisions.
+/// work or draining toward retirement. Generated SubmitWork guards consume this
+/// marker so work-routing admission stays inside MobMachine authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum MobMemberState {
     #[default]
     Active,
     Retiring,
+}
+
+/// Typed public rejection class for [`MobMachineInput::SubmitWork`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SubmitWorkRejectReasonKind {
+    #[default]
+    MobNotRunning,
+    MemberNotFound,
+    MemberRetiring,
+    NotExternallyAddressable,
 }
 
 /// Typed work-origin classification for
@@ -982,20 +992,13 @@ impl MobMemberLifecycleMaterial {
 
 impl MobMachineState {
     /// Project lifecycle truth for an identity from the machine's membership
-    /// maps. `member_present` is the roster/event-projection presence bit; it
-    /// only tells the machine whether a public member row exists for this
-    /// identity, not what lifecycle state that row should report.
+    /// maps.
     pub fn member_lifecycle_for_identity(
         &self,
         agent_identity: &AgentIdentity,
-        member_present: bool,
     ) -> MobMemberLifecycleMaterial {
-        let restore_failure = member_present
-            .then(|| self.member_restore_failures.get(agent_identity).cloned())
-            .flatten();
-        let status = if !member_present {
-            MobMemberLifecycleStatus::Unknown
-        } else if restore_failure.is_some() {
+        let restore_failure = self.member_restore_failures.get(agent_identity).cloned();
+        let status = if restore_failure.is_some() {
             MobMemberLifecycleStatus::Broken
         } else if let Some(runtime_id) = self.identity_to_runtime.get(agent_identity) {
             if self.member_state_markers.get(runtime_id) == Some(&MobMemberState::Retiring) {
@@ -1042,6 +1045,18 @@ mod tests {
             },
         )
         .expect("CreateRunSeed should be accepted before child seed");
+    }
+
+    fn seed_live_member(authority: &mut MobMachineAuthority, runtime_id: &AgentRuntimeId) {
+        authority.state.live_runtime_ids.insert(runtime_id.clone());
+        authority
+            .state
+            .externally_addressable_runtime_ids
+            .insert(runtime_id.clone());
+        authority
+            .state
+            .runtime_fence_tokens
+            .insert(runtime_id.clone(), FenceToken(7));
     }
 
     fn seed_root_frame(
@@ -1133,6 +1148,62 @@ mod tests {
         assert_eq!(
             authority.state.run_ready_frames.get(&run_id),
             Some(&Vec::new())
+        );
+    }
+
+    #[test]
+    fn submit_work_rejects_retiring_runtime() {
+        let mut authority = MobMachineAuthority::new();
+        let runtime_id = AgentRuntimeId::from("worker:1");
+        seed_live_member(&mut authority, &runtime_id);
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SubmitWork {
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: FenceToken(7),
+                work_id: WorkId::from("before-retire"),
+                origin: WorkOrigin::External,
+            },
+        )
+        .expect("live externally addressable member should accept work");
+
+        authority
+            .state
+            .member_state_markers
+            .insert(runtime_id.clone(), MobMemberState::Retiring);
+
+        let rejected = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SubmitWork {
+                agent_runtime_id: runtime_id,
+                fence_token: FenceToken(7),
+                work_id: WorkId::from("during-retire"),
+                origin: WorkOrigin::External,
+            },
+        );
+        assert!(
+            rejected.is_err(),
+            "Retiring work admission must be owned by generated SubmitWork guards"
+        );
+
+        let rejection = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ResolveSubmitWorkRejection {
+                agent_runtime_id: AgentRuntimeId::from("worker:1"),
+                origin: WorkOrigin::External,
+            },
+        )
+        .expect("retiring SubmitWork rejection should have typed machine feedback");
+        assert!(
+            rejection.effects.iter().any(|effect| matches!(
+                effect,
+                MobMachineEffect::SubmitWorkRejected {
+                    reason: SubmitWorkRejectReasonKind::MemberRetiring,
+                    ..
+                }
+            )),
+            "SubmitWork rejection public class must be owned by generated feedback"
         );
     }
 
@@ -1396,9 +1467,7 @@ mod tests {
         let runtime_id = AgentRuntimeId::from("worker:1");
 
         assert_eq!(
-            authority
-                .state
-                .member_lifecycle_for_identity(&identity, true),
+            authority.state.member_lifecycle_for_identity(&identity),
             MobMemberLifecycleMaterial {
                 status: MobMemberLifecycleStatus::Unknown,
                 terminal_class: MobMemberTerminalClass::TerminalUnknown,
@@ -1411,9 +1480,7 @@ mod tests {
             .identity_to_runtime
             .insert(identity.clone(), runtime_id.clone());
         authority.state.live_runtime_ids.insert(runtime_id.clone());
-        let active = authority
-            .state
-            .member_lifecycle_for_identity(&identity, true);
+        let active = authority.state.member_lifecycle_for_identity(&identity);
         assert_eq!(
             active,
             MobMemberLifecycleMaterial {
@@ -1428,9 +1495,7 @@ mod tests {
             .state
             .member_state_markers
             .insert(runtime_id.clone(), MobMemberState::Retiring);
-        let retiring = authority
-            .state
-            .member_lifecycle_for_identity(&identity, true);
+        let retiring = authority.state.member_lifecycle_for_identity(&identity);
         assert_eq!(
             retiring,
             MobMemberLifecycleMaterial {
@@ -1443,9 +1508,7 @@ mod tests {
 
         authority.state.member_state_markers.remove(&runtime_id);
         authority.state.live_runtime_ids.remove(&runtime_id);
-        let completed = authority
-            .state
-            .member_lifecycle_for_identity(&identity, true);
+        let completed = authority.state.member_lifecycle_for_identity(&identity);
         assert_eq!(
             completed,
             MobMemberLifecycleMaterial {
@@ -1474,9 +1537,7 @@ mod tests {
             .insert(identity.clone(), "missing durable session".to_string());
 
         assert_eq!(
-            authority
-                .state
-                .member_lifecycle_for_identity(&identity, true),
+            authority.state.member_lifecycle_for_identity(&identity),
             MobMemberLifecycleMaterial {
                 status: MobMemberLifecycleStatus::Broken,
                 terminal_class: MobMemberTerminalClass::TerminalFailure,

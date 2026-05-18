@@ -1318,7 +1318,7 @@ impl MobActor {
         let lifecycle = self
             .dsl_authority
             .state
-            .member_lifecycle_for_identity(&dsl_identity, true);
+            .member_lifecycle_for_identity(&dsl_identity);
         if lifecycle.status == mob_dsl::MobMemberLifecycleStatus::Broken {
             let diag = self.restore_failure_for(agent_identity).await.unwrap_or(
                 super::handle::RestoreFailureDiagnostic {
@@ -1722,7 +1722,7 @@ impl MobActor {
         let machine_lifecycle = self
             .dsl_authority
             .state
-            .member_lifecycle_for_identity(&dsl_identity, member_present);
+            .member_lifecycle_for_identity(&dsl_identity);
 
         let (output_preview, tokens_used) = match current_bridge_session_id.as_ref() {
             None => (None, 0),
@@ -1768,7 +1768,7 @@ impl MobActor {
         let lifecycle = self
             .dsl_authority
             .state
-            .member_lifecycle_for_identity(&dsl_identity, true);
+            .member_lifecycle_for_identity(&dsl_identity);
         MobMemberLifecycleProjection::roster_state_for_machine_lifecycle(&lifecycle)
     }
 
@@ -2384,32 +2384,56 @@ impl MobActor {
         .map(|_| ())
     }
 
-    fn submit_work_rejection_for_machine_state(
-        &self,
-        machine_state: &mob_dsl::MobMachineState,
+    fn resolve_submit_work_rejection_in_authority(
+        authority: &mut mob_dsl::MobMachineAuthority,
         dsl_runtime_id: &mob_dsl::AgentRuntimeId,
         origin: WorkOrigin,
         agent_identity: &MeerkatId,
+        current_state: MobState,
     ) -> MobError {
-        if project_dsl_phase(machine_state.lifecycle_phase) != MobState::Running {
-            return MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Running,
-            };
-        }
-        if !machine_state.live_runtime_ids.contains(dsl_runtime_id) {
-            return MobError::MemberNotFound(agent_identity.clone());
-        }
-        if matches!(origin, WorkOrigin::External)
-            && !machine_state
-                .externally_addressable_runtime_ids
-                .contains(dsl_runtime_id)
-        {
-            return MobError::NotExternallyAddressable(agent_identity.clone());
-        }
-        match origin {
-            WorkOrigin::External => MobError::NotExternallyAddressable(agent_identity.clone()),
-            WorkOrigin::Internal => MobError::MemberNotFound(agent_identity.clone()),
+        let dsl_origin = mob_dsl::WorkOrigin::from(origin);
+        let transition = match mob_dsl::MobMachineMutator::apply(
+            authority,
+            mob_dsl::MobMachineInput::ResolveSubmitWorkRejection {
+                agent_runtime_id: dsl_runtime_id.clone(),
+                origin: dsl_origin,
+            },
+        ) {
+            Ok(transition) => transition,
+            Err(err) => {
+                return MobError::Internal(format!(
+                    "MobMachine rejected SubmitWork and failed to resolve typed rejection: {err}"
+                ));
+            }
+        };
+        let reason = transition
+            .effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::SubmitWorkRejected {
+                    agent_runtime_id,
+                    reason,
+                    ..
+                } if agent_runtime_id == *dsl_runtime_id => Some(reason),
+                _ => None,
+            });
+        match reason {
+            Some(mob_dsl::SubmitWorkRejectReasonKind::MobNotRunning) => {
+                MobError::InvalidTransition {
+                    from: current_state,
+                    to: MobState::Running,
+                }
+            }
+            Some(
+                mob_dsl::SubmitWorkRejectReasonKind::MemberNotFound
+                | mob_dsl::SubmitWorkRejectReasonKind::MemberRetiring,
+            ) => MobError::MemberNotFound(agent_identity.clone()),
+            Some(mob_dsl::SubmitWorkRejectReasonKind::NotExternallyAddressable) => {
+                MobError::NotExternallyAddressable(agent_identity.clone())
+            }
+            None => MobError::Internal(
+                "MobMachine rejected SubmitWork without typed rejection feedback".into(),
+            ),
         }
     }
 
@@ -2458,11 +2482,12 @@ impl MobActor {
         )
         .map(|_| ())
         .map_err(|_| {
-            self.submit_work_rejection_for_machine_state(
-                &authority.state,
+            Self::resolve_submit_work_rejection_in_authority(
+                &mut authority,
                 &dsl_runtime_id,
                 origin,
                 agent_identity,
+                self.state(),
             )
         })
     }
@@ -10215,8 +10240,6 @@ impl MobActor {
     ///   * Auto-spawn via the roster's [`SpawnPolicy`] when the target member
     ///     is absent but a policy resolves a spec. Only meaningful for
     ///     externally-originated work — internal origins never auto-spawn.
-    ///   * `ensure_member_not_broken` / `MemberState::Active` filtering so
-    ///     broken or retiring members return typed [`MobError::MemberNotFound`].
     ///   * Post-authorization dispatch — reading the machine's
     ///     `RequestRuntimeIngress` effect and materializing it as an actual
     ///     runtime ingress (event injector or `StartTurnRequest`). This is
@@ -10279,9 +10302,6 @@ impl MobActor {
         }
         let entry = match initial_entry {
             Some(e) => {
-                if e.state != crate::roster::MemberState::Active {
-                    return Err(MobError::MemberNotFound(agent_identity));
-                }
                 self.ensure_member_not_broken(&e.agent_identity).await?;
                 e
             }
@@ -10317,13 +10337,6 @@ impl MobActor {
                             "auto-spawned member '{identity}' missing from roster after completion"
                         ))
                     })?;
-                    if self.machine_roster_state_for_entry(&spawned_entry)
-                        != crate::roster::MemberState::Active
-                    {
-                        return Err(MobError::Internal(format!(
-                            "auto-spawned member '{identity}' is not active"
-                        )));
-                    }
                     spawned_entry
                 } else {
                     return Err(MobError::MemberNotFound(agent_identity));
@@ -10352,11 +10365,13 @@ impl MobActor {
         ) {
             Ok(transition) => transition,
             Err(_) => {
-                return Err(self.submit_work_rejection_for_machine_state(
-                    &self.dsl_authority.state,
+                let current_state = self.state();
+                return Err(Self::resolve_submit_work_rejection_in_authority(
+                    &mut self.dsl_authority,
                     &dsl_runtime_id,
                     origin,
                     &agent_identity,
+                    current_state,
                 ));
             }
         };
@@ -10432,11 +10447,13 @@ impl MobActor {
         ) {
             Ok(transition) => transition,
             Err(_) => {
-                return Err(self.submit_work_rejection_for_machine_state(
-                    &self.dsl_authority.state,
+                let current_state = self.state();
+                return Err(Self::resolve_submit_work_rejection_in_authority(
+                    &mut self.dsl_authority,
                     &dsl_runtime_id,
                     origin,
                     agent_identity,
+                    current_state,
                 ));
             }
         };

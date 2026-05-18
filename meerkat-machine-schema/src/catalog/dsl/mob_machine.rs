@@ -103,8 +103,8 @@ macro_rules! mob_catalog_machine_dsl {
             member_restore_failures: Map<AgentIdentity, String>,
             // Per-runtime lifecycle marker (Active vs Retiring). Tracks the
             // draining/retiring sub-state independently of the mob-level
-            // lifecycle phase so the shell can decide whether to route fresh
-            // work to a member while retire-drain is in flight.
+            // lifecycle phase so generated SubmitWork authority can decide
+            // whether fresh work may route while retire-drain is in flight.
             member_state_markers: Map<AgentRuntimeId, MobMemberState>,
             // Undirected wiring edges between agent identities. Stored as
             // ordered pairs (smaller identity first) wrapped in WiringEdge
@@ -353,6 +353,7 @@ macro_rules! mob_catalog_machine_dsl {
             SessionIngressDetachedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
             SessionIngressDetachFailedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String },
             SubmitWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
+            ResolveSubmitWorkRejection { agent_runtime_id: AgentRuntimeId, origin: Enum<WorkOrigin> },
             CancelWork { work_id: WorkId },
             CancelAllWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             Stop,
@@ -441,6 +442,7 @@ macro_rules! mob_catalog_machine_dsl {
         effect MobMachineEffect {
             RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
             RequestRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
+            SubmitWorkRejected { agent_runtime_id: AgentRuntimeId, origin: Enum<WorkOrigin>, reason: Enum<SubmitWorkRejectReasonKind> },
             RequestRuntimeRetire { session_id: SessionId },
             RequestRuntimeDestroy { session_id: SessionId },
             RequestSessionIngressDetachForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
@@ -490,6 +492,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
         disposition RequestRuntimeIngress => routed [MeerkatMachine],
+        disposition SubmitWorkRejected => local,
         disposition RequestRuntimeRetire => routed [MeerkatMachine],
         disposition RequestRuntimeDestroy => routed [MeerkatMachine],
         disposition RequestSessionIngressDetachForMobDestroy => external handoff mob_destroying_session_ingress,
@@ -893,6 +896,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
             guard "external_origin" { origin == WorkOrigin::External }
             guard "runtime_externally_addressable" { self.externally_addressable_runtime_ids.contains(agent_runtime_id) }
             update {}
@@ -905,10 +909,90 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
             guard "internal_origin" { origin == WorkOrigin::Internal }
             update {}
             to Running
             emit RequestRuntimeIngress { agent_runtime_id: agent_runtime_id, fence_token: fence_token, work_id: work_id, origin: origin }
+        }
+
+        transition ResolveSubmitWorkRejectionStopped {
+            on input ResolveSubmitWorkRejection { agent_runtime_id, origin }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            update {}
+            to Stopped
+            emit SubmitWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                origin: origin,
+                reason: SubmitWorkRejectReasonKind::MobNotRunning
+            }
+        }
+
+        transition ResolveSubmitWorkRejectionCompleted {
+            on input ResolveSubmitWorkRejection { agent_runtime_id, origin }
+            guard { self.lifecycle_phase == Phase::Completed }
+            update {}
+            to Completed
+            emit SubmitWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                origin: origin,
+                reason: SubmitWorkRejectReasonKind::MobNotRunning
+            }
+        }
+
+        transition ResolveSubmitWorkRejectionDestroyed {
+            on input ResolveSubmitWorkRejection { agent_runtime_id, origin }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
+            emit SubmitWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                origin: origin,
+                reason: SubmitWorkRejectReasonKind::MobNotRunning
+            }
+        }
+
+        transition ResolveSubmitWorkRejectionMemberNotFound {
+            on input ResolveSubmitWorkRejection { agent_runtime_id, origin }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "runtime_not_live" { !self.live_runtime_ids.contains(agent_runtime_id) }
+            update {}
+            to Running
+            emit SubmitWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                origin: origin,
+                reason: SubmitWorkRejectReasonKind::MemberNotFound
+            }
+        }
+
+        transition ResolveSubmitWorkRejectionMemberRetiring {
+            on input ResolveSubmitWorkRejection { agent_runtime_id, origin }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            update {}
+            to Running
+            emit SubmitWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                origin: origin,
+                reason: SubmitWorkRejectReasonKind::MemberRetiring
+            }
+        }
+
+        transition ResolveSubmitWorkRejectionNotExternallyAddressable {
+            on input ResolveSubmitWorkRejection { agent_runtime_id, origin }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "external_origin" { origin == WorkOrigin::External }
+            guard "runtime_not_externally_addressable" { !self.externally_addressable_runtime_ids.contains(agent_runtime_id) }
+            update {}
+            to Running
+            emit SubmitWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                origin: origin,
+                reason: SubmitWorkRejectReasonKind::NotExternallyAddressable
+            }
         }
 
         transition RetireMember {
@@ -3667,13 +3751,23 @@ pub enum LoopIterationReducerCommandKind {
 }
 
 /// Per-runtime lifecycle marker tracking whether a member is actively serving
-/// work or draining toward retirement. Opaque to DSL guards — observed only
-/// at the shell layer for work-routing decisions.
+/// work or draining toward retirement. Generated SubmitWork guards consume this
+/// marker so work-routing admission stays inside MobMachine authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum MobMemberState {
     #[default]
     Active,
     Retiring,
+}
+
+/// Typed public rejection class for [`MobMachineInput::SubmitWork`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SubmitWorkRejectReasonKind {
+    #[default]
+    MobNotRunning,
+    MemberNotFound,
+    MemberRetiring,
+    NotExternallyAddressable,
 }
 
 /// Typed work-origin classification for

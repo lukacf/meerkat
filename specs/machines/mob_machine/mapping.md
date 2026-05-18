@@ -135,6 +135,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SubmitWorkRunningInternal`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionMemberNotFound`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `ResolveSubmitWorkRejectionMemberRetiring`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionNotExternallyAddressable`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 - `RetireMember`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
@@ -581,6 +599,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RequestRuntimeIngress`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SubmitWorkRejected`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `flow-and-run-lifecycle`
 - `RequestRuntimeRetire`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`

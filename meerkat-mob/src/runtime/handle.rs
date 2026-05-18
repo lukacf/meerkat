@@ -136,6 +136,8 @@ pub struct MobMemberListEntry {
     /// Member role (profile name).
     pub role: ProfileName,
     pub runtime_mode: MobRuntimeMode,
+    /// Compatibility state mirror. `status` is the canonical lifecycle result
+    /// projected from MobMachine authority.
     #[serde(default)]
     pub state: crate::roster::MemberState,
     pub wired_to: BTreeSet<AgentIdentity>,
@@ -1895,8 +1897,7 @@ impl MobHandle {
                     .or(machine_bridge_session_id);
                 let material = MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
                     member_present: true,
-                    machine_lifecycle: machine_state
-                        .member_lifecycle_for_identity(&dsl_identity, true),
+                    machine_lifecycle: machine_state.member_lifecycle_for_identity(&dsl_identity),
                     output_preview: None,
                     tokens_used: 0,
                     agent_runtime_id: entry.agent_runtime_id.clone(),
@@ -1937,7 +1938,7 @@ impl MobHandle {
         machine_state: &mob_dsl::MobMachineState,
     ) -> RosterEntry {
         let machine_lifecycle =
-            Self::member_lifecycle_from_machine_state(&entry.agent_identity, machine_state, true);
+            Self::member_lifecycle_from_machine_state(&entry.agent_identity, machine_state);
         entry.state =
             MobMemberLifecycleProjection::roster_state_for_machine_lifecycle(&machine_lifecycle);
         entry
@@ -1946,11 +1947,10 @@ impl MobHandle {
     fn member_lifecycle_from_machine_state(
         identity: &crate::ids::AgentIdentity,
         machine_state: &mob_dsl::MobMachineState,
-        member_present: bool,
     ) -> mob_dsl::MobMemberLifecycleMaterial {
         let domain_identity = crate::ids::AgentIdentity::from(identity.as_str());
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
-        machine_state.member_lifecycle_for_identity(&dsl_identity, member_present)
+        machine_state.member_lifecycle_for_identity(&dsl_identity)
     }
 
     fn project_roster_from_machine_state(
@@ -1958,11 +1958,8 @@ impl MobHandle {
         machine_state: &mob_dsl::MobMachineState,
     ) -> Roster {
         roster.project_member_states(|entry| {
-            let machine_lifecycle = Self::member_lifecycle_from_machine_state(
-                &entry.agent_identity,
-                machine_state,
-                true,
-            );
+            let machine_lifecycle =
+                Self::member_lifecycle_from_machine_state(&entry.agent_identity, machine_state);
             MobMemberLifecycleProjection::roster_state_for_machine_lifecycle(&machine_lifecycle)
         });
         roster
@@ -2080,22 +2077,15 @@ impl MobHandle {
             .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
     }
 
-    /// Acquire a capability-bearing handle for a specific active member.
+    /// Acquire a capability-bearing handle for a specific member.
     pub async fn member(&self, identity: &AgentIdentity) -> Result<MemberHandle, MobError> {
         let meerkat_id = MeerkatId::from(identity);
         if let Some(diag) = self.restore_failure_for(&meerkat_id).await {
             return Err(Self::restore_failure_error(&meerkat_id, diag));
         }
-        let entry = self
-            .get_member(identity)
+        self.get_member(identity)
             .await
             .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
-        let machine_state = self.machine_state_watch_rx.borrow().clone();
-        let lifecycle =
-            Self::member_lifecycle_from_machine_state(&entry.agent_identity, &machine_state, true);
-        if lifecycle.status != mob_dsl::MobMemberLifecycleStatus::Active {
-            return Err(MobError::MemberNotFound(meerkat_id.clone()));
-        }
         Ok(MemberHandle {
             mob: self.clone(),
             agent_identity: meerkat_id,
@@ -2616,11 +2606,15 @@ impl MobHandle {
 
     /// Core `list_members_matching` worker invoked by
     /// `execute_machine_command`. Composition over
-    /// [`list_members`](Self::list_members) with each constraint applied
-    /// conjunctively. An empty filter matches every member.
+    /// machine-projected list surfaces with each constraint applied
+    /// conjunctively. An empty filter matches every non-retiring member.
     async fn handle_list_members_matching(&self, filter: MemberFilter) -> Vec<MobMemberListEntry> {
-        Box::pin(self.list_members())
-            .await
+        let members = if filter.state == Some(crate::roster::MemberState::Retiring) {
+            Box::pin(self.list_members_including_retiring()).await
+        } else {
+            Box::pin(self.list_members()).await
+        };
+        members
             .into_iter()
             .filter(|entry| {
                 if let Some(role) = &filter.role
@@ -2629,7 +2623,14 @@ impl MobHandle {
                     return false;
                 }
                 if let Some(state) = filter.state
-                    && entry.state != state
+                    && !match state {
+                        crate::roster::MemberState::Active => {
+                            entry.status == MobMemberStatus::Active
+                        }
+                        crate::roster::MemberState::Retiring => {
+                            entry.status == MobMemberStatus::Retiring
+                        }
+                    }
                 {
                     return false;
                 }
@@ -2941,16 +2942,6 @@ impl MobHandle {
         agent_identity: MeerkatId,
         message: meerkat_core::types::ContentInput,
     ) -> Result<(), MobError> {
-        let domain_identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
-        let Some(entry) = self.get_member(&domain_identity).await else {
-            return Err(MobError::MemberNotFound(agent_identity));
-        };
-        let machine_state = self.machine_state_watch_rx.borrow().clone();
-        let lifecycle =
-            Self::member_lifecycle_from_machine_state(&entry.agent_identity, &machine_state, true);
-        if lifecycle.status != mob_dsl::MobMemberLifecycleStatus::Active {
-            return Err(MobError::MemberNotFound(agent_identity));
-        }
         let snapshot = self
             .member_status(&AgentIdentity::from(agent_identity.as_str()))
             .await?;

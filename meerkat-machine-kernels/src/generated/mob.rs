@@ -1552,6 +1552,66 @@ impl std::fmt::Display for StepRunStatus {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SubmitWorkRejectReasonKind {
+    #[default]
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+    #[serde(rename = "MemberNotFound")]
+    MemberNotFound,
+    #[serde(rename = "MemberRetiring")]
+    MemberRetiring,
+    #[serde(rename = "NotExternallyAddressable")]
+    NotExternallyAddressable,
+}
+impl SubmitWorkRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MobNotRunning => "MobNotRunning",
+            Self::MemberNotFound => "MemberNotFound",
+            Self::MemberRetiring => "MemberRetiring",
+            Self::NotExternallyAddressable => "NotExternallyAddressable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SubmitWorkRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            "MemberNotFound" => Ok(Self::MemberNotFound),
+            "MemberRetiring" => Ok(Self::MemberRetiring),
+            "NotExternallyAddressable" => Ok(Self::NotExternallyAddressable),
+            other => Err(format!(
+                "invalid SubmitWorkRejectReasonKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SubmitWorkRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SubmitWorkRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -2045,6 +2105,11 @@ pub mod inputs {
         pub origin: WorkOrigin,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSubmitWorkRejection {
+        pub agent_runtime_id: AgentRuntimeId,
+        pub origin: WorkOrigin,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelWork {
         pub work_id: WorkId,
     }
@@ -2156,6 +2221,7 @@ pub enum Input {
     SessionIngressDetachedForMobDestroy(inputs::SessionIngressDetachedForMobDestroy),
     SessionIngressDetachFailedForMobDestroy(inputs::SessionIngressDetachFailedForMobDestroy),
     SubmitWork(inputs::SubmitWork),
+    ResolveSubmitWorkRejection(inputs::ResolveSubmitWorkRejection),
     CancelWork(inputs::CancelWork),
     CancelAllWork(inputs::CancelAllWork),
     Stop(inputs::Stop),
@@ -2223,6 +2289,7 @@ impl Input {
                 InputKind::SessionIngressDetachFailedForMobDestroy
             }
             Self::SubmitWork(_) => InputKind::SubmitWork,
+            Self::ResolveSubmitWorkRejection(_) => InputKind::ResolveSubmitWorkRejection,
             Self::CancelWork(_) => InputKind::CancelWork,
             Self::CancelAllWork(_) => InputKind::CancelAllWork,
             Self::Stop(_) => InputKind::Stop,
@@ -2283,6 +2350,7 @@ pub enum InputKind {
     SessionIngressDetachedForMobDestroy,
     SessionIngressDetachFailedForMobDestroy,
     SubmitWork,
+    ResolveSubmitWorkRejection,
     CancelWork,
     CancelAllWork,
     Stop,
@@ -2596,6 +2664,12 @@ pub mod effects {
         pub origin: WorkOrigin,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SubmitWorkRejected {
+        pub agent_runtime_id: AgentRuntimeId,
+        pub origin: WorkOrigin,
+        pub reason: SubmitWorkRejectReasonKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestRuntimeRetire {
         pub session_id: SessionId,
     }
@@ -2675,6 +2749,7 @@ pub mod effects {
 pub enum Effect {
     RequestRuntimeBinding(effects::RequestRuntimeBinding),
     RequestRuntimeIngress(effects::RequestRuntimeIngress),
+    SubmitWorkRejected(effects::SubmitWorkRejected),
     RequestRuntimeRetire(effects::RequestRuntimeRetire),
     RequestRuntimeDestroy(effects::RequestRuntimeDestroy),
     RequestSessionIngressDetachForMobDestroy(effects::RequestSessionIngressDetachForMobDestroy),
@@ -2701,6 +2776,7 @@ pub enum Effect {
 pub enum EffectKind {
     RequestRuntimeBinding,
     RequestRuntimeIngress,
+    SubmitWorkRejected,
     RequestRuntimeRetire,
     RequestRuntimeDestroy,
     RequestSessionIngressDetachForMobDestroy,
@@ -2765,6 +2841,12 @@ pub enum TransitionId {
     KickoffClearCompleted,
     SubmitWorkRunningExternal,
     SubmitWorkRunningInternal,
+    ResolveSubmitWorkRejectionStopped,
+    ResolveSubmitWorkRejectionCompleted,
+    ResolveSubmitWorkRejectionDestroyed,
+    ResolveSubmitWorkRejectionMemberNotFound,
+    ResolveSubmitWorkRejectionMemberRetiring,
+    ResolveSubmitWorkRejectionNotExternallyAddressable,
     RetireMember,
     ObserveRuntimeRetired,
     ResetMember,

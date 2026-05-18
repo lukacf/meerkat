@@ -118,6 +118,10 @@ macro_rules! auth_catalog_machine_dsl {
                     max_outstanding_flows: u64,
                     observed_global_outstanding_flows: u64,
                 },
+                ConfirmOAuthDurableAdmission {
+                    observed_global_outstanding_flows: u64,
+                    max_outstanding_flows: u64,
+                },
                 VerifyOAuthDeviceFlow { flow_id: String, provider: String, now_millis: u64 },
                 BeginOAuthDevicePoll { flow_id: String, provider: String, now_millis: u64 },
                 FinishOAuthDevicePoll { flow_id: String },
@@ -519,6 +523,14 @@ macro_rules! auth_catalog_machine_dsl {
                 }
                 to Valid
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition ConfirmOAuthDurableAdmission {
+                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                on input ConfirmOAuthDurableAdmission { observed_global_outstanding_flows, max_outstanding_flows }
+                guard "oauth_global_capacity_available" { observed_global_outstanding_flows < max_outstanding_flows }
+                update {}
+                to Valid
             }
 
             transition VerifyOAuthDeviceFlow {

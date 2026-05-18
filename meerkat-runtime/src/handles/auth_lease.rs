@@ -587,6 +587,48 @@ impl RuntimeAuthLeaseHandle {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn confirm_oauth_durable_admission(
+        &self,
+        target: &AuthBindingRef,
+        observed_global_outstanding_flows: u64,
+        max_outstanding_flows: u64,
+        context: &'static str,
+    ) -> Result<(), DslTransitionError> {
+        let lease_key = LeaseKey::from_auth_binding(target);
+        let input = auth_dsl::AuthMachineInput::ConfirmOAuthDurableAdmission {
+            observed_global_outstanding_flows,
+            max_outstanding_flows,
+        };
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (from_phase, to_phase) = {
+            let entry = match guard.authorities.get_mut(&lease_key) {
+                Some(m) => m,
+                None => {
+                    return Err(DslTransitionError::new(
+                        context,
+                        format!("no auth machine registered for lease_key `{lease_key}`"),
+                    ));
+                }
+            };
+            let from_phase = map_phase(entry.state().lifecycle_phase);
+            auth_dsl::AuthMachineMutator::apply(entry, input)
+                .map_err(|err| map_auth_machine_error(err, context))?;
+            let to_phase = map_phase(entry.state().lifecycle_phase);
+            (from_phase, to_phase)
+        };
+        emit_audit(
+            &lease_key,
+            "confirm_oauth_durable_admission",
+            from_phase,
+            to_phase,
+        );
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn has_oauth_browser_flow(&self, target: &AuthBindingRef, flow_id: &str) -> bool {
         let lease_key = LeaseKey::from_auth_binding(target);
         self.machines
@@ -807,6 +849,9 @@ impl RuntimeAuthLeaseHandle {
                 "expire_oauth_browser_flow"
             }
             auth_dsl::AuthMachineInput::AdmitOAuthDeviceFlow { .. } => "admit_oauth_device_flow",
+            auth_dsl::AuthMachineInput::ConfirmOAuthDurableAdmission { .. } => {
+                "confirm_oauth_durable_admission"
+            }
             auth_dsl::AuthMachineInput::VerifyOAuthDeviceFlow { .. } => "verify_oauth_device_flow",
             auth_dsl::AuthMachineInput::BeginOAuthDevicePoll { .. } => "begin_oauth_device_poll",
             auth_dsl::AuthMachineInput::FinishOAuthDevicePoll { .. } => "finish_oauth_device_poll",

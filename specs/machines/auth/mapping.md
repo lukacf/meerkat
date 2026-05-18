@@ -129,6 +129,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdmitOAuthDeviceFlowReauthRequired`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
+- `ConfirmOAuthDurableAdmissionValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `ConfirmOAuthDurableAdmissionExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `ConfirmOAuthDurableAdmissionRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `ConfirmOAuthDurableAdmissionReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
 - `VerifyOAuthDeviceFlowValid`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`

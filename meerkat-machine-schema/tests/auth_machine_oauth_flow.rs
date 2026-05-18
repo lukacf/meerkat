@@ -68,6 +68,24 @@ fn auth_machine_declares_oauth_flow_lifecycle_inputs() {
             "`{input}` should carry global capacity observation as u64"
         );
     }
+    let durable_confirmation = schema
+        .inputs
+        .variant_named("ConfirmOAuthDurableAdmission")
+        .expect("AuthMachine must declare durable OAuth admission confirmation input");
+    assert_eq!(
+        durable_confirmation
+            .field_named("observed_global_outstanding_flows")
+            .expect("durable confirmation must carry typed global OAuth capacity observation")
+            .ty,
+        TypeRef::U64
+    );
+    assert_eq!(
+        durable_confirmation
+            .field_named("max_outstanding_flows")
+            .expect("durable confirmation must carry OAuth capacity limit")
+            .ty,
+        TypeRef::U64
+    );
 }
 
 #[test]
@@ -116,6 +134,35 @@ fn auth_machine_oauth_admission_has_generated_global_capacity_guard() {
 }
 
 #[test]
+fn auth_machine_oauth_durable_confirmation_has_generated_global_capacity_guard() {
+    let schema = dsl_auth_machine();
+    let transitions = schema
+        .transitions
+        .iter()
+        .filter(|transition| {
+            transition
+                .name
+                .as_str()
+                .starts_with("ConfirmOAuthDurableAdmission")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !transitions.is_empty(),
+        "AuthMachine must route durable OAuth admission confirmation transitions"
+    );
+    for transition in transitions {
+        assert!(
+            transition
+                .guards
+                .iter()
+                .any(|guard| guard.name == "oauth_global_capacity_available"),
+            "{} must confirm durable OAuth admission in generated authority",
+            transition.name
+        );
+    }
+}
+
+#[test]
 fn auth_machine_oauth_flow_lifecycle_transitions_preserve_credential_phase() {
     let schema = dsl_auth_machine();
     for transition in schema.transitions.iter().filter(|transition| {
@@ -125,6 +172,7 @@ fn auth_machine_oauth_flow_lifecycle_transitions_preserve_credential_phase() {
             "ConsumeOAuthBrowserFlow",
             "ExpireOAuthBrowserFlow",
             "AdmitOAuthDeviceFlow",
+            "ConfirmOAuthDurableAdmission",
             "VerifyOAuthDeviceFlow",
             "BeginOAuthDevicePoll",
             "FinishOAuthDevicePoll",

@@ -37,6 +37,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ConsumeOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
 - `ExpireOAuthBrowserFlow`(flow_id: String)
 - `AdmitOAuthDeviceFlow`(flow_id: String, provider: String, expires_at_millis: u64, max_outstanding_flows: u64, observed_global_outstanding_flows: u64)
+- `ConfirmOAuthDurableAdmission`(observed_global_outstanding_flows: u64, max_outstanding_flows: u64)
 - `VerifyOAuthDeviceFlow`(flow_id: String, provider: String, now_millis: u64)
 - `BeginOAuthDevicePoll`(flow_id: String, provider: String, now_millis: u64)
 - `FinishOAuthDevicePoll`(flow_id: String)
@@ -362,6 +363,34 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `oauth_capacity_available`
   - `oauth_global_capacity_available`
 - Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
+### `ConfirmOAuthDurableAdmissionValid`
+- From: `Valid`
+- On: `ConfirmOAuthDurableAdmission`(observed_global_outstanding_flows, max_outstanding_flows)
+- Guards:
+  - `oauth_global_capacity_available`
+- To: `Valid`
+
+### `ConfirmOAuthDurableAdmissionExpiring`
+- From: `Expiring`
+- On: `ConfirmOAuthDurableAdmission`(observed_global_outstanding_flows, max_outstanding_flows)
+- Guards:
+  - `oauth_global_capacity_available`
+- To: `Expiring`
+
+### `ConfirmOAuthDurableAdmissionRefreshing`
+- From: `Refreshing`
+- On: `ConfirmOAuthDurableAdmission`(observed_global_outstanding_flows, max_outstanding_flows)
+- Guards:
+  - `oauth_global_capacity_available`
+- To: `Refreshing`
+
+### `ConfirmOAuthDurableAdmissionReauthRequired`
+- From: `ReauthRequired`
+- On: `ConfirmOAuthDurableAdmission`(observed_global_outstanding_flows, max_outstanding_flows)
+- Guards:
+  - `oauth_global_capacity_available`
 - To: `ReauthRequired`
 
 ### `VerifyOAuthDeviceFlowValid`

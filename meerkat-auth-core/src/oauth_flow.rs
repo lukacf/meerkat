@@ -1096,6 +1096,29 @@ impl OAuthFlowRegistry {
         Ok(())
     }
 
+    pub fn insert_restored_browser_flow_without_capacity(
+        &self,
+        state: String,
+        target: AuthBindingRef,
+        provider: OAuthProviderIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+        created_at: Instant,
+    ) -> Result<(), OAuthFlowError> {
+        let mut flows = self.flows.lock();
+        flows.insert(
+            state,
+            OAuthFlowRecord {
+                target,
+                provider,
+                redirect_uri,
+                pkce_verifier,
+                created_at,
+            },
+        );
+        Ok(())
+    }
+
     pub fn insert_restored_device_flow(
         &self,
         target: AuthBindingRef,
@@ -1113,6 +1136,35 @@ impl OAuthFlowRegistry {
             return Err(OAuthFlowError::CapacityExceeded {
                 max_outstanding: self.max_outstanding,
             });
+        }
+        let record = OAuthDeviceFlowRecord {
+            target,
+            provider,
+            device_code: device_code.clone(),
+            created_at,
+            expires_at,
+        };
+        device_flows.insert(
+            device_code,
+            OAuthDeviceFlowState {
+                record,
+                poll_lease: None,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn insert_restored_device_flow_without_capacity(
+        &self,
+        target: AuthBindingRef,
+        provider: OAuthProviderIdentity,
+        device_code: String,
+        created_at: Instant,
+        expires_at: Instant,
+    ) -> Result<(), OAuthFlowError> {
+        let mut device_flows = self.device_flows.lock();
+        if device_flows.contains_key(&device_code) {
+            return Err(OAuthFlowError::DeviceCodeAlreadyAdmitted);
         }
         let record = OAuthDeviceFlowRecord {
             target,
@@ -1186,6 +1238,32 @@ impl OAuthFlowRegistry {
                 max_outstanding: self.max_outstanding,
             });
         }
+        flows.insert(state, record);
+        Ok(OAuthPrunedFlows::from_expired(
+            expired_browser,
+            expired_device,
+        ))
+    }
+
+    pub fn insert_browser_flow_with_pruned_without_capacity(
+        &self,
+        state: String,
+        target: AuthBindingRef,
+        provider: OAuthProviderIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+    ) -> Result<OAuthPrunedFlows, OAuthFlowError> {
+        let record = OAuthFlowRecord {
+            target,
+            provider,
+            redirect_uri,
+            pkce_verifier,
+            created_at: Instant::now(),
+        };
+        let mut flows = self.flows.lock();
+        let mut device_flows = self.device_flows.lock();
+        let expired_browser = take_expired_locked(&mut flows, self.ttl);
+        let expired_device = take_expired_device_locked(&mut device_flows);
         flows.insert(state, record);
         Ok(OAuthPrunedFlows::from_expired(
             expired_browser,

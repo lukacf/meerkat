@@ -191,6 +191,11 @@ pub mod inputs {
         pub observed_global_outstanding_flows: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConfirmOAuthDurableAdmission {
+        pub observed_global_outstanding_flows: u64,
+        pub max_outstanding_flows: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct VerifyOAuthDeviceFlow {
         pub flow_id: String,
         pub provider: String,
@@ -235,6 +240,7 @@ pub enum Input {
     ConsumeOAuthBrowserFlow(inputs::ConsumeOAuthBrowserFlow),
     ExpireOAuthBrowserFlow(inputs::ExpireOAuthBrowserFlow),
     AdmitOAuthDeviceFlow(inputs::AdmitOAuthDeviceFlow),
+    ConfirmOAuthDurableAdmission(inputs::ConfirmOAuthDurableAdmission),
     VerifyOAuthDeviceFlow(inputs::VerifyOAuthDeviceFlow),
     BeginOAuthDevicePoll(inputs::BeginOAuthDevicePoll),
     FinishOAuthDevicePoll(inputs::FinishOAuthDevicePoll),
@@ -259,6 +265,7 @@ impl Input {
             Self::ConsumeOAuthBrowserFlow(_) => InputKind::ConsumeOAuthBrowserFlow,
             Self::ExpireOAuthBrowserFlow(_) => InputKind::ExpireOAuthBrowserFlow,
             Self::AdmitOAuthDeviceFlow(_) => InputKind::AdmitOAuthDeviceFlow,
+            Self::ConfirmOAuthDurableAdmission(_) => InputKind::ConfirmOAuthDurableAdmission,
             Self::VerifyOAuthDeviceFlow(_) => InputKind::VerifyOAuthDeviceFlow,
             Self::BeginOAuthDevicePoll(_) => InputKind::BeginOAuthDevicePoll,
             Self::FinishOAuthDevicePoll(_) => InputKind::FinishOAuthDevicePoll,
@@ -284,6 +291,7 @@ pub enum InputKind {
     ConsumeOAuthBrowserFlow,
     ExpireOAuthBrowserFlow,
     AdmitOAuthDeviceFlow,
+    ConfirmOAuthDurableAdmission,
     VerifyOAuthDeviceFlow,
     BeginOAuthDevicePoll,
     FinishOAuthDevicePoll,
@@ -353,6 +361,10 @@ pub enum TransitionId {
     AdmitOAuthDeviceFlowExpiring,
     AdmitOAuthDeviceFlowRefreshing,
     AdmitOAuthDeviceFlowReauthRequired,
+    ConfirmOAuthDurableAdmissionValid,
+    ConfirmOAuthDurableAdmissionExpiring,
+    ConfirmOAuthDurableAdmissionRefreshing,
+    ConfirmOAuthDurableAdmissionReauthRequired,
     VerifyOAuthDeviceFlowValid,
     VerifyOAuthDeviceFlowExpiring,
     VerifyOAuthDeviceFlowRefreshing,

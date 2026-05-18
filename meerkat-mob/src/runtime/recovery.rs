@@ -247,10 +247,14 @@ mod tests {
     }
 
     #[test]
-    fn test_pre_v3_pending_run_is_accepted() {
+    fn test_pre_v3_pending_run_is_rejected_by_authority_projection() {
         let mut run = minimal_authority_backed_run(MobRunStatus::Pending);
         run.schema_version = 2;
-        assert!(reconcile_run_state(&mut run).is_ok());
+        let result = reconcile_run_state(&mut run);
+        assert!(matches!(
+            result,
+            Err(RestoreIncompatible::FlowAuthorityProjectionMismatch { .. })
+        ));
     }
 
     #[test]

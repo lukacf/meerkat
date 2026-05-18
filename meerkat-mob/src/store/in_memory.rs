@@ -476,7 +476,10 @@ impl MobRunStore for InMemoryMobRunStore {
         authority
             .validate_step_entry(run, &entry)
             .map_err(|error| MobStoreError::Internal(error.to_string()))?;
-        run.step_ledger.push(entry);
+        let mut candidate = run.clone();
+        candidate.step_ledger.push(entry);
+        validate_authorized_run_projection(&candidate)?;
+        *run = candidate;
         Ok(())
     }
 
@@ -501,7 +504,10 @@ impl MobRunStore for InMemoryMobRunStore {
         if is_duplicate {
             return Ok(false);
         }
-        run.step_ledger.push(entry);
+        let mut candidate = run.clone();
+        candidate.step_ledger.push(entry);
+        validate_authorized_run_projection(&candidate)?;
+        *run = candidate;
         Ok(true)
     }
 
@@ -518,7 +524,10 @@ impl MobRunStore for InMemoryMobRunStore {
         authority
             .validate_failure_entry(run, &entry)
             .map_err(|error| MobStoreError::Internal(error.to_string()))?;
-        run.failure_ledger.push(entry);
+        let mut candidate = run.clone();
+        candidate.failure_ledger.push(entry);
+        validate_authorized_run_projection(&candidate)?;
+        *run = candidate;
         Ok(())
     }
 
@@ -1256,11 +1265,25 @@ mod tests {
                 .append_step_entry_if_absent_with_authority(
                     &run_id,
                     step_entry,
-                    dispatched_authority,
+                    dispatched_authority.clone(),
                 )
                 .await
                 .unwrap()
         );
+        store
+            .append_step_entry_with_authority(
+                &run_id,
+                StepLedgerEntry {
+                    step_id: step_id.clone(),
+                    agent_identity: AgentIdentity::from(crate::run::FLOW_RUN_PROVENANCE_AGENT_ID),
+                    status: StepRunStatus::Dispatched,
+                    output: None,
+                    timestamp: Utc::now(),
+                },
+                dispatched_authority,
+            )
+            .await
+            .expect_err("one dispatch authority must not authorize duplicate step ledger rows");
 
         let dispatched_run = store.get_run(&run_id).await.unwrap().unwrap();
         let (failed_flow_state, failed_authority_input) = dispatched_run
@@ -1285,20 +1308,25 @@ mod tests {
             MobRunProvenanceAuthority::from_flow_authority_input(failed_authority_input)
                 .expect("fail input is provenance authority");
 
+        let failure_entry = FailureLedgerEntry {
+            step_id: step_id.clone(),
+            reason: "failed".to_string(),
+            error_report: None,
+            error: None,
+            timestamp: Utc::now(),
+        };
         store
             .append_failure_entry_with_authority(
                 &run_id,
-                FailureLedgerEntry {
-                    step_id,
-                    reason: "failed".to_string(),
-                    error_report: None,
-                    error: None,
-                    timestamp: Utc::now(),
-                },
-                failed_authority,
+                failure_entry.clone(),
+                failed_authority.clone(),
             )
             .await
             .unwrap();
+        store
+            .append_failure_entry_with_authority(&run_id, failure_entry, failed_authority)
+            .await
+            .expect_err("one fail authority must not authorize duplicate failure ledger rows");
 
         let stored = store.get_run(&run_id).await.unwrap().unwrap();
         assert_eq!(stored.step_ledger.len(), 1);
@@ -1337,6 +1365,14 @@ mod tests {
             .await
             .expect_err("raw failure provenance must be rejected");
         assert!(error.to_string().contains("failure ledger entry"));
+
+        let mut run = sample_run(MobRunStatus::Running);
+        run.schema_version = crate::run::MOB_RUN_SCHEMA_VERSION - 1;
+        let error = store
+            .create_run(run)
+            .await
+            .expect_err("caller-controlled schema version must be rejected");
+        assert!(error.to_string().contains("schema_version"));
     }
 
     #[tokio::test]

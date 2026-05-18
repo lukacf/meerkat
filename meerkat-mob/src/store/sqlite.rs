@@ -1285,6 +1285,8 @@ impl MobRunStore for SqliteMobRunStore {
                 .validate_step_entry(&run, &entry)
                 .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             run.step_ledger.push(entry);
+            run.validate_flow_authority_projection()
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             let encoded = encode_json(&run)?;
             tx.execute(
                 "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
@@ -1333,6 +1335,8 @@ impl MobRunStore for SqliteMobRunStore {
                 return Ok(false);
             }
             run.step_ledger.push(entry);
+            run.validate_flow_authority_projection()
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             let encoded = encode_json(&run)?;
             tx.execute(
                 "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
@@ -1373,6 +1377,8 @@ impl MobRunStore for SqliteMobRunStore {
                 .validate_failure_entry(&run, &entry)
                 .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             run.failure_ledger.push(entry);
+            run.validate_flow_authority_projection()
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             let encoded = encode_json(&run)?;
             tx.execute(
                 "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
@@ -2541,11 +2547,25 @@ mod tests {
                 .append_step_entry_if_absent_with_authority(
                     &ledger_run_id,
                     entry,
-                    dispatched_authority,
+                    dispatched_authority.clone(),
                 )
                 .await
                 .unwrap()
         );
+        store
+            .append_step_entry_with_authority(
+                &ledger_run_id,
+                StepLedgerEntry {
+                    step_id: StepId::from("step-1"),
+                    agent_identity: AgentIdentity::from(crate::run::FLOW_RUN_PROVENANCE_AGENT_ID),
+                    status: StepRunStatus::Dispatched,
+                    output: None,
+                    timestamp: Utc::now(),
+                },
+                dispatched_authority,
+            )
+            .await
+            .expect_err("one dispatch authority must not authorize duplicate step ledger rows");
     }
 
     #[tokio::test]
@@ -2581,6 +2601,14 @@ mod tests {
             .await
             .expect_err("raw failure provenance must be rejected");
         assert!(error.to_string().contains("failure ledger entry"));
+
+        let mut run = sample_run(MobRunStatus::Running);
+        run.schema_version = crate::run::MOB_RUN_SCHEMA_VERSION - 1;
+        let error = store
+            .create_run(run)
+            .await
+            .expect_err("caller-controlled schema version must be rejected");
+        assert!(error.to_string().contains("schema_version"));
     }
 
     #[tokio::test]

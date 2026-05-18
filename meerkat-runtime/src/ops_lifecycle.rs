@@ -707,6 +707,79 @@ impl ShellState {
         self.dsl.0.state.wait_active
     }
 
+    fn wait_all_satisfied_from_effects(
+        effects: &[mm_dsl::MeerkatMachineEffect],
+    ) -> Result<Option<WaitAllSatisfied>, OpsLifecycleError> {
+        let mut satisfied = None;
+        for effect in effects {
+            let mm_dsl::MeerkatMachineEffect::WaitAllSatisfied {
+                wait_request_id,
+                operation_ids,
+            } = effect
+            else {
+                continue;
+            };
+            if satisfied.is_some() {
+                return Err(OpsLifecycleError::Internal(
+                    "generated wait_all authority emitted multiple satisfaction effects".into(),
+                ));
+            }
+            let wait_uuid = uuid::Uuid::parse_str(&wait_request_id.0).map_err(|err| {
+                OpsLifecycleError::Internal(format!(
+                    "generated wait_all authority emitted invalid wait request id '{}': {err}",
+                    wait_request_id.0
+                ))
+            })?;
+            let mut ids = Vec::with_capacity(operation_ids.len());
+            for operation_id in operation_ids {
+                ids.push(
+                    serde_json::from_str::<OperationId>(&operation_id.0).map_err(|err| {
+                        OpsLifecycleError::Internal(format!(
+                            "generated wait_all authority emitted invalid operation id '{}': {err}",
+                            operation_id.0
+                        ))
+                    })?,
+                );
+            }
+            satisfied = Some(WaitAllSatisfied {
+                wait_request_id: WaitRequestId::from_uuid(wait_uuid),
+                operation_ids: ids,
+            });
+        }
+        Ok(satisfied)
+    }
+
+    fn try_satisfy_wait_all_authority(
+        &mut self,
+    ) -> Result<Option<WaitAllSatisfied>, OpsLifecycleError> {
+        let Some(dsl_wait_request_id) = self.dsl.0.state.wait_request_id.clone() else {
+            return Ok(None);
+        };
+        let dsl_operation_id_tokens = self.dsl.0.state.wait_operation_id_tokens.clone();
+        let transition = match mm_dsl::MeerkatMachineMutator::apply(
+            &mut self.dsl.0,
+            mm_dsl::MeerkatMachineInput::SatisfyWaitAll {
+                wait_request_id: dsl_wait_request_id,
+                operation_id_tokens: dsl_operation_id_tokens,
+            },
+        ) {
+            Ok(transition) => transition,
+            Err(mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. }) => return Ok(None),
+            Err(err) => {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "DSL rejected ops transition (SatisfyWaitAll): {err:?}"
+                )));
+            }
+        };
+        Self::wait_all_satisfied_from_effects(&transition.effects)?
+            .ok_or_else(|| {
+                OpsLifecycleError::Internal(
+                    "generated wait_all authority accepted satisfaction without effect".into(),
+                )
+            })
+            .map(Some)
+    }
+
     fn begin_wait_all_authority(
         &mut self,
         wait_request_id: &WaitRequestId,
@@ -731,17 +804,6 @@ impl ShellState {
             }
         }
 
-        let all_terminal = operation_ids.iter().all(|operation_id| {
-            self.status(operation_id)
-                .is_some_and(OperationStatus::is_terminal)
-        });
-        if all_terminal {
-            return Ok(WaitAllAuthorityPlan::AlreadySatisfied(WaitAllSatisfied {
-                wait_request_id: wait_request_id.clone(),
-                operation_ids: operation_ids.to_vec(),
-            }));
-        }
-
         let dsl_ids: std::collections::BTreeSet<String> = operation_ids
             .iter()
             .map(|id| mm_dsl::OperationId::from_domain(id).0)
@@ -758,6 +820,9 @@ impl ShellState {
             },
             "RequestWaitAll",
         )?;
+        if let Some(satisfied) = self.try_satisfy_wait_all_authority()? {
+            return Ok(WaitAllAuthorityPlan::AlreadySatisfied(satisfied));
+        }
         Ok(WaitAllAuthorityPlan::ActivateBarrier)
     }
 
@@ -788,36 +853,33 @@ impl ShellState {
     /// without a live correlation (post-recovery, or duplicate resolution),
     /// the oneshot simply remains pending.
     fn maybe_satisfy_wait(&mut self) {
-        // Capture membership *before* applying — `SatisfyWaitAll` clears the
-        // DSL barrier, so a post-apply read would lose the member list carried
-        // on the obligation token.
-        let ids = self.wait_operation_ids();
-        let Some(dsl_wait_request_id) = self.dsl.0.state.wait_request_id.clone() else {
-            return;
+        let satisfied = match self.try_satisfy_wait_all_authority() {
+            Ok(Some(satisfied)) => satisfied,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "generated wait_all authority rejected satisfaction unexpectedly"
+                );
+                return;
+            }
         };
-        let dsl_operation_id_tokens = self.dsl.0.state.wait_operation_id_tokens.clone();
-        if self
-            .dsl_apply_raw(mm_dsl::MeerkatMachineInput::SatisfyWaitAll {
-                wait_request_id: dsl_wait_request_id,
-                operation_id_tokens: dsl_operation_id_tokens,
-            })
-            .is_err()
-        {
-            // Guard rejection (barrier inactive, or members not all terminal
-            // yet) is an expected idempotent no-op on the satisfaction fixed
-            // point, not a shell/DSL desync. Swallow.
-            return;
-        }
-        let wait_id = match self.wait_request_id.take() {
+        let wait_id = match self.wait_request_id.clone() {
             Some(id) => id,
             None => return,
         };
+        if satisfied.wait_request_id != wait_id {
+            tracing::error!(
+                shell_wait_request_id = %wait_id,
+                authority_wait_request_id = %satisfied.wait_request_id,
+                "generated wait_all authority satisfied a different wait request"
+            );
+            return;
+        }
+        self.wait_request_id = None;
         if let Some(pending) = self.pending_wait.take() {
             if pending.wait_request_id == wait_id {
-                let _ = pending.sender.send(WaitAllSatisfied {
-                    wait_request_id: wait_id,
-                    operation_ids: ids,
-                });
+                let _ = pending.sender.send(satisfied);
             } else {
                 self.pending_wait = Some(pending);
             }
@@ -1283,22 +1345,32 @@ impl RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
         match state.wait_request_id.as_ref() {
             Some(active) if active == wait_request_id => {
-                state.wait_request_id = None;
-                state.pending_wait = None;
                 // Clear the DSL barrier via the dedicated `CancelWaitAll`
                 // transition. Unlike `SatisfyWaitAll`, it does not require
                 // every member to be terminal (the request was dropped, not
-                // resolved) and does not emit the `WaitAllSatisfied`
-                // obligation. The `wait_is_active` guard keeps it an
-                // idempotent no-op if the barrier was already cleared.
-                let _ = state.dsl_apply(
+                // resolved) and does not emit the `WaitAllSatisfied`.
+                state.dsl_apply(
                     mm_dsl::MeerkatMachineInput::CancelWaitAll,
                     "CancelWaitAll(cancel)",
-                );
+                )?;
+                state.wait_request_id = None;
+                if state
+                    .pending_wait
+                    .as_ref()
+                    .is_some_and(|pending| pending.wait_request_id == *wait_request_id)
+                {
+                    state.pending_wait = None;
+                }
                 Ok(())
             }
             _ => {
-                state.pending_wait = None;
+                if state
+                    .pending_wait
+                    .as_ref()
+                    .is_some_and(|pending| pending.wait_request_id == *wait_request_id)
+                {
+                    state.pending_wait = None;
+                }
                 Ok(())
             }
         }
@@ -1362,9 +1434,16 @@ impl Future for WaitAllFuture<'_> {
 impl Drop for WaitAllFuture<'_> {
     fn drop(&mut self) {
         if matches!(self.state, WaitAllFutureState::Waiting(_)) {
-            let _ = self
+            if let Err(err) = self
                 .registry
-                .cancel_wait_all_internal(&self.wait_request_id);
+                .cancel_wait_all_internal(&self.wait_request_id)
+            {
+                tracing::error!(
+                    wait_request_id = %self.wait_request_id,
+                    error = %err,
+                    "generated wait_all authority rejected cancellation during drop"
+                );
+            }
         }
     }
 }
@@ -1852,16 +1931,13 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                         WaitAllFutureState::Ready(Some(outcomes))
                     }
                     Ok(WaitAllAuthorityPlan::ActivateBarrier) => {
-                        state.wait_request_id = Some(wait_request_id.clone());
-
                         if state.pending_wait.is_some() {
                             // Roll back the DSL barrier we just activated so the
                             // registry is not stuck in a wait-active state with
                             // no correlation oneshot to resolve. `CancelWaitAll`
                             // is the no-obligation clearer (members need not be
                             // terminal).
-                            state.wait_request_id = None;
-                            let _ = state.dsl_apply(
+                            let rollback = state.dsl_apply(
                                 mm_dsl::MeerkatMachineInput::CancelWaitAll,
                                 "CancelWaitAll(rollback)",
                             );
@@ -1869,14 +1945,16 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                                 registry: self,
                                 wait_request_id,
                                 operation_ids: owned_ids,
-                                state: WaitAllFutureState::Ready(Some(Err(
-                                    OpsLifecycleError::Internal(
+                                state: WaitAllFutureState::Ready(Some(Err(match rollback {
+                                    Ok(()) => OpsLifecycleError::Internal(
                                         "wait_all started while a pending wait sender already existed"
                                             .into(),
                                     ),
-                                ))),
+                                    Err(err) => err,
+                                }))),
                             });
                         }
+                        state.wait_request_id = Some(wait_request_id.clone());
                         let (sender, receiver) = tokio::sync::oneshot::channel();
                         state.pending_wait = Some(PendingWaitState {
                             wait_request_id: wait_request_id.clone(),
@@ -2095,6 +2173,12 @@ mod tests {
         // Obligation carries the validated ID
         assert_eq!(wait_result.satisfied.operation_ids, vec![op_id]);
         assert_ne!(wait_result.satisfied.wait_request_id.to_string(), "");
+        let state = registry.read_state().unwrap();
+        assert!(
+            !state.wait_active(),
+            "already-satisfied wait_all must be cleared by generated satisfaction authority"
+        );
+        assert!(state.wait_operation_ids().is_empty());
     }
 
     #[tokio::test]

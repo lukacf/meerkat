@@ -1486,20 +1486,6 @@ impl MobActor {
             .map(|_| ())
     }
 
-    fn probe_idempotent_command_admission(
-        &self,
-        input: mob_dsl::MobMachineInput,
-        target: MobState,
-        context: &str,
-        already_applied: bool,
-    ) -> Result<(), MobError> {
-        match self.probe_command_admission(input, target, context) {
-            Ok(()) => Ok(()),
-            Err(error) if already_applied && self.state() == target => Ok(()),
-            Err(error) => Err(error),
-        }
-    }
-
     fn apply_command_admission(
         &mut self,
         input: mob_dsl::MobMachineInput,
@@ -1515,6 +1501,12 @@ impl MobActor {
                 );
                 self.invalid_transition_to(target)
             })
+    }
+
+    fn effects_include_wiring_graph_change(effects: &[mob_dsl::MobMachineEffect]) -> bool {
+        effects
+            .iter()
+            .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::WiringGraphChanged { .. }))
     }
 
     fn preview_dsl_input(
@@ -5618,9 +5610,9 @@ impl MobActor {
     ///    missing comms runtime / public key fails fast as
     ///    [`MobError::WiringError`] with **zero side effects**.
     /// 3. Submit `MobMachineInput::WireMembers { edge }` to the DSL
-    ///    authority. `edge_not_already_wired` makes re-wiring the same
-    ///    edge a no-op success (idempotent) when the roster is already
-    ///    in sync. Otherwise we proceed to repair live comms state.
+    ///    authority. Already-wired idempotency is a generated no-op
+    ///    transition; only `WiringGraphChanged` means the machine graph
+    ///    actually mutated.
     /// 4. On DSL acceptance, bidirectionally install trust on both
     ///    runtimes (A trusts B, B trusts A) and emit `mob.peer_added`
     ///    notifications from both sides. Any failure mid-step rolls back
@@ -5663,17 +5655,10 @@ impl MobActor {
         let dsl_a = mob_dsl::AgentIdentity::from_domain(&local_identity);
         let dsl_b = mob_dsl::AgentIdentity::from_domain(&peer_identity);
         let edge = mob_dsl::WiringEdge::new(dsl_a, dsl_b);
-        let dsl_has_edge = self
-            .dsl_authority
-            .state
-            .wiring_edges
-            .iter()
-            .any(|existing| existing == &edge);
-        self.probe_idempotent_command_admission(
+        self.probe_command_admission(
             mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
             MobState::Running,
             "wire_members_command_admission",
-            dsl_has_edge,
         )?;
 
         if local_identity == peer_identity {
@@ -5703,6 +5688,12 @@ impl MobActor {
 
         // Idempotent short-circuit when DSL AND roster both already
         // reflect the edge — no trust/notification fan-out needed.
+        let dsl_has_edge = self
+            .dsl_authority
+            .state
+            .wiring_edges
+            .iter()
+            .any(|existing| existing == &edge);
         let roster_has_edge = local_entry.wired_to.contains(&peer_entry.agent_identity)
             && peer_entry.wired_to.contains(&local_entry.agent_identity);
 
@@ -6000,31 +5991,10 @@ impl MobActor {
             }
         };
 
-        // Submit the DSL input. `edge_not_already_wired` may reject as
-        // idempotent-success. We still fall through to repair trust/
-        // notifications if the roster projection is out of sync.
-        let dsl_added = match self.apply_dsl_input(
-            mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
-            "wire_members",
-        ) {
-            Ok(()) => true,
-            Err(MobError::Internal(message)) if message.contains("wire_members") => {
-                if self
-                    .dsl_authority
-                    .state
-                    .wiring_edges
-                    .iter()
-                    .any(|existing| existing == &edge)
-                {
-                    false
-                } else {
-                    return Err(MobError::WiringError(format!(
-                        "wire rejected by MobMachine DSL: {message}"
-                    )));
-                }
-            }
-            Err(other) => return Err(other),
-        };
+        // Submit the DSL input. Already-wired idempotency is a generated
+        // no-op transition; only the typed `WiringGraphChanged` effect means
+        // rollback must undo a machine graph mutation.
+        let dsl_added = self.apply_wire_members_idempotent(&edge)?;
 
         let local_peer_id = Self::trusted_peer_removal_key(&local_spec);
         let peer_peer_id = Self::trusted_peer_removal_key(&peer_spec);
@@ -6455,28 +6425,11 @@ impl MobActor {
         &mut self,
         edge: &mob_dsl::WiringEdge,
     ) -> Result<bool, MobError> {
-        match self.apply_dsl_input(
+        let effects = self.apply_dsl_input_collect_effects(
             mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
             "wire_members",
-        ) {
-            Ok(()) => Ok(true),
-            Err(MobError::Internal(message)) if message.contains("wire_members") => {
-                if self
-                    .dsl_authority
-                    .state
-                    .wiring_edges
-                    .iter()
-                    .any(|existing| existing == edge)
-                {
-                    Ok(false)
-                } else {
-                    Err(MobError::WiringError(format!(
-                        "wire rejected by MobMachine DSL: {message}"
-                    )))
-                }
-            }
-            Err(other) => Err(other),
-        }
+        )?;
+        Ok(Self::effects_include_wiring_graph_change(&effects))
     }
 
     async fn rollback_peer_only_wire(
@@ -6584,9 +6537,8 @@ impl MobActor {
     ///
     /// Mirror of [`handle_wire`]: submits
     /// `MobMachineInput::UnwireMembers { edge }` and records
-    /// `MobEventKind::MembersUnwired { a, b }` on acceptance. DSL
-    /// rejection on the `edge_currently_wired` guard is treated as
-    /// idempotent success (the edge is already absent from the authority).
+    /// `MobEventKind::MembersUnwired { a, b }` on acceptance. Already-absent
+    /// idempotency is a generated no-op transition.
     async fn handle_unwire(
         &mut self,
         local: MeerkatId,
@@ -6822,33 +6774,10 @@ impl MobActor {
             return Ok(());
         }
 
-        // Submit DSL input first. Idempotent rejection (edge absent) is
-        // handled above; here we expect acceptance (or a non-idempotent
-        // rejection that must surface).
-        let dsl_removed = match self.apply_dsl_input(
-            mob_dsl::MobMachineInput::UnwireMembers { edge: edge.clone() },
-            "unwire_members",
-        ) {
-            Ok(()) => true,
-            Err(MobError::Internal(message)) if message.contains("unwire_members") => {
-                if !self
-                    .dsl_authority
-                    .state
-                    .wiring_edges
-                    .iter()
-                    .any(|existing| existing == &edge)
-                {
-                    // DSL already absent — proceed with trust removal +
-                    // notification so live comms state is repaired.
-                    false
-                } else {
-                    return Err(MobError::WiringError(format!(
-                        "unwire rejected by MobMachine DSL: {message}"
-                    )));
-                }
-            }
-            Err(other) => return Err(other),
-        };
+        // Submit DSL input first. Already-absent idempotency is a generated
+        // no-op transition; only `WiringGraphChanged` means rollback must
+        // re-submit the wire.
+        let dsl_removed = self.apply_unwire_members_idempotent(&edge)?;
 
         let mut removed_local_trust = false;
         let mut removed_peer_trust = false;
@@ -7009,28 +6938,11 @@ impl MobActor {
         &mut self,
         edge: &mob_dsl::WiringEdge,
     ) -> Result<bool, MobError> {
-        match self.apply_dsl_input(
+        let effects = self.apply_dsl_input_collect_effects(
             mob_dsl::MobMachineInput::UnwireMembers { edge: edge.clone() },
             "unwire_members",
-        ) {
-            Ok(()) => Ok(true),
-            Err(MobError::Internal(message)) if message.contains("unwire_members") => {
-                if !self
-                    .dsl_authority
-                    .state
-                    .wiring_edges
-                    .iter()
-                    .any(|existing| existing == edge)
-                {
-                    Ok(false)
-                } else {
-                    Err(MobError::WiringError(format!(
-                        "unwire rejected by MobMachine DSL: {message}"
-                    )))
-                }
-            }
-            Err(other) => Err(other),
-        }
+        )?;
+        Ok(Self::effects_include_wiring_graph_change(&effects))
     }
 
     fn external_peer_edge(
@@ -7061,56 +6973,22 @@ impl MobActor {
         &mut self,
         edge: &mob_dsl::ExternalPeerEdge,
     ) -> Result<bool, MobError> {
-        match self.apply_dsl_input(
+        let effects = self.apply_dsl_input_collect_effects(
             mob_dsl::MobMachineInput::WireExternalPeer { edge: edge.clone() },
             "wire_external_peer",
-        ) {
-            Ok(()) => Ok(true),
-            Err(MobError::Internal(message)) if message.contains("wire_external_peer") => {
-                if self
-                    .dsl_authority
-                    .state
-                    .external_peer_edges
-                    .iter()
-                    .any(|existing| existing == edge)
-                {
-                    Ok(false)
-                } else {
-                    Err(MobError::WiringError(format!(
-                        "wire external peer rejected by MobMachine DSL: {message}"
-                    )))
-                }
-            }
-            Err(other) => Err(other),
-        }
+        )?;
+        Ok(Self::effects_include_wiring_graph_change(&effects))
     }
 
     fn apply_unwire_external_peer_idempotent(
         &mut self,
         edge: &mob_dsl::ExternalPeerEdge,
     ) -> Result<bool, MobError> {
-        match self.apply_dsl_input(
+        let effects = self.apply_dsl_input_collect_effects(
             mob_dsl::MobMachineInput::UnwireExternalPeer { edge: edge.clone() },
             "unwire_external_peer",
-        ) {
-            Ok(()) => Ok(true),
-            Err(MobError::Internal(message)) if message.contains("unwire_external_peer") => {
-                if !self
-                    .dsl_authority
-                    .state
-                    .external_peer_edges
-                    .iter()
-                    .any(|existing| existing == edge)
-                {
-                    Ok(false)
-                } else {
-                    Err(MobError::WiringError(format!(
-                        "unwire external peer rejected by MobMachine DSL: {message}"
-                    )))
-                }
-            }
-            Err(other) => Err(other),
-        }
+        )?;
+        Ok(Self::effects_include_wiring_graph_change(&effects))
     }
 
     /// Unwind side effects from a failed local-local unwire. Best-effort.
@@ -7247,17 +7125,10 @@ impl MobActor {
             )));
         }
         let edge = Self::external_peer_edge(&local_identity, &spec);
-        let dsl_has_edge = self
-            .dsl_authority
-            .state
-            .external_peer_edges
-            .iter()
-            .any(|existing| existing == &edge);
-        self.probe_idempotent_command_admission(
+        self.probe_command_admission(
             mob_dsl::MobMachineInput::WireExternalPeer { edge: edge.clone() },
             MobState::Running,
             "wire_external_peer_command_admission",
-            dsl_has_edge,
         )?;
 
         // Look up the local member's roster entry and session binding.

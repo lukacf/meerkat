@@ -1216,6 +1216,14 @@ macro_rules! mob_catalog_machine_dsl {
             emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
         }
 
+        transition WireMembersAlreadyWired {
+            on input WireMembers { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_already_wired" { self.wiring_edges.contains(edge) == true }
+            update {}
+            to Running
+        }
+
         transition RecoverRosterWiringRunning {
             on signal RecoverRosterWiring { edge }
             guard { self.lifecycle_phase == Phase::Running }
@@ -1267,6 +1275,14 @@ macro_rules! mob_catalog_machine_dsl {
             emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Unwired, edge: edge }
         }
 
+        transition UnwireMembersAlreadyAbsent {
+            on input UnwireMembers { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_already_absent" { self.wiring_edges.contains(edge) == false }
+            update {}
+            to Running
+        }
+
         transition WireExternalPeerRunning {
             on input WireExternalPeer { edge }
             guard { self.lifecycle_phase == Phase::Running }
@@ -1278,6 +1294,14 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
             emit EmitExternalPeerWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
+        }
+
+        transition WireExternalPeerAlreadyWired {
+            on input WireExternalPeer { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_already_wired" { self.external_peer_edges.contains(edge) == true }
+            update {}
+            to Running
         }
 
         transition RecoverExternalPeerWiringRunning {
@@ -1333,6 +1357,14 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
             emit EmitExternalPeerWiringLifecycleNotice { kind: WiringLifecycleKind::Unwired, edge: edge }
+        }
+
+        transition UnwireExternalPeerAlreadyAbsent {
+            on input UnwireExternalPeer { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_already_absent" { self.external_peer_edges.contains(edge) == false }
+            update {}
+            to Running
         }
 
         transition ForceCancelRunning {

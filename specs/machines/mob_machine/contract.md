@@ -674,6 +674,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `WiringGraphChanged`, `EmitWiringLifecycleNotice`
 - To: `Running`
 
+### `WireMembersAlreadyWired`
+- From: `Running`
+- On: `WireMembers`(edge)
+- Guards:
+  - `edge_already_wired`
+- To: `Running`
+
 ### `RecoverRosterWiringRunning`
 - From: `Running`
 - On: `RecoverRosterWiring`(edge)
@@ -710,12 +717,26 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `WiringGraphChanged`, `EmitWiringLifecycleNotice`
 - To: `Running`
 
+### `UnwireMembersAlreadyAbsent`
+- From: `Running`
+- On: `UnwireMembers`(edge)
+- Guards:
+  - `edge_already_absent`
+- To: `Running`
+
 ### `WireExternalPeerRunning`
 - From: `Running`
 - On: `WireExternalPeer`(edge)
 - Guards:
   - `external_peer_not_already_wired`
 - Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
+- To: `Running`
+
+### `WireExternalPeerAlreadyWired`
+- From: `Running`
+- On: `WireExternalPeer`(edge)
+- Guards:
+  - `external_peer_already_wired`
 - To: `Running`
 
 ### `RecoverExternalPeerWiringRunning`
@@ -752,6 +773,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `external_peer_currently_wired`
 - Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
+- To: `Running`
+
+### `UnwireExternalPeerAlreadyAbsent`
+- From: `Running`
+- On: `UnwireExternalPeer`(edge)
+- Guards:
+  - `external_peer_already_absent`
 - To: `Running`
 
 ### `ForceCancelRunning`

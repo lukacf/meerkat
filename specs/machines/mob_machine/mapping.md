@@ -201,6 +201,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `WireMembersRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
+- `WireMembersAlreadyWired`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
 - `RecoverRosterWiringRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
@@ -216,9 +219,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `UnwireMembersRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
+- `UnwireMembersAlreadyAbsent`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
 - `WireExternalPeerRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `WireExternalPeerAlreadyWired`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`
 - `RecoverExternalPeerWiringRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
@@ -234,6 +243,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `UnwireExternalPeerRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `UnwireExternalPeerAlreadyAbsent`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`
 - `ForceCancelRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`

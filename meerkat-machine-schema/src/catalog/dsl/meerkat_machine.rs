@@ -3727,7 +3727,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit IngressAccepted
             emit PostAdmissionSignal { signal: PostAdmissionSignalKind::InterruptYielding }
-            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: "peer admission requested cooperative boundary cancel" }
         }
         // Running + immediate (immediate=true, interrupt_yielding=false)
         transition AcceptWithCompletionRunningImmediate {
@@ -3740,7 +3739,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit IngressAccepted
             emit PostAdmissionSignal { signal: PostAdmissionSignalKind::RequestImmediateProcessing }
-            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: "peer admission requested cooperative boundary cancel" }
         }
 
         // 26. AcceptWithoutWake: Idle/Attached/Running self-loops

@@ -25484,6 +25484,21 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     .await
     .expect("default peer response should succeed");
 
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        service
+            .applied_runtime_context_appends(&sid_requester)
+            .await
+            .len(),
+        requester_context_baseline,
+        "default response to a steer request should wait for the requester boundary, not cancel the active run"
+    );
+
+    service
+        .interrupt(&sid_requester)
+        .await
+        .expect("boundary release should let requester drain steered response");
+
     let requester_delivery = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let appends = service
@@ -25514,7 +25529,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
             .await
             .expect("requester snapshot should exist");
         panic!(
-            "default response to a steer request should interrupt and reach requester; appends={appends:?} snapshot={snapshot:?}"
+            "default response to a steer request should drain after requester boundary; appends={appends:?} snapshot={snapshot:?}"
         );
     }
 

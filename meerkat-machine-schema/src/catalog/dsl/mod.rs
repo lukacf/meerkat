@@ -886,8 +886,6 @@ runtime_internal_inputs!(
         ConsumeInput,
         ConsumeOnAccept,
         DetachIngress,
-        DrainExitedClean,
-        DrainExitedRespawnable,
         EnterExtraction,
         ExtractionFailed,
         ExtractionStart,

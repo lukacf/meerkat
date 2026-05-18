@@ -427,21 +427,13 @@ impl MeerkatMachine {
                 ))
             }
             MeerkatMachineCommand::SessionHasComms { session_id } => {
-                // Wave-c C-H2: pre-collapse, "slot present in sibling
-                // map" was true iff `spawn_comms_drain_if_needed` (or the
-                // test setup helper) had actually inserted a slot for
-                // this session. Post-collapse every registered session
-                // carries a `CommsDrainSlot` in its `drain_slot` field,
-                // initialised `phase = Inactive` with no bound runtime.
-                // Preserve the pre-collapse predicate by checking "drain
-                // has ever been engaged" (phase != Inactive or a comms
-                // runtime is bound), which is the observable meaning
-                // callers depend on.
-                let sessions = self.sessions.read().await;
-                let engaged = sessions.get(&session_id).is_some_and(|entry| {
-                    entry.drain_slot.phase != crate::meerkat_machine::CommsDrainPhase::Inactive
-                        || entry.drain_slot.bound_runtime.is_some()
-                });
+                let engaged = self
+                    .drain_authority_state(&session_id)
+                    .await
+                    .is_some_and(|state| {
+                        state.peer_owner_kind
+                            != crate::meerkat_machine::dsl::PeerIngressOwnerKind::Unattached
+                    });
                 Ok(MeerkatMachineCommandResult::Bool(engaged))
             }
             MeerkatMachineCommand::OpsLifecycleRegistry { session_id } => {

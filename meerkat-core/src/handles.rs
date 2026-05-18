@@ -680,7 +680,8 @@ pub trait TurnStateHandle: Send + Sync {
 /// Comms drain lifecycle DSL handle.
 ///
 /// Covers the `drain_phase`/`drain_mode` DSL substate: ensure/spawn/stop the
-/// comms drain task and observe clean vs respawnable exits.
+/// comms drain task and report typed exit reasons. The machine classifies the
+/// resulting stopped vs respawnable state.
 pub trait CommsDrainHandle: Send + Sync {
     /// Fire the `EnsureDrainRunning` signal — lazy spawn path.
     fn ensure_drain_running(&self) -> Result<(), DslTransitionError>;
@@ -691,10 +692,11 @@ pub trait CommsDrainHandle: Send + Sync {
     /// Fire the `StopDrain` input.
     fn stop_drain(&self) -> Result<(), DslTransitionError>;
 
-    /// Fire the `DrainExitedClean` input (drain stopped without failure).
+    /// Compatibility alias for reporting a non-failed drain exit.
     fn drain_exited_clean(&self) -> Result<(), DslTransitionError>;
 
-    /// Fire the `DrainExitedRespawnable` input (drain exited and can be respawned).
+    /// Compatibility alias for reporting a failed drain exit; generated
+    /// authority decides whether the current mode is respawnable.
     fn drain_exited_respawnable(&self) -> Result<(), DslTransitionError>;
 
     /// Fire the `NotifyDrainExited { reason }` input with a typed reason.

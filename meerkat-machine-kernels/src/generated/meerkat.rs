@@ -6779,10 +6779,6 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StopDrain {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct DrainExitedClean {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct DrainExitedRespawnable {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StageVisibilityFilter {
         pub filter: ToolFilter,
     }
@@ -7153,8 +7149,6 @@ pub enum Input {
     CancelWaitAll(inputs::CancelWaitAll),
     SpawnDrain(inputs::SpawnDrain),
     StopDrain(inputs::StopDrain),
-    DrainExitedClean(inputs::DrainExitedClean),
-    DrainExitedRespawnable(inputs::DrainExitedRespawnable),
     StageVisibilityFilter(inputs::StageVisibilityFilter),
     CommitVisibilityFilter(inputs::CommitVisibilityFilter),
     StageDeferredNames(inputs::StageDeferredNames),
@@ -7356,8 +7350,6 @@ impl Input {
             Self::CancelWaitAll(_) => InputKind::CancelWaitAll,
             Self::SpawnDrain(_) => InputKind::SpawnDrain,
             Self::StopDrain(_) => InputKind::StopDrain,
-            Self::DrainExitedClean(_) => InputKind::DrainExitedClean,
-            Self::DrainExitedRespawnable(_) => InputKind::DrainExitedRespawnable,
             Self::StageVisibilityFilter(_) => InputKind::StageVisibilityFilter,
             Self::CommitVisibilityFilter(_) => InputKind::CommitVisibilityFilter,
             Self::StageDeferredNames(_) => InputKind::StageDeferredNames,
@@ -7550,8 +7542,6 @@ pub enum InputKind {
     CancelWaitAll,
     SpawnDrain,
     StopDrain,
-    DrainExitedClean,
-    DrainExitedRespawnable,
     StageVisibilityFilter,
     CommitVisibilityFilter,
     StageDeferredNames,
@@ -8991,16 +8981,6 @@ pub enum TransitionId {
     StopDrainRunning,
     StopDrainRetired,
     StopDrainStopped,
-    DrainExitedCleanIdle,
-    DrainExitedCleanAttached,
-    DrainExitedCleanRunning,
-    DrainExitedCleanRetired,
-    DrainExitedCleanStopped,
-    DrainExitedRespawnableIdle,
-    DrainExitedRespawnableAttached,
-    DrainExitedRespawnableRunning,
-    DrainExitedRespawnableRetired,
-    DrainExitedRespawnableStopped,
     StageVisibilityFilterIdle,
     StageVisibilityFilterAttached,
     StageVisibilityFilterRunning,

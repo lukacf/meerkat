@@ -712,25 +712,25 @@ impl MeerkatMachine {
         let drain = {
             let sessions = self.sessions.read().await;
             if let Some(entry) = sessions.get(session_id) {
-                let slot = &entry.drain_slot;
-                // Wave-c C-H2 (37cc46a44) collapsed the separate
-                // `comms_drain_slots` map into `RuntimeSessionEntry`, so
-                // the slot is structurally always present once the
-                // session is registered. `slot_present` must keep its
-                // pre-collapse semantics: "has this session been
-                // drain-spawned?" — i.e. true once the slot has moved
-                // past `Inactive` with no bindings. Inactive + no
-                // bindings + no handle means the slot has never run.
-                let activated = slot.phase != crate::meerkat_machine::CommsDrainPhase::Inactive
-                    || slot.mode.is_some()
-                    || slot.handle.is_some()
-                    || slot.bound_runtime.is_some();
+                let authority = entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let state = authority.state();
+                let phase = crate::meerkat_machine::CommsDrainPhase::from(state.drain_phase);
+                let mode = state
+                    .drain_mode
+                    .map(crate::meerkat_machine::CommsDrainMode::from);
+                let handle_present = entry.drain_slot.handle_present();
+                let activated = phase != crate::meerkat_machine::CommsDrainPhase::Inactive
+                    || mode.is_some()
+                    || handle_present;
                 if activated {
                     MeerkatDrainSnapshot {
                         slot_present: true,
-                        phase: Some(slot.phase),
-                        mode: slot.mode,
-                        handle_present: slot.handle.is_some(),
+                        phase: Some(phase),
+                        mode,
+                        handle_present,
                     }
                 } else {
                     MeerkatDrainSnapshot {

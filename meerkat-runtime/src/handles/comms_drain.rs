@@ -60,19 +60,11 @@ impl CommsDrainHandle for RuntimeCommsDrainHandle {
     }
 
     fn drain_exited_clean(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::DrainExitedClean,
-            "CommsDrainHandle::drain_exited_clean",
-        )
+        self.notify_drain_exited(DrainExitReason::Dismissed)
     }
 
     fn drain_exited_respawnable(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::DrainExitedRespawnable,
-            "CommsDrainHandle::drain_exited_respawnable",
-        )
+        self.notify_drain_exited(DrainExitReason::Failed)
     }
 
     fn notify_drain_exited(&self, reason: DrainExitReason) -> Result<(), DslTransitionError> {

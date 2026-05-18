@@ -2314,8 +2314,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             // Comms drain inputs
             SpawnDrain { mode: DrainMode },
             StopDrain,
-            DrainExitedClean,
-            DrainExitedRespawnable,
             // Visibility inputs
             // Dogma round 4, wave 2b #12: `StageVisibilityFilter` no longer
             // accepts a revision parameter — the DSL mints it via
@@ -3825,12 +3823,25 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // 9. NotifyDrainExited: per-phase self-loop, guard session_registered, emit RuntimeNotice
+        // 9. NotifyDrainExited: the runtime reports the observed exit reason;
+        // the machine owns whether that exit leaves the drain respawnable or
+        // stopped. The shell must not classify clean-vs-respawnable from a
+        // local slot table.
         transition NotifyDrainExited {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input NotifyDrainExited { reason }
             guard "session_registered" { self.session_id != None }
-            update {}
+            update {
+                if self.drain_phase == DrainPhase::Running {
+                    if self.drain_mode == Some(DrainMode::PersistentHost)
+                        && reason == DrainExitReason::Failed
+                    {
+                        self.drain_phase = DrainPhase::ExitedRespawnable;
+                    } else {
+                        self.drain_phase = DrainPhase::Stopped;
+                    }
+                }
+            }
             to Idle
             emit RuntimeNotice { kind: RuntimeNoticeKind::Drain, detail: "drain exited" }
         }
@@ -10304,27 +10315,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "drain_is_running" { self.drain_phase == DrainPhase::Running }
             update {
                 self.drain_phase = DrainPhase::Stopped;
-            }
-            to Idle
-        }
-
-        // DrainExitedClean: drain exited cleanly, reset to inactive
-        transition DrainExitedClean {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input DrainExitedClean
-            update {
-                self.drain_phase = DrainPhase::Inactive;
-                self.drain_mode = None;
-            }
-            to Idle
-        }
-
-        // DrainExitedRespawnable: drain exited but can be respawned
-        transition DrainExitedRespawnable {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input DrainExitedRespawnable
-            update {
-                self.drain_phase = DrainPhase::ExitedRespawnable;
             }
             to Idle
         }

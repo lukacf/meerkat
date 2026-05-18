@@ -1876,16 +1876,26 @@ async fn spawn_test_comms_drain(
     let entry = sessions
         .get_mut(&session_id)
         .expect("register_session must have created the entry");
-    let slot = &mut entry.drain_slot;
-    slot.mode = Some(mode);
-    slot.phase = CommsDrainPhase::Starting;
-    slot.handle = Some(crate::comms_drain::spawn_comms_drain(
+    {
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SpawnDrain {
+                mode: crate::meerkat_machine::dsl::DrainMode::from(mode),
+            },
+        )
+        .expect("test drain spawn authority should accept");
+    }
+    let handle = crate::comms_drain::spawn_comms_drain(
         Arc::clone(adapter),
         session_id.clone(),
-        comms_runtime,
+        Arc::clone(&comms_runtime),
         Some(idle_timeout),
-    ));
-    slot.phase = CommsDrainPhase::Running;
+    );
+    entry.drain_slot.install_task(comms_runtime, handle);
 }
 
 async fn current_phase(
@@ -1893,15 +1903,20 @@ async fn current_phase(
     session_id: &SessionId,
 ) -> Option<CommsDrainPhase> {
     let sessions = adapter.sessions.read().await;
-    sessions.get(session_id).map(|entry| entry.drain_slot.phase)
+    sessions.get(session_id).map(|entry| {
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        CommsDrainPhase::from(authority.state().drain_phase)
+    })
 }
 
 async fn handle_present(adapter: &Arc<MeerkatMachine>, session_id: &SessionId) -> bool {
     let sessions = adapter.sessions.read().await;
     sessions
         .get(session_id)
-        .and_then(|entry| entry.drain_slot.handle.as_ref())
-        .is_some()
+        .is_some_and(|entry| entry.drain_slot.handle_present())
 }
 
 async fn wait_for_phase(

@@ -717,8 +717,6 @@ meerkat_machine_runtime_internal_inputs!(
         BindSupervisor,
         ClearLocalEndpoint,
         DetachIngress,
-        DrainExitedClean,
-        DrainExitedRespawnable,
         PublishLocalEndpoint,
         RemoveDirectPeerEndpoint,
         SpawnDrain,
@@ -889,8 +887,6 @@ meerkat_machine_fieldless_runtime_internal_inputs!(
         ForceCancelNoRun,
         CancelWaitAll,
         StopDrain,
-        DrainExitedClean,
-        DrainExitedRespawnable,
         SurfaceShutdown,
         DetachIngress,
         ClearLocalEndpoint,
@@ -1593,7 +1589,10 @@ pub struct MeerkatOpsSnapshot {
     pub operations: Vec<OperationLifecycleSnapshot>,
 }
 
-/// Snapshot of comms-drain lifecycle truth for one session.
+/// Diagnostic comms-drain projection for one session.
+///
+/// `phase` and `mode` are read from generated MeerkatMachine authority; the
+/// handle flag is shell task mechanics only.
 #[derive(Debug, Clone)]
 pub struct MeerkatDrainSnapshot {
     pub slot_present: bool,

@@ -1177,7 +1177,7 @@ mod tests {
 
     // === Classified inbox tests ===
 
-    use crate::classify::IngressClassificationContext;
+    use crate::classify::{IngressClassificationContext, test_support};
     use crate::trust::{TrustedPeer, TrustedPeers};
     use std::sync::atomic::AtomicUsize;
 
@@ -1185,11 +1185,10 @@ mod tests {
         trusted: TrustedPeers,
         require_auth: bool,
     ) -> Arc<IngressClassificationContext> {
-        let machine = AcceptingPeerCommsHandle::new();
         make_classification_context_with_machine(
             trusted,
             require_auth,
-            Some(machine as Arc<dyn meerkat_core::handles::PeerCommsHandle>),
+            Some(test_support::runtime_peer_comms_handle()),
         )
     }
 
@@ -1236,271 +1235,16 @@ mod tests {
         }
     }
 
-    struct AcceptingPeerCommsHandle;
-
-    impl AcceptingPeerCommsHandle {
-        fn new() -> Arc<Self> {
-            Arc::new(Self)
-        }
-
-        fn classify_request_intent(intent: &str) -> meerkat_core::PeerIngressClassification {
-            let auth = if intent == meerkat_core::SUPERVISOR_BRIDGE_INTENT {
-                PeerIngressAuthDecision::Exempt(
-                    meerkat_core::PeerIngressAuthExemption::SupervisorBridge,
-                )
-            } else {
-                PeerIngressAuthDecision::Required
-            };
-            let mut classification =
-                if intent == meerkat_core::comms::PeerLifecycleKind::PeerAdded.as_str() {
-                    meerkat_core::PeerIngressClassification::lifecycle(
-                        meerkat_core::comms::PeerLifecycleKind::PeerAdded,
-                    )
-                } else if intent == meerkat_core::comms::PeerLifecycleKind::PeerRetired.as_str() {
-                    meerkat_core::PeerIngressClassification::lifecycle(
-                        meerkat_core::comms::PeerLifecycleKind::PeerRetired,
-                    )
-                } else if intent == meerkat_core::comms::PeerLifecycleKind::PeerUnwired.as_str() {
-                    meerkat_core::PeerIngressClassification::lifecycle(
-                        meerkat_core::comms::PeerLifecycleKind::PeerUnwired,
-                    )
-                } else {
-                    meerkat_core::PeerIngressClassification::required(
-                        PeerInputClass::ActionableRequest,
-                        PeerIngressKind::Request,
-                    )
-                };
-            classification.auth = auth;
-            classification
-        }
-
-        fn classify_external_facts(
-            facts: meerkat_core::PeerIngressEnvelopeFacts,
-        ) -> meerkat_core::PeerIngressAdmission {
-            match &facts.kind {
-                meerkat_core::PeerIngressEnvelopeKind::Message { body } => {
-                    let classification = meerkat_core::PeerIngressClassification::required(
-                        PeerInputClass::ActionableMessage,
-                        PeerIngressKind::Message,
-                    );
-                    meerkat_core::PeerIngressAdmission {
-                        rendered_text: meerkat_core::format_peer_message_projection(
-                            &facts.from_peer,
-                            body,
-                        ),
-                        classification,
-                        lifecycle_peer: None,
-                        request_id: None,
-                    }
-                }
-                meerkat_core::PeerIngressEnvelopeKind::Request { intent, params } => {
-                    let classification = Self::classify_request_intent(intent);
-                    let lifecycle_peer = classification
-                        .lifecycle_kind
-                        .map(|_| meerkat_core::peer_lifecycle_subject(params, &facts.from_peer));
-                    meerkat_core::PeerIngressAdmission {
-                        rendered_text: meerkat_core::render_peer_ingress_admitted_text(
-                            &facts,
-                            &classification,
-                        ),
-                        classification,
-                        lifecycle_peer,
-                        request_id: Some(facts.item_id.clone()),
-                    }
-                }
-                meerkat_core::PeerIngressEnvelopeKind::Lifecycle { kind, params } => {
-                    let classification = meerkat_core::PeerIngressClassification::lifecycle(*kind);
-                    meerkat_core::PeerIngressAdmission {
-                        rendered_text: String::new(),
-                        classification,
-                        lifecycle_peer: Some(meerkat_core::peer_lifecycle_subject(
-                            params,
-                            &facts.from_peer,
-                        )),
-                        request_id: None,
-                    }
-                }
-                meerkat_core::PeerIngressEnvelopeKind::Response {
-                    in_reply_to,
-                    status,
-                    result,
-                } => {
-                    let terminality = meerkat_core::classify_response_terminality(*status);
-                    let class = match terminality {
-                        TerminalityClass::Progress => PeerInputClass::ResponseProgress,
-                        _ => PeerInputClass::ResponseTerminal,
-                    };
-                    let mut classification = meerkat_core::PeerIngressClassification::required(
-                        class,
-                        PeerIngressKind::Response,
-                    );
-                    classification.response_terminality = Some(terminality);
-                    meerkat_core::PeerIngressAdmission {
-                        rendered_text: meerkat_core::format_peer_response_projection(
-                            &facts.from_peer,
-                            in_reply_to,
-                            *status,
-                            result,
-                        ),
-                        classification,
-                        lifecycle_peer: None,
-                        request_id: Some(in_reply_to.clone()),
-                    }
-                }
-                meerkat_core::PeerIngressEnvelopeKind::Ack { in_reply_to } => {
-                    meerkat_core::PeerIngressAdmission {
-                        rendered_text: meerkat_core::format_peer_ack_projection(
-                            &facts.from_peer,
-                            in_reply_to,
-                        ),
-                        classification: meerkat_core::PeerIngressClassification::required(
-                            PeerInputClass::Ack,
-                            PeerIngressKind::Ack,
-                        ),
-                        lifecycle_peer: None,
-                        request_id: Some(in_reply_to.clone()),
-                    }
-                }
-            }
-        }
-
-        fn classify_plain_facts(
-            facts: meerkat_core::PeerIngressPlainEventFacts,
-        ) -> meerkat_core::PeerIngressAdmission {
-            meerkat_core::PeerIngressAdmission {
-                classification: meerkat_core::PeerIngressClassification::required(
-                    PeerInputClass::PlainEvent,
-                    PeerIngressKind::PlainEvent,
-                ),
-                lifecycle_peer: None,
-                request_id: None,
-                rendered_text: meerkat_core::format_external_event_projection(
-                    &facts.source_name,
-                    Some(&facts.body),
-                ),
-            }
-        }
-
-        fn resolve_receive_facts(
-            facts: meerkat_core::PeerIngressReceiveFacts,
-        ) -> meerkat_core::PeerIngressReceiveAuthority {
-            let (outcome, admission_diagnostic, authority_phase) = if facts.queue_closed {
-                (
-                    meerkat_core::PeerIngressReceiveOutcome::DroppedSessionClosed,
-                    None,
-                    facts.current_phase,
-                )
-            } else if !facts.queue_capacity_available {
-                (
-                    meerkat_core::PeerIngressReceiveOutcome::DroppedInboxFull,
-                    None,
-                    facts.current_phase,
-                )
-            } else if facts.kind == PeerIngressKind::PlainEvent {
-                (
-                    meerkat_core::PeerIngressReceiveOutcome::Admitted,
-                    None,
-                    facts.current_phase,
-                )
-            } else {
-                let admitted = facts.auth_exempt || facts.trusted || !facts.auth_required;
-                let authority_phase = if admitted || facts.queued_work_present {
-                    meerkat_core::PeerIngressAuthorityPhase::Received
-                } else {
-                    meerkat_core::PeerIngressAuthorityPhase::Dropped
-                };
-                let outcome = if admitted {
-                    meerkat_core::PeerIngressReceiveOutcome::Admitted
-                } else {
-                    meerkat_core::PeerIngressReceiveOutcome::DroppedUntrustedSender
-                };
-                (
-                    outcome,
-                    Some(meerkat_core::PeerIngressAdmissionDiagnostic::from_trusted(
-                        facts.trusted,
-                    )),
-                    authority_phase,
-                )
-            };
-            meerkat_core::PeerIngressReceiveAuthority {
-                outcome,
-                admission_diagnostic,
-                authority_phase,
-            }
-        }
-
-        fn resolve_dequeue_facts(
-            current_phase: meerkat_core::PeerIngressAuthorityPhase,
-            facts: meerkat_core::PeerIngressDequeueFacts,
-        ) -> meerkat_core::PeerIngressDequeueAuthority {
-            let authority_phase =
-                if facts.kind == PeerIngressKind::PlainEvent || facts.auth.is_exempt() {
-                    current_phase
-                } else if facts.queued_work_remaining {
-                    meerkat_core::PeerIngressAuthorityPhase::Received
-                } else {
-                    meerkat_core::PeerIngressAuthorityPhase::Delivered
-                };
-            meerkat_core::PeerIngressDequeueAuthority { authority_phase }
-        }
-    }
-
-    impl meerkat_core::handles::PeerCommsHandle for AcceptingPeerCommsHandle {
-        fn classify_external_envelope(
-            &self,
-            facts: meerkat_core::PeerIngressEnvelopeFacts,
-        ) -> Result<meerkat_core::PeerIngressAdmission, meerkat_core::handles::DslTransitionError>
-        {
-            Ok(Self::classify_external_facts(facts))
-        }
-
-        fn classify_plain_event(
-            &self,
-            facts: meerkat_core::PeerIngressPlainEventFacts,
-        ) -> Result<meerkat_core::PeerIngressAdmission, meerkat_core::handles::DslTransitionError>
-        {
-            Ok(Self::classify_plain_facts(facts))
-        }
-
-        fn resolve_peer_ingress_receive(
-            &self,
-            facts: meerkat_core::PeerIngressReceiveFacts,
-        ) -> Result<
-            meerkat_core::PeerIngressReceiveAuthority,
-            meerkat_core::handles::DslTransitionError,
-        > {
-            Ok(Self::resolve_receive_facts(facts))
-        }
-
-        fn resolve_peer_ingress_dequeue(
-            &self,
-            facts: meerkat_core::PeerIngressDequeueFacts,
-        ) -> Result<
-            meerkat_core::PeerIngressDequeueAuthority,
-            meerkat_core::handles::DslTransitionError,
-        > {
-            Ok(Self::resolve_dequeue_facts(
-                meerkat_core::PeerIngressAuthorityPhase::Absent,
-                facts,
-            ))
-        }
-
-        fn set_peer_ingress_context(
-            &self,
-            _keep_alive: bool,
-        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-            Ok(())
-        }
-    }
-
     struct RejectingPeerCommsHandle {
         external_calls: AtomicUsize,
+        delegate: Arc<dyn meerkat_core::handles::PeerCommsHandle>,
     }
 
     impl RejectingPeerCommsHandle {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 external_calls: AtomicUsize::new(0),
+                delegate: test_support::runtime_peer_comms_handle(),
             })
         }
 
@@ -1527,7 +1271,7 @@ mod tests {
             facts: meerkat_core::PeerIngressPlainEventFacts,
         ) -> Result<meerkat_core::PeerIngressAdmission, meerkat_core::handles::DslTransitionError>
         {
-            Ok(AcceptingPeerCommsHandle::classify_plain_facts(facts))
+            self.delegate.classify_plain_event(facts)
         }
 
         fn resolve_peer_ingress_receive(
@@ -1537,7 +1281,7 @@ mod tests {
             meerkat_core::PeerIngressReceiveAuthority,
             meerkat_core::handles::DslTransitionError,
         > {
-            Ok(AcceptingPeerCommsHandle::resolve_receive_facts(facts))
+            self.delegate.resolve_peer_ingress_receive(facts)
         }
 
         fn resolve_peer_ingress_dequeue(
@@ -1547,17 +1291,14 @@ mod tests {
             meerkat_core::PeerIngressDequeueAuthority,
             meerkat_core::handles::DslTransitionError,
         > {
-            Ok(AcceptingPeerCommsHandle::resolve_dequeue_facts(
-                meerkat_core::PeerIngressAuthorityPhase::Absent,
-                facts,
-            ))
+            self.delegate.resolve_peer_ingress_dequeue(facts)
         }
 
         fn set_peer_ingress_context(
             &self,
-            _keep_alive: bool,
+            keep_alive: bool,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-            Ok(())
+            self.delegate.set_peer_ingress_context(keep_alive)
         }
     }
 

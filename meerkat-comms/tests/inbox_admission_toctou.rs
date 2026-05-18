@@ -18,138 +18,28 @@ use meerkat_comms::runtime::comms_runtime::CommsRuntime;
 use meerkat_comms::types::{Envelope, InboxItem, MessageKind};
 use meerkat_comms::{AdmissionOutcome, DropReason};
 use meerkat_core::comms::{PeerAddress, PeerName, PeerTransport, TrustedPeerDescriptor};
-use meerkat_core::{
-    PeerIngressAdmission, PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision,
-    PeerIngressAuthExemption, PeerIngressAuthorityPhase, PeerIngressClassification,
-    PeerIngressDequeueAuthority, PeerIngressDequeueFacts, PeerIngressEnvelopeFacts,
-    PeerIngressEnvelopeKind, PeerIngressKind, PeerIngressPlainEventFacts,
-    PeerIngressReceiveAuthority, PeerIngressReceiveFacts, PeerIngressReceiveOutcome,
-    PeerInputClass, SUPERVISOR_BRIDGE_INTENT,
-};
+use meerkat_core::{PeerIngressAuthDecision, PeerIngressAuthExemption, SUPERVISOR_BRIDGE_INTENT};
 use std::sync::Arc;
 use uuid::Uuid;
 
-struct TestPeerCommsHandle;
-
-impl TestPeerCommsHandle {
-    fn install(runtime: &CommsRuntime) {
-        runtime.install_peer_comms_handle(Arc::new(Self));
-    }
+fn install_test_peer_comms_handle(runtime: &CommsRuntime) {
+    runtime.install_peer_comms_handle(runtime_peer_comms_handle());
 }
 
-impl meerkat_core::handles::PeerCommsHandle for TestPeerCommsHandle {
-    fn classify_external_envelope(
-        &self,
-        facts: PeerIngressEnvelopeFacts,
-    ) -> Result<PeerIngressAdmission, meerkat_core::handles::DslTransitionError> {
-        match &facts.kind {
-            PeerIngressEnvelopeKind::Message { body } => Ok(PeerIngressAdmission {
-                classification: PeerIngressClassification::required(
-                    PeerInputClass::ActionableMessage,
-                    PeerIngressKind::Message,
-                ),
-                lifecycle_peer: None,
-                request_id: None,
-                rendered_text: meerkat_core::format_peer_message_projection(&facts.from_peer, body),
-            }),
-            PeerIngressEnvelopeKind::Request { intent, .. } => {
-                let mut classification = PeerIngressClassification::required(
-                    PeerInputClass::ActionableRequest,
-                    PeerIngressKind::Request,
-                );
-                if intent == SUPERVISOR_BRIDGE_INTENT {
-                    classification.auth =
-                        PeerIngressAuthDecision::Exempt(PeerIngressAuthExemption::SupervisorBridge);
-                }
-                Ok(PeerIngressAdmission {
-                    rendered_text: meerkat_core::render_peer_ingress_admitted_text(
-                        &facts,
-                        &classification,
-                    ),
-                    classification,
-                    lifecycle_peer: None,
-                    request_id: Some(facts.item_id.clone()),
-                })
-            }
-            _ => Err(meerkat_core::handles::DslTransitionError::guard_rejected(
-                "test_peer_comms::classify_external_envelope",
-                "unsupported test ingress shape",
-            )),
-        }
-    }
-
-    fn classify_plain_event(
-        &self,
-        facts: PeerIngressPlainEventFacts,
-    ) -> Result<PeerIngressAdmission, meerkat_core::handles::DslTransitionError> {
-        Ok(PeerIngressAdmission {
-            classification: PeerIngressClassification::required(
-                PeerInputClass::PlainEvent,
-                PeerIngressKind::PlainEvent,
-            ),
-            lifecycle_peer: None,
-            request_id: None,
-            rendered_text: meerkat_core::format_external_event_projection(
-                &facts.source_name,
-                Some(&facts.body),
-            ),
-        })
-    }
-
-    fn resolve_peer_ingress_receive(
-        &self,
-        facts: PeerIngressReceiveFacts,
-    ) -> Result<PeerIngressReceiveAuthority, meerkat_core::handles::DslTransitionError> {
-        let admitted = facts.kind == PeerIngressKind::PlainEvent
-            || facts.auth_exempt
-            || facts.trusted
-            || !facts.auth_required;
-        let outcome = if facts.queue_closed {
-            PeerIngressReceiveOutcome::DroppedSessionClosed
-        } else if !facts.queue_capacity_available {
-            PeerIngressReceiveOutcome::DroppedInboxFull
-        } else if admitted {
-            PeerIngressReceiveOutcome::Admitted
-        } else {
-            PeerIngressReceiveOutcome::DroppedUntrustedSender
-        };
-        let authority_phase = if facts.kind == PeerIngressKind::PlainEvent {
-            facts.current_phase
-        } else if admitted || facts.queued_work_present {
-            PeerIngressAuthorityPhase::Received
-        } else {
-            PeerIngressAuthorityPhase::Dropped
-        };
-        let admission_diagnostic = (facts.kind != PeerIngressKind::PlainEvent)
-            .then(|| PeerIngressAdmissionDiagnostic::from_trusted(facts.trusted));
-        Ok(PeerIngressReceiveAuthority {
-            outcome,
-            admission_diagnostic,
-            authority_phase,
-        })
-    }
-
-    fn resolve_peer_ingress_dequeue(
-        &self,
-        facts: PeerIngressDequeueFacts,
-    ) -> Result<PeerIngressDequeueAuthority, meerkat_core::handles::DslTransitionError> {
-        let authority_phase = if facts.kind == PeerIngressKind::PlainEvent || facts.auth.is_exempt()
-        {
-            PeerIngressAuthorityPhase::Absent
-        } else if facts.queued_work_remaining {
-            PeerIngressAuthorityPhase::Received
-        } else {
-            PeerIngressAuthorityPhase::Delivered
-        };
-        Ok(PeerIngressDequeueAuthority { authority_phase })
-    }
-
-    fn set_peer_ingress_context(
-        &self,
-        _keep_alive: bool,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        Ok(())
-    }
+fn runtime_peer_comms_handle() -> Arc<dyn meerkat_core::handles::PeerCommsHandle> {
+    let state = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineState {
+        lifecycle_phase: meerkat_runtime::meerkat_machine::dsl::MeerkatPhase::Attached,
+        session_id: Some(meerkat_runtime::meerkat_machine::dsl::SessionId(
+            "test-session".to_string(),
+        )),
+        ..Default::default()
+    };
+    let authority = Arc::new(std::sync::Mutex::new(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::from_state(state),
+    ));
+    Arc::new(meerkat_runtime::RuntimePeerCommsHandle::new(Arc::new(
+        meerkat_runtime::HandleDslAuthority::from_shared(authority),
+    )))
 }
 
 fn descriptor_for(name: &str, pubkey: &meerkat_comms::identity::PubKey) -> TrustedPeerDescriptor {
@@ -187,7 +77,7 @@ fn make_signed_envelope(
 async fn trusted_sender_is_admitted_through_classified_path() {
     let receiver_name = format!("recv-{}", Uuid::new_v4().simple());
     let receiver = CommsRuntime::inproc_only(&receiver_name).expect("receiver runtime");
-    TestPeerCommsHandle::install(&receiver);
+    install_test_peer_comms_handle(&receiver);
     let sender = Keypair::generate();
 
     // Register the sender as trusted on the receiver.
@@ -226,7 +116,7 @@ async fn trusted_sender_is_admitted_through_classified_path() {
 async fn revoked_sender_is_rejected_at_admission() {
     let receiver_name = format!("recv-{}", Uuid::new_v4().simple());
     let receiver = CommsRuntime::inproc_only(&receiver_name).expect("receiver runtime");
-    TestPeerCommsHandle::install(&receiver);
+    install_test_peer_comms_handle(&receiver);
     let sender = Keypair::generate();
 
     // Seed trust, then revoke — this is the post-revoke state the
@@ -276,7 +166,7 @@ async fn concurrent_revokes_and_admissions_never_admit_untrusted() {
     let receiver_name = format!("recv-{}", Uuid::new_v4().simple());
     let receiver =
         std::sync::Arc::new(CommsRuntime::inproc_only(&receiver_name).expect("receiver runtime"));
-    TestPeerCommsHandle::install(receiver.as_ref());
+    install_test_peer_comms_handle(receiver.as_ref());
     let sender = std::sync::Arc::new(Keypair::generate());
 
     meerkat_core::agent::CommsRuntime::add_trusted_peer(
@@ -370,7 +260,7 @@ async fn concurrent_revokes_and_admissions_never_admit_untrusted() {
 async fn classify_at_t0_revoke_at_t1_admit_at_t2_sees_revoked_state() {
     let receiver_name = format!("recv-{}", Uuid::new_v4().simple());
     let receiver = CommsRuntime::inproc_only(&receiver_name).expect("receiver runtime");
-    TestPeerCommsHandle::install(&receiver);
+    install_test_peer_comms_handle(&receiver);
     let sender = Keypair::generate();
 
     // Seed trust — classification at T0 will see the sender as trusted.
@@ -415,7 +305,7 @@ async fn classify_at_t0_revoke_at_t1_admit_at_t2_sees_revoked_state() {
 async fn auth_exempt_bridge_request_admits_without_trust_edge() {
     let receiver_name = format!("recv-{}", Uuid::new_v4().simple());
     let receiver = CommsRuntime::inproc_only(&receiver_name).expect("receiver runtime");
-    TestPeerCommsHandle::install(&receiver);
+    install_test_peer_comms_handle(&receiver);
     let sender = Keypair::generate();
     // No trust edge seeded — sender is not trusted.
 

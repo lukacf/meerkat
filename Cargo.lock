@@ -2939,6 +2939,7 @@ dependencies = [
  "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-runtime",
  "meerkat-skills",
  "parking_lot",
  "rand_core 0.6.4",

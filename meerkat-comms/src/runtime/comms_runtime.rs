@@ -2961,8 +2961,7 @@ mod tests {
     }
 
     fn install_test_peer_comms_handle(runtime: &CommsRuntime) {
-        runtime.install_peer_comms_handle(test_support::AcceptingPeerCommsHandle::new()
-            as Arc<dyn meerkat_core::handles::PeerCommsHandle>);
+        runtime.install_peer_comms_handle(test_support::runtime_peer_comms_handle());
     }
 
     fn inproc_only_with_test_peer_authority(name: &str) -> CommsRuntime {

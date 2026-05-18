@@ -36,6 +36,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverRosterMemberRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `RecoverMemberSessionBindingFreshRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `RecoverMemberSessionBindingReplacingRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `RecoverMemberSessionBindingAlreadyCurrentRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
 - `RecoverRosterMemberResetRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`

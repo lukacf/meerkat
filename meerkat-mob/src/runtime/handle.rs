@@ -1572,7 +1572,7 @@ impl MobHandle {
                     .read()
                     .await
                     .entry(&agent_identity)
-                    .map(|entry| {
+                    .and_then(|entry| {
                         let machine_state = self.machine_state_watch_rx.borrow().clone();
                         Self::project_roster_entry_from_machine_state(entry, &machine_state)
                     });
@@ -1887,15 +1887,8 @@ impl MobHandle {
                 let domain_identity =
                     crate::ids::AgentIdentity::from(entry.agent_identity.as_str());
                 let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
-                let machine_bridge_session_id = machine_state
-                    .member_session_bindings
-                    .get(&dsl_identity)
-                    .and_then(|dsl_session_id| SessionId::parse(&dsl_session_id.0).ok());
-                let current_bridge_session_id = entry
-                    .member_ref
-                    .bridge_session_id()
-                    .cloned()
-                    .or(machine_bridge_session_id);
+                let current_bridge_session_id =
+                    Self::machine_bridge_session_id_for_identity(&domain_identity, machine_state);
                 let material = MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
                     member_present: true,
                     machine_lifecycle: machine_state.member_lifecycle_for_identity(&dsl_identity),
@@ -1934,15 +1927,75 @@ impl MobHandle {
             .collect()
     }
 
+    fn machine_bridge_session_id_for_identity(
+        identity: &crate::ids::AgentIdentity,
+        machine_state: &mob_dsl::MobMachineState,
+    ) -> Option<SessionId> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        machine_state
+            .member_session_bindings
+            .get(&dsl_identity)
+            .and_then(|dsl_session_id| SessionId::parse(&dsl_session_id.0).ok())
+    }
+
+    fn machine_runtime_id_and_fence_for_identity(
+        identity: &crate::ids::AgentIdentity,
+        machine_state: &mob_dsl::MobMachineState,
+    ) -> Option<(AgentRuntimeId, FenceToken)> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        let dsl_runtime_id = machine_state.identity_to_runtime.get(&dsl_identity)?;
+        let generation = dsl_runtime_id
+            .0
+            .strip_prefix(&format!("{identity}:"))
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(crate::ids::Generation::new)?;
+        let fence_token = machine_state
+            .runtime_fence_tokens
+            .get(dsl_runtime_id)
+            .map(|token| FenceToken::new(token.0))?;
+        Some((
+            AgentRuntimeId::new(identity.clone(), generation),
+            fence_token,
+        ))
+    }
+
+    fn project_member_ref_session_binding(
+        member_ref: &crate::event::MemberRef,
+        current_bridge_session_id: Option<SessionId>,
+    ) -> Option<crate::event::MemberRef> {
+        match member_ref {
+            crate::event::MemberRef::Session { .. } => {
+                current_bridge_session_id.map(crate::event::MemberRef::from_bridge_session_id)
+            }
+            crate::event::MemberRef::BackendPeer {
+                peer_id,
+                address,
+                pubkey,
+                bootstrap_token,
+                ..
+            } => Some(crate::event::MemberRef::BackendPeer {
+                peer_id: peer_id.clone(),
+                address: address.clone(),
+                pubkey: *pubkey,
+                bootstrap_token: bootstrap_token.clone(),
+                session_id: current_bridge_session_id,
+            }),
+        }
+    }
+
     fn project_roster_entry_from_machine_state(
         mut entry: RosterEntry,
         machine_state: &mob_dsl::MobMachineState,
-    ) -> RosterEntry {
+    ) -> Option<RosterEntry> {
         let machine_lifecycle =
             Self::member_lifecycle_from_machine_state(&entry.agent_identity, machine_state);
         entry.state =
             MobMemberLifecycleProjection::roster_state_for_machine_lifecycle(&machine_lifecycle);
-        entry
+        let current_bridge_session_id =
+            Self::machine_bridge_session_id_for_identity(&entry.agent_identity, machine_state);
+        entry.member_ref =
+            Self::project_member_ref_session_binding(&entry.member_ref, current_bridge_session_id)?;
+        Some(entry)
     }
 
     fn member_lifecycle_from_machine_state(
@@ -1955,15 +2008,14 @@ impl MobHandle {
     }
 
     fn project_roster_from_machine_state(
-        mut roster: Roster,
+        roster: Roster,
         machine_state: &mob_dsl::MobMachineState,
     ) -> Roster {
-        roster.project_member_states(|entry| {
-            let machine_lifecycle =
-                Self::member_lifecycle_from_machine_state(&entry.agent_identity, machine_state);
-            MobMemberLifecycleProjection::roster_state_for_machine_lifecycle(&machine_lifecycle)
-        });
-        roster
+        let entries = roster.list_all().cloned().collect();
+        Roster::from_projected_entries(Self::project_roster_entries_from_machine_state(
+            entries,
+            machine_state,
+        ))
     }
 
     async fn project_roster_snapshot_from_machine_state(&self) -> Roster {
@@ -1984,7 +2036,7 @@ impl MobHandle {
     ) -> Vec<RosterEntry> {
         entries
             .into_iter()
-            .map(|entry| Self::project_roster_entry_from_machine_state(entry, machine_state))
+            .filter_map(|entry| Self::project_roster_entry_from_machine_state(entry, machine_state))
             .collect()
     }
 
@@ -2000,14 +2052,10 @@ impl MobHandle {
             let roster = self.roster.read().await;
             roster.get(&MeerkatId::from(identity)).cloned()
         };
-        let machine_bridge_session_id = machine_state
-            .member_session_bindings
-            .get(&dsl_identity)
-            .and_then(|dsl_session_id| SessionId::parse(&dsl_session_id.0).ok());
-        let current_bridge_session_id = roster_entry
-            .as_ref()
-            .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
-            .or(machine_bridge_session_id);
+        let current_bridge_session_id =
+            Self::machine_bridge_session_id_for_identity(&domain_identity, &machine_state);
+        let machine_runtime =
+            Self::machine_runtime_id_and_fence_for_identity(&domain_identity, &machine_state);
         let (output_preview, tokens_used) =
             match (include_session_details, current_bridge_session_id.as_ref()) {
                 (true, Some(bridge_session_id)) => {
@@ -2029,10 +2077,20 @@ impl MobHandle {
             agent_runtime_id: roster_entry
                 .as_ref()
                 .map(|entry| entry.agent_runtime_id.clone())
+                .or_else(|| {
+                    machine_runtime
+                        .as_ref()
+                        .map(|(agent_runtime_id, _)| agent_runtime_id.clone())
+                })
                 .unwrap_or_else(|| AgentRuntimeId::initial(identity.clone())),
             fence_token: roster_entry
                 .as_ref()
                 .map(|entry| entry.fence_token)
+                .or_else(|| {
+                    machine_runtime
+                        .as_ref()
+                        .map(|(_, fence_token)| *fence_token)
+                })
                 .unwrap_or(FenceToken::new(0)),
             current_bridge_session_id,
             peer_connectivity: None,
@@ -2122,15 +2180,14 @@ impl MobHandle {
     /// canonical session-scoped runtime APIs they don't own themselves —
     /// that delegation is explicitly permitted by
     /// `docs/architecture/meerkat-runtime-dogma.md` principle #3
-    /// ("shell owns mechanics, not meaning"). The resolver reads the
-    /// roster's canonical identity→bridge mapping; no parallel truth is
-    /// introduced. Regression
+    /// ("shell owns mechanics, not meaning"). The resolver reads
+    /// `MobMachineState.member_session_bindings`; the event roster is only
+    /// a compatibility mirror. Regression
     /// `resolve_bridge_session_id_is_lookup_not_mutation` proves this is
-    /// a pure read against the single owner (the mob roster).
+    /// a pure read against the generated authority projection.
     pub async fn resolve_bridge_session_id(&self, identity: &AgentIdentity) -> Option<SessionId> {
-        self.get_member(identity)
-            .await
-            .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        Self::machine_bridge_session_id_for_identity(identity, &machine_state)
     }
 
     /// Acquire a capability-bearing handle for a specific member.

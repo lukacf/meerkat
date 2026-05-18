@@ -2512,6 +2512,13 @@ pub mod signals {
         pub external_addressable: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverMemberSessionBinding {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub bridge_session_id: SessionId,
+        pub replacing: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverRosterMemberReset {
         pub agent_identity: AgentIdentity,
         pub previous_agent_runtime_id: AgentRuntimeId,
@@ -2607,6 +2614,7 @@ pub enum Signal {
     DestroyMob(signals::DestroyMob),
     ObserveRuntimeDestroyed(signals::ObserveRuntimeDestroyed),
     RecoverRosterMember(signals::RecoverRosterMember),
+    RecoverMemberSessionBinding(signals::RecoverMemberSessionBinding),
     RecoverRosterMemberReset(signals::RecoverRosterMemberReset),
     RecoverRosterMemberRetired(signals::RecoverRosterMemberRetired),
     RecoverRosterWiring(signals::RecoverRosterWiring),
@@ -2649,6 +2657,7 @@ impl Signal {
             Self::DestroyMob(_) => SignalKind::DestroyMob,
             Self::ObserveRuntimeDestroyed(_) => SignalKind::ObserveRuntimeDestroyed,
             Self::RecoverRosterMember(_) => SignalKind::RecoverRosterMember,
+            Self::RecoverMemberSessionBinding(_) => SignalKind::RecoverMemberSessionBinding,
             Self::RecoverRosterMemberReset(_) => SignalKind::RecoverRosterMemberReset,
             Self::RecoverRosterMemberRetired(_) => SignalKind::RecoverRosterMemberRetired,
             Self::RecoverRosterWiring(_) => SignalKind::RecoverRosterWiring,
@@ -2692,6 +2701,7 @@ pub enum SignalKind {
     DestroyMob,
     ObserveRuntimeDestroyed,
     RecoverRosterMember,
+    RecoverMemberSessionBinding,
     RecoverRosterMemberReset,
     RecoverRosterMemberRetired,
     RecoverRosterWiring,
@@ -2897,6 +2907,9 @@ pub enum TransitionId {
     EnsureMemberRunningExisting,
     EnsureMemberRunningMissing,
     RecoverRosterMemberRunning,
+    RecoverMemberSessionBindingFreshRunning,
+    RecoverMemberSessionBindingReplacingRunning,
+    RecoverMemberSessionBindingAlreadyCurrentRunning,
     RecoverRosterMemberResetRunning,
     RecoverRosterMemberRetiredRunning,
     RecoverRosterMemberRetiredAlreadyAbsent,

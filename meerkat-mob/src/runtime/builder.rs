@@ -77,6 +77,33 @@ fn apply_seeded_mob_signal(
     Ok(())
 }
 
+fn apply_seeded_member_session_binding(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    agent_identity: &crate::ids::AgentIdentity,
+    agent_runtime_id: &crate::ids::AgentRuntimeId,
+    bridge_session_id: &meerkat_core::types::SessionId,
+    context: &'static str,
+) -> Result<(), MobError> {
+    use crate::machines::mob_machine as mob_dsl;
+
+    let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+    let replacing = authority
+        .state()
+        .member_session_bindings
+        .get(&dsl_identity)
+        .cloned();
+    apply_seeded_mob_signal(
+        authority,
+        mob_dsl::MobMachineSignal::RecoverMemberSessionBinding {
+            agent_identity: dsl_identity,
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
+            bridge_session_id: mob_dsl::SessionId::from_domain(bridge_session_id),
+            replacing,
+        },
+        context,
+    )
+}
+
 fn finish_seeded_mob_authority_phase(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     target_phase: MobState,
@@ -222,6 +249,19 @@ fn seed_mob_authority_sync_from_events(
                     },
                     "recover_member_spawned",
                 )?;
+                if let Some(bridge_session_id) = member_spawned
+                    .bridge_member_ref
+                    .as_ref()
+                    .and_then(crate::event::MemberRef::bridge_session_id)
+                {
+                    apply_seeded_member_session_binding(
+                        authority,
+                        &member_spawned.agent_identity,
+                        &member_spawned.agent_runtime_id,
+                        bridge_session_id,
+                        "recover_member_session_binding",
+                    )?;
+                }
             }
             MobEventKind::MemberReset {
                 agent_identity,
@@ -1104,6 +1144,7 @@ impl MobBuilder {
                 notify_orchestrator_on_resume,
                 default_llm_client.clone(),
                 &tool_bundles,
+                wiring.dsl_authority.as_mut(),
                 &preview_handle,
                 &default_external_tools_provider,
                 storage.realm_profiles.clone(),
@@ -1229,6 +1270,7 @@ impl MobBuilder {
         notify_orchestrator_on_resume: bool,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
+        dsl_authority: &mut crate::machines::mob_machine::MobMachineAuthority,
         tool_handle: &MobHandle,
         default_external_tools_provider: &Option<crate::ExternalToolsProvider>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
@@ -1256,13 +1298,16 @@ impl MobBuilder {
         }
 
         let roster_entries = roster.list().cloned().collect::<Vec<_>>();
-        let roster_session_ids = roster_entries
-            .iter()
-            .filter_map(|entry| entry.bridge_session_id().cloned())
+        let machine_session_ids = dsl_authority
+            .state()
+            .member_session_bindings
+            .values()
+            .filter_map(|session_id| meerkat_core::types::SessionId::parse(&session_id.0).ok())
             .collect::<std::collections::HashSet<_>>();
 
-        // Archive orphan sessions that are active but not present in the event-projected roster.
-        for session_id in active_ids.difference(&roster_session_ids) {
+        // Archive orphan sessions that are active but not present in
+        // MobMachine's recovered identity→session binding authority.
+        for session_id in active_ids.difference(&machine_session_ids) {
             if session_service
                 .session_belongs_to_mob(session_id, &definition.id)
                 .await
@@ -1276,7 +1321,14 @@ impl MobBuilder {
         }
         // Recreate missing sessions referenced by MemberSpawned events.
         for entry in &roster_entries {
-            let Some(bridge_session_id) = entry.bridge_session_id().cloned() else {
+            let dsl_identity =
+                crate::machines::mob_machine::AgentIdentity::from_domain(&entry.agent_identity);
+            let Some(bridge_session_id) = dsl_authority
+                .state()
+                .member_session_bindings
+                .get(&dsl_identity)
+                .and_then(|session_id| meerkat_core::types::SessionId::parse(&session_id.0).ok())
+            else {
                 continue;
             };
             if active_ids.contains(&bridge_session_id) {
@@ -1362,6 +1414,19 @@ impl MobBuilder {
                 match session_service.create_session(req).await {
                     Ok(created) => {
                         let created_bridge_session_id = created.session_id;
+                        if let Err(error) = apply_seeded_member_session_binding(
+                            dsl_authority,
+                            &entry.agent_identity,
+                            &entry.agent_runtime_id,
+                            &created_bridge_session_id,
+                            "resume_recovered_member_session_binding",
+                        ) {
+                            record_restore_failure(format!(
+                                "MobMachine rejected recovered bridge session '{created_bridge_session_id}': {error}"
+                            ))
+                            .await;
+                            continue;
+                        }
                         let _ = roster.set_bridge_session_id(
                             &entry.agent_identity,
                             created_bridge_session_id.clone(),
@@ -1423,6 +1488,13 @@ impl MobBuilder {
             let req = build::to_create_session_request(&config, prompt.into());
             let created = session_service.create_session(req).await?;
             let created_bridge_session_id = created.session_id;
+            apply_seeded_member_session_binding(
+                dsl_authority,
+                &entry.agent_identity,
+                &entry.agent_runtime_id,
+                &created_bridge_session_id,
+                "resume_fresh_member_session_binding",
+            )?;
             let _ = roster
                 .set_bridge_session_id(&entry.agent_identity, created_bridge_session_id.clone());
             tool_handle
@@ -1644,11 +1716,19 @@ impl MobBuilder {
                 .map(|entry| entry.wired_to.len())
                 .sum::<usize>()
                 / 2;
-            let bridge_session_id = orchestrator_entry.bridge_session_id().ok_or_else(|| {
-                MobError::Internal(
-                    "orchestrator entry missing session-backed member ref".to_string(),
-                )
-            })?;
+            let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(
+                &orchestrator_entry.agent_identity,
+            );
+            let bridge_session_id = dsl_authority
+                .state()
+                .member_session_bindings
+                .get(&dsl_identity)
+                .and_then(|session_id| meerkat_core::types::SessionId::parse(&session_id.0).ok())
+                .ok_or_else(|| {
+                    MobError::Internal(
+                        "orchestrator entry missing MobMachine session binding".to_string(),
+                    )
+                })?;
             let resume_message = format!(
                 "Mob '{}' resumed with {} active meerkats and {} wiring links. Reconcile worker state and continue orchestration.",
                 definition.id, active_count, wired_edges
@@ -1656,7 +1736,7 @@ impl MobBuilder {
             match orchestrator_entry.runtime_mode {
                 crate::MobRuntimeMode::AutonomousHost => {
                     let injector = session_service
-                        .interaction_event_injector(bridge_session_id)
+                        .interaction_event_injector(&bridge_session_id)
                         .await
                         .ok_or_else(|| MobError::MissingMemberCapability {
                             member_id: orchestrator_entry.agent_identity.clone(),

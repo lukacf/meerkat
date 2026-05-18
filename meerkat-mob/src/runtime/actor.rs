@@ -1705,29 +1705,52 @@ impl MobActor {
         }
     }
 
+    fn machine_bridge_session_id_for_identity(
+        &self,
+        agent_identity: &crate::ids::AgentIdentity,
+    ) -> Option<SessionId> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        self.dsl_authority
+            .state()
+            .member_session_bindings
+            .get(&dsl_identity)
+            .and_then(|session_id| SessionId::parse(&session_id.0).ok())
+    }
+
     async fn machine_member_material(
         &self,
         agent_identity: &MeerkatId,
         include_session_details: bool,
     ) -> CanonicalMemberSnapshotMaterial {
-        let (roster_entry, current_bridge_session_id) = {
+        let roster_entry = {
             let roster = self.roster.read().await;
-            match roster.get(agent_identity) {
-                Some(entry) => (
-                    Some(entry.clone()),
-                    entry.member_ref.bridge_session_id().cloned(),
-                ),
-                None => (None, None),
-            }
+            roster.get(agent_identity).cloned()
         };
         let domain_identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
         let machine_projection = self.machine_projection_for_identity(&domain_identity);
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
-        let machine_bridge_session_id = machine_projection
-            .bound_session_id
+        let current_bridge_session_id =
+            self.machine_bridge_session_id_for_identity(&domain_identity);
+        let machine_runtime = machine_projection
+            .runtime_id
             .as_ref()
-            .and_then(|dsl_session_id| SessionId::parse(&dsl_session_id.0).ok());
-        let current_bridge_session_id = current_bridge_session_id.or(machine_bridge_session_id);
+            .and_then(|runtime_id| {
+                let generation = runtime_id
+                    .0
+                    .strip_prefix(&format!("{domain_identity}:"))
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(crate::ids::Generation::new)?;
+                let fence_token = self
+                    .dsl_authority
+                    .state()
+                    .runtime_fence_tokens
+                    .get(runtime_id)
+                    .map(|token| crate::ids::FenceToken::new(token.0))?;
+                Some((
+                    crate::ids::AgentRuntimeId::new(domain_identity.clone(), generation),
+                    fence_token,
+                ))
+            });
         let member_present = roster_entry.is_some();
         let machine_lifecycle = self
             .dsl_authority
@@ -1757,6 +1780,11 @@ impl MobActor {
             agent_runtime_id: roster_entry
                 .as_ref()
                 .map(|entry| entry.agent_runtime_id.clone())
+                .or_else(|| {
+                    machine_runtime
+                        .as_ref()
+                        .map(|(agent_runtime_id, _)| agent_runtime_id.clone())
+                })
                 .unwrap_or_else(|| {
                     crate::ids::AgentRuntimeId::initial(crate::ids::AgentIdentity::from(
                         agent_identity.as_str(),
@@ -1765,6 +1793,11 @@ impl MobActor {
             fence_token: roster_entry
                 .as_ref()
                 .map(|entry| entry.fence_token)
+                .or_else(|| {
+                    machine_runtime
+                        .as_ref()
+                        .map(|(_, fence_token)| *fence_token)
+                })
                 .unwrap_or(crate::ids::FenceToken::new(0)),
             current_bridge_session_id,
             peer_connectivity: None,
@@ -2932,16 +2965,16 @@ impl MobActor {
         Ok(())
     }
 
-    async fn teardown_session_runtime_bindings_from_roster(&self) {
+    async fn teardown_session_runtime_bindings_from_machine(&self) {
         #[cfg(feature = "runtime-adapter")]
         if let Some(adapter) = &self.runtime_adapter {
-            let session_ids = {
-                let roster = self.roster.read().await;
-                roster
-                    .list()
-                    .filter_map(|entry| entry.member_ref.bridge_session_id().cloned())
-                    .collect::<Vec<_>>()
-            };
+            let session_ids = self
+                .dsl_authority
+                .state()
+                .member_session_bindings
+                .values()
+                .filter_map(|session_id| SessionId::parse(&session_id.0).ok())
+                .collect::<Vec<_>>();
             for session_id in session_ids {
                 adapter.abort_comms_drain(&session_id).await;
                 adapter.unregister_session(&session_id).await;
@@ -3773,7 +3806,9 @@ impl MobActor {
                             .await
                             .entry(&agent_identity)
                             .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
-                        let session_id = match entry.member_ref.bridge_session_id().cloned() {
+                        let domain_identity = AgentIdentity::from(agent_identity.as_str());
+                        let session_id =
+                            match self.machine_bridge_session_id_for_identity(&domain_identity) {
                             Some(session_id) => session_id,
                             None => {
                                 return Err(MobError::UnsupportedForMode {
@@ -3802,8 +3837,9 @@ impl MobActor {
                         let mut streams = Vec::with_capacity(entries.len());
                         let mut unsupported_mode: Option<crate::MobRuntimeMode> = None;
                         for entry in entries {
-                            let Some(session_id) = entry.member_ref.bridge_session_id().cloned()
-                            else {
+                            let Some(session_id) = self.machine_bridge_session_id_for_identity(
+                                &AgentIdentity::from(entry.agent_identity.as_str()),
+                            ) else {
                                 // Peer-only members cannot supply an agent event stream;
                                 // skip silently and record the mode so callers who ended
                                 // up with zero streams learn why.
@@ -3963,7 +3999,7 @@ impl MobActor {
                             result = Err(error);
                         }
                     }
-                    self.teardown_session_runtime_bindings_from_roster().await;
+                    self.teardown_session_runtime_bindings_from_machine().await;
                     // Cancel remaining lifecycle notification tasks.
                     // abort_all is non-blocking; join_next drains the abort results.
                     self.lifecycle_tasks.abort_all();
@@ -7603,9 +7639,6 @@ impl MobActor {
         entry: &RosterEntry,
         releasing: Option<&mob_dsl::SessionId>,
     ) -> Result<Option<SessionId>, MobError> {
-        if let Some(session_id) = entry.member_ref.bridge_session_id().cloned() {
-            return Ok(Some(session_id));
-        }
         releasing
             .map(|session_id| {
                 if session_id.0.is_empty() {
@@ -7740,10 +7773,11 @@ impl MobActor {
         // The DSL guards reject Retire when the runtime_id is absent from
         // `live_runtime_ids` or the phase forbids it.
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let domain_identity = AgentIdentity::from(agent_identity.as_str());
         let detach_session_id = if preserve_realtime_binding {
             None
         } else {
-            entry.member_ref.bridge_session_id().cloned()
+            self.machine_bridge_session_id_for_identity(&domain_identity)
         };
         let releasing = if preserve_realtime_binding {
             None

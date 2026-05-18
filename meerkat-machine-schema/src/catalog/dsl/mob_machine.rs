@@ -410,6 +410,7 @@ macro_rules! mob_catalog_machine_dsl {
             DestroyMob { session_id: SessionId },
             ObserveRuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             RecoverRosterMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, external_addressable: bool },
+            RecoverMemberSessionBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, replacing: Option<SessionId> },
             RecoverRosterMemberReset { agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             RecoverRosterMemberRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
             RecoverRosterWiring { edge: WiringEdge },
@@ -648,6 +649,50 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_restore_failures.remove(agent_identity);
                 self.topology_epoch += 1;
             }
+            to Running
+        }
+
+        transition RecoverMemberSessionBindingFreshRunning {
+            on signal RecoverMemberSessionBinding { agent_identity, agent_runtime_id, bridge_session_id, replacing }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "replacing_absent" { replacing == None }
+            update {
+                self.member_session_bindings.insert(agent_identity, bridge_session_id);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: None, new_session_id: Some(bridge_session_id) }
+        }
+
+        transition RecoverMemberSessionBindingReplacingRunning {
+            on signal RecoverMemberSessionBinding { agent_identity, agent_runtime_id, bridge_session_id, replacing }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "replacing_present" { replacing != None }
+            guard "replacing_matches_current" { self.member_session_bindings.get_cloned(agent_identity) == Some(replacing.get("value")) }
+            guard "replacement_changes_binding" { bridge_session_id != replacing.get("value") }
+            update {
+                self.member_session_bindings.insert(agent_identity, bridge_session_id);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(replacing.get("value")), new_session_id: Some(bridge_session_id) }
+        }
+
+        transition RecoverMemberSessionBindingAlreadyCurrentRunning {
+            on signal RecoverMemberSessionBinding { agent_identity, agent_runtime_id, bridge_session_id, replacing }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "binding_already_current" { self.member_session_bindings.get_cloned(agent_identity) == Some(bridge_session_id) }
+            guard "replacing_absent_or_current" { replacing == None || replacing == Some(bridge_session_id) }
+            update {}
             to Running
         }
 

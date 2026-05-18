@@ -185,6 +185,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DestroyMob`(session_id: SessionId)
 - `ObserveRuntimeDestroyed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `RecoverRosterMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, external_addressable: Bool)
+- `RecoverMemberSessionBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, replacing: Option<SessionId>)
 - `RecoverRosterMemberReset`(agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `RecoverRosterMemberRetired`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 - `RecoverRosterWiring`(edge: WiringEdge)
@@ -289,6 +290,41 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `identity_not_recovered`
   - `runtime_not_recovered`
+- To: `Running`
+
+### `RecoverMemberSessionBindingFreshRunning`
+- From: `Running`
+- On: `RecoverMemberSessionBinding`(agent_identity, agent_runtime_id, bridge_session_id, replacing)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_recovered`
+  - `no_prior_session_binding`
+  - `replacing_absent`
+- Emits: `MemberSessionBindingChanged`
+- To: `Running`
+
+### `RecoverMemberSessionBindingReplacingRunning`
+- From: `Running`
+- On: `RecoverMemberSessionBinding`(agent_identity, agent_runtime_id, bridge_session_id, replacing)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_recovered`
+  - `prior_session_binding_present`
+  - `replacing_present`
+  - `replacing_matches_current`
+  - `replacement_changes_binding`
+- Emits: `MemberSessionBindingChanged`
+- To: `Running`
+
+### `RecoverMemberSessionBindingAlreadyCurrentRunning`
+- From: `Running`
+- On: `RecoverMemberSessionBinding`(agent_identity, agent_runtime_id, bridge_session_id, replacing)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_recovered`
+  - `prior_session_binding_present`
+  - `binding_already_current`
+  - `replacing_absent_or_current`
 - To: `Running`
 
 ### `RecoverRosterMemberResetRunning`

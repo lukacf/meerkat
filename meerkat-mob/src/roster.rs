@@ -312,6 +312,23 @@ impl Roster {
             .is_none()
     }
 
+    /// Build a read projection from already-materialized entries.
+    pub(crate) fn from_projected_entries(entries: impl IntoIterator<Item = RosterEntry>) -> Self {
+        let mut projected = Self {
+            entries: entries
+                .into_iter()
+                .map(|entry| (entry.agent_identity.clone(), entry))
+                .collect(),
+        };
+        let identities = projected.entries.keys().cloned().collect::<BTreeSet<_>>();
+        for entry in projected.entries.values_mut() {
+            entry
+                .wired_to
+                .retain(|identity| identities.contains(identity));
+        }
+        projected
+    }
+
     /// Remove a member by AgentIdentity.
     pub fn remove_by_identity(&mut self, identity: &AgentIdentity) {
         if self.entries.remove(identity).is_some() {

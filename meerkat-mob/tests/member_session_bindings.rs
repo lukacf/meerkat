@@ -31,7 +31,7 @@
 
 use meerkat_mob::machines::mob_machine::{
     AgentIdentity, AgentRuntimeId, FenceToken, Generation, MobId, MobMachineAuthority,
-    MobMachineEffect, MobMachineInput, MobMachineMutator, SessionId,
+    MobMachineEffect, MobMachineInput, MobMachineMutator, MobMachineSignal, SessionId,
 };
 
 fn identity(name: &str) -> AgentIdentity {
@@ -78,6 +78,29 @@ fn retire_input(
     }
 }
 
+fn recover_roster_member_signal(identity_name: &str, generation: u64) -> MobMachineSignal {
+    MobMachineSignal::RecoverRosterMember {
+        agent_identity: identity(identity_name),
+        agent_runtime_id: runtime_id(identity_name, generation),
+        fence_token: FenceToken(generation),
+        external_addressable: false,
+    }
+}
+
+fn recover_member_session_binding_signal(
+    identity_name: &str,
+    generation: u64,
+    bridge_sid: &str,
+    replacing: Option<SessionId>,
+) -> MobMachineSignal {
+    MobMachineSignal::RecoverMemberSessionBinding {
+        agent_identity: identity(identity_name),
+        agent_runtime_id: runtime_id(identity_name, generation),
+        bridge_session_id: session_id(bridge_sid),
+        replacing,
+    }
+}
+
 /// Pull the `MemberSessionBindingChanged` effect, matching on the
 /// four-tuple of `(epoch, agent_identity, old, new)`.
 fn find_binding_changed(
@@ -97,6 +120,93 @@ fn find_binding_changed(
         )),
         _ => None,
     })
+}
+
+#[test]
+fn recovery_member_session_binding_is_generated_authority_owned() {
+    let mut authority = MobMachineAuthority::new();
+
+    let rejected = authority.apply_signal(recover_member_session_binding_signal(
+        "alpha",
+        1,
+        "bridge-a-gen1",
+        None,
+    ));
+    assert!(
+        rejected.is_err(),
+        "recovery binding must fail until the member identity/runtime has been recovered",
+    );
+
+    authority
+        .apply_signal(recover_roster_member_signal("alpha", 1))
+        .expect("roster member recovery must be accepted");
+    let transition = authority
+        .apply_signal(recover_member_session_binding_signal(
+            "alpha",
+            1,
+            "bridge-a-gen1",
+            None,
+        ))
+        .expect("fresh recovered binding must be accepted");
+    assert_eq!(
+        find_binding_changed(&transition),
+        Some((
+            authority.state().topology_epoch,
+            identity("alpha"),
+            None,
+            Some(session_id("bridge-a-gen1")),
+        )),
+    );
+
+    let idempotent = authority
+        .apply_signal(recover_member_session_binding_signal(
+            "alpha",
+            1,
+            "bridge-a-gen1",
+            Some(session_id("bridge-a-gen1")),
+        ))
+        .expect("same recovered binding must be idempotent");
+    assert!(
+        find_binding_changed(&idempotent).is_none(),
+        "idempotent recovered binding must not emit a topology change",
+    );
+
+    let rotated = authority
+        .apply_signal(recover_member_session_binding_signal(
+            "alpha",
+            1,
+            "bridge-a-gen2",
+            Some(session_id("bridge-a-gen1")),
+        ))
+        .expect("recovered replacement must be accepted when replacing matches machine state");
+    assert_eq!(
+        find_binding_changed(&rotated),
+        Some((
+            authority.state().topology_epoch,
+            identity("alpha"),
+            Some(session_id("bridge-a-gen1")),
+            Some(session_id("bridge-a-gen2")),
+        )),
+    );
+
+    let wrong_replacing = authority.apply_signal(recover_member_session_binding_signal(
+        "alpha",
+        1,
+        "bridge-a-gen3",
+        Some(session_id("bridge-a-gen1")),
+    ));
+    assert!(
+        wrong_replacing.is_err(),
+        "recovered replacement must be rejected when replacing does not match machine state",
+    );
+    assert_eq!(
+        authority
+            .state()
+            .member_session_bindings
+            .get(&identity("alpha")),
+        Some(&session_id("bridge-a-gen2")),
+        "rejected recovery replacement must not mutate the binding map",
+    );
 }
 
 #[test]

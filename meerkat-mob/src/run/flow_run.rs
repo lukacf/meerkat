@@ -219,7 +219,6 @@ pub(crate) mod inputs {
         pub step_id: StepId,
         pub frame_id: FrameId,
         pub node_id: FlowNodeId,
-        pub append_failure_ledger: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelStep {
@@ -864,12 +863,7 @@ pub(crate) fn transition<C: Context>(
             })
         }
         Input::ProjectFrameStepStatus(payload) => {
-            let _ = (
-                &payload.step_id,
-                &payload.frame_id,
-                &payload.node_id,
-                payload.append_failure_ledger,
-            );
+            let _ = (&payload.step_id, &payload.frame_id, &payload.node_id);
             Err(guard(
                 TransitionId::ProjectFrameStepStatus,
                 GuardId::StepStatus,

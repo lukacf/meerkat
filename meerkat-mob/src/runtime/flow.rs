@@ -50,7 +50,7 @@ pub struct FlowEngine {
 pub struct FrameStepProjectionEffects {
     pub step_status: StepRunStatus,
     pub persist_output: bool,
-    pub append_failure_ledger: bool,
+    pub failure_ledger_effect: bool,
     pub escalate_supervisor: bool,
     pub authority: MobRunProvenanceAuthority,
 }
@@ -65,32 +65,19 @@ struct FrameStepProjectionOutcome {
 pub struct FrameStepProjectionRequest {
     pub frame_id: FrameId,
     pub node_id: FlowNodeId,
-    pub append_failure_ledger: bool,
 }
 
 impl FrameStepProjectionRequest {
     pub fn completed(frame_id: FrameId, node_id: FlowNodeId) -> Self {
-        Self {
-            frame_id,
-            node_id,
-            append_failure_ledger: false,
-        }
+        Self { frame_id, node_id }
     }
 
     pub fn skipped(frame_id: FrameId, node_id: FlowNodeId) -> Self {
-        Self {
-            frame_id,
-            node_id,
-            append_failure_ledger: false,
-        }
+        Self { frame_id, node_id }
     }
 
-    pub fn failed(frame_id: FrameId, node_id: FlowNodeId, append_failure_ledger: bool) -> Self {
-        Self {
-            frame_id,
-            node_id,
-            append_failure_ledger,
-        }
+    pub fn failed(frame_id: FrameId, node_id: FlowNodeId) -> Self {
+        Self { frame_id, node_id }
     }
 }
 
@@ -215,18 +202,16 @@ impl FlowEngine {
                                 }
                                 let failure = frame_outcome.step_failures.get(step_id);
                                 let request = match (&step_status, failure) {
-                                    (StepRunStatus::Failed, Some(failure)) => {
+                                    (StepRunStatus::Failed, Some(_)) => {
                                         FrameStepProjectionRequest::failed(
                                             projection_record.frame_id.clone(),
                                             projection_record.node_id.clone(),
-                                            failure.append_failure_ledger,
                                         )
                                     }
                                     (StepRunStatus::Failed, None) => {
                                         FrameStepProjectionRequest::failed(
                                             projection_record.frame_id.clone(),
                                             projection_record.node_id.clone(),
-                                            true,
                                         )
                                     }
                                     (StepRunStatus::Skipped, _) => {
@@ -393,7 +378,6 @@ impl FlowEngine {
             Err(error) => {
                 return Ok(StepGuardOutcome::Failed {
                     reason: format!("template render failed for step '{step_id}': {error}"),
-                    failure_ledger_recorded: false,
                 });
             }
         };
@@ -451,7 +435,6 @@ impl FlowEngine {
             };
             return Ok(StepGuardOutcome::Failed {
                 reason: error.to_string(),
-                failure_ledger_recorded: false,
             });
         }
 
@@ -530,10 +513,7 @@ impl FlowEngine {
                         validate_schema_ref(schema_ref, step_id, &aggregate).await
                 {
                     let reason = schema_err.to_string();
-                    return Ok(StepGuardOutcome::Failed {
-                        reason,
-                        failure_ledger_recorded: false,
-                    });
+                    return Ok(StepGuardOutcome::Failed { reason });
                 }
 
                 self.emitter
@@ -543,7 +523,6 @@ impl FlowEngine {
             }
             Err(failure) => Ok(StepGuardOutcome::Failed {
                 reason: failure.reason,
-                failure_ledger_recorded: failure.failure_ledger_recorded,
             }),
         }
     }
@@ -573,7 +552,6 @@ impl FlowEngine {
             Err(error) => {
                 return Ok(StepGuardOutcome::Failed {
                     reason: format!("template render failed for step '{step_id}': {error}"),
-                    failure_ledger_recorded: false,
                 });
             }
         };
@@ -649,13 +627,7 @@ impl FlowEngine {
                     .collect::<Vec<_>>()
                     .join("; ")
             };
-            return Ok(StepGuardOutcome::Failed {
-                reason: combined,
-                failure_ledger_recorded: !failures.is_empty()
-                    && failures
-                        .iter()
-                        .all(|failure| failure.failure_ledger_recorded),
-            });
+            return Ok(StepGuardOutcome::Failed { reason: combined });
         }
 
         // Aggregate output using the step's dispatch/collection policy.
@@ -666,10 +638,7 @@ impl FlowEngine {
             && let Err(schema_err) = validate_schema_ref(schema_ref, step_id, &aggregate).await
         {
             let reason = schema_err.to_string();
-            return Ok(StepGuardOutcome::Failed {
-                reason,
-                failure_ledger_recorded: false,
-            });
+            return Ok(StepGuardOutcome::Failed { reason });
         }
 
         self.emitter
@@ -975,7 +944,7 @@ impl FlowEngine {
             }
             StepRunStatus::Failed => {
                 let reason = reason.unwrap_or_else(|| "frame step failed".into());
-                if effects.append_failure_ledger {
+                if effects.failure_ledger_effect {
                     self.run_store
                         .append_failure_entry_with_authority(
                             run_id,
@@ -1034,66 +1003,6 @@ impl FlowEngine {
                 .await?;
         }
         Ok(())
-    }
-
-    async fn apply_failure_projection(
-        &self,
-        effects: Option<Vec<flow_run::Effect>>,
-        run_id: &RunId,
-        step_id: &StepId,
-        reason: String,
-        append_failure_ledger: bool,
-    ) -> Result<bool, MobError> {
-        let Some(effects) = effects else {
-            return Ok(false);
-        };
-        if let Some(step_notice) = find_step_notice_effect(&effects, step_id)? {
-            let authority = flow_run_effects_provenance_authority(run_id, &effects, step_id)?;
-            self.run_store
-                .append_step_entry_with_authority(
-                    run_id,
-                    StepLedgerEntry {
-                        step_id: step_notice.step_id.clone(),
-                        agent_identity: AgentIdentity::from(flow_system_member_id().as_str()),
-                        status: step_notice.status,
-                        output: None,
-                        timestamp: Utc::now(),
-                    },
-                    authority.clone(),
-                )
-                .await?;
-            self.emitter
-                .step_failed(run_id.clone(), step_id.clone(), reason.clone())
-                .await?;
-        }
-        if append_failure_ledger
-            && has_effect(
-                &effects,
-                FlowRunEffectKind::AppendFailureLedger,
-                Some(step_id),
-                None,
-            )
-        {
-            self.run_store
-                .append_failure_entry_with_authority(
-                    run_id,
-                    FailureLedgerEntry {
-                        step_id: step_id.clone(),
-                        reason,
-                        error_report: None,
-                        error: None,
-                        timestamp: Utc::now(),
-                    },
-                    flow_run_effects_provenance_authority(run_id, &effects, step_id)?,
-                )
-                .await?;
-        }
-        Ok(has_effect(
-            &effects,
-            FlowRunEffectKind::EscalateSupervisor,
-            Some(step_id),
-            None,
-        ))
     }
 
     async fn is_run_running(&self, run_id: &RunId) -> Result<bool, MobError> {
@@ -1155,6 +1064,7 @@ impl FlowEngine {
         run_id: &RunId,
         machine_state: mob_dsl::MobMachineState,
         authority: MobMachineFlowAuthorityToken,
+        machine_effects: Vec<mob_dsl::MobMachineEffect>,
         context: &'static str,
     ) -> Result<Option<Vec<flow_run::Effect>>, MobError> {
         let command = MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {});
@@ -1170,6 +1080,7 @@ impl FlowEngine {
                 run_id,
                 command.clone(),
                 authority,
+                &machine_effects,
             )?;
             let transitioned = self
                 .run_store
@@ -1200,6 +1111,7 @@ impl FlowEngine {
         command: MobMachineFlowRunCommand,
         machine_state: mob_dsl::MobMachineState,
         authority: MobMachineFlowAuthorityToken,
+        machine_effects: Vec<mob_dsl::MobMachineEffect>,
         context: &'static str,
     ) -> Result<Vec<flow_run::Effect>, MobError> {
         let authority_input = command.authority_input(run_id);
@@ -1211,6 +1123,7 @@ impl FlowEngine {
                 run_id,
                 command.clone(),
                 authority,
+                &machine_effects,
             )?;
             let transitioned = self
                 .run_store
@@ -1253,20 +1166,6 @@ impl FlowEngine {
         self.cas_flow_input_with_effects(
             run_id,
             MobMachineFlowRunCommand::SkipStep(flow_run::inputs::SkipStep {
-                step_id: step_id.clone(),
-            }),
-        )
-        .await
-    }
-
-    async fn fail_step_effects(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-    ) -> Result<Option<Vec<flow_run::Effect>>, MobError> {
-        self.cas_flow_input_with_effects(
-            run_id,
-            MobMachineFlowRunCommand::FailStep(flow_run::inputs::FailStep {
                 step_id: step_id.clone(),
             }),
         )
@@ -1377,11 +1276,7 @@ impl FlowEngine {
         step_id: &StepId,
         request: FrameStepProjectionRequest,
     ) -> Result<FrameStepProjectionOutcome, MobError> {
-        let FrameStepProjectionRequest {
-            frame_id,
-            node_id,
-            append_failure_ledger: requested_failure_ledger_append,
-        } = request;
+        let FrameStepProjectionRequest { frame_id, node_id } = request;
         let machine_state = self.handle.query_machine_state().await?;
         let step_status = frame_step_projection_status_from_machine(
             &machine_state,
@@ -1413,7 +1308,6 @@ impl FlowEngine {
                 step_id: step_id.clone(),
                 frame_id,
                 node_id,
-                append_failure_ledger: requested_failure_ledger_append,
             },
         );
         let authority_input = command.authority_input(run_id);
@@ -1440,7 +1334,7 @@ impl FlowEngine {
             effects: Some(FrameStepProjectionEffects {
                 step_status: projected_status.clone(),
                 persist_output: matches!(projected_status, StepRunStatus::Completed),
-                append_failure_ledger: has_effect(
+                failure_ledger_effect: has_effect(
                     &effects,
                     FlowRunEffectKind::AppendFailureLedger,
                     Some(step_id),
@@ -1572,6 +1466,7 @@ impl FlowEngine {
             input,
             machine_state,
             authority,
+            Vec::new(),
         )
         .await
     }
@@ -1619,6 +1514,7 @@ impl FlowEngine {
         input: MobMachineFlowRunCommand,
         machine_state: mob_dsl::MobMachineState,
         authority: MobMachineFlowAuthorityToken,
+        machine_effects: Vec<mob_dsl::MobMachineEffect>,
     ) -> Result<TerminalizationOutcome, MobError> {
         let next_status = target.status();
         let authority_input = input.authority_input(&run_id);
@@ -1641,6 +1537,7 @@ impl FlowEngine {
                 &run_id,
                 input.clone(),
                 authority,
+                &machine_effects,
             )?
             .next_state;
             let transitioned = self
@@ -1717,34 +1614,18 @@ fn legacy_flat_steps_as_root_frame(steps: &IndexMap<StepId, FlowStepSpec>) -> Fr
 /// Outcome of canonical step execution via `execute_step_with_all_guards`.
 pub(crate) enum StepGuardOutcome {
     Completed(Value),
-    Skipped {
-        reason: String,
-    },
-    Failed {
-        reason: String,
-        failure_ledger_recorded: bool,
-    },
+    Skipped { reason: String },
+    Failed { reason: String },
 }
 
 #[derive(Debug)]
 struct StepTargetFailure {
     reason: String,
-    failure_ledger_recorded: bool,
 }
 
 impl StepTargetFailure {
-    fn recorded(reason: String) -> Self {
-        Self {
-            reason,
-            failure_ledger_recorded: true,
-        }
-    }
-
     fn unrecorded(reason: String) -> Self {
-        Self {
-            reason,
-            failure_ledger_recorded: false,
-        }
+        Self { reason }
     }
 }
 
@@ -2377,15 +2258,9 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
                 let _ = (frame_id, node_id, reason);
                 Ok(super::flow_frame_engine::FrameStepResult::Skipped)
             }
-            StepGuardOutcome::Failed {
-                reason,
-                failure_ledger_recorded,
-            } => {
+            StepGuardOutcome::Failed { reason } => {
                 let _ = (frame_id, node_id);
-                Ok(super::flow_frame_engine::FrameStepResult::Failed {
-                    reason,
-                    failure_ledger_recorded,
-                })
+                Ok(super::flow_frame_engine::FrameStepResult::Failed { reason })
             }
         }
     }

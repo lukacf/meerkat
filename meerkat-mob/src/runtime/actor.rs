@@ -11176,11 +11176,18 @@ impl MobActor {
         let authority_input = command.authority_input(run_id);
         let prepared = self.prepare_dsl_input(authority_input.clone(), context)?;
         let machine_state = prepared.authority.state.clone();
+        let machine_effects = prepared.effects.clone();
         let authority =
             MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&authority_input)?;
         let effects = if matches!(command, MobMachineFlowRunCommand::StartRun(_)) {
             self.flow_engine
-                .start_run_state_with_machine_state(run_id, machine_state, authority, context)
+                .start_run_state_with_machine_state(
+                    run_id,
+                    machine_state,
+                    authority,
+                    machine_effects,
+                    context,
+                )
                 .await?
         } else {
             Some(
@@ -11190,6 +11197,7 @@ impl MobActor {
                         command,
                         machine_state,
                         authority,
+                        machine_effects,
                         context,
                     )
                     .await?,
@@ -11583,6 +11591,7 @@ impl MobActor {
         let authority_input = command.authority_input(&run_id);
         let prepared = self.prepare_dsl_input(authority_input.clone(), context)?;
         let machine_state = prepared.authority.state.clone();
+        let machine_effects = prepared.effects.clone();
         let authority =
             MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&authority_input)?;
         let outcome = self
@@ -11594,6 +11603,7 @@ impl MobActor {
                 command,
                 machine_state,
                 authority,
+                machine_effects,
             )
             .await;
         match outcome {

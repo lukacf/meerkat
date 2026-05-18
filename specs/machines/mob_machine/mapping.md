@@ -438,6 +438,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeFlowRunReducerCommandProjectFrameStepStatus`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
+- `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 - `AuthorizeFlowRunReducerCommandCancelStep`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`

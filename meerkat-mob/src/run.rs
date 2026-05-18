@@ -430,7 +430,6 @@ impl MobMachineFlowRunCommand {
                 .loop_instance_id()
                 .map(|loop_id| mob_dsl::LoopInstanceId::from(loop_id.as_str())),
             retry_key: self.retry_key().map(str::to_owned),
-            append_failure_ledger: self.append_failure_ledger(),
         }
     }
 
@@ -550,13 +549,6 @@ impl MobMachineFlowRunCommand {
     fn retry_key(&self) -> Option<&str> {
         match self {
             Self::RecordTargetFailure(payload) => Some(payload.retry_key.as_str()),
-            _ => None,
-        }
-    }
-
-    fn append_failure_ledger(&self) -> Option<bool> {
-        match self {
-            Self::ProjectFrameStepStatus(payload) => Some(payload.append_failure_ledger),
             _ => None,
         }
     }
@@ -983,8 +975,6 @@ pub enum FlowAuthorityInputRecord {
         node_id: Option<mob_dsl::FlowNodeId>,
         loop_instance_id: Option<mob_dsl::LoopInstanceId>,
         retry_key: Option<String>,
-        #[serde(default)]
-        append_failure_ledger: Option<bool>,
     },
     CreateFrameSeed(FlowFrameSeedAuthorityRecord),
     AuthorizeFlowFrameReducerCommand {
@@ -1099,7 +1089,6 @@ impl FlowAuthorityInputRecord {
                 node_id,
                 loop_instance_id,
                 retry_key,
-                append_failure_ledger,
             } => Self::AuthorizeFlowRunReducerCommand {
                 run_id,
                 command: command.into(),
@@ -1111,7 +1100,6 @@ impl FlowAuthorityInputRecord {
                 node_id,
                 loop_instance_id,
                 retry_key,
-                append_failure_ledger,
             },
             mob_dsl::MobMachineInput::CreateFrameSeed {
                 run_id,
@@ -1350,7 +1338,6 @@ impl FlowAuthorityInputRecord {
                 node_id,
                 loop_instance_id,
                 retry_key,
-                append_failure_ledger,
             } => mob_dsl::MobMachineInput::AuthorizeFlowRunReducerCommand {
                 run_id,
                 command: command.into(),
@@ -1362,7 +1349,6 @@ impl FlowAuthorityInputRecord {
                 node_id,
                 loop_instance_id,
                 retry_key,
-                append_failure_ledger,
             },
             Self::CreateFrameSeed(record) => mob_dsl::MobMachineInput::CreateFrameSeed {
                 run_id: record.run_id,
@@ -1453,6 +1439,7 @@ pub(crate) fn apply_mob_machine_flow_run_command(
     run_id: &RunId,
     command: MobMachineFlowRunCommand,
     authority: MobMachineFlowAuthorityToken,
+    machine_effects: &[mob_dsl::MobMachineEffect],
 ) -> Result<flow_run::Outcome, MobError> {
     authority.require(MobMachineFlowAuthorityKind::FlowRun(command.kind()))?;
     match command {
@@ -1539,6 +1526,7 @@ pub(crate) fn apply_mob_machine_flow_run_command(
             machine_state,
             run_id,
             &payload.step_id,
+            machine_effects,
         ),
         MobMachineFlowRunCommand::SkipStep(payload) => project_flow_run_step_status_from_machine(
             state,
@@ -1556,7 +1544,7 @@ pub(crate) fn apply_mob_machine_flow_run_command(
                 &payload.step_id,
                 &payload.frame_id,
                 &payload.node_id,
-                payload.append_failure_ledger,
+                machine_effects,
             )
         }
         MobMachineFlowRunCommand::CancelStep(payload) => project_flow_run_step_status_from_machine(
@@ -2328,6 +2316,7 @@ fn project_flow_run_failed_step_from_machine(
     machine_state: &mob_dsl::MobMachineState,
     run_id: &RunId,
     step_id: &StepId,
+    machine_effects: &[mob_dsl::MobMachineEffect],
 ) -> Result<flow_run::Outcome, MobError> {
     let mut outcome = project_flow_run_step_status_from_machine(
         state,
@@ -2339,11 +2328,7 @@ fn project_flow_run_failed_step_from_machine(
     )?;
     let run_key = mob_dsl::RunId::from(run_id.to_string());
     project_flow_run_counters_from_machine(&mut outcome.next_state, machine_state, &run_key)?;
-    outcome.effects.push(flow_run::Effect::AppendFailureLedger(
-        flow_run::effects::AppendFailureLedger {
-            step_id: step_id.clone(),
-        },
-    ));
+    append_generated_flow_run_effects(&mut outcome.effects, machine_effects, step_id);
     Ok(outcome)
 }
 
@@ -2354,7 +2339,7 @@ fn project_flow_run_frame_step_status_from_machine(
     step_id: &StepId,
     frame_id: &FrameId,
     node_id: &FlowNodeId,
-    append_failure_ledger: bool,
+    machine_effects: &[mob_dsl::MobMachineEffect],
 ) -> Result<flow_run::Outcome, MobError> {
     let expected_status =
         machine_projected_frame_step_status(machine_state, run_id, step_id, frame_id, node_id)?;
@@ -2374,13 +2359,7 @@ fn project_flow_run_frame_step_status_from_machine(
                 machine_state,
                 &run_key,
             )?;
-            if append_failure_ledger {
-                outcome.effects.push(flow_run::Effect::AppendFailureLedger(
-                    flow_run::effects::AppendFailureLedger {
-                        step_id: step_id.clone(),
-                    },
-                ));
-            }
+            append_generated_flow_run_effects(&mut outcome.effects, machine_effects, step_id);
             if outcome.next_state.escalation_threshold > 0
                 && outcome.next_state.consecutive_failure_count
                     >= outcome.next_state.escalation_threshold
@@ -2403,6 +2382,22 @@ fn project_flow_run_frame_step_status_from_machine(
         _ => {}
     }
     Ok(outcome)
+}
+
+fn append_generated_flow_run_effects(
+    effects: &mut Vec<flow_run::Effect>,
+    machine_effects: &[mob_dsl::MobMachineEffect],
+    step_id: &StepId,
+) {
+    for effect in machine_effects {
+        if matches!(effect, mob_dsl::MobMachineEffect::AppendFailureLedger) {
+            effects.push(flow_run::Effect::AppendFailureLedger(
+                flow_run::effects::AppendFailureLedger {
+                    step_id: step_id.clone(),
+                },
+            ));
+        }
+    }
 }
 
 fn machine_projected_frame_step_status(
@@ -4148,9 +4143,10 @@ impl MobRun {
         command: MobMachineFlowRunCommand,
     ) -> Result<mob_dsl::MobMachineInput, MobError> {
         let input = command.authority_input(&self.run_id);
-        mob_dsl::MobMachineMutator::apply(authority, input.clone()).map_err(|error| {
-            MobError::Internal(format!("test flow run authority input rejected: {error}"))
-        })?;
+        let transition =
+            mob_dsl::MobMachineMutator::apply(authority, input.clone()).map_err(|error| {
+                MobError::Internal(format!("test flow run authority input rejected: {error}"))
+            })?;
         let authority_token =
             MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&input)?;
         let outcome = apply_mob_machine_flow_run_command(
@@ -4159,6 +4155,7 @@ impl MobRun {
             &self.run_id,
             command,
             authority_token,
+            &transition.effects,
         )?;
         self.flow_state = outcome.next_state;
         Ok(input)
@@ -4845,10 +4842,7 @@ impl MobRunProvenanceAuthority {
         run.validate_flow_authority_projection_core()?;
         let record = self.validate_present(run)?;
         let FlowAuthorityInputRecord::AuthorizeFlowRunReducerCommand {
-            command,
-            step_id,
-            append_failure_ledger,
-            ..
+            command, step_id, ..
         } = record
         else {
             unreachable!("validate_present returned a flow-run reducer authority record")
@@ -4871,8 +4865,7 @@ impl MobRunProvenanceAuthority {
         let can_append_failure = match command {
             FlowRunReducerCommandRecord::FailStep => true,
             FlowRunReducerCommandRecord::ProjectFrameStepStatus => {
-                append_failure_ledger == Some(true)
-                    && run.step_status_snapshot()?.get(&step_id) == Some(&StepRunStatus::Failed)
+                run.step_status_snapshot()?.get(&step_id) == Some(&StepRunStatus::Failed)
             }
             _ => false,
         };
@@ -5079,6 +5072,7 @@ mod tests {
             &run_id,
             MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {}),
             frame_token,
+            &[],
         )
         .expect_err("flow_run reducer must reject frame authority");
         assert!(
@@ -5104,7 +5098,6 @@ mod tests {
             node_id: None,
             loop_instance_id: None,
             retry_key: None,
-            append_failure_ledger: None,
         };
         let run_token =
             MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&run_authority_input)
@@ -5115,6 +5108,7 @@ mod tests {
             &run_id,
             MobMachineFlowRunCommand::CompleteStep(flow_run::inputs::CompleteStep { step_id }),
             run_token,
+            &[],
         )
         .expect_err("machine-owned reducer authority must still require accepted projection state");
         assert!(

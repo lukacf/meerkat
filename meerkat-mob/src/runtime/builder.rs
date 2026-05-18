@@ -521,7 +521,6 @@ async fn commit_recovered_flow_run_command(
                     ))
                 },
             )?;
-        let _ = transition;
         let token =
             MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&authority_input)?;
         let outcome = apply_mob_machine_flow_run_command(
@@ -530,6 +529,7 @@ async fn commit_recovered_flow_run_command(
             run_id,
             command.clone(),
             token,
+            &transition.effects,
         )?;
 
         let won = if let Some(next_status) = &next_status {

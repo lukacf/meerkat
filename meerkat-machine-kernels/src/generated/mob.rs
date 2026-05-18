@@ -3022,6 +3022,7 @@ pub enum TransitionId {
     AuthorizeFlowRunReducerCommandFailStep,
     AuthorizeFlowRunReducerCommandSkipStep,
     AuthorizeFlowRunReducerCommandProjectFrameStepStatus,
+    AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailed,
     AuthorizeFlowRunReducerCommandCancelStep,
     AuthorizeFlowRunReducerCommandRegisterTargets,
     AuthorizeFlowRunReducerCommandRecordTargetSuccess,

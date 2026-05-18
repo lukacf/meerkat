@@ -1306,8 +1306,28 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `frame_node_tracked`
   - `frame_node_maps_to_step`
   - `run_step_not_already_terminal_projected`
-  - `frame_node_completed_skipped_or_failed`
+  - `frame_node_completed_or_skipped`
 - Emits: `EmitRunLifecycleNotice`
+- To: `Running`
+
+### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailed`
+- From: `Running`, `Stopped`, `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `project_frame_step_status_command`
+  - `has_step_id`
+  - `has_run_step_key`
+  - `has_frame_id`
+  - `has_node_id`
+  - `step_tracked`
+  - `frame_belongs_to_run`
+  - `frame_node_tracked`
+  - `frame_node_maps_to_step`
+  - `run_step_not_already_terminal_projected`
+  - `frame_node_failed`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandCancelStep`

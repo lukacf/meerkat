@@ -42,10 +42,7 @@ pub enum FrameStepResult {
     Skipped,
     /// Step failed for a step-local reason; the frame should fail this node
     /// but continue admitting unrelated siblings.
-    Failed {
-        reason: String,
-        failure_ledger_recorded: bool,
-    },
+    Failed { reason: String },
 }
 
 /// Canonical outcome of executing a frame subtree.
@@ -67,7 +64,6 @@ pub struct FrameStepProjection {
 #[derive(Debug, Clone)]
 pub struct FrameStepFailureProjection {
     pub reason: String,
-    pub append_failure_ledger: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1308,17 +1304,9 @@ impl FlowFrameEngine {
                             .skip_node(run_id, &frame_id, &node_id)
                             .await?;
                     }
-                    Ok(FrameStepResult::Failed {
-                        reason,
-                        failure_ledger_recorded,
-                    }) => {
-                        step_failures.insert(
-                            step_id.clone(),
-                            FrameStepFailureProjection {
-                                reason,
-                                append_failure_ledger: !failure_ledger_recorded,
-                            },
-                        );
+                    Ok(FrameStepResult::Failed { reason }) => {
+                        step_failures
+                            .insert(step_id.clone(), FrameStepFailureProjection { reason });
                         self.frame_kernel
                             .fail_node(run_id, &frame_id, &node_id)
                             .await?;
@@ -2470,7 +2458,7 @@ fn run_transition_outcome(
     command: MobMachineFlowRunCommand,
     authority: MobMachineFlowAuthorityToken,
 ) -> Result<flow_run::Outcome, MobError> {
-    apply_mob_machine_flow_run_command(state, machine_state, run_id, command, authority)
+    apply_mob_machine_flow_run_command(state, machine_state, run_id, command, authority, &[])
 }
 
 fn run_transition_state(

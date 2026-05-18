@@ -2501,28 +2501,6 @@ impl From<crate::identifiers::InputKind> for RecoveredInputKind {
     }
 }
 
-/// Typed mirror of the recovered policy apply mode used only as an admission
-/// witness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum RecoveredPolicyApplyMode {
-    #[default]
-    StageRunStart,
-    StageRunBoundary,
-    InjectNow,
-    Ignore,
-}
-
-impl From<crate::policy::ApplyMode> for RecoveredPolicyApplyMode {
-    fn from(mode: crate::policy::ApplyMode) -> Self {
-        match mode {
-            crate::policy::ApplyMode::StageRunStart => Self::StageRunStart,
-            crate::policy::ApplyMode::StageRunBoundary => Self::StageRunBoundary,
-            crate::policy::ApplyMode::InjectNow => Self::InjectNow,
-            crate::policy::ApplyMode::Ignore => Self::Ignore,
-        }
-    }
-}
-
 /// Typed mirror of recovered routing disposition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RecoveredRoutingDisposition {

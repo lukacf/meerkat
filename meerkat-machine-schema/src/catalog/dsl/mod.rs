@@ -696,10 +696,6 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Retain", "Discard"],
             ),
             NamedTypeBinding::string_enum(
-                "RecoveredPolicyApplyMode",
-                &["StageRunStart", "StageRunBoundary", "InjectNow", "Ignore"],
-            ),
-            NamedTypeBinding::string_enum(
                 "RecoveredRoutingDisposition",
                 &["Queue", "Steer", "Immediate", "Drop"],
             ),

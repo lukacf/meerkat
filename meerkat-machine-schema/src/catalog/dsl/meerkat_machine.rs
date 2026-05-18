@@ -1256,18 +1256,6 @@ pub enum RecoveredInputRecoveryDisposition {
     Discard,
 }
 
-/// Typed mirror of the recovered policy apply mode used only as an admission
-/// witness. The machine validates this against the persisted runtime boundary
-/// stamp before any recovered admission facts are re-materialized.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum RecoveredPolicyApplyMode {
-    #[default]
-    StageRunStart,
-    StageRunBoundary,
-    InjectNow,
-    Ignore,
-}
-
 /// Typed mirror of recovered routing disposition. The machine validates this
 /// against the recovered lane witness so queue/steer truth is not rebuilt by
 /// recovery glue.
@@ -2213,7 +2201,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             RecoverAdmittedInput {
                 input_id: String,
                 input_kind: Enum<RecoveredInputKind>,
-                policy_apply_mode: Enum<RecoveredPolicyApplyMode>,
                 policy_routing_disposition: Enum<RecoveredRoutingDisposition>,
                 runtime_boundary: Enum<RecoveredRunApplyBoundary>,
                 runtime_execution_kind: Enum<RecoveredRuntimeExecutionKind>,
@@ -9036,28 +9023,18 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         // RecoverAdmittedInput: accept or reject the recovered admission
         // witness before shell recovery may re-materialize admission metadata.
-        // This is the coherence check for persisted input kind, policy, lane,
-        // and runtime semantics stamps.
+        // This is the coherence check for persisted input kind, lane, and
+        // runtime semantics stamps.
         transition RecoverAdmittedInput {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RecoverAdmittedInput {
                 input_id,
                 input_kind,
-                policy_apply_mode,
                 policy_routing_disposition,
                 runtime_boundary,
                 runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent,
                 lane
-            }
-            guard "recovered_boundary_matches_policy" {
-                (policy_apply_mode == RecoveredPolicyApplyMode::StageRunBoundary
-                    && runtime_boundary == RecoveredRunApplyBoundary::RunCheckpoint)
-                || (policy_apply_mode == RecoveredPolicyApplyMode::InjectNow
-                    && runtime_boundary == RecoveredRunApplyBoundary::Immediate)
-                || ((policy_apply_mode == RecoveredPolicyApplyMode::StageRunStart
-                    || policy_apply_mode == RecoveredPolicyApplyMode::Ignore)
-                    && runtime_boundary == RecoveredRunApplyBoundary::RunStart)
             }
             guard "recovered_execution_kind_matches_input" {
                 (input_kind == RecoveredInputKind::Continuation

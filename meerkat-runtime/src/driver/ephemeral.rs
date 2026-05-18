@@ -815,7 +815,6 @@ impl EphemeralRuntimeDriver {
             mm_dsl::MeerkatMachineInput::RecoverAdmittedInput {
                 input_id: Self::dsl_key(work_id),
                 input_kind: mm_dsl::RecoveredInputKind::from(input_kind),
-                policy_apply_mode: mm_dsl::RecoveredPolicyApplyMode::from(policy.apply_mode),
                 policy_routing_disposition: mm_dsl::RecoveredRoutingDisposition::from(
                     policy.routing_disposition,
                 ),

@@ -1,10 +1,8 @@
-use super::flow_system_step_id;
 use crate::error::MobError;
 use crate::event::{MobEventKind, NewMobEvent};
 use crate::ids::{FlowId, MobId, RunId};
-use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus};
+use crate::run::{MobRun, MobRunStatus};
 use crate::store::{MobEventStore, MobRunStore};
-use chrono::Utc;
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
@@ -160,11 +158,7 @@ impl FlowTerminalizationAuthority {
             MobRunStatus::Failed => {
                 let reason = match requested {
                     TerminalizationTarget::Failed { reason } => reason,
-                    _ => run
-                        .failure_ledger
-                        .last()
-                        .map(|entry| entry.reason.clone())
-                        .unwrap_or_else(|| "run already failed".to_string()),
+                    _ => "run already failed".to_string(),
                 };
                 TerminalizationTarget::Failed { reason }
             }
@@ -205,37 +199,11 @@ impl FlowTerminalizationAuthority {
     ) -> Result<TerminalizationOutcome, MobError> {
         let reason =
             format!("terminal run status persisted but {event_name} append failed: {append_error}");
-        if let Err(failure_ledger_error) = self
-            .run_store
-            .append_failure_entry(
-                run_id,
-                FailureLedgerEntry {
-                    step_id: flow_system_step_id(),
-                    reason: reason.clone(),
-                    error_report: None,
-                    error: None,
-                    timestamp: Utc::now(),
-                },
-            )
-            .await
-        {
-            tracing::error!(
-                run_id = %run_id,
-                event_name,
-                append_error = %append_error,
-                ledger_error = %failure_ledger_error,
-                "terminal event append divergence could not be recorded in failure ledger"
-            );
-            return Err(MobError::Internal(format!(
-                "terminal run status persisted but {event_name} append failed and failure ledger append also failed: {failure_ledger_error}"
-            )));
-        }
-
         tracing::error!(
             run_id = %run_id,
             event_name,
             append_error = %append_error,
-            "terminal event append divergence recorded in failure ledger"
+            "terminal event append divergence surfaced without mutating run provenance"
         );
         Err(MobError::Internal(reason))
     }
@@ -246,7 +214,7 @@ mod tests {
     use super::{FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget};
     use crate::event::{MobEvent, MobEventKind, NewMobEvent};
     use crate::ids::{FlowId, LoopId, MobId, RunId, StepId};
-    use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus, StepLedgerEntry};
+    use crate::run::{MobRun, MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry};
     use crate::store::{
         InMemoryMobRunStore, MobEventStore, MobRunStore, MobStoreError, terminal_event_identity,
     };
@@ -297,37 +265,37 @@ mod tests {
             self.inner.list_runs(mob_id, flow_id).await
         }
 
-        async fn append_step_entry(
+        async fn append_step_entry_with_authority(
             &self,
             run_id: &RunId,
             entry: StepLedgerEntry,
+            authority: MobRunProvenanceAuthority,
         ) -> Result<(), MobStoreError> {
-            self.inner.append_step_entry(run_id, entry).await
+            self.inner
+                .append_step_entry_with_authority(run_id, entry, authority)
+                .await
         }
 
-        async fn append_step_entry_if_absent(
+        async fn append_step_entry_if_absent_with_authority(
             &self,
             run_id: &RunId,
             entry: StepLedgerEntry,
+            authority: MobRunProvenanceAuthority,
         ) -> Result<bool, MobStoreError> {
-            self.inner.append_step_entry_if_absent(run_id, entry).await
+            self.inner
+                .append_step_entry_if_absent_with_authority(run_id, entry, authority)
+                .await
         }
 
-        async fn put_step_output(
+        async fn append_failure_entry_with_authority(
             &self,
             run_id: &RunId,
-            step_id: &StepId,
-            output: serde_json::Value,
+            entry: crate::run::FailureLedgerEntry,
+            authority: MobRunProvenanceAuthority,
         ) -> Result<(), MobStoreError> {
-            self.inner.put_step_output(run_id, step_id, output).await
-        }
-
-        async fn append_failure_entry(
-            &self,
-            run_id: &RunId,
-            entry: FailureLedgerEntry,
-        ) -> Result<(), MobStoreError> {
-            self.inner.append_failure_entry(run_id, entry).await
+            self.inner
+                .append_failure_entry_with_authority(run_id, entry, authority)
+                .await
         }
 
         async fn cas_flow_state_with_authority(
@@ -1038,7 +1006,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_terminalization_records_coherence_failure_ledger_on_append_error() {
+    async fn test_terminalization_surfaces_append_error_without_provenance_mutation() {
         let run_store = Arc::new(InMemoryMobRunStore::new());
         let events = Arc::new(FaultInjectedEventStore::default());
         events.fail_appends_for("FlowFailed").await;
@@ -1075,11 +1043,8 @@ mod tests {
             .expect("run exists");
         assert_eq!(run.status, MobRunStatus::Failed);
         assert!(
-            run.failure_ledger.iter().any(|entry| {
-                entry.step_id == crate::runtime::flow_system_step_id()
-                    && entry.reason.contains("FlowFailed append failed")
-            }),
-            "failed terminal append should always be mirrored into failure ledger"
+            run.failure_ledger.is_empty(),
+            "failed terminal append must not invent run provenance outside machine authority"
         );
     }
 }

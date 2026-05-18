@@ -7,7 +7,9 @@ use crate::definition::{
 use crate::event::MobEvent;
 use crate::profile::{Profile, ProfileBinding, ToolConfig};
 use crate::run::MobRunStatus;
-use crate::run::{FailureLedgerEntry, MobRun, StepLedgerEntry, StepRunStatus};
+use crate::run::{
+    FailureLedgerEntry, MobRun, MobRunProvenanceAuthority, StepLedgerEntry, StepRunStatus,
+};
 use crate::storage::MobStorage;
 use crate::store::{
     ExternalBindingOverlayRecord, ExternalBindingOverlayStatus, InMemoryMobEventStore,
@@ -2093,37 +2095,37 @@ impl MobRunStore for RecordingRunStore {
         self.inner.list_runs(mob_id, flow_id).await
     }
 
-    async fn append_step_entry(
+    async fn append_step_entry_with_authority(
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<(), MobStoreError> {
-        self.inner.append_step_entry(run_id, entry).await
+        self.inner
+            .append_step_entry_with_authority(run_id, entry, authority)
+            .await
     }
 
-    async fn append_step_entry_if_absent(
+    async fn append_step_entry_if_absent_with_authority(
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<bool, MobStoreError> {
-        self.inner.append_step_entry_if_absent(run_id, entry).await
+        self.inner
+            .append_step_entry_if_absent_with_authority(run_id, entry, authority)
+            .await
     }
 
-    async fn put_step_output(
-        &self,
-        run_id: &RunId,
-        step_id: &crate::StepId,
-        output: serde_json::Value,
-    ) -> Result<(), MobStoreError> {
-        self.inner.put_step_output(run_id, step_id, output).await
-    }
-
-    async fn append_failure_entry(
+    async fn append_failure_entry_with_authority(
         &self,
         run_id: &RunId,
         entry: FailureLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<(), MobStoreError> {
-        self.inner.append_failure_entry(run_id, entry).await
+        self.inner
+            .append_failure_entry_with_authority(run_id, entry, authority)
+            .await
     }
 
     async fn cas_flow_state_with_authority(
@@ -21645,7 +21647,8 @@ async fn test_cancel_fallback_uses_direct_pending_to_terminal_cas_attempts() {
 }
 
 #[tokio::test]
-async fn test_concurrent_fail_and_cancel_resolve_single_terminal_state_with_event_or_ledger() {
+async fn test_concurrent_fail_and_cancel_resolve_single_terminal_state_without_raw_ledger_fallback()
+{
     let events = Arc::new(FaultInjectedMobEventStore::new());
     events.fail_appends_for("FlowFailed").await;
     events.fail_appends_for("FlowCanceled").await;
@@ -21706,11 +21709,11 @@ async fn test_concurrent_fail_and_cancel_resolve_single_terminal_state_with_even
 
     if terminal_events == 0 {
         assert!(
-            terminal.failure_ledger.iter().any(|entry| {
-                entry.step_id == crate::runtime::flow_system_step_id()
-                    && entry.reason.contains("append failed")
-            }),
-            "when terminal append is fault-injected, a durable coherence ledger entry is required"
+            !terminal
+                .failure_ledger
+                .iter()
+                .any(|entry| entry.reason.contains("append failed")),
+            "terminal append failures must not mutate failure ledger outside machine authority"
         );
     }
 }
@@ -21886,9 +21889,9 @@ async fn test_plain_text_step_output_can_skip_json_parsing() {
         terminal.step_ledger.iter().any(|entry| {
             entry.step_id == "start"
                 && entry.status == StepRunStatus::Completed
-                && entry.output == Some(serde_json::Value::String("not-json".to_string()))
+                && entry.output == Some(serde_json::json!({"w-1": "not-json"}))
         }),
-        "completed start ledger entry should persist raw plain-text output as JSON string"
+        "completed start ledger entry should persist plain-text output in the canonical aggregate shape"
     );
 }
 
@@ -21911,7 +21914,7 @@ async fn test_spawn_rejects_reserved_flow_system_member_prefix() {
 }
 
 #[tokio::test]
-async fn test_flow_failed_append_failure_records_coherence_failure_ledger_entry() {
+async fn test_flow_failed_append_failure_does_not_write_raw_failure_ledger_entry() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
     events.fail_appends_for("FlowFailed").await;
     let (handle, service) =
@@ -21929,11 +21932,11 @@ async fn test_flow_failed_append_failure_records_coherence_failure_ledger_entry(
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
     assert_eq!(terminal.status, MobRunStatus::Failed);
     assert!(
-        terminal.failure_ledger.iter().any(|entry| {
-            entry.step_id == crate::runtime::flow_system_step_id()
-                && entry.reason.contains("FlowFailed append failed")
-        }),
-        "failed terminal event append should be recorded in failure ledger"
+        !terminal
+            .failure_ledger
+            .iter()
+            .any(|entry| entry.reason.contains("FlowFailed append failed")),
+        "failed terminal event append must not write failure ledger without machine authority"
     );
     let machine_state = handle
         .query_machine_state()
@@ -21952,7 +21955,7 @@ async fn test_flow_failed_append_failure_records_coherence_failure_ledger_entry(
 }
 
 #[tokio::test]
-async fn test_flow_completed_append_failure_records_coherence_failure_ledger_entry() {
+async fn test_flow_completed_append_failure_does_not_write_raw_failure_ledger_entry() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
     events.fail_appends_for("FlowCompleted").await;
     let (handle, _service) = create_test_mob_with_events(
@@ -21972,11 +21975,11 @@ async fn test_flow_completed_append_failure_records_coherence_failure_ledger_ent
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
     assert_eq!(terminal.status, MobRunStatus::Completed);
     assert!(
-        terminal.failure_ledger.iter().any(|entry| {
-            entry.step_id == crate::runtime::flow_system_step_id()
-                && entry.reason.contains("FlowCompleted append failed")
-        }),
-        "failed terminal event append should be recorded in failure ledger"
+        !terminal
+            .failure_ledger
+            .iter()
+            .any(|entry| entry.reason.contains("FlowCompleted append failed")),
+        "failed terminal event append must not write failure ledger without machine authority"
     );
     let machine_state = handle
         .query_machine_state()
@@ -22051,7 +22054,7 @@ async fn test_flow_completed_append_failure_records_coherence_failure_ledger_ent
 }
 
 #[tokio::test]
-async fn test_flow_canceled_append_failure_records_coherence_failure_ledger_entry() {
+async fn test_flow_canceled_append_failure_does_not_write_raw_failure_ledger_entry() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
     events.fail_appends_for("FlowCanceled").await;
     let (handle, service) = create_test_mob_with_events(
@@ -22076,11 +22079,11 @@ async fn test_flow_canceled_append_failure_records_coherence_failure_ledger_entr
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
     assert_eq!(terminal.status, MobRunStatus::Canceled);
     assert!(
-        terminal.failure_ledger.iter().any(|entry| {
-            entry.step_id == crate::runtime::flow_system_step_id()
-                && entry.reason.contains("FlowCanceled append failed")
-        }),
-        "failed terminal event append should be recorded in failure ledger"
+        !terminal
+            .failure_ledger
+            .iter()
+            .any(|entry| entry.reason.contains("FlowCanceled append failed")),
+        "failed terminal event append must not write failure ledger without machine authority"
     );
     let machine_state = handle
         .query_machine_state()

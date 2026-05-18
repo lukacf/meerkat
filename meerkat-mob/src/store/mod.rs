@@ -25,7 +25,7 @@ use crate::machines::mob_machine as mob_dsl;
 use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
-    MobRunStatus, StepLedgerEntry,
+    MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry,
 };
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -454,26 +454,23 @@ pub trait MobRunStore: Send + Sync {
         next_flow_state: &flow_run::State,
         authority_inputs: Vec<mob_dsl::MobMachineInput>,
     ) -> Result<bool, MobStoreError>;
-    async fn append_step_entry(
+    async fn append_step_entry_with_authority(
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<(), MobStoreError>;
-    async fn append_step_entry_if_absent(
+    async fn append_step_entry_if_absent_with_authority(
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<bool, MobStoreError>;
-    async fn put_step_output(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        output: serde_json::Value,
-    ) -> Result<(), MobStoreError>;
-    async fn append_failure_entry(
+    async fn append_failure_entry_with_authority(
         &self,
         run_id: &RunId,
         entry: FailureLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<(), MobStoreError>;
 
     async fn cas_frame_state_with_authority(

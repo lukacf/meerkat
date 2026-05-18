@@ -19,7 +19,7 @@ use crate::profile::Profile;
 use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
-    MobRunStatus, StepLedgerEntry,
+    MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -1257,10 +1257,11 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
-    async fn append_step_entry(
+    async fn append_step_entry_with_authority(
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<(), MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
@@ -1280,6 +1281,9 @@ impl MobRunStore for SqliteMobRunStore {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
             let mut run: MobRun = decode_json(&bytes)?;
+            authority
+                .validate_step_entry(&run, &entry)
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             run.step_ledger.push(entry);
             let encoded = encode_json(&run)?;
             tx.execute(
@@ -1293,10 +1297,11 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
-    async fn append_step_entry_if_absent(
+    async fn append_step_entry_if_absent_with_authority(
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
@@ -1316,6 +1321,9 @@ impl MobRunStore for SqliteMobRunStore {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
             let mut run: MobRun = decode_json(&bytes)?;
+            authority
+                .validate_step_entry(&run, &entry)
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             let is_duplicate = run.step_ledger.iter().any(|existing| {
                 existing.step_id == entry.step_id
                     && existing.agent_identity == entry.agent_identity
@@ -1337,59 +1345,11 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
-    async fn put_step_output(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        output: serde_json::Value,
-    ) -> Result<(), MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let step_id = step_id.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT run_json FROM mob_runs WHERE run_id = ?1",
-                    params![key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(se)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if let Some(entry) = run
-                .step_ledger
-                .iter_mut()
-                .rev()
-                .find(|entry| entry.step_id == step_id)
-            {
-                entry.output = Some(output);
-            } else {
-                return Err(MobStoreError::Internal(format!(
-                    "cannot set output for unknown step '{step_id}' in run '{run_id}'"
-                )));
-            }
-            let encoded = encode_json(&run)?;
-            tx.execute(
-                "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
-                params![encoded, key],
-            )
-            .map_err(se)?;
-            tx.commit().map_err(se)?;
-            Ok(())
-        })
-        .await
-    }
-
-    async fn append_failure_entry(
+    async fn append_failure_entry_with_authority(
         &self,
         run_id: &RunId,
         entry: FailureLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<(), MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
@@ -1409,6 +1369,9 @@ impl MobRunStore for SqliteMobRunStore {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
             let mut run: MobRun = decode_json(&bytes)?;
+            authority
+                .validate_failure_entry(&run, &entry)
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             run.failure_ledger.push(entry);
             let encoded = encode_json(&run)?;
             tx.execute(
@@ -2526,23 +2489,60 @@ mod tests {
             .count();
         assert_eq!(winners, 1);
 
+        let ledger_run = sample_run(MobRunStatus::Running);
+        let ledger_run_id = ledger_run.run_id.clone();
+        let step_id = StepId::from("step-1");
+        let ledger_expected_flow_state = ledger_run.flow_state.clone();
+        let (dispatched_flow_state, dispatched_authority_input) = ledger_run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::DispatchStep(
+                    crate::run::flow_run::inputs::DispatchStep {
+                        step_id: step_id.clone(),
+                    },
+                ),
+            )
+            .expect("project dispatched step state");
+        store.create_run(ledger_run).await.unwrap();
+        assert!(
+            store
+                .cas_flow_state_with_authority(
+                    &ledger_run_id,
+                    &ledger_expected_flow_state,
+                    &dispatched_flow_state,
+                    vec![dispatched_authority_input.clone()],
+                )
+                .await
+                .unwrap()
+        );
+        let dispatched_authority =
+            MobRunProvenanceAuthority::from_flow_authority_input(dispatched_authority_input)
+                .expect("dispatch input is provenance authority");
+
         let entry = StepLedgerEntry {
-            step_id: StepId::from("step-a"),
-            agent_identity: AgentIdentity::from("worker-1"),
-            status: StepRunStatus::Completed,
+            step_id,
+            agent_identity: AgentIdentity::from(crate::run::FLOW_RUN_PROVENANCE_AGENT_ID),
+            status: StepRunStatus::Dispatched,
             output: None,
             timestamp: Utc::now(),
         };
 
         assert!(
             store
-                .append_step_entry_if_absent(&run_id, entry.clone())
+                .append_step_entry_if_absent_with_authority(
+                    &ledger_run_id,
+                    entry.clone(),
+                    dispatched_authority.clone(),
+                )
                 .await
                 .unwrap()
         );
         assert!(
             !store
-                .append_step_entry_if_absent(&run_id, entry)
+                .append_step_entry_if_absent_with_authority(
+                    &ledger_run_id,
+                    entry,
+                    dispatched_authority,
+                )
                 .await
                 .unwrap()
         );

@@ -15,7 +15,7 @@ use crate::profile::Profile;
 use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FlowAuthorityInputRecord, FrameSnapshot, LoopIterationLedgerEntry,
-    LoopSnapshot, MobRun, MobRunStatus, StepLedgerEntry,
+    LoopSnapshot, MobRun, MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry,
 };
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -463,28 +463,36 @@ impl MobRunStore for InMemoryMobRunStore {
         Ok(true)
     }
 
-    async fn append_step_entry(
+    async fn append_step_entry_with_authority(
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<(), MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
             .get_mut(run_id)
             .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        authority
+            .validate_step_entry(run, &entry)
+            .map_err(|error| MobStoreError::Internal(error.to_string()))?;
         run.step_ledger.push(entry);
         Ok(())
     }
 
-    async fn append_step_entry_if_absent(
+    async fn append_step_entry_if_absent_with_authority(
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
             .get_mut(run_id)
             .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        authority
+            .validate_step_entry(run, &entry)
+            .map_err(|error| MobStoreError::Internal(error.to_string()))?;
         let is_duplicate = run.step_ledger.iter().any(|existing| {
             existing.step_id == entry.step_id
                 && existing.agent_identity == entry.agent_identity
@@ -497,39 +505,19 @@ impl MobRunStore for InMemoryMobRunStore {
         Ok(true)
     }
 
-    async fn put_step_output(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        output: serde_json::Value,
-    ) -> Result<(), MobStoreError> {
-        let mut runs = self.runs.write().await;
-        let run = runs
-            .get_mut(run_id)
-            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
-        if let Some(entry) = run
-            .step_ledger
-            .iter_mut()
-            .rev()
-            .find(|entry| &entry.step_id == step_id)
-        {
-            entry.output = Some(output);
-            return Ok(());
-        }
-        Err(MobStoreError::Internal(format!(
-            "cannot set output for unknown step '{step_id}' in run '{run_id}'"
-        )))
-    }
-
-    async fn append_failure_entry(
+    async fn append_failure_entry_with_authority(
         &self,
         run_id: &RunId,
         entry: FailureLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<(), MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
             .get_mut(run_id)
             .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        authority
+            .validate_failure_entry(run, &entry)
+            .map_err(|error| MobStoreError::Internal(error.to_string()))?;
         run.failure_ledger.push(entry);
         Ok(())
     }
@@ -1218,11 +1206,36 @@ mod tests {
         let store = InMemoryMobRunStore::new();
         let run = sample_run(MobRunStatus::Running);
         let run_id = run.run_id.clone();
+        let step_id = StepId::from("step-1");
+        let expected_flow_state = run.flow_state.clone();
+        let (dispatched_flow_state, dispatched_authority_input) = run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::DispatchStep(
+                    crate::run::flow_run::inputs::DispatchStep {
+                        step_id: step_id.clone(),
+                    },
+                ),
+            )
+            .expect("project dispatched step state");
         store.create_run(run).await.unwrap();
+        assert!(
+            store
+                .cas_flow_state_with_authority(
+                    &run_id,
+                    &expected_flow_state,
+                    &dispatched_flow_state,
+                    vec![dispatched_authority_input.clone()],
+                )
+                .await
+                .unwrap()
+        );
+        let dispatched_authority =
+            MobRunProvenanceAuthority::from_flow_authority_input(dispatched_authority_input)
+                .expect("dispatch input is provenance authority");
 
         let step_entry = StepLedgerEntry {
-            step_id: StepId::from("s1"),
-            agent_identity: AgentIdentity::from("worker-1"),
+            step_id: step_id.clone(),
+            agent_identity: AgentIdentity::from(crate::run::FLOW_RUN_PROVENANCE_AGENT_ID),
             status: StepRunStatus::Dispatched,
             output: None,
             timestamp: Utc::now(),
@@ -1230,31 +1243,59 @@ mod tests {
 
         assert!(
             store
-                .append_step_entry_if_absent(&run_id, step_entry.clone())
+                .append_step_entry_if_absent_with_authority(
+                    &run_id,
+                    step_entry.clone(),
+                    dispatched_authority.clone(),
+                )
                 .await
                 .unwrap()
         );
         assert!(
             !store
-                .append_step_entry_if_absent(&run_id, step_entry)
+                .append_step_entry_if_absent_with_authority(
+                    &run_id,
+                    step_entry,
+                    dispatched_authority,
+                )
                 .await
                 .unwrap()
         );
 
+        let dispatched_run = store.get_run(&run_id).await.unwrap().unwrap();
+        let (failed_flow_state, failed_authority_input) = dispatched_run
+            .flow_run_command_projection_for_test(crate::run::MobMachineFlowRunCommand::FailStep(
+                crate::run::flow_run::inputs::FailStep {
+                    step_id: step_id.clone(),
+                },
+            ))
+            .expect("project failed step state");
+        assert!(
+            store
+                .cas_flow_state_with_authority(
+                    &run_id,
+                    &dispatched_run.flow_state,
+                    &failed_flow_state,
+                    vec![failed_authority_input.clone()],
+                )
+                .await
+                .unwrap()
+        );
+        let failed_authority =
+            MobRunProvenanceAuthority::from_flow_authority_input(failed_authority_input)
+                .expect("fail input is provenance authority");
+
         store
-            .put_step_output(&run_id, &StepId::from("s1"), serde_json::json!({"ok":true}))
-            .await
-            .unwrap();
-        store
-            .append_failure_entry(
+            .append_failure_entry_with_authority(
                 &run_id,
                 FailureLedgerEntry {
-                    step_id: StepId::from("s1"),
+                    step_id,
                     reason: "failed".to_string(),
                     error_report: None,
                     error: None,
                     timestamp: Utc::now(),
                 },
+                failed_authority,
             )
             .await
             .unwrap();
@@ -1262,10 +1303,6 @@ mod tests {
         let stored = store.get_run(&run_id).await.unwrap().unwrap();
         assert_eq!(stored.step_ledger.len(), 1);
         assert_eq!(stored.failure_ledger.len(), 1);
-        assert_eq!(
-            stored.step_ledger[0].output,
-            Some(serde_json::json!({"ok":true}))
-        );
     }
 
     #[tokio::test]

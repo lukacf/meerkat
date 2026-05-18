@@ -20,6 +20,8 @@ pub mod flow_frame;
 pub mod flow_run;
 pub mod loop_iteration;
 
+pub const FLOW_RUN_PROVENANCE_AGENT_ID: &str = "__flow_system_member__";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowProjectionKernelRole {
     MobMachineOwnedFailClosedProjection,
@@ -4637,6 +4639,174 @@ pub struct FailureLedgerEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<meerkat_core::event::TurnErrorMetadata>,
     pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MobRunProvenanceAuthority {
+    input: mob_dsl::MobMachineInput,
+}
+
+impl MobRunProvenanceAuthority {
+    pub fn from_flow_authority_input(input: mob_dsl::MobMachineInput) -> Result<Self, MobError> {
+        let record = FlowAuthorityInputRecord::from_machine_input(input.clone())?;
+        match record {
+            FlowAuthorityInputRecord::AuthorizeFlowRunReducerCommand { .. } => Ok(Self { input }),
+            _ => Err(MobError::Internal(format!(
+                "MobRun provenance authority requires a flow-run reducer authority input, got {input:?}"
+            ))),
+        }
+    }
+
+    fn record(&self) -> Result<FlowAuthorityInputRecord, MobError> {
+        FlowAuthorityInputRecord::from_machine_input(self.input.clone())
+    }
+
+    fn validate_present(&self, run: &MobRun) -> Result<FlowAuthorityInputRecord, MobError> {
+        let record = self.record()?;
+        if run
+            .flow_authority_inputs
+            .iter()
+            .any(|existing| existing == &record)
+        {
+            Ok(record)
+        } else {
+            Err(MobError::Internal(format!(
+                "run '{}' provenance authority input is not present in the MobMachine authority log",
+                run.run_id
+            )))
+        }
+    }
+
+    pub(crate) fn validate_step_entry(
+        &self,
+        run: &MobRun,
+        entry: &StepLedgerEntry,
+    ) -> Result<(), MobError> {
+        run.validate_flow_authority_projection()?;
+        if entry.agent_identity.as_str() != FLOW_RUN_PROVENANCE_AGENT_ID {
+            return Err(MobError::Internal(format!(
+                "run '{}' step ledger authority only permits system provenance '{}', entry has '{}'",
+                run.run_id, FLOW_RUN_PROVENANCE_AGENT_ID, entry.agent_identity
+            )));
+        }
+        let record = self.validate_present(run)?;
+        let FlowAuthorityInputRecord::AuthorizeFlowRunReducerCommand {
+            command, step_id, ..
+        } = record
+        else {
+            unreachable!("validate_present returned a flow-run reducer authority record")
+        };
+        let step_id = step_id
+            .map(|step_id| project_step_id(&step_id))
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "run '{}' step ledger authority {:?} did not name a step",
+                    run.run_id, command
+                ))
+            })?;
+        if step_id != entry.step_id {
+            return Err(MobError::Internal(format!(
+                "run '{}' step ledger authority step '{}' does not match entry step '{}'",
+                run.run_id, step_id, entry.step_id
+            )));
+        }
+
+        let expected = match command {
+            FlowRunReducerCommandRecord::DispatchStep => Some(StepRunStatus::Dispatched),
+            FlowRunReducerCommandRecord::CompleteStep => Some(StepRunStatus::Completed),
+            FlowRunReducerCommandRecord::FailStep => Some(StepRunStatus::Failed),
+            FlowRunReducerCommandRecord::SkipStep => Some(StepRunStatus::Skipped),
+            FlowRunReducerCommandRecord::CancelStep => Some(StepRunStatus::Canceled),
+            FlowRunReducerCommandRecord::ProjectFrameStepStatus => {
+                run.step_status_snapshot()?.get(&step_id).cloned()
+            }
+            _ => None,
+        }
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "run '{}' authority command {:?} cannot authorize a step ledger entry",
+                run.run_id, command
+            ))
+        })?;
+
+        if expected != entry.status {
+            return Err(MobError::Internal(format!(
+                "run '{}' step ledger authority projected {:?} for step '{}', entry has {:?}",
+                run.run_id, expected, entry.step_id, entry.status
+            )));
+        }
+        let expected_output = match command {
+            FlowRunReducerCommandRecord::ProjectFrameStepStatus
+                if expected == StepRunStatus::Completed =>
+            {
+                projected_step_output(run, &entry.step_id)
+            }
+            _ => None,
+        };
+        if entry.output.as_ref() != expected_output {
+            return Err(MobError::Internal(format!(
+                "run '{}' step ledger authority projected output {:?} for step '{}', entry has {:?}",
+                run.run_id, expected_output, entry.step_id, entry.output
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_failure_entry(
+        &self,
+        run: &MobRun,
+        entry: &FailureLedgerEntry,
+    ) -> Result<(), MobError> {
+        run.validate_flow_authority_projection()?;
+        let record = self.validate_present(run)?;
+        let FlowAuthorityInputRecord::AuthorizeFlowRunReducerCommand {
+            command, step_id, ..
+        } = record
+        else {
+            unreachable!("validate_present returned a flow-run reducer authority record")
+        };
+        let step_id = step_id
+            .map(|step_id| project_step_id(&step_id))
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "run '{}' failure ledger authority {:?} did not name a step",
+                    run.run_id, command
+                ))
+            })?;
+        if step_id != entry.step_id {
+            return Err(MobError::Internal(format!(
+                "run '{}' failure ledger authority step '{}' does not match entry step '{}'",
+                run.run_id, step_id, entry.step_id
+            )));
+        }
+
+        let can_append_failure = match command {
+            FlowRunReducerCommandRecord::FailStep => true,
+            FlowRunReducerCommandRecord::ProjectFrameStepStatus => {
+                run.step_status_snapshot()?.get(&step_id) == Some(&StepRunStatus::Failed)
+            }
+            _ => false,
+        };
+        if !can_append_failure {
+            return Err(MobError::Internal(format!(
+                "run '{}' authority command {:?} cannot authorize a failure ledger entry",
+                run.run_id, command
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn projected_step_output<'a>(run: &'a MobRun, step_id: &StepId) -> Option<&'a serde_json::Value> {
+    let mut output = run.root_step_outputs.get(step_id);
+    for iterations in run.loop_iteration_outputs.values() {
+        for iteration in iterations {
+            if let Some(value) = iteration.get(step_id) {
+                output = Some(value);
+            }
+        }
+    }
+    output
 }
 
 /// Immutable per-run flow snapshot.

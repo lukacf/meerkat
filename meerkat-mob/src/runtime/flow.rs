@@ -19,8 +19,8 @@ use crate::machines::mob_machine as mob_dsl;
 use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, MobMachineFlowAuthorityToken,
-    MobMachineFlowRunCommand, MobRun, MobRunStatus, StepLedgerEntry, StepRunStatus,
-    apply_mob_machine_flow_run_command,
+    MobMachineFlowRunCommand, MobRun, MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry,
+    StepRunStatus, apply_mob_machine_flow_run_command,
 };
 use crate::runtime::flow_frame_engine::{FlowFrameTerminalPhase, FrameStepProjection};
 use crate::store::{MobEventStore, MobRunStore};
@@ -52,6 +52,7 @@ pub struct FrameStepProjectionEffects {
     pub persist_output: bool,
     pub append_failure_ledger: bool,
     pub escalate_supervisor: bool,
+    pub authority: MobRunProvenanceAuthority,
 }
 
 #[derive(Debug, Clone)]
@@ -459,6 +460,10 @@ impl FlowEngine {
             targets.truncate(1);
         }
 
+        let dispatch_effects = self.dispatch_step_effects(run_id, step_id).await?;
+        self.apply_dispatch_projection(dispatch_effects, run_id, step_id)
+            .await?;
+
         // ── 6. Multi-target (FanOut/FanIn) ─────────────────────────────────
         if targets.len() > 1 {
             return self
@@ -697,18 +702,6 @@ impl FlowEngine {
             self.emitter
                 .step_dispatched(run_id.clone(), step_id.clone(), target.clone())
                 .await?;
-            self.run_store
-                .append_step_entry_if_absent(
-                    run_id,
-                    StepLedgerEntry {
-                        step_id: step_id.clone(),
-                        agent_identity: AgentIdentity::from(target.as_str()),
-                        status: StepRunStatus::Dispatched,
-                        output: None,
-                        timestamp: Utc::now(),
-                    },
-                )
-                .await?;
 
             let ticket = match self
                 .executor
@@ -765,18 +758,6 @@ impl FlowEngine {
                     );
                     match output_value {
                         Ok(value) => {
-                            self.run_store
-                                .append_step_entry(
-                                    run_id,
-                                    StepLedgerEntry {
-                                        step_id: step_id.clone(),
-                                        agent_identity: AgentIdentity::from(target.as_str()),
-                                        status: StepRunStatus::Completed,
-                                        output: Some(value.clone()),
-                                        timestamp: Utc::now(),
-                                    },
-                                )
-                                .await?;
                             self.emitter
                                 .step_target_completed(
                                     run_id.clone(),
@@ -799,18 +780,6 @@ impl FlowEngine {
                                     .await?;
                                 continue;
                             }
-                            self.run_store
-                                .append_step_entry(
-                                    run_id,
-                                    StepLedgerEntry {
-                                        step_id: step_id.clone(),
-                                        agent_identity: AgentIdentity::from(target.as_str()),
-                                        status: StepRunStatus::Failed,
-                                        output: None,
-                                        timestamp: Utc::now(),
-                                    },
-                                )
-                                .await?;
                             self.emitter
                                 .step_target_failed(
                                     run_id.clone(),
@@ -819,19 +788,7 @@ impl FlowEngine {
                                     reason.clone(),
                                 )
                                 .await?;
-                            self.run_store
-                                .append_failure_entry(
-                                    run_id,
-                                    FailureLedgerEntry {
-                                        step_id: step_id.clone(),
-                                        reason: reason.clone(),
-                                        error_report: None,
-                                        error: None,
-                                        timestamp: Utc::now(),
-                                    },
-                                )
-                                .await?;
-                            return Ok(Err(StepTargetFailure::recorded(reason)));
+                            return Ok(Err(StepTargetFailure::unrecorded(reason)));
                         }
                     }
                 }
@@ -854,18 +811,6 @@ impl FlowEngine {
                             .await?;
                         continue;
                     }
-                    self.run_store
-                        .append_step_entry(
-                            run_id,
-                            StepLedgerEntry {
-                                step_id: step_id.clone(),
-                                agent_identity: AgentIdentity::from(target.as_str()),
-                                status: StepRunStatus::Failed,
-                                output: None,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
                     self.emitter
                         .step_target_failed_with_error(
                             run_id.clone(),
@@ -876,37 +821,14 @@ impl FlowEngine {
                             error.clone(),
                         )
                         .await?;
-                    self.run_store
-                        .append_failure_entry(
-                            run_id,
-                            FailureLedgerEntry {
-                                step_id: step_id.clone(),
-                                reason: reason.clone(),
-                                error_report,
-                                error,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
-                    return Ok(Err(StepTargetFailure::recorded(reason)));
+                    let _ = (error_report, error);
+                    return Ok(Err(StepTargetFailure::unrecorded(reason)));
                 }
                 Ok(FlowTurnOutcome::Canceled) => {
                     if cancel.is_some_and(CancellationToken::is_cancelled) {
                         return Err(MobError::RunCanceled(run_id.clone()));
                     }
                     let cancel_reason = "canceled".to_string();
-                    self.run_store
-                        .append_step_entry(
-                            run_id,
-                            StepLedgerEntry {
-                                step_id: step_id.clone(),
-                                agent_identity: AgentIdentity::from(target.as_str()),
-                                status: StepRunStatus::Failed,
-                                output: None,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
                     self.emitter
                         .step_target_failed(
                             run_id.clone(),
@@ -915,19 +837,7 @@ impl FlowEngine {
                             cancel_reason.clone(),
                         )
                         .await?;
-                    self.run_store
-                        .append_failure_entry(
-                            run_id,
-                            FailureLedgerEntry {
-                                step_id: step_id.clone(),
-                                reason: cancel_reason.clone(),
-                                error_report: None,
-                                error: None,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
-                    return Ok(Err(StepTargetFailure::recorded(cancel_reason)));
+                    return Ok(Err(StepTargetFailure::unrecorded(cancel_reason)));
                 }
                 Err(MobError::FlowTurnTimedOut) => {
                     let timeout_reason = match self.executor.on_timeout(ticket).await {
@@ -962,18 +872,6 @@ impl FlowEngine {
                             .await?;
                         continue;
                     }
-                    self.run_store
-                        .append_step_entry(
-                            run_id,
-                            StepLedgerEntry {
-                                step_id: step_id.clone(),
-                                agent_identity: AgentIdentity::from(target.as_str()),
-                                status: StepRunStatus::Failed,
-                                output: None,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
                     self.emitter
                         .step_target_failed(
                             run_id.clone(),
@@ -982,19 +880,7 @@ impl FlowEngine {
                             timeout_reason.clone(),
                         )
                         .await?;
-                    self.run_store
-                        .append_failure_entry(
-                            run_id,
-                            FailureLedgerEntry {
-                                step_id: step_id.clone(),
-                                reason: timeout_reason.clone(),
-                                error_report: None,
-                                error: None,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
-                    return Ok(Err(StepTargetFailure::recorded(timeout_reason)));
+                    return Ok(Err(StepTargetFailure::unrecorded(timeout_reason)));
                 }
                 Err(other) => return Err(other),
             }
@@ -1016,6 +902,41 @@ impl FlowEngine {
         Ok(())
     }
 
+    async fn apply_dispatch_projection(
+        &self,
+        effects: Option<Vec<flow_run::Effect>>,
+        run_id: &RunId,
+        step_id: &StepId,
+    ) -> Result<(), MobError> {
+        let Some(effects) = effects else {
+            return Ok(());
+        };
+        let Some(step_notice) = find_step_notice_effect(&effects, step_id)? else {
+            return Ok(());
+        };
+        if step_notice.status != StepRunStatus::Dispatched {
+            return Err(MobError::Internal(format!(
+                "dispatch projection for run '{run_id}' step '{step_id}' emitted {:?}",
+                step_notice.status
+            )));
+        }
+        let authority = flow_run_effects_provenance_authority(run_id, &effects, step_id)?;
+        self.run_store
+            .append_step_entry_if_absent_with_authority(
+                run_id,
+                StepLedgerEntry {
+                    step_id: step_notice.step_id,
+                    agent_identity: AgentIdentity::from(flow_system_member_id().as_str()),
+                    status: StepRunStatus::Dispatched,
+                    output: None,
+                    timestamp: Utc::now(),
+                },
+                authority,
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn apply_frame_step_projection(
         &self,
         effects: Option<FrameStepProjectionEffects>,
@@ -1027,8 +948,9 @@ impl FlowEngine {
         let Some(effects) = effects else {
             return Ok(false);
         };
+        let authority = effects.authority.clone();
         self.run_store
-            .append_step_entry(
+            .append_step_entry_with_authority(
                 run_id,
                 StepLedgerEntry {
                     step_id: step_id.clone(),
@@ -1037,6 +959,7 @@ impl FlowEngine {
                     output: if effects.persist_output { output } else { None },
                     timestamp: Utc::now(),
                 },
+                authority.clone(),
             )
             .await?;
         match effects.step_status {
@@ -1054,7 +977,7 @@ impl FlowEngine {
                 let reason = reason.unwrap_or_else(|| "frame step failed".into());
                 if effects.append_failure_ledger {
                     self.run_store
-                        .append_failure_entry(
+                        .append_failure_entry_with_authority(
                             run_id,
                             FailureLedgerEntry {
                                 step_id: step_id.clone(),
@@ -1063,6 +986,7 @@ impl FlowEngine {
                                 error: None,
                                 timestamp: Utc::now(),
                             },
+                            authority,
                         )
                         .await?;
                 }
@@ -1091,8 +1015,9 @@ impl FlowEngine {
             return Ok(());
         };
         if let Some(step_notice) = find_step_notice_effect(&effects, step_id)? {
+            let authority = flow_run_effects_provenance_authority(run_id, &effects, step_id)?;
             self.run_store
-                .append_step_entry(
+                .append_step_entry_with_authority(
                     run_id,
                     StepLedgerEntry {
                         step_id: step_notice.step_id.clone(),
@@ -1101,6 +1026,7 @@ impl FlowEngine {
                         output: None,
                         timestamp: Utc::now(),
                     },
+                    authority,
                 )
                 .await?;
             self.emitter
@@ -1122,8 +1048,9 @@ impl FlowEngine {
             return Ok(false);
         };
         if let Some(step_notice) = find_step_notice_effect(&effects, step_id)? {
+            let authority = flow_run_effects_provenance_authority(run_id, &effects, step_id)?;
             self.run_store
-                .append_step_entry(
+                .append_step_entry_with_authority(
                     run_id,
                     StepLedgerEntry {
                         step_id: step_notice.step_id.clone(),
@@ -1132,6 +1059,7 @@ impl FlowEngine {
                         output: None,
                         timestamp: Utc::now(),
                     },
+                    authority.clone(),
                 )
                 .await?;
             self.emitter
@@ -1147,7 +1075,7 @@ impl FlowEngine {
             )
         {
             self.run_store
-                .append_failure_entry(
+                .append_failure_entry_with_authority(
                     run_id,
                     FailureLedgerEntry {
                         step_id: step_id.clone(),
@@ -1156,6 +1084,7 @@ impl FlowEngine {
                         error: None,
                         timestamp: Utc::now(),
                     },
+                    flow_run_effects_provenance_authority(run_id, &effects, step_id)?,
                 )
                 .await?;
         }
@@ -1479,18 +1408,17 @@ impl FlowEngine {
             });
         }
 
+        let command = MobMachineFlowRunCommand::ProjectFrameStepStatus(
+            flow_run::inputs::ProjectFrameStepStatus {
+                step_id: step_id.clone(),
+                frame_id,
+                node_id,
+                append_failure_ledger: requested_failure_ledger_append,
+            },
+        );
+        let authority_input = command.authority_input(run_id);
         let effects = self
-            .cas_flow_input_with_effects(
-                run_id,
-                MobMachineFlowRunCommand::ProjectFrameStepStatus(
-                    flow_run::inputs::ProjectFrameStepStatus {
-                        step_id: step_id.clone(),
-                        frame_id,
-                        node_id,
-                        append_failure_ledger: requested_failure_ledger_append,
-                    },
-                ),
-            )
+            .cas_flow_input_with_effects(run_id, command)
             .await?
             .ok_or_else(|| {
                 MobError::Internal(format!(
@@ -1524,6 +1452,7 @@ impl FlowEngine {
                     Some(step_id),
                     None,
                 ),
+                authority: MobRunProvenanceAuthority::from_flow_authority_input(authority_input)?,
             }),
         })
     }
@@ -1889,6 +1818,42 @@ fn find_step_notice_effect(
         return Ok(Some(StepNoticeEffect { step_id, status }));
     }
     Ok(None)
+}
+
+fn flow_run_effects_provenance_authority(
+    run_id: &RunId,
+    effects: &[flow_run::Effect],
+    step_id: &StepId,
+) -> Result<MobRunProvenanceAuthority, MobError> {
+    let notice = find_step_notice_effect(effects, step_id)?.ok_or_else(|| {
+        MobError::Internal(format!(
+            "flow-run effects for run '{run_id}' step '{step_id}' did not include a step notice"
+        ))
+    })?;
+    let command = match notice.status {
+        StepRunStatus::Dispatched => {
+            MobMachineFlowRunCommand::DispatchStep(flow_run::inputs::DispatchStep {
+                step_id: step_id.clone(),
+            })
+        }
+        StepRunStatus::Completed => {
+            MobMachineFlowRunCommand::CompleteStep(flow_run::inputs::CompleteStep {
+                step_id: step_id.clone(),
+            })
+        }
+        StepRunStatus::Failed => MobMachineFlowRunCommand::FailStep(flow_run::inputs::FailStep {
+            step_id: step_id.clone(),
+        }),
+        StepRunStatus::Skipped => MobMachineFlowRunCommand::SkipStep(flow_run::inputs::SkipStep {
+            step_id: step_id.clone(),
+        }),
+        StepRunStatus::Canceled => {
+            MobMachineFlowRunCommand::CancelStep(flow_run::inputs::CancelStep {
+                step_id: step_id.clone(),
+            })
+        }
+    };
+    MobRunProvenanceAuthority::from_flow_authority_input(command.authority_input(run_id))
 }
 
 fn has_effect(

@@ -506,56 +506,6 @@ impl MobRunStore for InMemoryMobRunStore {
         Ok(())
     }
 
-    async fn upsert_loop_snapshot(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        snapshot: LoopSnapshot,
-        ledger_entry: Option<LoopIterationLedgerEntry>,
-    ) -> Result<(), MobStoreError> {
-        let mut runs = self.runs.write().await;
-        let run = runs
-            .get_mut(run_id)
-            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
-        run.loops.insert(loop_instance_id.clone(), snapshot);
-        if let Some(entry) = ledger_entry
-            && !run.loop_iteration_ledger.iter().any(|existing| {
-                existing.loop_instance_id == entry.loop_instance_id
-                    && existing.iteration == entry.iteration
-                    && existing.frame_id == entry.frame_id
-            })
-        {
-            run.loop_iteration_ledger.push(entry);
-        }
-        Ok(())
-    }
-
-    async fn cas_frame_state(
-        &self,
-        run_id: &RunId,
-        frame_id: &FrameId,
-        expected: Option<&FrameSnapshot>,
-        next: FrameSnapshot,
-    ) -> Result<bool, MobStoreError> {
-        let mut runs = self.runs.write().await;
-        let run = runs
-            .get_mut(run_id)
-            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
-        let current = run.frames.get(frame_id);
-        match (expected, current) {
-            (None, None) => {
-                // Insert new frame
-                run.frames.insert(frame_id.clone(), next);
-                Ok(true)
-            }
-            (Some(exp), Some(cur)) if exp == cur => {
-                run.frames.insert(frame_id.clone(), next);
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
-    }
-
     async fn cas_frame_state_with_authority(
         &self,
         run_id: &RunId,
@@ -586,32 +536,6 @@ impl MobRunStore for InMemoryMobRunStore {
         }
     }
 
-    async fn cas_grant_node_slot(
-        &self,
-        run_id: &RunId,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-    ) -> Result<bool, MobStoreError> {
-        let mut runs = self.runs.write().await;
-        let run = runs
-            .get_mut(run_id)
-            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
-        // Check all expectations atomically
-        if &run.flow_state != expected_run_state {
-            return Ok(false);
-        }
-        if run.frames.get(frame_id) != Some(expected_frame) {
-            return Ok(false);
-        }
-        // Apply all updates
-        run.flow_state = next_run_state;
-        run.frames.insert(frame_id.clone(), next_frame);
-        Ok(true)
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn cas_grant_node_slot_with_authority(
         &self,
@@ -637,53 +561,6 @@ impl MobRunStore for InMemoryMobRunStore {
         run.flow_state = next_run_state;
         run.frames.insert(frame_id.clone(), next_frame);
         append_flow_authority_inputs(run, authority_inputs)?;
-        Ok(true)
-    }
-
-    async fn cas_complete_step_and_record_output(
-        &self,
-        run_id: &RunId,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-        step_output_key: String,
-        step_output: serde_json::Value,
-        loop_context: Option<(&LoopId, u64)>,
-    ) -> Result<bool, MobStoreError> {
-        let mut runs = self.runs.write().await;
-        let run = runs
-            .get_mut(run_id)
-            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
-        if run.frames.get(frame_id) != Some(expected_frame) {
-            return Ok(false);
-        }
-        run.frames.insert(frame_id.clone(), next_frame);
-        match loop_context {
-            None => {
-                run.root_step_outputs.insert(
-                    crate::ids::StepId::from(step_output_key.as_str()),
-                    step_output,
-                );
-            }
-            Some((loop_id, iteration)) => {
-                let iteration_index = usize::try_from(iteration).map_err(|_| {
-                    MobStoreError::Internal(format!(
-                        "loop iteration index {iteration} exceeds usize::MAX on this target"
-                    ))
-                })?;
-                let vec = run
-                    .loop_iteration_outputs
-                    .entry(loop_id.clone())
-                    .or_default();
-                while vec.len() <= iteration_index {
-                    vec.push(IndexMap::new());
-                }
-                vec[iteration_index].insert(
-                    crate::ids::StepId::from(step_output_key.as_str()),
-                    step_output,
-                );
-            }
-        }
         Ok(true)
     }
 
@@ -739,38 +616,6 @@ impl MobRunStore for InMemoryMobRunStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn cas_start_loop(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-        initial_loop: LoopSnapshot,
-    ) -> Result<bool, MobStoreError> {
-        let mut runs = self.runs.write().await;
-        let run = runs
-            .get_mut(run_id)
-            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
-        if &run.flow_state != expected_run_state {
-            return Ok(false);
-        }
-        if run.frames.get(frame_id) != Some(expected_frame) {
-            return Ok(false);
-        }
-        // Loop must not already exist
-        if run.loops.contains_key(loop_instance_id) {
-            return Ok(false);
-        }
-        run.flow_state = next_run_state;
-        run.frames.insert(frame_id.clone(), next_frame);
-        run.loops.insert(loop_instance_id.clone(), initial_loop);
-        Ok(true)
-    }
-
-    #[allow(clippy::too_many_arguments)]
     async fn cas_start_loop_with_authority(
         &self,
         run_id: &RunId,
@@ -804,30 +649,6 @@ impl MobRunStore for InMemoryMobRunStore {
         Ok(true)
     }
 
-    async fn cas_loop_request_body_frame(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_loop: &LoopSnapshot,
-        next_loop: LoopSnapshot,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let mut runs = self.runs.write().await;
-        let run = runs
-            .get_mut(run_id)
-            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
-        if &run.flow_state != expected_run_state {
-            return Ok(false);
-        }
-        if run.loops.get(loop_instance_id) != Some(expected_loop) {
-            return Ok(false);
-        }
-        run.flow_state = next_run_state;
-        run.loops.insert(loop_instance_id.clone(), next_loop);
-        Ok(true)
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn cas_loop_request_body_frame_with_authority(
         &self,
@@ -853,46 +674,6 @@ impl MobRunStore for InMemoryMobRunStore {
         run.flow_state = next_run_state;
         run.loops.insert(loop_instance_id.clone(), next_loop);
         append_flow_authority_inputs(run, authority_inputs)?;
-        Ok(true)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn cas_grant_body_frame_start(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_loop: &LoopSnapshot,
-        next_loop: LoopSnapshot,
-        frame_id: &FrameId,
-        initial_frame: FrameSnapshot,
-        ledger_entry: LoopIterationLedgerEntry,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let mut runs = self.runs.write().await;
-        let run = runs
-            .get_mut(run_id)
-            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
-        if &run.flow_state != expected_run_state {
-            return Ok(false);
-        }
-        if run.loops.get(loop_instance_id) != Some(expected_loop) {
-            return Ok(false);
-        }
-        // Frame must not already exist
-        if run.frames.contains_key(frame_id) {
-            return Ok(false);
-        }
-        run.flow_state = next_run_state;
-        run.loops.insert(loop_instance_id.clone(), next_loop);
-        run.frames.insert(frame_id.clone(), initial_frame);
-        if !run.loop_iteration_ledger.iter().any(|existing| {
-            existing.loop_instance_id == ledger_entry.loop_instance_id
-                && existing.iteration == ledger_entry.iteration
-                && existing.frame_id == ledger_entry.frame_id
-        }) {
-            run.loop_iteration_ledger.push(ledger_entry);
-        }
         Ok(true)
     }
 
@@ -939,38 +720,6 @@ impl MobRunStore for InMemoryMobRunStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn cas_complete_body_frame(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_loop: &LoopSnapshot,
-        next_loop: LoopSnapshot,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let mut runs = self.runs.write().await;
-        let run = runs
-            .get_mut(run_id)
-            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
-        if &run.flow_state != expected_run_state {
-            return Ok(false);
-        }
-        if run.loops.get(loop_instance_id) != Some(expected_loop) {
-            return Ok(false);
-        }
-        if run.frames.get(frame_id) != Some(expected_frame) {
-            return Ok(false);
-        }
-        run.flow_state = next_run_state;
-        run.loops.insert(loop_instance_id.clone(), next_loop);
-        run.frames.insert(frame_id.clone(), next_frame);
-        Ok(true)
-    }
-
-    #[allow(clippy::too_many_arguments)]
     async fn cas_complete_body_frame_with_authority(
         &self,
         run_id: &RunId,
@@ -997,42 +746,11 @@ impl MobRunStore for InMemoryMobRunStore {
         if run.frames.get(frame_id) != Some(expected_frame) {
             return Ok(false);
         }
+        validate_flow_authority_inputs(run_id, &authority_inputs)?;
         run.flow_state = next_run_state;
         run.loops.insert(loop_instance_id.clone(), next_loop);
         run.frames.insert(frame_id.clone(), next_frame);
         append_flow_authority_inputs(run, authority_inputs)?;
-        Ok(true)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn cas_complete_loop(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_loop: &LoopSnapshot,
-        next_loop: LoopSnapshot,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let mut runs = self.runs.write().await;
-        let run = runs
-            .get_mut(run_id)
-            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
-        if &run.flow_state != expected_run_state {
-            return Ok(false);
-        }
-        if run.loops.get(loop_instance_id) != Some(expected_loop) {
-            return Ok(false);
-        }
-        if run.frames.get(frame_id) != Some(expected_frame) {
-            return Ok(false);
-        }
-        run.flow_state = next_run_state;
-        run.loops.insert(loop_instance_id.clone(), next_loop);
-        run.frames.insert(frame_id.clone(), next_frame);
         Ok(true)
     }
 

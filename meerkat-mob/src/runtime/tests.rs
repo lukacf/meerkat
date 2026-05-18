@@ -2126,201 +2126,6 @@ impl MobRunStore for RecordingRunStore {
         self.inner.append_failure_entry(run_id, entry).await
     }
 
-    async fn upsert_loop_snapshot(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &crate::ids::LoopInstanceId,
-        snapshot: crate::run::LoopSnapshot,
-        ledger_entry: Option<crate::run::LoopIterationLedgerEntry>,
-    ) -> Result<(), MobStoreError> {
-        self.inner
-            .upsert_loop_snapshot(run_id, loop_instance_id, snapshot, ledger_entry)
-            .await
-    }
-
-    async fn cas_frame_state(
-        &self,
-        run_id: &RunId,
-        frame_id: &crate::ids::FrameId,
-        expected: Option<&crate::run::FrameSnapshot>,
-        next: crate::run::FrameSnapshot,
-    ) -> Result<bool, MobStoreError> {
-        self.inner
-            .cas_frame_state(run_id, frame_id, expected, next)
-            .await
-    }
-
-    async fn cas_grant_node_slot(
-        &self,
-        run_id: &RunId,
-        expected_run_state: &crate::run::flow_run::State,
-        next_run_state: crate::run::flow_run::State,
-        frame_id: &crate::ids::FrameId,
-        expected_frame: &crate::run::FrameSnapshot,
-        next_frame: crate::run::FrameSnapshot,
-    ) -> Result<bool, MobStoreError> {
-        self.inner
-            .cas_grant_node_slot(
-                run_id,
-                expected_run_state,
-                next_run_state,
-                frame_id,
-                expected_frame,
-                next_frame,
-            )
-            .await
-    }
-
-    async fn cas_complete_step_and_record_output(
-        &self,
-        run_id: &RunId,
-        frame_id: &crate::ids::FrameId,
-        expected_frame: &crate::run::FrameSnapshot,
-        next_frame: crate::run::FrameSnapshot,
-        step_output_key: String,
-        step_output: serde_json::Value,
-        loop_context: Option<(&crate::ids::LoopId, u64)>,
-    ) -> Result<bool, MobStoreError> {
-        self.inner
-            .cas_complete_step_and_record_output(
-                run_id,
-                frame_id,
-                expected_frame,
-                next_frame,
-                step_output_key,
-                step_output,
-                loop_context,
-            )
-            .await
-    }
-
-    async fn cas_start_loop(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &crate::ids::LoopInstanceId,
-        expected_run_state: &crate::run::flow_run::State,
-        next_run_state: crate::run::flow_run::State,
-        frame_id: &crate::ids::FrameId,
-        expected_frame: &crate::run::FrameSnapshot,
-        next_frame: crate::run::FrameSnapshot,
-        initial_loop: crate::run::LoopSnapshot,
-    ) -> Result<bool, MobStoreError> {
-        self.inner
-            .cas_start_loop(
-                run_id,
-                loop_instance_id,
-                expected_run_state,
-                next_run_state,
-                frame_id,
-                expected_frame,
-                next_frame,
-                initial_loop,
-            )
-            .await
-    }
-
-    async fn cas_loop_request_body_frame(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &crate::ids::LoopInstanceId,
-        expected_loop: &crate::run::LoopSnapshot,
-        next_loop: crate::run::LoopSnapshot,
-        expected_run_state: &crate::run::flow_run::State,
-        next_run_state: crate::run::flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        self.inner
-            .cas_loop_request_body_frame(
-                run_id,
-                loop_instance_id,
-                expected_loop,
-                next_loop,
-                expected_run_state,
-                next_run_state,
-            )
-            .await
-    }
-
-    async fn cas_grant_body_frame_start(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &crate::ids::LoopInstanceId,
-        expected_loop: &crate::run::LoopSnapshot,
-        next_loop: crate::run::LoopSnapshot,
-        frame_id: &crate::ids::FrameId,
-        initial_frame: crate::run::FrameSnapshot,
-        ledger_entry: crate::run::LoopIterationLedgerEntry,
-        expected_run_state: &crate::run::flow_run::State,
-        next_run_state: crate::run::flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        self.inner
-            .cas_grant_body_frame_start(
-                run_id,
-                loop_instance_id,
-                expected_loop,
-                next_loop,
-                frame_id,
-                initial_frame,
-                ledger_entry,
-                expected_run_state,
-                next_run_state,
-            )
-            .await
-    }
-
-    async fn cas_complete_body_frame(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &crate::ids::LoopInstanceId,
-        expected_loop: &crate::run::LoopSnapshot,
-        next_loop: crate::run::LoopSnapshot,
-        frame_id: &crate::ids::FrameId,
-        expected_frame: &crate::run::FrameSnapshot,
-        next_frame: crate::run::FrameSnapshot,
-        expected_run_state: &crate::run::flow_run::State,
-        next_run_state: crate::run::flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        self.inner
-            .cas_complete_body_frame(
-                run_id,
-                loop_instance_id,
-                expected_loop,
-                next_loop,
-                frame_id,
-                expected_frame,
-                next_frame,
-                expected_run_state,
-                next_run_state,
-            )
-            .await
-    }
-
-    async fn cas_complete_loop(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &crate::ids::LoopInstanceId,
-        expected_loop: &crate::run::LoopSnapshot,
-        next_loop: crate::run::LoopSnapshot,
-        frame_id: &crate::ids::FrameId,
-        expected_frame: &crate::run::FrameSnapshot,
-        next_frame: crate::run::FrameSnapshot,
-        expected_run_state: &crate::run::flow_run::State,
-        next_run_state: crate::run::flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        self.inner
-            .cas_complete_loop(
-                run_id,
-                loop_instance_id,
-                expected_loop,
-                next_loop,
-                frame_id,
-                expected_frame,
-                next_frame,
-                expected_run_state,
-                next_run_state,
-            )
-            .await
-    }
-
     async fn cas_flow_state_with_authority(
         &self,
         run_id: &RunId,
@@ -28701,29 +28506,66 @@ async fn test_resume_running_loop_node_completes_instead_of_failing() {
         3,
     )
     .await;
-    store
-        .upsert_loop_snapshot(
-            &run_id,
-            &loop_instance_id,
-            crate::run::LoopSnapshot {
-                kernel_state: crate::run::loop_iteration::State {
-                    phase: crate::run::loop_iteration::Phase::Running,
-                    loop_instance_id: loop_instance_id.clone(),
-                    parent_frame_id: frame_id.clone(),
-                    parent_node_id: crate::ids::FlowNodeId::from("loop-node"),
-                    loop_id: crate::ids::LoopId::from("retry"),
-                    depth: 1,
-                    stage: crate::run::loop_iteration::LoopIterationStage::AwaitingBodyFrame,
-                    current_iteration: 0,
-                    last_completed_iteration: 0,
-                    max_iterations: 3,
-                    active_body_frame_id: None,
-                },
-            },
-            None,
-        )
+    let desired_loop = crate::run::LoopSnapshot {
+        kernel_state: crate::run::loop_iteration::State {
+            phase: crate::run::loop_iteration::Phase::Running,
+            loop_instance_id: loop_instance_id.clone(),
+            parent_frame_id: frame_id.clone(),
+            parent_node_id: crate::ids::FlowNodeId::from("loop-node"),
+            loop_id: crate::ids::LoopId::from("retry"),
+            depth: 1,
+            stage: crate::run::loop_iteration::LoopIterationStage::AwaitingBodyFrame,
+            current_iteration: 0,
+            last_completed_iteration: 0,
+            max_iterations: 3,
+            active_body_frame_id: None,
+        },
+    };
+    let current_run = store
+        .get_run(&run_id)
         .await
-        .expect("seed running loop snapshot");
+        .expect("get run for loop seed")
+        .expect("run exists");
+    let loop_seed_input =
+        MobRun::create_loop_seed_input(&desired_loop).expect("loop seed authority input");
+    let seeded = if let Some(current_loop) = current_run.loops.get(&loop_instance_id).cloned() {
+        store
+            .cas_loop_request_body_frame_with_authority(
+                &run_id,
+                &loop_instance_id,
+                &current_loop,
+                desired_loop,
+                &current_run.flow_state,
+                current_run.flow_state.clone(),
+                vec![loop_seed_input],
+            )
+            .await
+            .expect("seed running loop snapshot")
+    } else {
+        let current_frame = current_run
+            .frames
+            .get(&frame_id)
+            .cloned()
+            .expect("root frame should exist before loop snapshot seed");
+        store
+            .cas_start_loop_with_authority(
+                &run_id,
+                &loop_instance_id,
+                &current_run.flow_state,
+                current_run.flow_state.clone(),
+                &frame_id,
+                &current_frame,
+                current_frame.clone(),
+                desired_loop,
+                vec![loop_seed_input],
+            )
+            .await
+            .expect("seed missing running loop snapshot")
+    };
+    assert!(
+        seeded,
+        "loop snapshot seed should succeed through authority store path"
+    );
 
     let engine = FlowFrameEngine::new(
         store.clone(),
@@ -28859,46 +28701,94 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
         3,
     )
     .await;
-    store
-        .upsert_loop_snapshot(
-            &run_id,
-            &loop_instance_id,
-            crate::run::LoopSnapshot {
-                kernel_state: crate::run::loop_iteration::State {
-                    phase: crate::run::loop_iteration::Phase::Running,
-                    loop_instance_id: loop_instance_id.clone(),
-                    parent_frame_id: frame_id.clone(),
-                    parent_node_id: crate::ids::FlowNodeId::from("loop-node"),
-                    loop_id: crate::ids::LoopId::from("retry"),
-                    depth: 1,
-                    stage: crate::run::loop_iteration::LoopIterationStage::BodyFrameActive,
-                    current_iteration: 0,
-                    last_completed_iteration: 0,
-                    max_iterations: 3,
-                    active_body_frame_id: Some(body_frame_id.clone()),
-                },
-            },
-            Some(crate::run::LoopIterationLedgerEntry {
-                loop_instance_id: loop_instance_id.clone(),
-                iteration: 0,
-                frame_id: body_frame_id.clone(),
-            }),
-        )
+    let desired_loop = crate::run::LoopSnapshot {
+        kernel_state: crate::run::loop_iteration::State {
+            phase: crate::run::loop_iteration::Phase::Running,
+            loop_instance_id: loop_instance_id.clone(),
+            parent_frame_id: frame_id.clone(),
+            parent_node_id: crate::ids::FlowNodeId::from("loop-node"),
+            loop_id: crate::ids::LoopId::from("retry"),
+            depth: 1,
+            stage: crate::run::loop_iteration::LoopIterationStage::BodyFrameActive,
+            current_iteration: 0,
+            last_completed_iteration: 0,
+            max_iterations: 3,
+            active_body_frame_id: Some(body_frame_id.clone()),
+        },
+    };
+    let current_run = store
+        .get_run(&run_id)
         .await
-        .expect("seed running loop snapshot with ledger entry");
+        .expect("get run for loop seed")
+        .expect("run exists");
+    if !current_run.loops.contains_key(&loop_instance_id) {
+        let initial_loop = crate::run::LoopSnapshot {
+            kernel_state: crate::run::loop_iteration::State {
+                phase: crate::run::loop_iteration::Phase::Running,
+                loop_instance_id: loop_instance_id.clone(),
+                parent_frame_id: frame_id.clone(),
+                parent_node_id: crate::ids::FlowNodeId::from("loop-node"),
+                loop_id: crate::ids::LoopId::from("retry"),
+                depth: 1,
+                stage: crate::run::loop_iteration::LoopIterationStage::AwaitingBodyFrame,
+                current_iteration: 0,
+                last_completed_iteration: 0,
+                max_iterations: 3,
+                active_body_frame_id: None,
+            },
+        };
+        let loop_seed_input =
+            MobRun::create_loop_seed_input(&initial_loop).expect("loop seed authority input");
+        let current_frame = current_run
+            .frames
+            .get(&frame_id)
+            .cloned()
+            .expect("root frame should exist before loop snapshot seed");
+        assert!(
+            store
+                .cas_start_loop_with_authority(
+                    &run_id,
+                    &loop_instance_id,
+                    &current_run.flow_state,
+                    current_run.flow_state.clone(),
+                    &frame_id,
+                    &current_frame,
+                    current_frame.clone(),
+                    initial_loop,
+                    vec![loop_seed_input],
+                )
+                .await
+                .expect("seed missing loop snapshot before body frame seed"),
+            "loop snapshot seed should succeed through authority store path"
+        );
+    }
+    let current_run = store
+        .get_run(&run_id)
+        .await
+        .expect("get run after loop seed")
+        .expect("run exists");
+    let current_loop = current_run
+        .loops
+        .get(&loop_instance_id)
+        .cloned()
+        .expect("loop node admission should persist loop snapshot");
+    let ledger_entry = crate::run::LoopIterationLedgerEntry {
+        loop_instance_id: loop_instance_id.clone(),
+        iteration: 0,
+        frame_id: body_frame_id.clone(),
+    };
+    let body_frame_seed_input = MobRun::create_frame_seed_input(
+        &run_id,
+        &body_frame_id,
+        Some(&loop_instance_id),
+        0,
+        crate::machines::mob_machine::FrameScope::Body,
+        &body_spec,
+        &[FlowNodeId::from("body-step")],
+    )
+    .expect("body frame seed input");
     handle
-        .project_machine_input(
-            MobRun::create_frame_seed_input(
-                &run_id,
-                &body_frame_id,
-                Some(&loop_instance_id),
-                0,
-                crate::machines::mob_machine::FrameScope::Body,
-                &body_spec,
-                &[FlowNodeId::from("body-step")],
-            )
-            .expect("body frame seed input"),
-        )
+        .project_machine_input(body_frame_seed_input.clone())
         .await
         .expect("seed body frame in MobMachine");
     let body_node_id = FlowNodeId::from("body-step");
@@ -28938,12 +28828,35 @@ async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry
             node_condition_results: [(body_node_id, None)].into_iter().collect(),
         },
     };
+    let body_frame_started_input =
+        crate::machines::mob_machine::MobMachineInput::AuthorizeLoopIterationReducerCommand {
+            loop_instance_id: crate::machines::mob_machine::LoopInstanceId::from(
+                loop_instance_id.as_str(),
+            ),
+            command:
+                crate::machines::mob_machine::LoopIterationReducerCommandKind::BodyFrameStarted,
+            body_frame_id: Some(crate::machines::mob_machine::FrameId::from(
+                body_frame_id.as_str(),
+            )),
+            body_frame_iteration: Some(0),
+        };
     assert!(
         store
-            .cas_frame_state(&run_id, &body_frame_id, None, body_frame)
+            .cas_grant_body_frame_start_with_authority(
+                &run_id,
+                &loop_instance_id,
+                &current_loop,
+                desired_loop,
+                &body_frame_id,
+                body_frame,
+                ledger_entry,
+                &current_run.flow_state,
+                current_run.flow_state.clone(),
+                vec![body_frame_seed_input, body_frame_started_input],
+            )
             .await
-            .expect("seed body frame snapshot"),
-        "body frame snapshot insert should succeed"
+            .expect("seed running loop snapshot with ledger entry"),
+        "body frame snapshot seed should succeed through authority store path"
     );
 
     let engine = FlowFrameEngine::new(

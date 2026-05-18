@@ -1418,73 +1418,6 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
-    async fn upsert_loop_snapshot(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        snapshot: LoopSnapshot,
-        ledger_entry: Option<LoopIterationLedgerEntry>,
-    ) -> Result<(), MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let loop_instance_id = loop_instance_id.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            run.loops.insert(loop_instance_id, snapshot);
-            if let Some(entry) = ledger_entry {
-                append_loop_iteration_ledger_if_absent(&mut run, entry);
-            }
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(())
-        })
-        .await
-    }
-
-    async fn cas_frame_state(
-        &self,
-        run_id: &RunId,
-        frame_id: &FrameId,
-        expected: Option<&FrameSnapshot>,
-        next: FrameSnapshot,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let frame_id = frame_id.clone();
-        let expected = expected.cloned();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            let current = run.frames.get(&frame_id);
-            let matches = match (expected.as_ref(), current) {
-                (None, None) => true,
-                (Some(exp), Some(cur)) => exp == cur,
-                _ => false,
-            };
-            if !matches {
-                return Ok(false);
-            }
-            run.frames.insert(frame_id, next);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
-        .await
-    }
-
     async fn cas_frame_state_with_authority(
         &self,
         run_id: &RunId,
@@ -1513,44 +1446,6 @@ impl MobRunStore for SqliteMobRunStore {
                 Ok(true)
             },
         )
-        .await
-    }
-
-    async fn cas_grant_node_slot(
-        &self,
-        run_id: &RunId,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let expected_run_state = expected_run_state.clone();
-        let frame_id = frame_id.clone();
-        let expected_frame = expected_frame.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected_run_state {
-                return Ok(false);
-            }
-            if run.frames.get(&frame_id) != Some(&expected_frame) {
-                return Ok(false);
-            }
-            run.flow_state = next_run_state;
-            run.frames.insert(frame_id, next_frame);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
         .await
     }
 
@@ -1584,61 +1479,6 @@ impl MobRunStore for SqliteMobRunStore {
                 Ok(true)
             },
         )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn cas_complete_step_and_record_output(
-        &self,
-        run_id: &RunId,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-        step_output_key: String,
-        step_output: serde_json::Value,
-        loop_context: Option<(&LoopId, u64)>,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let frame_id = frame_id.clone();
-        let expected_frame = expected_frame.clone();
-        let loop_context = loop_context.map(|(loop_id, iteration)| (loop_id.clone(), iteration));
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.frames.get(&frame_id) != Some(&expected_frame) {
-                return Ok(false);
-            }
-            run.frames.insert(frame_id, next_frame);
-            match loop_context {
-                None => {
-                    run.root_step_outputs
-                        .insert(StepId::from(step_output_key.as_str()), step_output);
-                }
-                Some((loop_id, iteration)) => {
-                    let iteration_index = usize::try_from(iteration).map_err(|_| {
-                        MobStoreError::Internal(format!(
-                            "loop iteration index {iteration} exceeds usize::MAX on this target"
-                        ))
-                    })?;
-                    let outputs = run.loop_iteration_outputs.entry(loop_id).or_default();
-                    while outputs.len() <= iteration_index {
-                        outputs.push(indexmap::IndexMap::new());
-                    }
-                    outputs[iteration_index]
-                        .insert(StepId::from(step_output_key.as_str()), step_output);
-                }
-            }
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
         .await
     }
 
@@ -1692,52 +1532,6 @@ impl MobRunStore for SqliteMobRunStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn cas_start_loop(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-        initial_loop: LoopSnapshot,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let loop_instance_id = loop_instance_id.clone();
-        let expected_run_state = expected_run_state.clone();
-        let frame_id = frame_id.clone();
-        let expected_frame = expected_frame.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected_run_state {
-                return Ok(false);
-            }
-            if run.frames.get(&frame_id) != Some(&expected_frame) {
-                return Ok(false);
-            }
-            if run.loops.contains_key(&loop_instance_id) {
-                return Ok(false);
-            }
-            run.flow_state = next_run_state;
-            run.frames.insert(frame_id, next_frame);
-            run.loops.insert(loop_instance_id, initial_loop);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
     async fn cas_start_loop_with_authority(
         &self,
         run_id: &RunId,
@@ -1777,44 +1571,6 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
-    async fn cas_loop_request_body_frame(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_loop: &LoopSnapshot,
-        next_loop: LoopSnapshot,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let loop_instance_id = loop_instance_id.clone();
-        let expected_loop = expected_loop.clone();
-        let expected_run_state = expected_run_state.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected_run_state {
-                return Ok(false);
-            }
-            if run.loops.get(&loop_instance_id) != Some(&expected_loop) {
-                return Ok(false);
-            }
-            run.flow_state = next_run_state;
-            run.loops.insert(loop_instance_id, next_loop);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
-        .await
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn cas_loop_request_body_frame_with_authority(
         &self,
@@ -1845,54 +1601,6 @@ impl MobRunStore for SqliteMobRunStore {
                 Ok(true)
             },
         )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn cas_grant_body_frame_start(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_loop: &LoopSnapshot,
-        next_loop: LoopSnapshot,
-        frame_id: &FrameId,
-        initial_frame: FrameSnapshot,
-        ledger_entry: LoopIterationLedgerEntry,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let loop_instance_id = loop_instance_id.clone();
-        let expected_loop = expected_loop.clone();
-        let frame_id = frame_id.clone();
-        let expected_run_state = expected_run_state.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected_run_state {
-                return Ok(false);
-            }
-            if run.loops.get(&loop_instance_id) != Some(&expected_loop) {
-                return Ok(false);
-            }
-            if run.frames.contains_key(&frame_id) {
-                return Ok(false);
-            }
-            run.flow_state = next_run_state;
-            run.loops.insert(loop_instance_id, next_loop);
-            run.frames.insert(frame_id, initial_frame);
-            append_loop_iteration_ledger_if_absent(&mut run, ledger_entry);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
         .await
     }
 
@@ -1939,54 +1647,6 @@ impl MobRunStore for SqliteMobRunStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn cas_complete_body_frame(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_loop: &LoopSnapshot,
-        next_loop: LoopSnapshot,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let loop_instance_id = loop_instance_id.clone();
-        let expected_loop = expected_loop.clone();
-        let frame_id = frame_id.clone();
-        let expected_frame = expected_frame.clone();
-        let expected_run_state = expected_run_state.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected_run_state {
-                return Ok(false);
-            }
-            if run.loops.get(&loop_instance_id) != Some(&expected_loop) {
-                return Ok(false);
-            }
-            if run.frames.get(&frame_id) != Some(&expected_frame) {
-                return Ok(false);
-            }
-            run.flow_state = next_run_state;
-            run.loops.insert(loop_instance_id, next_loop);
-            run.frames.insert(frame_id, next_frame);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
     async fn cas_complete_body_frame_with_authority(
         &self,
         run_id: &RunId,
@@ -2025,54 +1685,6 @@ impl MobRunStore for SqliteMobRunStore {
                 Ok(true)
             },
         )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn cas_complete_loop(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_loop: &LoopSnapshot,
-        next_loop: LoopSnapshot,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let loop_instance_id = loop_instance_id.clone();
-        let expected_loop = expected_loop.clone();
-        let frame_id = frame_id.clone();
-        let expected_frame = expected_frame.clone();
-        let expected_run_state = expected_run_state.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected_run_state {
-                return Ok(false);
-            }
-            if run.loops.get(&loop_instance_id) != Some(&expected_loop) {
-                return Ok(false);
-            }
-            if run.frames.get(&frame_id) != Some(&expected_frame) {
-                return Ok(false);
-            }
-            run.flow_state = next_run_state;
-            run.loops.insert(loop_instance_id, next_loop);
-            run.frames.insert(frame_id, next_frame);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
         .await
     }
 

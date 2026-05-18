@@ -675,12 +675,14 @@ impl CoreCommsRuntime for CommsRuntime {
                     ));
                 }
                 let effective_handling_mode = if is_terminal_reply {
-                    handling_mode.or_else(|| {
-                        self.inbound_request_handling_modes
-                            .lock()
-                            .get(&corr_id)
-                            .copied()
-                    })
+                    let resolved =
+                        handling_mode.or_else(|| peer_handle.inbound_handling_mode(corr_id));
+                    if resolved.is_none() {
+                        return Err(SendError::Validation(format!(
+                            "PeerResponse requires machine inbound peer request handling mode for corr_id {corr_id}"
+                        )));
+                    }
+                    resolved
                 } else {
                     None
                 };
@@ -710,10 +712,6 @@ impl CoreCommsRuntime for CommsRuntime {
                         "DSL rejected PeerResponseReplied for corr_id {corr_id}: {err}"
                     )));
                 }
-                if is_terminal_reply {
-                    self.inbound_request_handling_modes.lock().remove(&corr_id);
-                }
-
                 Ok(SendReceipt::PeerResponseSent {
                     envelope_id,
                     in_reply_to,
@@ -993,8 +991,6 @@ impl CoreCommsRuntime for CommsRuntime {
                             | MessageKind::Lifecycle { .. }
                             | MessageKind::Ack { .. } => meerkat_core::types::HandlingMode::Queue,
                         };
-                        let is_peer_request_envelope =
-                            matches!(&envelope.kind, MessageKind::Request { .. });
                         let content = match envelope.kind {
                             MessageKind::Message {
                                 body,
@@ -1051,13 +1047,6 @@ impl CoreCommsRuntime for CommsRuntime {
                                 return None;
                             }
                         };
-
-                        if is_peer_request_envelope {
-                            self.inbound_request_handling_modes.lock().insert(
-                                meerkat_core::PeerCorrelationId::from_uuid(envelope.id),
-                                envelope_handling_mode,
-                            );
-                        }
 
                         Some(meerkat_core::ClassifiedInboxInteraction {
                             interaction: meerkat_core::InboxInteraction {
@@ -1322,12 +1311,6 @@ pub struct CommsRuntime {
     /// require this handle.
     interaction_stream_handle:
         parking_lot::RwLock<Option<Arc<dyn meerkat_core::handles::InteractionStreamHandle>>>,
-    /// Transport-owned projection of the handling mode carried by inbound
-    /// peer requests. `send_response` uses this only when the caller omits an
-    /// explicit response override, matching the tool contract that responses
-    /// default to the original request's delivery mode.
-    inbound_request_handling_modes:
-        Arc<Mutex<HashMap<meerkat_core::PeerCorrelationId, meerkat_core::types::HandlingMode>>>,
 }
 
 impl CommsRuntime {
@@ -1430,7 +1413,6 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
-            inbound_request_handling_modes: Arc::new(Mutex::new(HashMap::new())),
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
@@ -1542,7 +1524,6 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
-            inbound_request_handling_modes: Arc::new(Mutex::new(HashMap::new())),
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
@@ -1666,7 +1647,6 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
-            inbound_request_handling_modes: Arc::new(Mutex::new(HashMap::new())),
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
@@ -2435,9 +2415,6 @@ impl CommsRuntime {
     /// Callers that want the stream-lifecycle CAS (Reserved/Attached gate)
     /// should use [`mark_interaction_complete`].
     fn drop_peer_interaction_projection(&self, interaction_id: Uuid) {
-        self.inbound_request_handling_modes
-            .lock()
-            .remove(&meerkat_core::PeerCorrelationId::from_uuid(interaction_id));
         let removed_sender = self.subscriber_registry.lock().remove(&interaction_id);
         let removed_stream = self
             .interaction_stream_registry
@@ -3048,6 +3025,8 @@ mod tests {
             Mutex<HashMap<meerkat_core::PeerCorrelationId, meerkat_core::OutboundPeerRequestState>>,
         inbound:
             Mutex<HashMap<meerkat_core::PeerCorrelationId, meerkat_core::InboundPeerRequestState>>,
+        inbound_modes:
+            Mutex<HashMap<meerkat_core::PeerCorrelationId, meerkat_core::types::HandlingMode>>,
         cleanup_observer:
             Mutex<Option<Arc<dyn meerkat_core::handles::PeerInteractionCleanupObserver>>>,
     }
@@ -3151,6 +3130,7 @@ mod tests {
         fn request_received(
             &self,
             corr_id: meerkat_core::PeerCorrelationId,
+            handling_mode: meerkat_core::types::HandlingMode,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
             let mut inbound = self.inbound.lock();
             if inbound.contains_key(&corr_id) {
@@ -3160,6 +3140,7 @@ mod tests {
                 ));
             }
             inbound.insert(corr_id, meerkat_core::InboundPeerRequestState::Received);
+            self.inbound_modes.lock().insert(corr_id, handling_mode);
             Ok(())
         }
 
@@ -3168,17 +3149,10 @@ mod tests {
             status: meerkat_core::ResponseStatus,
         ) -> Result<meerkat_core::TerminalityClass, meerkat_core::handles::DslTransitionError>
         {
-            Ok(match status {
-                meerkat_core::ResponseStatus::Accepted => meerkat_core::TerminalityClass::Progress,
-                meerkat_core::ResponseStatus::Completed => {
-                    meerkat_core::TerminalityClass::Terminal {
-                        disposition: meerkat_core::TerminalDisposition::Completed,
-                    }
-                }
-                meerkat_core::ResponseStatus::Failed => meerkat_core::TerminalityClass::Terminal {
-                    disposition: meerkat_core::TerminalDisposition::Failed,
-                },
-            })
+            let generated = meerkat_runtime::handles::RuntimePeerInteractionHandle::ephemeral();
+            meerkat_core::handles::PeerInteractionHandle::classify_response_reply(
+                &generated, status,
+            )
         }
 
         fn response_replied(
@@ -3191,6 +3165,7 @@ mod tests {
                     corr_id,
                 ));
             }
+            self.inbound_modes.lock().remove(&corr_id);
             Ok(())
         }
 
@@ -3206,6 +3181,13 @@ mod tests {
             corr_id: meerkat_core::PeerCorrelationId,
         ) -> Option<meerkat_core::InboundPeerRequestState> {
             self.inbound.lock().get(&corr_id).copied()
+        }
+
+        fn inbound_handling_mode(
+            &self,
+            corr_id: meerkat_core::PeerCorrelationId,
+        ) -> Option<meerkat_core::types::HandlingMode> {
+            self.inbound_modes.lock().get(&corr_id).copied()
         }
 
         fn install_cleanup_observer(
@@ -3634,7 +3616,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_envelopes_do_not_seed_peer_response_handling_mode_cache() {
+    async fn lifecycle_envelopes_remain_non_responseable_request_projections() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("lifecycle-no-response-cache", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
@@ -3674,12 +3656,9 @@ mod tests {
             meerkat_core::InteractionContent::Request { intent, .. }
                 if intent == meerkat_core::comms::PeerLifecycleKind::PeerAdded.as_str()
         ));
-        assert!(
-            !runtime
-                .inbound_request_handling_modes
-                .lock()
-                .contains_key(&meerkat_core::PeerCorrelationId::from_uuid(lifecycle_id)),
-            "lifecycle projections are request-shaped but are not responseable peer requests"
+        assert_eq!(
+            interactions[0].handling_mode,
+            meerkat_core::types::HandlingMode::Queue
         );
     }
 
@@ -4002,6 +3981,7 @@ mod tests {
         meerkat_core::handles::PeerInteractionHandle::request_received(
             peer_handle.as_ref(),
             corr_id,
+            meerkat_core::types::HandlingMode::Queue,
         )
         .expect("test authority should seed inbound request state");
 
@@ -4030,6 +4010,103 @@ mod tests {
             Some(meerkat_core::InboundPeerRequestState::Received),
             "failed terminal PeerResponse send must leave inbound request state retryable"
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_peer_response_default_handling_mode_projects_from_machine_authority() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("response-default-sender-{suffix}");
+        let receiver_name = format!("response-default-receiver-{suffix}");
+        let sender = Arc::new(CommsRuntime::inproc_only(&sender_name).unwrap());
+        let receiver = Arc::new(CommsRuntime::inproc_only(&receiver_name).unwrap());
+        let peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        sender.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            peer_handle.clone(),
+            Arc::new(TestInteractionStreamHandle::default()),
+        ));
+        install_test_peer_comms_handle(receiver.as_ref());
+        let receiver_peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        receiver.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            receiver_peer_handle.clone(),
+            Arc::new(TestInteractionStreamHandle::default()),
+        ));
+
+        CoreCommsRuntime::add_trusted_peer(
+            sender.as_ref(),
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await
+        .expect("sender should trust receiver");
+        CoreCommsRuntime::add_trusted_peer(
+            receiver.as_ref(),
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
+        )
+        .await
+        .expect("receiver should trust sender");
+
+        let interaction_id = Uuid::new_v4();
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
+        meerkat_core::handles::PeerInteractionHandle::request_received(
+            peer_handle.as_ref(),
+            corr_id,
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .expect("machine authority should record inbound request lane");
+        assert_eq!(
+            meerkat_core::handles::PeerInteractionHandle::inbound_handling_mode(
+                peer_handle.as_ref(),
+                corr_id
+            ),
+            Some(meerkat_core::types::HandlingMode::Queue)
+        );
+        meerkat_core::handles::PeerInteractionHandle::request_sent(
+            receiver_peer_handle.as_ref(),
+            corr_id,
+            sender_name.clone(),
+        )
+        .expect("receiver machine authority should expect the response");
+
+        let receipt = CoreCommsRuntime::send(
+            sender.as_ref(),
+            CommsCommand::PeerResponse {
+                to: peer_route(&receiver_name, receiver.public_key()),
+                in_reply_to: InteractionId(interaction_id),
+                status: meerkat_core::ResponseStatus::Completed,
+                result: serde_json::json!({"ok": true}),
+                blocks: None,
+                handling_mode: None,
+            },
+        )
+        .await
+        .expect("terminal response send should succeed");
+        assert!(matches!(receipt, SendReceipt::PeerResponseSent { .. }));
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(receiver.as_ref()).await;
+        assert_eq!(interactions.len(), 1);
+        assert_eq!(
+            interactions[0].handling_mode,
+            meerkat_core::types::HandlingMode::Queue
+        );
+        assert!(
+            meerkat_core::handles::PeerInteractionHandle::inbound_handling_mode(
+                peer_handle.as_ref(),
+                corr_id
+            )
+            .is_none()
+        );
+        assert!(matches!(
+            &interactions[0].content,
+            meerkat_core::InteractionContent::Response { in_reply_to, .. }
+                if in_reply_to.0 == interaction_id
+        ));
     }
 
     #[tokio::test]
@@ -4174,6 +4251,7 @@ mod tests {
         meerkat_core::handles::PeerInteractionHandle::request_received(
             peer_handle.as_ref(),
             corr_id,
+            meerkat_core::types::HandlingMode::Queue,
         )
         .expect("seed inbound request state");
 
@@ -5434,6 +5512,7 @@ mod tests {
         meerkat_core::handles::PeerInteractionHandle::request_received(
             peer_handle.as_ref(),
             corr_id,
+            meerkat_core::types::HandlingMode::Queue,
         )
         .expect("seed inbound request state");
 

@@ -19,6 +19,7 @@ use meerkat_core::peer_correlation::{
     InboundPeerRequestState as CoreInboundState, OutboundPeerRequestState as CoreOutboundState,
     PeerCorrelationId,
 };
+use meerkat_core::types::HandlingMode;
 
 use super::HandleDslAuthority;
 use crate::meerkat_machine::dsl as mm_dsl;
@@ -164,6 +165,13 @@ fn terminality_from_dsl(terminality: mm_dsl::PeerIngressResponseTerminality) -> 
     }
 }
 
+fn handling_mode_from_dsl(lane: mm_dsl::InputLane) -> HandlingMode {
+    match lane {
+        mm_dsl::InputLane::Queue => HandlingMode::Queue,
+        mm_dsl::InputLane::Steer => HandlingMode::Steer,
+    }
+}
+
 fn peer_reply_classified_effect(
     effects: Vec<mm_dsl::MeerkatMachineEffect>,
     context: &'static str,
@@ -240,10 +248,15 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
         )
     }
 
-    fn request_received(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
+    fn request_received(
+        &self,
+        corr_id: PeerCorrelationId,
+        handling_mode: HandlingMode,
+    ) -> Result<(), DslTransitionError> {
         self.apply_input_and_dispatch_cleanup(
             mm_dsl::MeerkatMachineInput::PeerRequestReceived {
                 corr_id: corr_id.into(),
+                handling_mode: mm_dsl::InputLane::from(handling_mode),
             },
             "PeerInteractionHandle::request_received",
         )
@@ -290,6 +303,16 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
             .get(&dsl_key)
             .copied()
             .map(Into::into)
+    }
+
+    fn inbound_handling_mode(&self, corr_id: PeerCorrelationId) -> Option<HandlingMode> {
+        let dsl_key: mm_dsl::PeerCorrelationId = corr_id.into();
+        self.dsl
+            .snapshot_state()
+            .inbound_peer_request_lanes
+            .get(&dsl_key)
+            .copied()
+            .map(handling_mode_from_dsl)
     }
 
     fn install_cleanup_observer(&self, observer: Arc<dyn PeerInteractionCleanupObserver>) {

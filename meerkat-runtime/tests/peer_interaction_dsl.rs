@@ -175,22 +175,31 @@ fn inbound_received_then_replied_advances_and_removes() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
     assert!(handle.inbound_state(corr_id).is_none());
-    handle.request_received(corr_id).unwrap();
+    handle
+        .request_received(corr_id, meerkat_core::types::HandlingMode::Queue)
+        .unwrap();
     assert_eq!(
         handle.inbound_state(corr_id),
         Some(InboundPeerRequestState::Received)
     );
+    assert_eq!(
+        handle.inbound_handling_mode(corr_id),
+        Some(meerkat_core::types::HandlingMode::Queue)
+    );
     handle.response_replied(corr_id).unwrap();
     assert!(handle.inbound_state(corr_id).is_none());
+    assert!(handle.inbound_handling_mode(corr_id).is_none());
 }
 
 #[test]
 fn inbound_received_rejects_duplicate() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
-    handle.request_received(corr_id).unwrap();
+    handle
+        .request_received(corr_id, meerkat_core::types::HandlingMode::Queue)
+        .unwrap();
     let err = handle
-        .request_received(corr_id)
+        .request_received(corr_id, meerkat_core::types::HandlingMode::Queue)
         .expect_err("duplicate inbound receipt must reject");
     assert_eq!(err.context, "PeerInteractionHandle::request_received");
 }
@@ -253,7 +262,13 @@ fn cleanup_observer_fires_on_terminal_transitions() {
     // Inbound reply does NOT fire `PeerInteractionCleanup` (it emits the
     // inbound state-change effect on a different variant).
     let d = PeerCorrelationId::new();
-    handle.request_received(d).unwrap();
+    handle
+        .request_received(d, meerkat_core::types::HandlingMode::Steer)
+        .unwrap();
+    assert_eq!(
+        handle.inbound_handling_mode(d),
+        Some(meerkat_core::types::HandlingMode::Steer)
+    );
     handle.response_replied(d).unwrap();
     assert_eq!(
         rec.0.lock().unwrap().clone(),
@@ -316,7 +331,9 @@ fn outbound_inbound_are_independent_namespaces() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
     handle.request_sent(corr_id, "peer-a".into()).unwrap();
-    handle.request_received(corr_id).unwrap();
+    handle
+        .request_received(corr_id, meerkat_core::types::HandlingMode::Queue)
+        .unwrap();
     assert_eq!(
         handle.outbound_state(corr_id),
         Some(OutboundPeerRequestState::Sent)

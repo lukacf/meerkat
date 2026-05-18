@@ -244,6 +244,12 @@ pub fn spawn_comms_drain(
                                         corr_id = %corr_id,
                                         "PeerInteractionHandle::response_terminal rejected (no DSL entry — classified drain saw an unknown corr_id)"
                                     );
+                                    reject_peer_response_observation_via_authority(
+                                        &comms_runtime,
+                                        &candidate,
+                                        "generated peer terminal transition rejected",
+                                    );
+                                    continue;
                                 }
                             }
 
@@ -309,6 +315,12 @@ pub fn spawn_comms_drain(
                                         corr_id = %corr_id,
                                         "PeerInteractionHandle::response_progress rejected"
                                     );
+                                    reject_peer_response_observation_via_authority(
+                                        &comms_runtime,
+                                        &candidate,
+                                        "generated peer progress transition rejected",
+                                    );
+                                    continue;
                                 }
                             }
 
@@ -371,7 +383,8 @@ pub fn spawn_comms_drain(
                             let corr_id =
                                 meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0);
                             if handle.inbound_state(corr_id).is_none()
-                                && let Err(err) = handle.request_received(corr_id)
+                                && let Err(err) = handle
+                                    .request_received(corr_id, candidate.interaction.handling_mode)
                             {
                                 tracing::warn!(
                                     error = %err,
@@ -1009,7 +1022,7 @@ fn record_bridge_inbound_peer_request(
     if handle.inbound_state(corr_id).is_some() {
         return true;
     }
-    if let Err(err) = handle.request_received(corr_id) {
+    if let Err(err) = handle.request_received(corr_id, candidate.interaction.handling_mode) {
         tracing::warn!(
             error = %err,
             corr_id = %corr_id,
@@ -2012,10 +2025,13 @@ mod tests {
     #[derive(Default)]
     struct CountingPeerInteractionHandle {
         inbound: std::sync::Mutex<HashSet<meerkat_core::PeerCorrelationId>>,
+        inbound_modes: std::sync::Mutex<HashMap<meerkat_core::PeerCorrelationId, HandlingMode>>,
         request_received_count: std::sync::atomic::AtomicUsize,
         response_rejected_count: std::sync::atomic::AtomicUsize,
         response_replied_count: std::sync::atomic::AtomicUsize,
         reject_request_received: std::sync::atomic::AtomicBool,
+        reject_response_progress: std::sync::atomic::AtomicBool,
+        reject_response_terminal: std::sync::atomic::AtomicBool,
     }
 
     impl CountingPeerInteractionHandle {
@@ -2023,6 +2039,22 @@ mod tests {
             let handle = Self::default();
             handle
                 .reject_request_received
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            handle
+        }
+
+        fn rejecting_response_progress() -> Self {
+            let handle = Self::default();
+            handle
+                .reject_response_progress
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            handle
+        }
+
+        fn rejecting_response_terminal() -> Self {
+            let handle = Self::default();
+            handle
+                .reject_response_terminal
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             handle
         }
@@ -2064,16 +2096,34 @@ mod tests {
 
         fn response_progress(
             &self,
-            _corr_id: meerkat_core::PeerCorrelationId,
+            corr_id: meerkat_core::PeerCorrelationId,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            if self
+                .reject_response_progress
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(Self::rejected(
+                    "PeerInteractionHandle::response_progress",
+                    corr_id,
+                ));
+            }
             Ok(())
         }
 
         fn response_terminal(
             &self,
-            _corr_id: meerkat_core::PeerCorrelationId,
+            corr_id: meerkat_core::PeerCorrelationId,
             _disposition: meerkat_core::handles::PeerTerminalDisposition,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            if self
+                .reject_response_terminal
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(Self::rejected(
+                    "PeerInteractionHandle::response_terminal",
+                    corr_id,
+                ));
+            }
             Ok(())
         }
 
@@ -2098,22 +2148,16 @@ mod tests {
             status: meerkat_core::ResponseStatus,
         ) -> Result<meerkat_core::TerminalityClass, meerkat_core::handles::DslTransitionError>
         {
-            Ok(match status {
-                meerkat_core::ResponseStatus::Accepted => meerkat_core::TerminalityClass::Progress,
-                meerkat_core::ResponseStatus::Completed => {
-                    meerkat_core::TerminalityClass::Terminal {
-                        disposition: meerkat_core::TerminalDisposition::Completed,
-                    }
-                }
-                meerkat_core::ResponseStatus::Failed => meerkat_core::TerminalityClass::Terminal {
-                    disposition: meerkat_core::TerminalDisposition::Failed,
-                },
-            })
+            let generated = crate::handles::RuntimePeerInteractionHandle::ephemeral();
+            meerkat_core::handles::PeerInteractionHandle::classify_response_reply(
+                &generated, status,
+            )
         }
 
         fn request_received(
             &self,
             corr_id: meerkat_core::PeerCorrelationId,
+            handling_mode: HandlingMode,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
             if self
                 .reject_request_received
@@ -2131,6 +2175,10 @@ mod tests {
                     corr_id,
                 ));
             }
+            self.inbound_modes
+                .lock()
+                .expect("inbound modes mutex")
+                .insert(corr_id, handling_mode);
             self.request_received_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
@@ -2147,6 +2195,10 @@ mod tests {
                     corr_id,
                 ));
             }
+            self.inbound_modes
+                .lock()
+                .expect("inbound modes mutex")
+                .remove(&corr_id);
             self.response_replied_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
@@ -2168,6 +2220,17 @@ mod tests {
                 .expect("inbound mutex")
                 .contains(&corr_id)
                 .then_some(meerkat_core::InboundPeerRequestState::Received)
+        }
+
+        fn inbound_handling_mode(
+            &self,
+            corr_id: meerkat_core::PeerCorrelationId,
+        ) -> Option<HandlingMode> {
+            self.inbound_modes
+                .lock()
+                .expect("inbound modes mutex")
+                .get(&corr_id)
+                .copied()
         }
 
         fn install_cleanup_observer(
@@ -2420,6 +2483,62 @@ mod tests {
             snapshot.ledger.input_count, 0,
             "malformed response terminality must fail closed before runtime admission"
         );
+    }
+
+    #[tokio::test]
+    async fn rejected_peer_response_transition_fails_closed_before_machine_admission() {
+        for (candidate, peer_handle) in [
+            (
+                response_candidate(
+                    PeerInputClass::ResponseTerminal,
+                    Some(meerkat_core::interaction::TerminalityClass::Terminal {
+                        disposition: meerkat_core::interaction::TerminalDisposition::Completed,
+                    }),
+                ),
+                Arc::new(CountingPeerInteractionHandle::rejecting_response_terminal()),
+            ),
+            (
+                response_candidate(
+                    PeerInputClass::ResponseProgress,
+                    Some(meerkat_core::interaction::TerminalityClass::Progress),
+                ),
+                Arc::new(CountingPeerInteractionHandle::rejecting_response_progress()),
+            ),
+        ] {
+            let adapter = Arc::new(MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            adapter.register_session(session_id.clone()).await;
+
+            let runtime = Arc::new(OneShotPeerRequestRuntime::new(
+                candidate,
+                Some(peer_handle.clone()),
+            ));
+            let drain = spawn_comms_drain(
+                adapter.clone(),
+                session_id.clone(),
+                runtime.clone(),
+                Some(Duration::from_millis(10)),
+            );
+
+            tokio::time::timeout(Duration::from_secs(1), drain)
+                .await
+                .expect("drain should exit after one rejected response candidate")
+                .expect("drain task should not panic");
+
+            assert_eq!(
+                peer_handle.response_rejected_count(),
+                1,
+                "rejected generated peer-response transition should terminalize peer truth through response rejection"
+            );
+            let snapshot = adapter
+                .meerkat_machine_spine_snapshot(&session_id)
+                .await
+                .expect("registered session snapshot");
+            assert_eq!(
+                snapshot.ledger.input_count, 0,
+                "rejected generated peer-response transition must fail closed before runtime admission"
+            );
+        }
     }
 
     #[tokio::test]

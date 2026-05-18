@@ -1723,6 +1723,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             // responses we owe back to remote peers. Receiver-side guard
             // prevents duplicate replies on the same correlation id.
             inbound_peer_requests: Map<PeerCorrelationId, InboundPeerRequestState>,
+            // Machine-owned handling-mode default for inbound peer requests.
+            // The request's typed lane is recorded at the same generated
+            // authority transition that admits the inbound request, and removed
+            // when the reply terminalizes. Outbound `send_response` may project
+            // this value when the caller omits an explicit terminal response
+            // handling-mode override.
+            inbound_peer_request_lanes: Map<PeerCorrelationId, Enum<InputLane>>,
 
             // --- Session-context advancement (W2-E / issue #264) ---
             //
@@ -1955,6 +1962,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             mcp_server_states = EmptyMap,
             pending_peer_requests = EmptyMap,
             inbound_peer_requests = EmptyMap,
+            inbound_peer_request_lanes = EmptyMap,
             last_session_context_updated_at_ms = 0,
             reserved_interaction_streams = EmptySet,
             attached_interaction_streams = EmptySet,
@@ -2382,7 +2390,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             PeerResponseTerminalArrived { corr_id: PeerCorrelationId, disposition: PeerTerminalDisposition },
             PeerResponseRejected { corr_id: PeerCorrelationId },
             PeerRequestTimedOut { corr_id: PeerCorrelationId },
-            PeerRequestReceived { corr_id: PeerCorrelationId },
+            PeerRequestReceived { corr_id: PeerCorrelationId, handling_mode: Enum<InputLane> },
             PeerResponseReplied { corr_id: PeerCorrelationId },
             // Session-context advancement input (W2-E). Shell fires this at every
             // site that mutates canonical session truth (prompt append, external
@@ -10651,10 +10659,11 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition PeerRequestReceived {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input PeerRequestReceived { corr_id }
+            on input PeerRequestReceived { corr_id, handling_mode }
             guard "not_already_inbound" { !self.inbound_peer_requests.contains_key(corr_id) }
             update {
                 self.inbound_peer_requests.insert(corr_id, InboundPeerRequestState::Received);
+                self.inbound_peer_request_lanes.insert(corr_id, handling_mode);
             }
             to Idle
             emit InboundPeerInteractionStateChanged { corr_id: corr_id, new_state: InboundPeerRequestState::Received }
@@ -10666,6 +10675,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "inbound_exists" { self.inbound_peer_requests.contains_key(corr_id) }
             update {
                 self.inbound_peer_requests.remove(corr_id);
+                self.inbound_peer_request_lanes.remove(corr_id);
             }
             to Idle
             emit InboundPeerInteractionStateChanged { corr_id: corr_id, new_state: InboundPeerRequestState::Replied }

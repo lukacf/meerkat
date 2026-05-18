@@ -6090,6 +6090,7 @@ pub struct State {
         std::collections::BTreeMap<PeerCorrelationId, OutboundPeerRequestState>,
     pub inbound_peer_requests:
         std::collections::BTreeMap<PeerCorrelationId, InboundPeerRequestState>,
+    pub inbound_peer_request_lanes: std::collections::BTreeMap<PeerCorrelationId, InputLane>,
     pub last_session_context_updated_at_ms: u64,
     pub reserved_interaction_streams: std::collections::BTreeSet<PeerCorrelationId>,
     pub attached_interaction_streams: std::collections::BTreeSet<PeerCorrelationId>,
@@ -6912,6 +6913,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerRequestReceived {
         pub corr_id: PeerCorrelationId,
+        pub handling_mode: InputLane,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerResponseReplied {
@@ -9396,6 +9398,7 @@ pub fn initial_state() -> State {
         mcp_server_states: Default::default(),
         pending_peer_requests: Default::default(),
         inbound_peer_requests: Default::default(),
+        inbound_peer_request_lanes: Default::default(),
         last_session_context_updated_at_ms: 0,
         reserved_interaction_streams: Default::default(),
         attached_interaction_streams: Default::default(),

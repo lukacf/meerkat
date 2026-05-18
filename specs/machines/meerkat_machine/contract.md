@@ -132,6 +132,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `mcp_server_states`: `Map<McpServerId, McpServerState>`
 - `pending_peer_requests`: `Map<PeerCorrelationId, OutboundPeerRequestState>`
 - `inbound_peer_requests`: `Map<PeerCorrelationId, InboundPeerRequestState>`
+- `inbound_peer_request_lanes`: `Map<PeerCorrelationId, InputLane>`
 - `last_session_context_updated_at_ms`: `u64`
 - `reserved_interaction_streams`: `Set<PeerCorrelationId>`
 - `attached_interaction_streams`: `Set<PeerCorrelationId>`
@@ -313,7 +314,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PeerResponseTerminalArrived`(corr_id: PeerCorrelationId, disposition: PeerTerminalDisposition)
 - `PeerResponseRejected`(corr_id: PeerCorrelationId)
 - `PeerRequestTimedOut`(corr_id: PeerCorrelationId)
-- `PeerRequestReceived`(corr_id: PeerCorrelationId)
+- `PeerRequestReceived`(corr_id: PeerCorrelationId, handling_mode: InputLane)
 - `PeerResponseReplied`(corr_id: PeerCorrelationId)
 - `AdvanceSessionContext`(updated_at_ms: u64)
 - `InteractionStreamReserved`(corr_id: PeerCorrelationId)
@@ -7938,7 +7939,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestReceivedIdle`
 - From: `Idle`
-- On: `PeerRequestReceived`(corr_id)
+- On: `PeerRequestReceived`(corr_id, handling_mode)
 - Guards:
   - `not_already_inbound`
 - Emits: `InboundPeerInteractionStateChanged`
@@ -7946,7 +7947,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestReceivedAttached`
 - From: `Attached`
-- On: `PeerRequestReceived`(corr_id)
+- On: `PeerRequestReceived`(corr_id, handling_mode)
 - Guards:
   - `not_already_inbound`
 - Emits: `InboundPeerInteractionStateChanged`
@@ -7954,7 +7955,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestReceivedRunning`
 - From: `Running`
-- On: `PeerRequestReceived`(corr_id)
+- On: `PeerRequestReceived`(corr_id, handling_mode)
 - Guards:
   - `not_already_inbound`
 - Emits: `InboundPeerInteractionStateChanged`
@@ -7962,7 +7963,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestReceivedRetired`
 - From: `Retired`
-- On: `PeerRequestReceived`(corr_id)
+- On: `PeerRequestReceived`(corr_id, handling_mode)
 - Guards:
   - `not_already_inbound`
 - Emits: `InboundPeerInteractionStateChanged`
@@ -7970,7 +7971,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestReceivedStopped`
 - From: `Stopped`
-- On: `PeerRequestReceived`(corr_id)
+- On: `PeerRequestReceived`(corr_id, handling_mode)
 - Guards:
   - `not_already_inbound`
 - Emits: `InboundPeerInteractionStateChanged`

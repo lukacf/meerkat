@@ -80,6 +80,8 @@ impl BlobStore for TestBlobStore {
 struct TestPeerInteractionHandle {
     outbound: parking_lot::Mutex<HashMap<PeerCorrelationId, OutboundPeerRequestState>>,
     inbound: parking_lot::Mutex<HashMap<PeerCorrelationId, InboundPeerRequestState>>,
+    inbound_modes:
+        parking_lot::Mutex<HashMap<PeerCorrelationId, meerkat_core::types::HandlingMode>>,
 }
 
 impl TestPeerInteractionHandle {
@@ -147,10 +149,15 @@ impl meerkat_core::handles::PeerInteractionHandle for TestPeerInteractionHandle 
         Ok(())
     }
 
-    fn request_received(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
+    fn request_received(
+        &self,
+        corr_id: PeerCorrelationId,
+        handling_mode: meerkat_core::types::HandlingMode,
+    ) -> Result<(), DslTransitionError> {
         self.inbound
             .lock()
             .insert(corr_id, InboundPeerRequestState::Received);
+        self.inbound_modes.lock().insert(corr_id, handling_mode);
         Ok(())
     }
 
@@ -158,15 +165,8 @@ impl meerkat_core::handles::PeerInteractionHandle for TestPeerInteractionHandle 
         &self,
         status: meerkat_core::ResponseStatus,
     ) -> Result<meerkat_core::TerminalityClass, DslTransitionError> {
-        Ok(match status {
-            meerkat_core::ResponseStatus::Accepted => meerkat_core::TerminalityClass::Progress,
-            meerkat_core::ResponseStatus::Completed => meerkat_core::TerminalityClass::Terminal {
-                disposition: meerkat_core::TerminalDisposition::Completed,
-            },
-            meerkat_core::ResponseStatus::Failed => meerkat_core::TerminalityClass::Terminal {
-                disposition: meerkat_core::TerminalDisposition::Failed,
-            },
-        })
+        let generated = meerkat_runtime::handles::RuntimePeerInteractionHandle::ephemeral();
+        meerkat_core::handles::PeerInteractionHandle::classify_response_reply(&generated, status)
     }
 
     fn response_replied(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
@@ -176,6 +176,7 @@ impl meerkat_core::handles::PeerInteractionHandle for TestPeerInteractionHandle 
                 corr_id,
             ));
         }
+        self.inbound_modes.lock().remove(&corr_id);
         Ok(())
     }
 
@@ -185,6 +186,13 @@ impl meerkat_core::handles::PeerInteractionHandle for TestPeerInteractionHandle 
 
     fn inbound_state(&self, corr_id: PeerCorrelationId) -> Option<InboundPeerRequestState> {
         self.inbound.lock().get(&corr_id).copied()
+    }
+
+    fn inbound_handling_mode(
+        &self,
+        corr_id: PeerCorrelationId,
+    ) -> Option<meerkat_core::types::HandlingMode> {
+        self.inbound_modes.lock().get(&corr_id).copied()
     }
 
     fn install_cleanup_observer(
@@ -647,7 +655,10 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
         other => panic!("expected B request, got {other:?}"),
     }
     peer_b
-        .request_received(PeerCorrelationId::from_uuid(request_id.0))
+        .request_received(
+            PeerCorrelationId::from_uuid(request_id.0),
+            meerkat_core::types::HandlingMode::Queue,
+        )
         .expect("seed B inbound request authority");
 
     handle_tools_call_with_context(

@@ -1624,7 +1624,10 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     ));
     responder_bindings
         .peer_interaction()
-        .request_received(PeerCorrelationId::from_uuid(request_id))
+        .request_received(
+            PeerCorrelationId::from_uuid(request_id),
+            meerkat_core::types::HandlingMode::Queue,
+        )
         .expect("seed responder inbound request state");
 
     CoreCommsRuntime::send(

@@ -47,7 +47,7 @@ use crate::turn_execution_authority::{
     ContentShape, TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind,
     TurnTerminalOutcome,
 };
-use crate::types::SessionId;
+use crate::types::{HandlingMode, SessionId};
 
 // ---------------------------------------------------------------------------
 // Typed cross-crate enums for DSL-owned discriminants.
@@ -1310,10 +1310,14 @@ pub trait PeerInteractionHandle: Send + Sync {
     /// effect is emitted; subsequent fires fail the guard.
     fn request_timed_out(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
 
-    /// Fire `PeerRequestReceived { corr_id }` (inbound).
+    /// Fire `PeerRequestReceived { corr_id, handling_mode }` (inbound).
     ///
     /// Guard: `corr_id` is not already in `inbound_peer_requests`.
-    fn request_received(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+    fn request_received(
+        &self,
+        corr_id: PeerCorrelationId,
+        handling_mode: HandlingMode,
+    ) -> Result<(), DslTransitionError>;
 
     /// Ask the generated machine authority to classify a typed outbound reply
     /// status before shell transport send/cleanup code consumes terminality.
@@ -1334,6 +1338,9 @@ pub trait PeerInteractionHandle: Send + Sync {
 
     /// Observe the DSL-owned state of an inbound peer request.
     fn inbound_state(&self, corr_id: PeerCorrelationId) -> Option<InboundPeerRequestState>;
+
+    /// Observe the DSL-owned handling-mode default for an inbound peer request.
+    fn inbound_handling_mode(&self, corr_id: PeerCorrelationId) -> Option<HandlingMode>;
 
     /// Install a projection-cleanup observer for the peer-interaction
     /// lifecycle. The runtime handle invokes the observer whenever a DSL

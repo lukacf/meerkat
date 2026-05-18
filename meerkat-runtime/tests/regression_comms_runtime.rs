@@ -653,12 +653,39 @@ async fn message_with_steer_while_running_requests_cooperative_interrupt() {
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
     assert_eq!(
-        post_admission_signal_from_accept_outcome(&outcome, false),
-        PostAdmissionSignal::InterruptYielding
+        post_admission_signal_from_accept_outcome(&outcome, true),
+        PostAdmissionSignal::RequestImmediateProcessing
     );
     assert_eq!(
         driver.take_post_admission_signal(),
         PostAdmissionSignal::None
+    );
+}
+
+#[tokio::test]
+async fn message_without_steer_while_running_requests_idle_wake() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    bind_running(&mut driver);
+
+    let interaction = make_message("peer-1", "hello");
+    let mut input = runtime_input_for_interaction(&interaction, &rid());
+    if let Input::Peer(peer) = &mut input {
+        peer.handling_mode = None;
+    }
+
+    // A default peer message is ordinary queued work. It should wake the
+    // runtime after the active turn, not cancel that turn at its next boundary.
+    let policy = DefaultPolicyTable::resolve(&input, false);
+    assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::WakeLoop
     );
 }
 

@@ -725,7 +725,7 @@ impl MeerkatMachine {
         }
     }
 
-    async fn dispatch_interrupt_yielding_runtime_effect(
+    async fn dispatch_cancel_after_boundary_runtime_effect(
         &self,
         session_id: &SessionId,
         effect_tx: Option<mpsc::Sender<crate::effect::RuntimeEffect>>,

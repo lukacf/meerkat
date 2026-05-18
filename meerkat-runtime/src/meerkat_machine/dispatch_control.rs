@@ -130,7 +130,7 @@ impl MeerkatMachine {
                 }
                 if let Some(projected_effect) = runtime_effect
                     && let Err(err) = self
-                        .dispatch_interrupt_yielding_runtime_effect(
+                        .dispatch_cancel_after_boundary_runtime_effect(
                             &session_id,
                             effect_tx,
                             boundary_handle,

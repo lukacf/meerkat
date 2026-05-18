@@ -5299,7 +5299,7 @@ async fn cancel_after_boundary_full_effect_channel_backpressures_after_live_wake
 }
 
 #[tokio::test]
-async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
+async fn apply_input_intermediate_peer_input_during_running_turn_wakes_without_boundary_cancel() {
     struct BlockingThenImmediateExecutor {
         apply_calls: Arc<AtomicUsize>,
         interrupt_calls: Arc<AtomicUsize>,
@@ -5356,7 +5356,7 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
             self.events
                 .lock()
                 .expect("events mutex poisoned")
-                .push("interrupt_yielding");
+                .push("boundary_cancel");
             Ok(())
         }
 
@@ -5464,7 +5464,7 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
     assert_eq!(
         interrupt_calls.load(Ordering::SeqCst),
         0,
-        "interrupt-yielding should remain queued until the running apply returns"
+        "default peer admission must not cancel the active turn at a boundary"
     );
     assert_eq!(
         apply_calls.load(Ordering::SeqCst),
@@ -5476,7 +5476,7 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
         let first_apply_finish_index = event_log.iter().position(|event| *event == "apply1_finish");
         assert!(
             first_apply_finish_index.is_none(),
-            "the first apply should still be blocked while interrupt-yielding is queued"
+            "the first apply should still be blocked while the peer input is queued"
         );
         assert!(
             event_log.is_empty(),
@@ -5498,7 +5498,7 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
                 && snapshot.inputs.queue.is_empty()
                 && snapshot.inputs.steer_queue.is_empty()
                 && snapshot.completion_waiters.waiter_count == 0
-                && interrupt_calls.load(Ordering::SeqCst) == 1
+                && interrupt_calls.load(Ordering::SeqCst) == 0
                 && apply_calls.load(Ordering::SeqCst) == 2
             {
                 break snapshot;
@@ -5516,7 +5516,7 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
                 .expect("snapshot should still exist after timeout");
             let event_log = events.lock().expect("events mutex poisoned").clone();
             panic!(
-                "attached runtime did not settle after interrupt-yielding as expected: phase={:?} control_run={:?} ingress_run={:?} queue={:?} steer_queue={:?} waiters={} interrupt_calls={} apply_calls={} events={:?}",
+                "attached runtime did not settle after peer wake as expected: phase={:?} control_run={:?} ingress_run={:?} queue={:?} steer_queue={:?} waiters={} interrupt_calls={} apply_calls={} events={:?}",
                 snapshot.control.phase,
                 snapshot.control.current_run_id,
                 snapshot.inputs.current_run_id,
@@ -5535,21 +5535,20 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
     assert_eq!(settled.completion_waiters.input_count, 0);
     assert_eq!(settled.completion_waiters.waiter_count, 0);
 
-    let (interrupt_index, second_apply_index) = {
+    let second_apply_index = {
         let event_log = events.lock().expect("events mutex poisoned");
-        let interrupt_index = event_log
-            .iter()
-            .position(|event| *event == "interrupt_yielding")
-            .expect("interrupt control should be delivered");
-        let second_apply_index = event_log
+        assert!(
+            !event_log.contains(&"boundary_cancel"),
+            "default peer admission must not deliver boundary-cancel control: {event_log:?}"
+        );
+        event_log
             .iter()
             .position(|event| *event == "apply2_start")
-            .expect("queued peer input should eventually start a second apply");
-        (interrupt_index, second_apply_index)
+            .expect("queued peer input should eventually start a second apply")
     };
     assert!(
-        interrupt_index < second_apply_index,
-        "interrupt-yielding control must drain before the next queued input starts"
+        second_apply_index > 0,
+        "queued peer input should run after the first apply finishes"
     );
 
     match completion_handle.wait().await {
@@ -5561,7 +5560,7 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
 }
 
 #[tokio::test]
-async fn service_peer_admission_uses_live_cancel_after_boundary() {
+async fn service_peer_admission_wakes_without_live_cancel_after_boundary() {
     struct LiveBoundaryHandle {
         calls: Arc<AtomicUsize>,
     }
@@ -5704,8 +5703,8 @@ async fn service_peer_admission_uses_live_cancel_after_boundary() {
 
     assert_eq!(
         live_control_calls.load(Ordering::SeqCst),
-        1,
-        "service ext Ingest should signal the live boundary handle while apply is blocked"
+        0,
+        "default peer admission must not signal the live boundary handle while apply is blocked"
     );
     assert_eq!(
         queued_control_calls.load(Ordering::SeqCst),
@@ -5718,14 +5717,19 @@ async fn service_peer_admission_uses_live_cancel_after_boundary() {
 
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if queued_control_calls.load(Ordering::SeqCst) == 1 {
+            if apply_calls.load(Ordering::SeqCst) == 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("queued boundary effect should still drain after apply returns");
+    .expect("queued peer input should run after the active apply returns");
+    assert_eq!(
+        queued_control_calls.load(Ordering::SeqCst),
+        0,
+        "default peer admission must not enqueue a boundary-cancel effect"
+    );
 }
 
 #[tokio::test]
@@ -18450,11 +18454,11 @@ async fn prepare_runtime_loop_batch_start_unwinds_run_state_when_staging_rejects
 }
 
 #[tokio::test]
-async fn modeled_meerkat_accept_with_completion_running_interrupt_signal_matches_runtime() {
+async fn modeled_meerkat_accept_with_completion_running_peer_wake_signal_matches_runtime() {
     let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Running).await;
     let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
         .await
-        .expect("running interrupt test should capture a pre-state snapshot");
+        .expect("running peer-wake test should capture a pre-state snapshot");
 
     let result = fixture
         .adapter
@@ -18462,7 +18466,7 @@ async fn modeled_meerkat_accept_with_completion_running_interrupt_signal_matches
             None,
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: fixture.session_id.clone(),
-                input: runtime_parity_peer_message("modeled running interrupt admission"),
+                input: runtime_parity_peer_message("modeled running peer wake admission"),
             },
         )
         .await
@@ -18473,23 +18477,23 @@ async fn modeled_meerkat_accept_with_completion_running_interrupt_signal_matches
             handle,
             admission_signal,
         } => (outcome, handle, admission_signal),
-        other => panic!("unexpected running interrupt result: {other:?}"),
+        other => panic!("unexpected running peer-wake result: {other:?}"),
     };
     assert!(outcome.is_accepted());
     let completion_handle =
-        completion_handle.expect("running interrupt input should expose a completion waiter");
+        completion_handle.expect("running peer-wake input should expose a completion waiter");
 
     let after = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
         .await
-        .expect("running interrupt test should capture a post-state snapshot");
+        .expect("running peer-wake test should capture a post-state snapshot");
     let schema = modeled_meerkat_kernel::schema();
     let input = modeled_kernel_input(
         "AcceptWithCompletion",
         [
             ("input_id", runtime_modeled_input_id_value()),
             ("request_immediate_processing", KernelValue::Bool(false)),
-            ("interrupt_yielding", KernelValue::Bool(true)),
-            ("wake_if_idle", KernelValue::Bool(false)),
+            ("interrupt_yielding", KernelValue::Bool(false)),
+            ("wake_if_idle", KernelValue::Bool(true)),
         ],
     );
     assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);

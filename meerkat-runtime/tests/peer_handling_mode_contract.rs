@@ -52,25 +52,25 @@ fn peer_message_input(handling_mode: Option<HandlingMode>) -> Input {
 }
 
 #[tokio::test]
-async fn running_queue_peer_message_interrupts_yielding() {
+async fn running_queue_peer_message_wakes_after_current_turn() {
     let mut driver = EphemeralRuntimeDriver::new(runtime_id());
     bind_running(&mut driver);
 
     let input = peer_message_input(None);
     let policy = DefaultPolicyTable::resolve(&input, false);
     assert_eq!(policy.apply_mode, ApplyMode::StageRunStart);
-    assert_eq!(policy.wake_mode, WakeMode::InterruptYielding);
+    assert_eq!(policy.wake_mode, WakeMode::WakeIfIdle);
     assert_eq!(policy.routing_disposition, RoutingDisposition::Queue);
 
     let outcome = driver.accept_input(input).await.expect("accept input");
     assert!(outcome.is_accepted());
     assert_eq!(
         post_admission_signal_from_accept_outcome(&outcome, false),
-        PostAdmissionSignal::InterruptYielding
+        PostAdmissionSignal::WakeLoop
     );
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 

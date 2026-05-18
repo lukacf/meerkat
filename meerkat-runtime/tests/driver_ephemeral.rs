@@ -186,7 +186,7 @@ async fn accept_peer_terminal_idle_wakes() {
     assert_machine_owned_admission_signal(&result, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -860,7 +860,7 @@ async fn post_admission_signal_accumulates_strongest() {
     assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -900,12 +900,12 @@ async fn post_admission_signal_steer_is_request_immediate() {
     );
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
 #[tokio::test]
-async fn post_admission_signal_queue_peer_message_while_running_interrupts_yielding() {
+async fn post_admission_signal_queue_peer_message_while_running_wakes_after_current_turn() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
 
     // Admit a prompt to start a run
@@ -933,7 +933,7 @@ async fn post_admission_signal_queue_peer_message_while_running_interrupts_yield
             correlation_id: None,
         },
         convention: Some(PeerConvention::Message),
-        body: "interrupt me".into(),
+        body: "wake me after the current turn".into(),
         payload: None,
         blocks: None,
         handling_mode: None,
@@ -943,12 +943,12 @@ async fn post_admission_signal_queue_peer_message_while_running_interrupts_yield
 
     assert_eq!(
         signal,
-        PostAdmissionSignal::InterruptYielding,
-        "queue-mode peer message while running should request cooperative interrupt, got {signal:?}"
+        PostAdmissionSignal::WakeLoop,
+        "queue-mode peer message while running should request an idle wake, got {signal:?}"
     );
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 

@@ -140,8 +140,13 @@ impl DefaultPolicyTable {
                 true,
             ),
 
-            // PeerInput(Message) — StageRunStart, WakeIfIdle (idle) /
-            // InterruptYielding (running)
+            // PeerInput(Message) — StageRunStart, WakeIfIdle.
+            //
+            // A default peer message is queued work for the next turn. While
+            // a turn is running it must wake the runtime after the current
+            // run settles, but it must not request a cooperative boundary
+            // cancel; explicit `handling_mode=steer` is the typed path for
+            // in-turn steering.
             (InputKind::PeerMessage, true) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::WakeIfIdle,
@@ -153,7 +158,7 @@ impl DefaultPolicyTable {
             ),
             (InputKind::PeerMessage, false) => pd(
                 ApplyMode::StageRunStart,
-                WakeMode::InterruptYielding,
+                WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
                 DrainPolicy::QueueNextTurn,
@@ -173,7 +178,7 @@ impl DefaultPolicyTable {
             ),
             (InputKind::PeerRequest, false) => pd(
                 ApplyMode::StageRunStart,
-                WakeMode::InterruptYielding,
+                WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
                 DrainPolicy::QueueNextTurn,
@@ -377,7 +382,7 @@ mod tests {
             InputKind::PeerMessage,
             false,
             ApplyMode::StageRunStart,
-            WakeMode::InterruptYielding,
+            WakeMode::WakeIfIdle,
             QueueMode::Fifo,
             ConsumePoint::OnRunComplete,
             true,
@@ -401,7 +406,7 @@ mod tests {
             InputKind::PeerRequest,
             false,
             ApplyMode::StageRunStart,
-            WakeMode::InterruptYielding,
+            WakeMode::WakeIfIdle,
             QueueMode::Fifo,
             ConsumePoint::OnRunComplete,
             true,
@@ -613,24 +618,24 @@ mod tests {
     }
 
     #[test]
-    fn peer_message_running_stays_queued_without_wake() {
+    fn peer_message_running_wakes_after_current_turn() {
         let decision =
             DefaultPolicyTable::resolve_by_kind(KindId::new(InputKind::PeerMessage), false);
         assert_eq!(
             decision.wake_mode,
-            WakeMode::InterruptYielding,
-            "peer_message while running must interrupt cooperative yielding"
+            WakeMode::WakeIfIdle,
+            "peer_message while running must wake the runtime after the current turn"
         );
     }
 
     #[test]
-    fn peer_request_running_interrupts_yielding() {
+    fn peer_request_running_wakes_after_current_turn() {
         let decision =
             DefaultPolicyTable::resolve_by_kind(KindId::new(InputKind::PeerRequest), false);
         assert_eq!(
             decision.wake_mode,
-            WakeMode::InterruptYielding,
-            "peer_request while running must interrupt cooperative yielding"
+            WakeMode::WakeIfIdle,
+            "peer_request while running must wake the runtime after the current turn"
         );
     }
 

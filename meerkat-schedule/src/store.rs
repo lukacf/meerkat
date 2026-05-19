@@ -362,6 +362,9 @@ impl ScheduleStore for MemoryScheduleStore {
     }
 
     async fn put_schedule(&self, schedule: Schedule) -> Result<(), ScheduleStoreError> {
+        schedule
+            .validate_machine_projection()
+            .map_err(ScheduleStoreError::Internal)?;
         self.inner
             .write()
             .await
@@ -402,6 +405,9 @@ impl ScheduleStore for MemoryScheduleStore {
     }
 
     async fn put_occurrence(&self, occurrence: Occurrence) -> Result<(), ScheduleStoreError> {
+        occurrence
+            .validate_machine_projection()
+            .map_err(ScheduleStoreError::Internal)?;
         self.inner
             .write()
             .await
@@ -418,11 +424,17 @@ impl ScheduleStore for MemoryScheduleStore {
     ) -> Result<Schedule, ScheduleStoreError> {
         let mut state = self.inner.write().await;
         let mut committed_schedule = schedule;
+        committed_schedule
+            .validate_machine_projection()
+            .map_err(ScheduleStoreError::Internal)?;
         state.schedules.insert(
             committed_schedule.schedule_id.clone(),
             committed_schedule.clone(),
         );
         for occurrence in occurrences {
+            occurrence
+                .validate_machine_projection()
+                .map_err(ScheduleStoreError::Internal)?;
             state
                 .occurrences
                 .insert(occurrence.occurrence_id.clone(), occurrence);

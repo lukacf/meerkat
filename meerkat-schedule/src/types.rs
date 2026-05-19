@@ -1,3 +1,4 @@
+use crate::machines::{occurrence_lifecycle as occ_dsl, schedule_lifecycle as sched_dsl};
 use chrono::{DateTime, Duration, Utc};
 use meerkat_core::ops::ToolAccessPolicy;
 use meerkat_core::skills::{SkillKey, SkillRef};
@@ -19,6 +20,529 @@ fn semantic_json_key<T: Serialize>(prefix: &str, value: &T) -> String {
         Ok(json) => format!("{prefix}:{json}"),
         Err(error) => format!("{prefix}:serialization-error:{error}"),
     }
+}
+
+fn trigger_stable_key(trigger: &TriggerSpec) -> String {
+    semantic_json_key("trigger", trigger)
+}
+
+fn policy_key<T: Serialize>(prefix: &str, value: &T) -> String {
+    semantic_json_key(prefix, value)
+}
+
+fn receipt_machine_value(receipt: &DeliveryReceipt) -> String {
+    serde_json::to_string(receipt).unwrap_or_default()
+}
+
+fn datetime_to_machine_millis(dt: DateTime<Utc>, field: &'static str) -> Result<u64, String> {
+    let millis = dt.timestamp_millis();
+    u64::try_from(millis).map_err(|_| {
+        format!("{field} timestamp cannot be represented as unsigned millis: {millis}")
+    })
+}
+
+fn optional_datetime_to_machine_millis(
+    dt: Option<DateTime<Utc>>,
+    field: &'static str,
+) -> Result<Option<u64>, String> {
+    dt.map(|value| datetime_to_machine_millis(value, field))
+        .transpose()
+}
+
+fn schedule_phase_to_machine(phase: SchedulePhase) -> sched_dsl::ScheduleLifecycleState {
+    match phase {
+        SchedulePhase::Active => sched_dsl::ScheduleLifecycleState::Active,
+        SchedulePhase::Paused => sched_dsl::ScheduleLifecycleState::Paused,
+        SchedulePhase::Deleted => sched_dsl::ScheduleLifecycleState::Deleted,
+    }
+}
+
+fn occurrence_phase_to_machine(phase: OccurrencePhase) -> occ_dsl::OccurrenceLifecycleState {
+    match phase {
+        OccurrencePhase::Pending => occ_dsl::OccurrenceLifecycleState::Pending,
+        OccurrencePhase::Claimed => occ_dsl::OccurrenceLifecycleState::Claimed,
+        OccurrencePhase::Dispatching => occ_dsl::OccurrenceLifecycleState::Dispatching,
+        OccurrencePhase::AwaitingCompletion => {
+            occ_dsl::OccurrenceLifecycleState::AwaitingCompletion
+        }
+        OccurrencePhase::Completed => occ_dsl::OccurrenceLifecycleState::Completed,
+        OccurrencePhase::Skipped => occ_dsl::OccurrenceLifecycleState::Skipped,
+        OccurrencePhase::Misfired => occ_dsl::OccurrenceLifecycleState::Misfired,
+        OccurrencePhase::Superseded => occ_dsl::OccurrenceLifecycleState::Superseded,
+        OccurrencePhase::DeliveryFailed => occ_dsl::OccurrenceLifecycleState::DeliveryFailed,
+    }
+}
+
+fn schedule_misfire_policy_to_machine(policy: &MisfirePolicy) -> sched_dsl::MisfirePolicy {
+    match policy {
+        MisfirePolicy::Skip => sched_dsl::MisfirePolicy::Skip,
+        MisfirePolicy::CatchUpWithin { .. } => sched_dsl::MisfirePolicy::CatchUpWithin,
+    }
+}
+
+fn schedule_lifecycle_state_to_wire(phase: sched_dsl::ScheduleLifecycleState) -> &'static str {
+    match phase {
+        sched_dsl::ScheduleLifecycleState::Active => "active",
+        sched_dsl::ScheduleLifecycleState::Paused => "paused",
+        sched_dsl::ScheduleLifecycleState::Deleted => "deleted",
+    }
+}
+
+fn schedule_lifecycle_state_from_wire(
+    phase: &str,
+) -> Result<sched_dsl::ScheduleLifecycleState, String> {
+    match phase {
+        "active" | "Active" => Ok(sched_dsl::ScheduleLifecycleState::Active),
+        "paused" | "Paused" => Ok(sched_dsl::ScheduleLifecycleState::Paused),
+        "deleted" | "Deleted" => Ok(sched_dsl::ScheduleLifecycleState::Deleted),
+        other => Err(format!("invalid ScheduleLifecycleState `{other}`")),
+    }
+}
+
+fn schedule_misfire_policy_to_wire(policy: sched_dsl::MisfirePolicy) -> &'static str {
+    match policy {
+        sched_dsl::MisfirePolicy::Skip => "skip",
+        sched_dsl::MisfirePolicy::CatchUpWithin => "catch_up_within",
+    }
+}
+
+fn schedule_misfire_policy_from_wire(policy: &str) -> Result<sched_dsl::MisfirePolicy, String> {
+    match policy {
+        "skip" | "Skip" => Ok(sched_dsl::MisfirePolicy::Skip),
+        "catch_up_within" | "CatchUpWithin" => Ok(sched_dsl::MisfirePolicy::CatchUpWithin),
+        other => Err(format!("invalid schedule MisfirePolicy `{other}`")),
+    }
+}
+
+fn schedule_overlap_policy_to_wire(policy: sched_dsl::OverlapPolicy) -> &'static str {
+    match policy {
+        sched_dsl::OverlapPolicy::AllowConcurrent => "allow_concurrent",
+        sched_dsl::OverlapPolicy::SkipIfRunning => "skip_if_running",
+    }
+}
+
+fn schedule_overlap_policy_from_wire(policy: &str) -> Result<sched_dsl::OverlapPolicy, String> {
+    match policy {
+        "allow_concurrent" | "AllowConcurrent" => Ok(sched_dsl::OverlapPolicy::AllowConcurrent),
+        "skip_if_running" | "SkipIfRunning" => Ok(sched_dsl::OverlapPolicy::SkipIfRunning),
+        other => Err(format!("invalid schedule OverlapPolicy `{other}`")),
+    }
+}
+
+fn schedule_missing_target_policy_to_wire(policy: sched_dsl::MissingTargetPolicy) -> &'static str {
+    match policy {
+        sched_dsl::MissingTargetPolicy::Skip => "skip",
+        sched_dsl::MissingTargetPolicy::MarkMisfired => "mark_misfired",
+    }
+}
+
+fn schedule_missing_target_policy_from_wire(
+    policy: &str,
+) -> Result<sched_dsl::MissingTargetPolicy, String> {
+    match policy {
+        "skip" | "Skip" => Ok(sched_dsl::MissingTargetPolicy::Skip),
+        "mark_misfired" | "MarkMisfired" => Ok(sched_dsl::MissingTargetPolicy::MarkMisfired),
+        other => Err(format!("invalid schedule MissingTargetPolicy `{other}`")),
+    }
+}
+
+fn occurrence_misfire_policy_to_machine(policy: &MisfirePolicy) -> occ_dsl::MisfirePolicy {
+    match policy {
+        MisfirePolicy::Skip => occ_dsl::MisfirePolicy::Skip,
+        MisfirePolicy::CatchUpWithin { .. } => occ_dsl::MisfirePolicy::CatchUpWithin,
+    }
+}
+
+fn occurrence_lifecycle_state_to_wire(phase: occ_dsl::OccurrenceLifecycleState) -> &'static str {
+    match phase {
+        occ_dsl::OccurrenceLifecycleState::Pending => "pending",
+        occ_dsl::OccurrenceLifecycleState::Claimed => "claimed",
+        occ_dsl::OccurrenceLifecycleState::Dispatching => "dispatching",
+        occ_dsl::OccurrenceLifecycleState::AwaitingCompletion => "awaiting_completion",
+        occ_dsl::OccurrenceLifecycleState::Completed => "completed",
+        occ_dsl::OccurrenceLifecycleState::Skipped => "skipped",
+        occ_dsl::OccurrenceLifecycleState::Misfired => "misfired",
+        occ_dsl::OccurrenceLifecycleState::Superseded => "superseded",
+        occ_dsl::OccurrenceLifecycleState::DeliveryFailed => "delivery_failed",
+    }
+}
+
+fn occurrence_lifecycle_state_from_wire(
+    phase: &str,
+) -> Result<occ_dsl::OccurrenceLifecycleState, String> {
+    match phase {
+        "pending" | "Pending" => Ok(occ_dsl::OccurrenceLifecycleState::Pending),
+        "claimed" | "Claimed" => Ok(occ_dsl::OccurrenceLifecycleState::Claimed),
+        "dispatching" | "Dispatching" => Ok(occ_dsl::OccurrenceLifecycleState::Dispatching),
+        "awaiting_completion" | "AwaitingCompletion" => {
+            Ok(occ_dsl::OccurrenceLifecycleState::AwaitingCompletion)
+        }
+        "completed" | "Completed" => Ok(occ_dsl::OccurrenceLifecycleState::Completed),
+        "skipped" | "Skipped" => Ok(occ_dsl::OccurrenceLifecycleState::Skipped),
+        "misfired" | "Misfired" => Ok(occ_dsl::OccurrenceLifecycleState::Misfired),
+        "superseded" | "Superseded" => Ok(occ_dsl::OccurrenceLifecycleState::Superseded),
+        "delivery_failed" | "DeliveryFailed" => {
+            Ok(occ_dsl::OccurrenceLifecycleState::DeliveryFailed)
+        }
+        other => Err(format!("invalid OccurrenceLifecycleState `{other}`")),
+    }
+}
+
+fn occurrence_misfire_policy_to_wire(policy: occ_dsl::MisfirePolicy) -> &'static str {
+    match policy {
+        occ_dsl::MisfirePolicy::Skip => "skip",
+        occ_dsl::MisfirePolicy::CatchUpWithin => "catch_up_within",
+    }
+}
+
+fn occurrence_misfire_policy_from_wire(policy: &str) -> Result<occ_dsl::MisfirePolicy, String> {
+    match policy {
+        "skip" | "Skip" => Ok(occ_dsl::MisfirePolicy::Skip),
+        "catch_up_within" | "CatchUpWithin" => Ok(occ_dsl::MisfirePolicy::CatchUpWithin),
+        other => Err(format!("invalid occurrence MisfirePolicy `{other}`")),
+    }
+}
+
+fn occurrence_overlap_policy_to_wire(policy: occ_dsl::OverlapPolicy) -> &'static str {
+    match policy {
+        occ_dsl::OverlapPolicy::AllowConcurrent => "allow_concurrent",
+        occ_dsl::OverlapPolicy::SkipIfRunning => "skip_if_running",
+    }
+}
+
+fn occurrence_overlap_policy_from_wire(policy: &str) -> Result<occ_dsl::OverlapPolicy, String> {
+    match policy {
+        "allow_concurrent" | "AllowConcurrent" => Ok(occ_dsl::OverlapPolicy::AllowConcurrent),
+        "skip_if_running" | "SkipIfRunning" => Ok(occ_dsl::OverlapPolicy::SkipIfRunning),
+        other => Err(format!("invalid occurrence OverlapPolicy `{other}`")),
+    }
+}
+
+fn occurrence_missing_target_policy_to_wire(policy: occ_dsl::MissingTargetPolicy) -> &'static str {
+    match policy {
+        occ_dsl::MissingTargetPolicy::Skip => "skip",
+        occ_dsl::MissingTargetPolicy::MarkMisfired => "mark_misfired",
+    }
+}
+
+fn occurrence_missing_target_policy_from_wire(
+    policy: &str,
+) -> Result<occ_dsl::MissingTargetPolicy, String> {
+    match policy {
+        "skip" | "Skip" => Ok(occ_dsl::MissingTargetPolicy::Skip),
+        "mark_misfired" | "MarkMisfired" => Ok(occ_dsl::MissingTargetPolicy::MarkMisfired),
+        other => Err(format!("invalid occurrence MissingTargetPolicy `{other}`")),
+    }
+}
+
+fn occurrence_failure_class_to_wire(failure_class: occ_dsl::FailureClass) -> &'static str {
+    match failure_class {
+        occ_dsl::FailureClass::TargetMaterializationFailed => "target_materialization_failed",
+        occ_dsl::FailureClass::TargetMissing => "target_missing",
+        occ_dsl::FailureClass::TargetBusy => "target_busy",
+        occ_dsl::FailureClass::RuntimeRejected => "runtime_rejected",
+        occ_dsl::FailureClass::MobRejected => "mob_rejected",
+        occ_dsl::FailureClass::LeaseLost => "lease_lost",
+        occ_dsl::FailureClass::TransportError => "transport_error",
+        occ_dsl::FailureClass::InternalError => "internal_error",
+    }
+}
+
+fn occurrence_failure_class_from_wire(
+    failure_class: &str,
+) -> Result<occ_dsl::FailureClass, String> {
+    match failure_class {
+        "target_materialization_failed" | "TargetMaterializationFailed" => {
+            Ok(occ_dsl::FailureClass::TargetMaterializationFailed)
+        }
+        "target_missing" | "TargetMissing" => Ok(occ_dsl::FailureClass::TargetMissing),
+        "target_busy" | "TargetBusy" => Ok(occ_dsl::FailureClass::TargetBusy),
+        "runtime_rejected" | "RuntimeRejected" => Ok(occ_dsl::FailureClass::RuntimeRejected),
+        "mob_rejected" | "MobRejected" => Ok(occ_dsl::FailureClass::MobRejected),
+        "lease_lost" | "LeaseLost" => Ok(occ_dsl::FailureClass::LeaseLost),
+        "transport_error" | "TransportError" => Ok(occ_dsl::FailureClass::TransportError),
+        "internal_error" | "InternalError" => Ok(occ_dsl::FailureClass::InternalError),
+        other => Err(format!("invalid OccurrenceFailureClass `{other}`")),
+    }
+}
+
+fn schedule_overlap_policy_to_machine(policy: &OverlapPolicy) -> sched_dsl::OverlapPolicy {
+    match policy {
+        OverlapPolicy::AllowConcurrent => sched_dsl::OverlapPolicy::AllowConcurrent,
+        OverlapPolicy::SkipIfRunning => sched_dsl::OverlapPolicy::SkipIfRunning,
+    }
+}
+
+fn occurrence_overlap_policy_to_machine(policy: &OverlapPolicy) -> occ_dsl::OverlapPolicy {
+    match policy {
+        OverlapPolicy::AllowConcurrent => occ_dsl::OverlapPolicy::AllowConcurrent,
+        OverlapPolicy::SkipIfRunning => occ_dsl::OverlapPolicy::SkipIfRunning,
+    }
+}
+
+fn schedule_missing_target_policy_to_machine(
+    policy: &MissingTargetPolicy,
+) -> sched_dsl::MissingTargetPolicy {
+    match policy {
+        MissingTargetPolicy::Skip => sched_dsl::MissingTargetPolicy::Skip,
+        MissingTargetPolicy::MarkMisfired => sched_dsl::MissingTargetPolicy::MarkMisfired,
+    }
+}
+
+fn occurrence_missing_target_policy_to_machine(
+    policy: &MissingTargetPolicy,
+) -> occ_dsl::MissingTargetPolicy {
+    match policy {
+        MissingTargetPolicy::Skip => occ_dsl::MissingTargetPolicy::Skip,
+        MissingTargetPolicy::MarkMisfired => occ_dsl::MissingTargetPolicy::MarkMisfired,
+    }
+}
+
+fn failure_class_to_machine(failure_class: OccurrenceFailureClass) -> occ_dsl::FailureClass {
+    match failure_class {
+        OccurrenceFailureClass::TargetMaterializationFailed => {
+            occ_dsl::FailureClass::TargetMaterializationFailed
+        }
+        OccurrenceFailureClass::TargetMissing => occ_dsl::FailureClass::TargetMissing,
+        OccurrenceFailureClass::TargetBusy => occ_dsl::FailureClass::TargetBusy,
+        OccurrenceFailureClass::RuntimeRejected => occ_dsl::FailureClass::RuntimeRejected,
+        OccurrenceFailureClass::MobRejected => occ_dsl::FailureClass::MobRejected,
+        OccurrenceFailureClass::LeaseLost => occ_dsl::FailureClass::LeaseLost,
+        OccurrenceFailureClass::TransportError => occ_dsl::FailureClass::TransportError,
+        OccurrenceFailureClass::InternalError => occ_dsl::FailureClass::InternalError,
+    }
+}
+
+pub(crate) fn validate_schedule_machine_projection(schedule: &Schedule) -> Result<(), String> {
+    let machine = &schedule.machine_state;
+    if machine.schedule_id.0 != schedule.schedule_id.0.to_string() {
+        return Err(format!(
+            "schedule {} id projection does not match machine_state",
+            schedule.schedule_id
+        ));
+    }
+    if schedule_phase_to_machine(schedule.phase) != machine.lifecycle_phase {
+        return Err(format!(
+            "schedule {} phase projection does not match machine_state",
+            schedule.schedule_id
+        ));
+    }
+    if schedule.revision.0 != machine.revision {
+        return Err(format!(
+            "schedule {} revision projection does not match machine_state",
+            schedule.schedule_id
+        ));
+    }
+    if trigger_stable_key(&schedule.trigger) != machine.trigger_key {
+        return Err(format!(
+            "schedule {} trigger projection does not match machine_state",
+            schedule.schedule_id
+        ));
+    }
+    if schedule.target.stable_key() != machine.target_binding_key {
+        return Err(format!(
+            "schedule {} target projection does not match machine_state",
+            schedule.schedule_id
+        ));
+    }
+    if schedule_misfire_policy_to_machine(&schedule.misfire_policy) != machine.misfire_policy
+        || policy_key("misfire_policy", &schedule.misfire_policy) != machine.misfire_policy_key
+    {
+        return Err(format!(
+            "schedule {} misfire policy projection does not match machine_state",
+            schedule.schedule_id
+        ));
+    }
+    if schedule_overlap_policy_to_machine(&schedule.overlap_policy) != machine.overlap_policy
+        || policy_key("overlap_policy", &schedule.overlap_policy) != machine.overlap_policy_key
+    {
+        return Err(format!(
+            "schedule {} overlap policy projection does not match machine_state",
+            schedule.schedule_id
+        ));
+    }
+    if schedule_missing_target_policy_to_machine(&schedule.missing_target_policy)
+        != machine.missing_target_policy
+        || policy_key("missing_target_policy", &schedule.missing_target_policy)
+            != machine.missing_target_policy_key
+    {
+        return Err(format!(
+            "schedule {} missing-target policy projection does not match machine_state",
+            schedule.schedule_id
+        ));
+    }
+    if u64::from(schedule.config.planning_horizon_days) != machine.planning_horizon_days
+        || u64::from(schedule.config.planning_horizon_occurrences)
+            != machine.planning_horizon_occurrences
+    {
+        return Err(format!(
+            "schedule {} planning horizon projection does not match machine_state",
+            schedule.schedule_id
+        ));
+    }
+    if optional_datetime_to_machine_millis(schedule.planning_cursor_utc, "planning_cursor_utc")?
+        != machine.planning_cursor_utc_ms
+    {
+        return Err(format!(
+            "schedule {} planning cursor projection does not match machine_state",
+            schedule.schedule_id
+        ));
+    }
+    if schedule.next_occurrence_ordinal.0 != machine.next_occurrence_ordinal {
+        return Err(format!(
+            "schedule {} next occurrence ordinal projection does not match machine_state",
+            schedule.schedule_id
+        ));
+    }
+    let superseded_ack_ids = schedule
+        .superseded_ack_ids
+        .iter()
+        .map(|id| sched_dsl::OccurrenceId(id.0.to_string()))
+        .collect::<BTreeSet<_>>();
+    if superseded_ack_ids != machine.superseded_ack_ids {
+        return Err(format!(
+            "schedule {} superseded ack projection does not match machine_state",
+            schedule.schedule_id
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_occurrence_machine_projection(
+    occurrence: &Occurrence,
+) -> Result<(), String> {
+    let machine = &occurrence.machine_state;
+    if occurrence_phase_to_machine(occurrence.phase) != machine.lifecycle_phase {
+        return Err(format!(
+            "occurrence {} phase projection does not match machine_state",
+            occurrence.occurrence_id
+        ));
+    }
+    if machine.occurrence_id.0 != occurrence.occurrence_id.0.to_string()
+        || machine.schedule_id.0 != occurrence.schedule_id.0.to_string()
+    {
+        return Err(format!(
+            "occurrence {} identity projection does not match machine_state",
+            occurrence.occurrence_id
+        ));
+    }
+    if occurrence.schedule_revision.0 != machine.schedule_revision
+        || occurrence.occurrence_ordinal.0 != machine.occurrence_ordinal
+    {
+        return Err(format!(
+            "occurrence {} revision/ordinal projection does not match machine_state",
+            occurrence.occurrence_id
+        ));
+    }
+    if trigger_stable_key(&occurrence.trigger_snapshot) != machine.trigger_key
+        || occurrence.target_snapshot.stable_key() != machine.target_binding_key
+    {
+        return Err(format!(
+            "occurrence {} target snapshot projection does not match machine_state",
+            occurrence.occurrence_id
+        ));
+    }
+    if occurrence_misfire_policy_to_machine(&occurrence.misfire_policy) != machine.misfire_policy
+        || policy_key("misfire_policy", &occurrence.misfire_policy) != machine.misfire_policy_key
+        || occurrence_overlap_policy_to_machine(&occurrence.overlap_policy)
+            != machine.overlap_policy
+        || policy_key("overlap_policy", &occurrence.overlap_policy) != machine.overlap_policy_key
+        || occurrence_missing_target_policy_to_machine(&occurrence.missing_target_policy)
+            != machine.missing_target_policy
+        || policy_key("missing_target_policy", &occurrence.missing_target_policy)
+            != machine.missing_target_policy_key
+    {
+        return Err(format!(
+            "occurrence {} policy projection does not match machine_state",
+            occurrence.occurrence_id
+        ));
+    }
+    if datetime_to_machine_millis(occurrence.due_at_utc, "due_at_utc")? != machine.due_at_utc_ms {
+        return Err(format!(
+            "occurrence {} due time projection does not match machine_state",
+            occurrence.occurrence_id
+        ));
+    }
+    let misfire_deadline = occurrence
+        .misfire_policy
+        .misfire_deadline_utc(occurrence.due_at_utc)
+        .map(|deadline| datetime_to_machine_millis(deadline, "misfire_deadline_utc"))
+        .transpose()?
+        .ok_or_else(|| {
+            format!(
+                "occurrence {} missing misfire deadline projection",
+                occurrence.occurrence_id
+            )
+        })?;
+    if misfire_deadline != machine.misfire_deadline_utc_ms {
+        return Err(format!(
+            "occurrence {} misfire deadline projection does not match machine_state",
+            occurrence.occurrence_id
+        ));
+    }
+    if occurrence.claimed_by != machine.claimed_by
+        || optional_datetime_to_machine_millis(
+            occurrence.lease_expires_at_utc,
+            "lease_expires_at_utc",
+        )? != machine.lease_expires_at_utc_ms
+        || optional_datetime_to_machine_millis(occurrence.claimed_at_utc, "claimed_at_utc")?
+            != machine.claimed_at_utc_ms
+        || occurrence
+            .claim_token
+            .map(|token| occ_dsl::ClaimToken(token.to_string()))
+            != machine.claim_token.clone()
+    {
+        return Err(format!(
+            "occurrence {} claim projection does not match machine_state",
+            occurrence.occurrence_id
+        ));
+    }
+    if occurrence.delivery_correlation_id != machine.delivery_correlation_id
+        || occurrence
+            .last_receipt
+            .as_ref()
+            .map(receipt_machine_value)
+            .map(occ_dsl::DeliveryReceipt)
+            != machine.last_receipt.clone()
+        || occurrence
+            .runtime_outcome
+            .as_ref()
+            .map(|outcome| semantic_json_key("runtime_outcome", outcome))
+            != machine.runtime_outcome_key
+    {
+        return Err(format!(
+            "occurrence {} delivery projection does not match machine_state",
+            occurrence.occurrence_id
+        ));
+    }
+    if occurrence.failure_class.map(failure_class_to_machine) != machine.failure_class
+        || occurrence.failure_detail != machine.failure_detail
+    {
+        return Err(format!(
+            "occurrence {} failure projection does not match machine_state",
+            occurrence.occurrence_id
+        ));
+    }
+    if optional_datetime_to_machine_millis(occurrence.dispatched_at_utc, "dispatched_at_utc")?
+        != machine.dispatched_at_utc_ms
+        || optional_datetime_to_machine_millis(occurrence.completed_at_utc, "completed_at_utc")?
+            != machine.completed_at_utc_ms
+    {
+        return Err(format!(
+            "occurrence {} terminal timestamp projection does not match machine_state",
+            occurrence.occurrence_id
+        ));
+    }
+    if u64::from(occurrence.attempt_count) != machine.attempt_count
+        || occurrence.superseded_by_revision.map(|revision| revision.0)
+            != machine.superseded_by_revision
+    {
+        return Err(format!(
+            "occurrence {} attempt/supersession projection does not match machine_state",
+            occurrence.occurrence_id
+        ));
+    }
+    Ok(())
 }
 
 macro_rules! uuid_newtype {
@@ -956,26 +1480,209 @@ fn planning_horizon_u32(field: &'static str, value: u64) -> Result<u32, String> 
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Schedule {
     pub schedule_id: ScheduleId,
     pub phase: SchedulePhase,
     pub revision: ScheduleRevision,
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub(crate) machine_state: sched_dsl::ScheduleLifecycleMachineState,
     pub trigger: TriggerSpec,
     pub target: TargetBinding,
-    #[serde(default)]
     pub misfire_policy: MisfirePolicy,
-    #[serde(default)]
     pub overlap_policy: OverlapPolicy,
-    #[serde(default)]
     pub missing_target_policy: MissingTargetPolicy,
     pub next_occurrence_ordinal: OccurrenceOrdinal,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning_cursor_utc: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub superseded_ack_ids: BTreeSet<OccurrenceId>,
-    #[serde(flatten)]
     pub config: ScheduleConfig,
+}
+
+#[derive(Serialize)]
+struct ScheduleSerdeWire {
+    schedule_id: ScheduleId,
+    phase: SchedulePhase,
+    revision: ScheduleRevision,
+    machine_state: ScheduleMachineStateWire,
+    trigger: TriggerSpec,
+    target: TargetBinding,
+    misfire_policy: MisfirePolicy,
+    overlap_policy: OverlapPolicy,
+    missing_target_policy: MissingTargetPolicy,
+    next_occurrence_ordinal: OccurrenceOrdinal,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    planning_cursor_utc: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    superseded_ack_ids: BTreeSet<OccurrenceId>,
+    #[serde(flatten)]
+    config: ScheduleConfig,
+}
+
+#[derive(Deserialize)]
+struct ScheduleWire {
+    schedule_id: ScheduleId,
+    phase: SchedulePhase,
+    revision: ScheduleRevision,
+    #[serde(default)]
+    machine_state: Option<ScheduleMachineStateWire>,
+    trigger: TriggerSpec,
+    target: TargetBinding,
+    #[serde(default)]
+    misfire_policy: MisfirePolicy,
+    #[serde(default)]
+    overlap_policy: OverlapPolicy,
+    #[serde(default)]
+    missing_target_policy: MissingTargetPolicy,
+    next_occurrence_ordinal: OccurrenceOrdinal,
+    #[serde(default)]
+    planning_cursor_utc: Option<DateTime<Utc>>,
+    #[serde(default)]
+    superseded_ack_ids: BTreeSet<OccurrenceId>,
+    #[serde(flatten)]
+    config: ScheduleConfig,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ScheduleMachineStateWire {
+    schedule_id: String,
+    lifecycle_phase: String,
+    revision: u64,
+    trigger_key: String,
+    target_binding_key: String,
+    misfire_policy: String,
+    misfire_policy_key: String,
+    overlap_policy: String,
+    overlap_policy_key: String,
+    missing_target_policy: String,
+    missing_target_policy_key: String,
+    planning_horizon_days: u64,
+    planning_horizon_occurrences: u64,
+    planning_cursor_utc_ms: Option<u64>,
+    next_occurrence_ordinal: u64,
+    #[serde(default)]
+    superseded_ack_ids: BTreeSet<String>,
+}
+
+impl From<&sched_dsl::ScheduleLifecycleMachineState> for ScheduleMachineStateWire {
+    fn from(state: &sched_dsl::ScheduleLifecycleMachineState) -> Self {
+        Self {
+            schedule_id: state.schedule_id.0.clone(),
+            lifecycle_phase: schedule_lifecycle_state_to_wire(state.lifecycle_phase).to_string(),
+            revision: state.revision,
+            trigger_key: state.trigger_key.clone(),
+            target_binding_key: state.target_binding_key.clone(),
+            misfire_policy: schedule_misfire_policy_to_wire(state.misfire_policy).to_string(),
+            misfire_policy_key: state.misfire_policy_key.clone(),
+            overlap_policy: schedule_overlap_policy_to_wire(state.overlap_policy).to_string(),
+            overlap_policy_key: state.overlap_policy_key.clone(),
+            missing_target_policy: schedule_missing_target_policy_to_wire(
+                state.missing_target_policy,
+            )
+            .to_string(),
+            missing_target_policy_key: state.missing_target_policy_key.clone(),
+            planning_horizon_days: state.planning_horizon_days,
+            planning_horizon_occurrences: state.planning_horizon_occurrences,
+            planning_cursor_utc_ms: state.planning_cursor_utc_ms,
+            next_occurrence_ordinal: state.next_occurrence_ordinal,
+            superseded_ack_ids: state
+                .superseded_ack_ids
+                .iter()
+                .map(|id| id.0.clone())
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<ScheduleMachineStateWire> for sched_dsl::ScheduleLifecycleMachineState {
+    type Error = String;
+
+    fn try_from(wire: ScheduleMachineStateWire) -> Result<Self, Self::Error> {
+        Ok(Self {
+            schedule_id: sched_dsl::ScheduleId(wire.schedule_id),
+            lifecycle_phase: schedule_lifecycle_state_from_wire(&wire.lifecycle_phase)?,
+            revision: wire.revision,
+            trigger_key: wire.trigger_key,
+            target_binding_key: wire.target_binding_key,
+            misfire_policy: schedule_misfire_policy_from_wire(&wire.misfire_policy)?,
+            misfire_policy_key: wire.misfire_policy_key,
+            overlap_policy: schedule_overlap_policy_from_wire(&wire.overlap_policy)?,
+            overlap_policy_key: wire.overlap_policy_key,
+            missing_target_policy: schedule_missing_target_policy_from_wire(
+                &wire.missing_target_policy,
+            )?,
+            missing_target_policy_key: wire.missing_target_policy_key,
+            planning_horizon_days: wire.planning_horizon_days,
+            planning_horizon_occurrences: wire.planning_horizon_occurrences,
+            planning_cursor_utc_ms: wire.planning_cursor_utc_ms,
+            next_occurrence_ordinal: wire.next_occurrence_ordinal,
+            superseded_ack_ids: wire
+                .superseded_ack_ids
+                .into_iter()
+                .map(sched_dsl::OccurrenceId)
+                .collect(),
+        })
+    }
+}
+
+impl From<&Schedule> for ScheduleSerdeWire {
+    fn from(schedule: &Schedule) -> Self {
+        Self {
+            schedule_id: schedule.schedule_id.clone(),
+            phase: schedule.phase,
+            revision: schedule.revision,
+            machine_state: ScheduleMachineStateWire::from(&schedule.machine_state),
+            trigger: schedule.trigger.clone(),
+            target: schedule.target.clone(),
+            misfire_policy: schedule.misfire_policy.clone(),
+            overlap_policy: schedule.overlap_policy.clone(),
+            missing_target_policy: schedule.missing_target_policy.clone(),
+            next_occurrence_ordinal: schedule.next_occurrence_ordinal,
+            planning_cursor_utc: schedule.planning_cursor_utc,
+            superseded_ack_ids: schedule.superseded_ack_ids.clone(),
+            config: schedule.config.clone(),
+        }
+    }
+}
+
+impl Serialize for Schedule {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        ScheduleSerdeWire::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Schedule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut wire = ScheduleWire::deserialize(deserializer)?;
+        let machine_state = wire
+            .machine_state
+            .take()
+            .ok_or_else(|| D::Error::missing_field("machine_state"))?
+            .try_into()
+            .map_err(D::Error::custom)?;
+        let schedule = Self {
+            schedule_id: wire.schedule_id,
+            phase: wire.phase,
+            revision: wire.revision,
+            machine_state,
+            trigger: wire.trigger,
+            target: wire.target,
+            misfire_policy: wire.misfire_policy,
+            overlap_policy: wire.overlap_policy,
+            missing_target_policy: wire.missing_target_policy,
+            next_occurrence_ordinal: wire.next_occurrence_ordinal,
+            planning_cursor_utc: wire.planning_cursor_utc,
+            superseded_ack_ids: wire.superseded_ack_ids,
+            config: wire.config,
+        };
+        validate_schedule_machine_projection(&schedule).map_err(D::Error::custom)?;
+        Ok(schedule)
+    }
 }
 
 impl Schedule {
@@ -992,53 +1699,339 @@ impl Schedule {
     pub fn touch(&mut self) {
         self.config.updated_at_utc = Utc::now();
     }
+
+    pub fn validate_machine_projection(&self) -> Result<(), String> {
+        validate_schedule_machine_projection(self)
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Occurrence {
     pub occurrence_id: OccurrenceId,
     pub schedule_id: ScheduleId,
     pub schedule_revision: ScheduleRevision,
     pub occurrence_ordinal: OccurrenceOrdinal,
     pub phase: OccurrencePhase,
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub(crate) machine_state: occ_dsl::OccurrenceLifecycleMachineState,
     pub due_at_utc: DateTime<Utc>,
     pub trigger_snapshot: TriggerSpec,
     pub target_snapshot: TargetBinding,
     pub misfire_policy: MisfirePolicy,
     pub overlap_policy: OverlapPolicy,
     pub missing_target_policy: MissingTargetPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_by: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_expires_at_utc: Option<DateTime<Utc>>,
     #[cfg_attr(feature = "schema", schemars(skip))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) claim_token: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_correlation_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_receipt: Option<DeliveryReceipt>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<OccurrenceFailureClass>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_outcome: Option<RuntimeDeliveryOutcome>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_detail: Option<String>,
-    #[serde(default)]
     pub attempt_count: u32,
     pub created_at_utc: DateTime<Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_at_utc: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatched_at_utc: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at_utc: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by_revision: Option<ScheduleRevision>,
 }
 
+#[derive(Serialize)]
+struct OccurrenceSerdeWire {
+    occurrence_id: OccurrenceId,
+    schedule_id: ScheduleId,
+    schedule_revision: ScheduleRevision,
+    occurrence_ordinal: OccurrenceOrdinal,
+    phase: OccurrencePhase,
+    machine_state: OccurrenceMachineStateWire,
+    due_at_utc: DateTime<Utc>,
+    trigger_snapshot: TriggerSpec,
+    target_snapshot: TargetBinding,
+    misfire_policy: MisfirePolicy,
+    overlap_policy: OverlapPolicy,
+    missing_target_policy: MissingTargetPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claimed_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lease_expires_at_utc: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claim_token: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivery_correlation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_receipt: Option<DeliveryReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_class: Option<OccurrenceFailureClass>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_outcome: Option<RuntimeDeliveryOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_detail: Option<String>,
+    attempt_count: u32,
+    created_at_utc: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claimed_at_utc: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dispatched_at_utc: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at_utc: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_by_revision: Option<ScheduleRevision>,
+}
+
+#[derive(Deserialize)]
+struct OccurrenceWire {
+    occurrence_id: OccurrenceId,
+    schedule_id: ScheduleId,
+    schedule_revision: ScheduleRevision,
+    occurrence_ordinal: OccurrenceOrdinal,
+    phase: OccurrencePhase,
+    #[serde(default)]
+    machine_state: Option<OccurrenceMachineStateWire>,
+    due_at_utc: DateTime<Utc>,
+    trigger_snapshot: TriggerSpec,
+    target_snapshot: TargetBinding,
+    misfire_policy: MisfirePolicy,
+    overlap_policy: OverlapPolicy,
+    missing_target_policy: MissingTargetPolicy,
+    #[serde(default)]
+    claimed_by: Option<String>,
+    #[serde(default)]
+    lease_expires_at_utc: Option<DateTime<Utc>>,
+    #[serde(default)]
+    claim_token: Option<Uuid>,
+    #[serde(default)]
+    delivery_correlation_id: Option<String>,
+    #[serde(default)]
+    last_receipt: Option<DeliveryReceipt>,
+    #[serde(default)]
+    failure_class: Option<OccurrenceFailureClass>,
+    #[serde(default)]
+    runtime_outcome: Option<RuntimeDeliveryOutcome>,
+    #[serde(default)]
+    failure_detail: Option<String>,
+    #[serde(default)]
+    attempt_count: u32,
+    created_at_utc: DateTime<Utc>,
+    #[serde(default)]
+    claimed_at_utc: Option<DateTime<Utc>>,
+    #[serde(default)]
+    dispatched_at_utc: Option<DateTime<Utc>>,
+    #[serde(default)]
+    completed_at_utc: Option<DateTime<Utc>>,
+    #[serde(default)]
+    superseded_by_revision: Option<ScheduleRevision>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct OccurrenceMachineStateWire {
+    lifecycle_phase: String,
+    occurrence_id: String,
+    schedule_id: String,
+    schedule_revision: u64,
+    occurrence_ordinal: u64,
+    trigger_key: String,
+    target_binding_key: String,
+    misfire_policy: String,
+    misfire_policy_key: String,
+    overlap_policy: String,
+    overlap_policy_key: String,
+    missing_target_policy: String,
+    missing_target_policy_key: String,
+    due_at_utc_ms: u64,
+    misfire_deadline_utc_ms: u64,
+    claimed_by: Option<String>,
+    lease_expires_at_utc_ms: Option<u64>,
+    claimed_at_utc_ms: Option<u64>,
+    claim_token: Option<String>,
+    delivery_correlation_id: Option<String>,
+    last_receipt: Option<String>,
+    runtime_outcome_key: Option<String>,
+    failure_class: Option<String>,
+    failure_detail: Option<String>,
+    dispatched_at_utc_ms: Option<u64>,
+    completed_at_utc_ms: Option<u64>,
+    attempt_count: u64,
+    superseded_by_revision: Option<u64>,
+}
+
+impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateWire {
+    fn from(state: &occ_dsl::OccurrenceLifecycleMachineState) -> Self {
+        Self {
+            lifecycle_phase: occurrence_lifecycle_state_to_wire(state.lifecycle_phase).to_string(),
+            occurrence_id: state.occurrence_id.0.clone(),
+            schedule_id: state.schedule_id.0.clone(),
+            schedule_revision: state.schedule_revision,
+            occurrence_ordinal: state.occurrence_ordinal,
+            trigger_key: state.trigger_key.clone(),
+            target_binding_key: state.target_binding_key.clone(),
+            misfire_policy: occurrence_misfire_policy_to_wire(state.misfire_policy).to_string(),
+            misfire_policy_key: state.misfire_policy_key.clone(),
+            overlap_policy: occurrence_overlap_policy_to_wire(state.overlap_policy).to_string(),
+            overlap_policy_key: state.overlap_policy_key.clone(),
+            missing_target_policy: occurrence_missing_target_policy_to_wire(
+                state.missing_target_policy,
+            )
+            .to_string(),
+            missing_target_policy_key: state.missing_target_policy_key.clone(),
+            due_at_utc_ms: state.due_at_utc_ms,
+            misfire_deadline_utc_ms: state.misfire_deadline_utc_ms,
+            claimed_by: state.claimed_by.clone(),
+            lease_expires_at_utc_ms: state.lease_expires_at_utc_ms,
+            claimed_at_utc_ms: state.claimed_at_utc_ms,
+            claim_token: state.claim_token.as_ref().map(|token| token.0.clone()),
+            delivery_correlation_id: state.delivery_correlation_id.clone(),
+            last_receipt: state.last_receipt.as_ref().map(|receipt| receipt.0.clone()),
+            runtime_outcome_key: state.runtime_outcome_key.clone(),
+            failure_class: state
+                .failure_class
+                .map(occurrence_failure_class_to_wire)
+                .map(str::to_string),
+            failure_detail: state.failure_detail.clone(),
+            dispatched_at_utc_ms: state.dispatched_at_utc_ms,
+            completed_at_utc_ms: state.completed_at_utc_ms,
+            attempt_count: state.attempt_count,
+            superseded_by_revision: state.superseded_by_revision,
+        }
+    }
+}
+
+impl TryFrom<OccurrenceMachineStateWire> for occ_dsl::OccurrenceLifecycleMachineState {
+    type Error = String;
+
+    fn try_from(wire: OccurrenceMachineStateWire) -> Result<Self, Self::Error> {
+        Ok(Self {
+            lifecycle_phase: occurrence_lifecycle_state_from_wire(&wire.lifecycle_phase)?,
+            occurrence_id: occ_dsl::OccurrenceId(wire.occurrence_id),
+            schedule_id: occ_dsl::ScheduleId(wire.schedule_id),
+            schedule_revision: wire.schedule_revision,
+            occurrence_ordinal: wire.occurrence_ordinal,
+            trigger_key: wire.trigger_key,
+            target_binding_key: wire.target_binding_key,
+            misfire_policy: occurrence_misfire_policy_from_wire(&wire.misfire_policy)?,
+            misfire_policy_key: wire.misfire_policy_key,
+            overlap_policy: occurrence_overlap_policy_from_wire(&wire.overlap_policy)?,
+            overlap_policy_key: wire.overlap_policy_key,
+            missing_target_policy: occurrence_missing_target_policy_from_wire(
+                &wire.missing_target_policy,
+            )?,
+            missing_target_policy_key: wire.missing_target_policy_key,
+            due_at_utc_ms: wire.due_at_utc_ms,
+            misfire_deadline_utc_ms: wire.misfire_deadline_utc_ms,
+            claimed_by: wire.claimed_by,
+            lease_expires_at_utc_ms: wire.lease_expires_at_utc_ms,
+            claimed_at_utc_ms: wire.claimed_at_utc_ms,
+            claim_token: wire.claim_token.map(occ_dsl::ClaimToken),
+            delivery_correlation_id: wire.delivery_correlation_id,
+            last_receipt: wire.last_receipt.map(occ_dsl::DeliveryReceipt),
+            runtime_outcome_key: wire.runtime_outcome_key,
+            failure_class: wire
+                .failure_class
+                .as_deref()
+                .map(occurrence_failure_class_from_wire)
+                .transpose()?,
+            failure_detail: wire.failure_detail,
+            dispatched_at_utc_ms: wire.dispatched_at_utc_ms,
+            completed_at_utc_ms: wire.completed_at_utc_ms,
+            attempt_count: wire.attempt_count,
+            superseded_by_revision: wire.superseded_by_revision,
+        })
+    }
+}
+
+impl From<&Occurrence> for OccurrenceSerdeWire {
+    fn from(occurrence: &Occurrence) -> Self {
+        Self {
+            occurrence_id: occurrence.occurrence_id.clone(),
+            schedule_id: occurrence.schedule_id.clone(),
+            schedule_revision: occurrence.schedule_revision,
+            occurrence_ordinal: occurrence.occurrence_ordinal,
+            phase: occurrence.phase,
+            machine_state: OccurrenceMachineStateWire::from(&occurrence.machine_state),
+            due_at_utc: occurrence.due_at_utc,
+            trigger_snapshot: occurrence.trigger_snapshot.clone(),
+            target_snapshot: occurrence.target_snapshot.clone(),
+            misfire_policy: occurrence.misfire_policy.clone(),
+            overlap_policy: occurrence.overlap_policy.clone(),
+            missing_target_policy: occurrence.missing_target_policy.clone(),
+            claimed_by: occurrence.claimed_by.clone(),
+            lease_expires_at_utc: occurrence.lease_expires_at_utc,
+            claim_token: occurrence.claim_token,
+            delivery_correlation_id: occurrence.delivery_correlation_id.clone(),
+            last_receipt: occurrence.last_receipt.clone(),
+            failure_class: occurrence.failure_class,
+            runtime_outcome: occurrence.runtime_outcome.clone(),
+            failure_detail: occurrence.failure_detail.clone(),
+            attempt_count: occurrence.attempt_count,
+            created_at_utc: occurrence.created_at_utc,
+            claimed_at_utc: occurrence.claimed_at_utc,
+            dispatched_at_utc: occurrence.dispatched_at_utc,
+            completed_at_utc: occurrence.completed_at_utc,
+            superseded_by_revision: occurrence.superseded_by_revision,
+        }
+    }
+}
+
+impl Serialize for Occurrence {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        OccurrenceSerdeWire::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Occurrence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut wire = OccurrenceWire::deserialize(deserializer)?;
+        let machine_state = wire
+            .machine_state
+            .take()
+            .ok_or_else(|| D::Error::missing_field("machine_state"))?
+            .try_into()
+            .map_err(D::Error::custom)?;
+        let occurrence = Self {
+            occurrence_id: wire.occurrence_id,
+            schedule_id: wire.schedule_id,
+            schedule_revision: wire.schedule_revision,
+            occurrence_ordinal: wire.occurrence_ordinal,
+            phase: wire.phase,
+            machine_state,
+            due_at_utc: wire.due_at_utc,
+            trigger_snapshot: wire.trigger_snapshot,
+            target_snapshot: wire.target_snapshot,
+            misfire_policy: wire.misfire_policy,
+            overlap_policy: wire.overlap_policy,
+            missing_target_policy: wire.missing_target_policy,
+            claimed_by: wire.claimed_by,
+            lease_expires_at_utc: wire.lease_expires_at_utc,
+            claim_token: wire.claim_token,
+            delivery_correlation_id: wire.delivery_correlation_id,
+            last_receipt: wire.last_receipt,
+            failure_class: wire.failure_class,
+            runtime_outcome: wire.runtime_outcome,
+            failure_detail: wire.failure_detail,
+            attempt_count: wire.attempt_count,
+            created_at_utc: wire.created_at_utc,
+            claimed_at_utc: wire.claimed_at_utc,
+            dispatched_at_utc: wire.dispatched_at_utc,
+            completed_at_utc: wire.completed_at_utc,
+            superseded_by_revision: wire.superseded_by_revision,
+        };
+        validate_occurrence_machine_projection(&occurrence).map_err(D::Error::custom)?;
+        Ok(occurrence)
+    }
+}
+
 impl Occurrence {
+    pub fn validate_machine_projection(&self) -> Result<(), String> {
+        validate_occurrence_machine_projection(self)
+    }
+
     pub fn due_misfire_detail_at(&self, now_utc: DateTime<Utc>) -> String {
         self.misfire_policy.misfire_detail(self.due_at_utc, now_utc)
     }

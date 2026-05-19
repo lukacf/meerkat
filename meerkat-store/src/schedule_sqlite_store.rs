@@ -602,6 +602,9 @@ fn write_schedule_in_txn(
     tx: &rusqlite::Transaction<'_>,
     schedule: &Schedule,
 ) -> Result<(), StoreError> {
+    schedule
+        .validate_machine_projection()
+        .map_err(StoreError::Internal)?;
     let schedule_json = serde_json::to_vec(schedule)?;
     tx.execute(
         r"
@@ -642,6 +645,9 @@ fn write_occurrence_in_txn(
     tx: &rusqlite::Transaction<'_>,
     occurrence: &Occurrence,
 ) -> Result<(), StoreError> {
+    occurrence
+        .validate_machine_projection()
+        .map_err(StoreError::Internal)?;
     let occurrence_json = serde_json::to_vec(occurrence)?;
     tx.execute(
         r"

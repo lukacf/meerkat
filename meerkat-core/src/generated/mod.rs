@@ -5,5 +5,6 @@
 // `pub mod` index, and `xtask audit-generated-headers` forbids the
 // codegen marker here to keep that honest.
 
+pub mod comms_trust_authority_sources;
 pub mod protocol_ops_barrier_satisfaction;
 pub mod terminal_surface_mapping;

@@ -2965,17 +2965,32 @@ mod tests {
         let descriptor = trusted_descriptor("peer", peer_key, "inproc://peer");
         let peer_id = descriptor.peer_id.to_string();
 
+        let add_authority = test_projection_authority(&descriptor, 7);
+        let add_authority_replay = add_authority.clone();
         let add = CoreCommsRuntime::apply_trust_mutation(
             &runtime,
             CommsTrustMutation::AddTrustedPeer {
                 peer: descriptor.clone(),
-                authority: test_projection_authority(&descriptor, 7),
+                authority: add_authority,
             },
         )
         .await
         .expect("generated add should apply");
         assert_eq!(add, CommsTrustMutationResult::Added);
         assert_eq!(runtime.peers().await.len(), 1);
+        let replay = CoreCommsRuntime::apply_trust_mutation(
+            &runtime,
+            CommsTrustMutation::AddTrustedPeer {
+                peer: descriptor.clone(),
+                authority: add_authority_replay,
+            },
+        )
+        .await
+        .expect_err("cloned generated add authority must be one-use");
+        assert!(
+            matches!(replay, SendError::Validation(ref message) if message.contains("already consumed")),
+            "unexpected replay rejection: {replay:?}"
+        );
 
         let remove = CoreCommsRuntime::apply_trust_mutation(
             &runtime,

@@ -11,6 +11,10 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::pin::Pin;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use uuid::Uuid;
 
 /// Comms request intent used for all supervisor bridge commands.
@@ -351,11 +355,12 @@ pub struct TrustedPeerDescriptor {
 /// decide trust semantics itself. Callers that need to add or remove trust
 /// must carry the generated machine/composition handoff that authorized the
 /// mutation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CommsTrustMutationAuthority {
     kind: CommsTrustMutationAuthorityKind,
     peer_id: String,
     epoch: u64,
+    consumed: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -503,6 +508,15 @@ impl CommsTrustMutationAuthority {
         epoch: u64,
     ) -> Result<Self, String> {
         let source_kind = source.comms_trust_authority_source_kind();
+        let source_type_name = std::any::type_name_of_val(source);
+        if !crate::generated::comms_trust_authority_sources::source_type_allowed_for_kind(
+            source_kind,
+            source_type_name,
+        ) {
+            return Err(format!(
+                "generated comms trust source type {source_type_name:?} is not registered for {source_kind:?}",
+            ));
+        }
         if !Self::source_kind_allows_authority_kind(source_kind, kind) {
             return Err(format!(
                 "generated comms trust source {source_kind:?} cannot mint authority {kind:?}",
@@ -512,6 +526,7 @@ impl CommsTrustMutationAuthority {
             kind,
             peer_id: peer_id.into(),
             epoch,
+            consumed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -555,6 +570,7 @@ impl CommsTrustMutationAuthority {
             CommsTrustMutationAuthorityKind::MeerkatMachinePeerProjection
             | CommsTrustMutationAuthorityKind::MobMachinePeerWiring
             | CommsTrustMutationAuthorityKind::MobMachinePeerRepair => {
+                self.consume_once()?;
                 self.validate_peer_match(peer_id)
             }
             _ => Err(format!(
@@ -568,6 +584,7 @@ impl CommsTrustMutationAuthority {
         match self.kind {
             CommsTrustMutationAuthorityKind::MeerkatMachinePeerProjection
             | CommsTrustMutationAuthorityKind::MobMachinePeerUnwiring => {
+                self.consume_once()?;
                 self.validate_peer_match(peer_id)
             }
             _ => Err(format!(
@@ -580,6 +597,7 @@ impl CommsTrustMutationAuthority {
     pub fn validate_private_add(&self, peer_id: PeerId) -> Result<(), String> {
         match self.kind {
             CommsTrustMutationAuthorityKind::MeerkatMachineSupervisorPublish => {
+                self.consume_once()?;
                 self.validate_peer_match(peer_id)
             }
             _ => Err(format!(
@@ -592,6 +610,7 @@ impl CommsTrustMutationAuthority {
     pub fn validate_private_remove(&self, peer_id: PeerId) -> Result<(), String> {
         match self.kind {
             CommsTrustMutationAuthorityKind::MeerkatMachineSupervisorRevoke => {
+                self.consume_once()?;
                 self.validate_peer_match(peer_id)
             }
             _ => Err(format!(
@@ -599,6 +618,13 @@ impl CommsTrustMutationAuthority {
                 self.kind,
             )),
         }
+    }
+
+    fn consume_once(&self) -> Result<(), String> {
+        self.consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| "generated comms trust authority was already consumed".to_string())
     }
 
     fn validate_peer_match(&self, peer_id: PeerId) -> Result<(), String> {
@@ -622,7 +648,7 @@ impl CommsTrustMutationAuthority {
 }
 
 /// Trust-store projection mutation requested by generated authority.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum CommsTrustMutation {
     AddTrustedPeer {
         peer: TrustedPeerDescriptor,
@@ -1404,6 +1430,30 @@ mod tests {
             true
         );
         Ok(())
+    }
+
+    struct FakeGeneratedSource;
+
+    impl generated_comms_trust_authority::Sealed for FakeGeneratedSource {}
+
+    impl GeneratedCommsTrustAuthoritySource for FakeGeneratedSource {
+        fn comms_trust_authority_source_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind {
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection
+        }
+    }
+
+    #[test]
+    fn handwritten_generated_source_cannot_mint_trust_authority() {
+        let err = CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection(
+            &FakeGeneratedSource,
+            PeerId::new().to_string(),
+            1,
+        )
+        .expect_err("unregistered handwritten source type must not mint authority");
+        assert!(
+            err.contains("is not registered"),
+            "unexpected rejection: {err}"
+        );
     }
 
     #[test]

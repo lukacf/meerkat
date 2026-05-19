@@ -152,6 +152,28 @@ fn terminal_surface_mapping_matches_codegen_output() {
     );
 }
 
+#[test]
+fn comms_trust_authority_sources_matches_codegen_output() {
+    use meerkat_machine_schema::{canonical_composition_schemas, compat_composition_schemas};
+
+    let mut compositions = canonical_composition_schemas();
+    compositions.extend(compat_composition_schemas());
+    let rendered = xtask::protocol_codegen::render_comms_trust_authority_sources(&compositions)
+        .expect("render comms_trust_authority_sources");
+    let rendered = rustfmt(&rendered);
+
+    let committed_path =
+        repo_root().join("meerkat-core/src/generated/comms_trust_authority_sources.rs");
+    let committed = std::fs::read_to_string(&committed_path)
+        .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
+
+    assert_eq!(
+        normalize(&committed),
+        normalize(&rendered),
+        "comms_trust_authority_sources.rs diverged from codegen output. If this is intentional, run `cargo xtask protocol-codegen` and commit the result."
+    );
+}
+
 /// Compile canary for generated protocol helper ownership: every helper
 /// emitted by protocol-codegen must land in an owning crate's checked
 /// `src/generated/` module tree, not in an ad-hoc bridge path outside a

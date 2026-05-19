@@ -352,6 +352,8 @@ macro_rules! mob_catalog_machine_dsl {
             UnwireMembers { edge: WiringEdge },
             WireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
             RegisterMemberPeer { agent_identity: AgentIdentity, peer_id: PeerId },
+            AuthorizeMemberTrustWiring { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
+            AuthorizeMemberTrustUnwiring { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             AuthorizeExternalPeerReciprocalTrust { key: ExternalPeerKey, agent_identity: AgentIdentity },
             UnwireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
             SessionIngressDetachedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
@@ -484,6 +486,8 @@ macro_rules! mob_catalog_machine_dsl {
             // snapshot.
             WiringGraphChanged { epoch: u64 },
             MemberSessionBindingChanged { epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId> },
+            MemberTrustWiringRequested { edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64 },
+            MemberTrustUnwiringRequested { edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64 },
             WiringTrustRepairRequested { edge: WiringEdge },
             ExternalPeerTrustRepairRequested { edge: ExternalPeerEdge },
             MemberPeerRegistered { agent_identity: AgentIdentity, peer_id: PeerId },
@@ -525,6 +529,8 @@ macro_rules! mob_catalog_machine_dsl {
         disposition EmitKickoffLifecycleNotice => external,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
+        disposition MemberTrustWiringRequested => local,
+        disposition MemberTrustUnwiringRequested => local,
         disposition WiringTrustRepairRequested => local,
         disposition ExternalPeerTrustRepairRequested => local,
         disposition MemberPeerRegistered => local,
@@ -1637,6 +1643,40 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: peer_id }
+        }
+
+        transition AuthorizeMemberTrustWiringRunning {
+            on input AuthorizeMemberTrustWiring { edge, a_identity, b_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_currently_wired" { self.wiring_edges.contains(edge) == true }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "a_member_peer_registered" { self.member_peer_ids.contains_key(a_identity) == true }
+            guard "b_member_peer_registered" { self.member_peer_ids.contains_key(b_identity) == true }
+            update {}
+            to Running
+            emit MemberTrustWiringRequested {
+                edge: edge,
+                a_peer_id: self.member_peer_ids.get_cloned(a_identity).get("value"),
+                b_peer_id: self.member_peer_ids.get_cloned(b_identity).get("value"),
+                epoch: self.topology_epoch
+            }
+        }
+
+        transition AuthorizeMemberTrustUnwiringRunning {
+            on input AuthorizeMemberTrustUnwiring { edge, a_identity, b_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_currently_wired" { self.wiring_edges.contains(edge) == true }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "a_member_peer_registered" { self.member_peer_ids.contains_key(a_identity) == true }
+            guard "b_member_peer_registered" { self.member_peer_ids.contains_key(b_identity) == true }
+            update {}
+            to Running
+            emit MemberTrustUnwiringRequested {
+                edge: edge,
+                a_peer_id: self.member_peer_ids.get_cloned(a_identity).get("value"),
+                b_peer_id: self.member_peer_ids.get_cloned(b_identity).get("value"),
+                epoch: self.topology_epoch
+            }
         }
 
         transition AuthorizeExternalPeerReciprocalTrustRunning {
@@ -3575,6 +3615,14 @@ macro_rules! mob_catalog_machine_dsl {
             agent_identity: &AgentIdentity,
         ) -> bool {
             key.local == *agent_identity
+        }
+
+        fn mob_machine_wiring_edge_matches_members(
+            edge: &WiringEdge,
+            a_identity: &AgentIdentity,
+            b_identity: &AgentIdentity,
+        ) -> bool {
+            edge.a == *a_identity && edge.b == *b_identity
         }
 
         fn mob_machine_frame_node_status_after_admit(

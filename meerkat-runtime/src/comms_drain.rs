@@ -17,6 +17,7 @@ use meerkat_core::comms::{
     PeerId, PeerRoute, TrustedPeerDescriptor,
 };
 use meerkat_core::event::AgentEvent;
+use meerkat_core::generated::comms_trust_authority;
 use meerkat_core::interaction::{
     InteractionContent, PeerIngressFact, PeerInputCandidate, PeerInputClass,
 };
@@ -932,7 +933,7 @@ async fn publish_supervisor_trust_from_generated_obligation(
     apply_generated_trust_add(
         comms_runtime,
         trusted_peer,
-        CommsTrustMutationAuthority::meerkat_machine_supervisor_publish(
+        comms_trust_authority::meerkat_machine_supervisor_publish(
             obligation.peer_id.clone(),
             obligation.epoch,
         ),
@@ -1527,7 +1528,7 @@ async fn try_handle_supervisor_bridge_command(
             if let Err(error) = apply_generated_trust_add(
                 comms_runtime,
                 publish_spec,
-                CommsTrustMutationAuthority::meerkat_machine_supervisor_publish(
+                comms_trust_authority::meerkat_machine_supervisor_publish(
                     publish_obligation.peer_id.clone(),
                     publish_obligation.epoch,
                 ),
@@ -1804,7 +1805,7 @@ async fn try_handle_supervisor_bridge_command(
                 if let Err(error) = apply_generated_trust_remove(
                     comms_runtime,
                     revoke_obligation.peer_id.clone(),
-                    CommsTrustMutationAuthority::meerkat_machine_supervisor_revoke(
+                    comms_trust_authority::meerkat_machine_supervisor_revoke(
                         revoke_obligation.peer_id.clone(),
                         revoke_obligation.epoch,
                     ),
@@ -1971,7 +1972,7 @@ async fn try_handle_supervisor_bridge_command(
             if let Err(error) = apply_generated_trust_remove(
                 comms_runtime,
                 revoke_obligation.peer_id.clone(),
-                CommsTrustMutationAuthority::meerkat_machine_supervisor_revoke(
+                comms_trust_authority::meerkat_machine_supervisor_revoke(
                     revoke_obligation.peer_id.clone(),
                     revoke_obligation.epoch,
                 ),

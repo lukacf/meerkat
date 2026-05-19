@@ -18,9 +18,10 @@ use meerkat_comms::runtime::comms_runtime::CommsRuntime;
 use meerkat_comms::types::{Envelope, InboxItem, MessageKind};
 use meerkat_comms::{AdmissionOutcome, DropReason};
 use meerkat_core::comms::{
-    CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, PeerAddress,
-    PeerName, PeerTransport, TrustedPeerDescriptor,
+    CommsTrustMutation, CommsTrustMutationResult, PeerAddress, PeerName, PeerTransport,
+    TrustedPeerDescriptor,
 };
+use meerkat_core::generated::comms_trust_authority;
 use meerkat_core::{PeerIngressAuthDecision, PeerIngressAuthExemption, SUPERVISOR_BRIDGE_INTENT};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -46,7 +47,7 @@ async fn apply_generated_trust(runtime: &CommsRuntime, peer: TrustedPeerDescript
     meerkat_core::agent::CommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
-            authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(
+            authority: comms_trust_authority::meerkat_machine_peer_projection(
                 peer.peer_id.to_string(),
                 0,
             ),
@@ -61,10 +62,7 @@ async fn revoke_generated_trust(runtime: &CommsRuntime, peer_id: String) -> bool
     match meerkat_core::agent::CommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::RemoveTrustedPeer {
-            authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(
-                peer_id.clone(),
-                0,
-            ),
+            authority: comms_trust_authority::meerkat_machine_peer_projection(peer_id.clone(), 0),
             peer_id,
         },
     )

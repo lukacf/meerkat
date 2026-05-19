@@ -3348,13 +3348,14 @@ mod tests {
     use meerkat_core::PlainEventSource;
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
     use meerkat_core::comms::{
-        CommsCommand, CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult,
-        SendError, SendReceipt, TrustedPeerDescriptor,
+        CommsCommand, CommsTrustMutation, CommsTrustMutationResult, SendError, SendReceipt,
+        TrustedPeerDescriptor,
     };
     use meerkat_core::event::AgentEvent;
     use meerkat_core::event_injector::{
         EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
     };
+    use meerkat_core::generated::comms_trust_authority;
     use meerkat_core::interaction::PeerInputCandidate;
     use meerkat_core::service::InitialTurnPolicy;
     use meerkat_core::service::SessionService;
@@ -3411,7 +3412,7 @@ mod tests {
         let added = runtime
             .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
                 peer: peer.clone(),
-                authority: CommsTrustMutationAuthority::mob_machine_peer_wiring(peer_id.clone(), 1),
+                authority: comms_trust_authority::mob_machine_peer_wiring(peer_id.clone(), 1),
             })
             .await
             .expect("authorized add succeeds");
@@ -3427,10 +3428,7 @@ mod tests {
         let removed = runtime
             .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
-                authority: CommsTrustMutationAuthority::mob_machine_peer_unwiring(
-                    peer_id.clone(),
-                    2,
-                ),
+                authority: comms_trust_authority::mob_machine_peer_unwiring(peer_id.clone(), 2),
             })
             .await
             .expect("authorized remove succeeds");

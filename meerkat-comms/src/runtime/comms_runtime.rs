@@ -2937,11 +2937,11 @@ mod tests {
     use meerkat_core::{
         BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, SendError,
         comms::{
-            CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, InputSource,
-            InputStreamMode, PeerDirectorySource, PeerId, PeerName, PeerReachability,
-            PeerReachabilityReason, PeerRoute, PeerSendability, StreamError, StreamScope,
-            TrustedPeerDescriptor,
+            CommsTrustMutation, CommsTrustMutationResult, InputSource, InputStreamMode,
+            PeerDirectorySource, PeerId, PeerName, PeerReachability, PeerReachabilityReason,
+            PeerRoute, PeerSendability, StreamError, StreamScope, TrustedPeerDescriptor,
         },
+        generated::comms_trust_authority,
         interaction::InteractionId,
         types::{ContentBlock, ImageData, SessionId},
     };
@@ -2993,7 +2993,7 @@ mod tests {
             &runtime,
             CommsTrustMutation::AddTrustedPeer {
                 peer: descriptor,
-                authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(
+                authority: comms_trust_authority::meerkat_machine_peer_projection(
                     peer_id.clone(),
                     7,
                 ),
@@ -3008,7 +3008,7 @@ mod tests {
             &runtime,
             CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
-                authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(peer_id, 8),
+                authority: comms_trust_authority::meerkat_machine_peer_projection(peer_id, 8),
             },
         )
         .await

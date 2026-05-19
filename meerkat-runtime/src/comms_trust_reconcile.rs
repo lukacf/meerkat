@@ -42,9 +42,10 @@ use std::sync::Arc;
 use crate::meerkat_machine::dsl::PeerEndpoint;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
 use meerkat_core::comms::{
-    CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, PeerAddress, PeerId,
-    PeerName, SendError, TrustedPeerDescriptor,
+    CommsTrustMutation, CommsTrustMutationResult, PeerAddress, PeerId, PeerName, SendError,
+    TrustedPeerDescriptor,
 };
+use meerkat_core::generated::comms_trust_authority;
 
 /// Typed error surfaced by the reconciliation handler.
 #[derive(Debug, thiserror::Error)]
@@ -147,7 +148,7 @@ impl CommsTrustReconciler {
             let descriptor = endpoint_to_descriptor(&endpoint)?;
             self.comms
                 .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
-                    authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(
+                    authority: comms_trust_authority::meerkat_machine_peer_projection(
                         endpoint.peer_id.0.clone(),
                         epoch,
                     ),
@@ -166,7 +167,7 @@ impl CommsTrustReconciler {
                 .comms
                 .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
                     peer_id: endpoint.peer_id.0.clone(),
-                    authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(
+                    authority: comms_trust_authority::meerkat_machine_peer_projection(
                         endpoint.peer_id.0.clone(),
                         epoch,
                     ),

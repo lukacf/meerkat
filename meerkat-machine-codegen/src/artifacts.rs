@@ -6406,6 +6406,14 @@ impl<'a> MachineTlaCompiler<'a> {
         .expect("write to string");
         writeln!(
             out,
+            "{}(edge, a_identity, b_identity) ==",
+            prefix("mob_machine_wiring_edge_matches_members")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ edge.a = a_identity");
+        pushln!(out, "    /\\ edge.b = b_identity");
+        writeln!(
+            out,
             "{}(status) == status \\in {{\"Completed\", \"Failed\", \"Skipped\", \"Canceled\"}}",
             prefix("mob_machine_node_terminal")
         )

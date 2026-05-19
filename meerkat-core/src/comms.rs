@@ -370,90 +370,62 @@ pub enum CommsTrustMutationAuthority {
 }
 
 impl CommsTrustMutationAuthority {
-    #[track_caller]
-    pub fn meerkat_machine_peer_projection(peer_id: impl Into<String>, epoch: u64) -> Self {
-        Self::assert_generated_authority_issuer();
+    pub(crate) fn from_meerkat_machine_peer_projection(
+        peer_id: impl Into<String>,
+        epoch: u64,
+    ) -> Self {
         Self::MeerkatMachinePeerProjection {
             peer_id: peer_id.into(),
             epoch,
         }
     }
 
-    #[track_caller]
-    pub fn meerkat_machine_supervisor_publish(peer_id: impl Into<String>, epoch: u64) -> Self {
-        Self::assert_generated_authority_issuer();
+    pub(crate) fn from_meerkat_machine_supervisor_publish(
+        peer_id: impl Into<String>,
+        epoch: u64,
+    ) -> Self {
         Self::MeerkatMachineSupervisorPublish {
             peer_id: peer_id.into(),
             epoch,
         }
     }
 
-    #[track_caller]
-    pub fn meerkat_machine_supervisor_revoke(peer_id: impl Into<String>, epoch: u64) -> Self {
-        Self::assert_generated_authority_issuer();
+    pub(crate) fn from_meerkat_machine_supervisor_revoke(
+        peer_id: impl Into<String>,
+        epoch: u64,
+    ) -> Self {
         Self::MeerkatMachineSupervisorRevoke {
             peer_id: peer_id.into(),
             epoch,
         }
     }
 
-    #[track_caller]
-    pub fn mob_machine_peer_wiring(peer_id: impl Into<String>, epoch: u64) -> Self {
-        Self::assert_generated_authority_issuer();
+    pub(crate) fn from_mob_machine_peer_wiring(peer_id: impl Into<String>, epoch: u64) -> Self {
         Self::MobMachinePeerWiring {
             peer_id: peer_id.into(),
             epoch,
         }
     }
 
-    #[track_caller]
-    pub fn mob_machine_peer_unwiring(peer_id: impl Into<String>, epoch: u64) -> Self {
-        Self::assert_generated_authority_issuer();
+    pub(crate) fn from_mob_machine_peer_unwiring(peer_id: impl Into<String>, epoch: u64) -> Self {
         Self::MobMachinePeerUnwiring {
             peer_id: peer_id.into(),
             epoch,
         }
     }
 
-    #[track_caller]
-    pub fn mob_machine_peer_repair(peer_id: impl Into<String>, epoch: u64) -> Self {
-        Self::assert_generated_authority_issuer();
+    pub(crate) fn from_mob_machine_peer_repair(peer_id: impl Into<String>, epoch: u64) -> Self {
         Self::MobMachinePeerRepair {
             peer_id: peer_id.into(),
             epoch,
         }
     }
 
-    #[track_caller]
-    pub fn mob_machine_peer_retire(peer_id: impl Into<String>, epoch: u64) -> Self {
-        Self::assert_generated_authority_issuer();
+    pub(crate) fn from_mob_machine_peer_retire(peer_id: impl Into<String>, epoch: u64) -> Self {
         Self::MobMachinePeerRetire {
             peer_id: peer_id.into(),
             epoch,
         }
-    }
-
-    #[track_caller]
-    fn assert_generated_authority_issuer() {
-        let location = std::panic::Location::caller();
-        let file = location.file();
-        if file.contains("/tests/")
-            || file.ends_with("meerkat-comms/src/runtime/comms_runtime.rs")
-            || file.ends_with("meerkat-mob-mcp/src/lib.rs")
-            || file.ends_with("meerkat-mob/src/runtime/actor.rs")
-            || file.ends_with("meerkat-mob/src/runtime/builder.rs")
-            || file.ends_with("meerkat-mob/src/runtime/supervisor_bridge.rs")
-            || file.ends_with("meerkat-runtime/src/comms_drain.rs")
-            || file.ends_with("meerkat-runtime/src/comms_trust_reconcile.rs")
-        {
-            return;
-        }
-        tracing::error!(
-            file = file,
-            line = location.line(),
-            "CommsTrustMutationAuthority may only be issued from generated machine/composition handoff seams"
-        );
-        std::process::abort();
     }
 
     pub fn validate_public_add(&self, peer_id: PeerId) -> Result<(), String> {

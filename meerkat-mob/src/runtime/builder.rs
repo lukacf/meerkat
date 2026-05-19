@@ -5,6 +5,7 @@ use meerkat_core::comms::{
     CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, SendError,
     TrustedPeerDescriptor,
 };
+use meerkat_core::generated::comms_trust_authority;
 use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
 use std::collections::HashSet;
@@ -79,6 +80,24 @@ fn apply_seeded_mob_input(
     Ok(())
 }
 
+fn register_seeded_member_peer(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    agent_identity: &crate::ids::AgentIdentity,
+    peer_id: &str,
+    context: &'static str,
+) -> Result<(), MobError> {
+    apply_seeded_mob_input(
+        authority,
+        crate::machines::mob_machine::MobMachineInput::RegisterMemberPeer {
+            agent_identity: crate::machines::mob_machine::AgentIdentity::from_domain(
+                agent_identity,
+            ),
+            peer_id: crate::machines::mob_machine::PeerId::from(peer_id.to_string()),
+        },
+        context,
+    )
+}
+
 fn apply_seeded_mob_input_collect_effects(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     input: crate::machines::mob_machine::MobMachineInput,
@@ -122,10 +141,10 @@ fn seeded_effects_include_wiring_graph_change(
 }
 
 fn resume_member_repair_authority_from_effects(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     effects: &[crate::machines::mob_machine::MobMachineEffect],
     edge: &crate::machines::mob_machine::WiringEdge,
     peer_id: &str,
-    epoch: u64,
     context: &'static str,
 ) -> Result<CommsTrustMutationAuthority, MobError> {
     let graph_changed = seeded_effects_include_wiring_graph_change(effects);
@@ -137,14 +156,39 @@ fn resume_member_repair_authority_from_effects(
             } if effect_edge == edge
         )
     });
-    if repair_requested && !graph_changed {
-        return Ok(CommsTrustMutationAuthority::mob_machine_peer_repair(
-            peer_id, epoch,
-        ));
+    if !repair_requested || graph_changed {
+        return Err(MobError::WiringError(format!(
+            "{context} produced no generated member trust repair authority for peer '{peer_id}'"
+        )));
     }
-    Err(MobError::WiringError(format!(
-        "{context} produced no generated member trust repair authority"
-    )))
+
+    let handoff_effects = apply_seeded_mob_input_collect_effects(
+        authority,
+        crate::machines::mob_machine::MobMachineInput::AuthorizeMemberTrustWiring {
+            edge: edge.clone(),
+            a_identity: edge.a.clone(),
+            b_identity: edge.b.clone(),
+        },
+        context,
+    )?;
+    handoff_effects
+        .iter()
+        .find_map(|effect| match effect {
+            crate::machines::mob_machine::MobMachineEffect::MemberTrustWiringRequested {
+                edge: effect_edge,
+                a_peer_id,
+                b_peer_id,
+                epoch,
+            } if effect_edge == edge && (a_peer_id.0 == peer_id || b_peer_id.0 == peer_id) => Some(
+                comms_trust_authority::mob_machine_peer_repair(peer_id, *epoch),
+            ),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            MobError::WiringError(format!(
+                "{context} produced no generated member trust handoff for peer '{peer_id}'"
+            ))
+        })
 }
 
 fn resume_external_repair_authority_from_effects(
@@ -164,7 +208,7 @@ fn resume_external_repair_authority_from_effects(
         )
     });
     if repair_requested && !graph_changed {
-        return Ok(CommsTrustMutationAuthority::mob_machine_peer_repair(
+        return Ok(comms_trust_authority::mob_machine_peer_repair(
             peer_id, epoch,
         ));
     }
@@ -1660,8 +1704,7 @@ impl MobBuilder {
                 let _ = roster.set_comms_identity(&entry.agent_identity, None, None);
                 continue;
             }
-            let local_comms = provisioner.comms_runtime(&entry.member_ref).await;
-            if let Some(comms_a) = &local_comms {
+            if let Some(comms_a) = provisioner.comms_runtime(&entry.member_ref).await {
                 let peer_id_a = comms_a.peer_id().ok_or_else(|| {
                     MobError::WiringError(format!(
                         "resume requires peer id for wired member '{}'",
@@ -1679,17 +1722,26 @@ impl MobBuilder {
                     Some(peer_id_a),
                     Some(key_a.clone()),
                 );
-                apply_seeded_mob_input(
+                register_seeded_member_peer(
                     dsl_authority,
-                    crate::machines::mob_machine::MobMachineInput::RegisterMemberPeer {
-                        agent_identity: crate::machines::mob_machine::AgentIdentity::from_domain(
-                            &entry.agent_identity,
-                        ),
-                        peer_id: crate::machines::mob_machine::PeerId::from(peer_id_a.to_string()),
-                    },
+                    &entry.agent_identity,
+                    &peer_id_a.to_string(),
                     "resume_register_member_peer",
                 )?;
+            } else if let Some(peer_id) = entry.peer_id() {
+                register_seeded_member_peer(
+                    dsl_authority,
+                    &entry.agent_identity,
+                    &peer_id.to_string(),
+                    "resume_register_backend_member_peer",
+                )?;
             }
+        }
+        for entry in &entries {
+            if broken_members.contains(&entry.agent_identity) {
+                continue;
+            }
+            let local_comms = provisioner.comms_runtime(&entry.member_ref).await;
             let mut desired_trust = Vec::new();
 
             let local_dsl_identity =
@@ -1804,10 +1856,10 @@ impl MobBuilder {
                             "resume_member_trust_repair",
                         )?;
                         resume_member_repair_authority_from_effects(
+                            dsl_authority,
                             &effects,
                             edge,
                             &spec_peer_id,
-                            dsl_authority.state().topology_epoch,
                             "resume_member_trust_repair",
                         )?
                     }

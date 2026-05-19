@@ -128,6 +128,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `UnwireMembers`(edge: WiringEdge)
 - `WireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
 - `RegisterMemberPeer`(agent_identity: AgentIdentity, peer_id: PeerId)
+- `AuthorizeMemberTrustWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
+- `AuthorizeMemberTrustUnwiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `AuthorizeExternalPeerReciprocalTrust`(key: ExternalPeerKey, agent_identity: AgentIdentity)
 - `UnwireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
 - `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
@@ -243,6 +245,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitKickoffLifecycleNotice`(member_id: String, intent: KickoffIntent)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
+- `MemberTrustWiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64)
+- `MemberTrustUnwiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64)
 - `WiringTrustRepairRequested`(edge: WiringEdge)
 - `ExternalPeerTrustRepairRequested`(edge: ExternalPeerEdge)
 - `MemberPeerRegistered`(agent_identity: AgentIdentity, peer_id: PeerId)
@@ -947,6 +951,28 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `identity_present`
 - Emits: `MemberPeerRegistered`
+- To: `Running`
+
+### `AuthorizeMemberTrustWiringRunning`
+- From: `Running`
+- On: `AuthorizeMemberTrustWiring`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_currently_wired`
+  - `edge_matches_members`
+  - `a_member_peer_registered`
+  - `b_member_peer_registered`
+- Emits: `MemberTrustWiringRequested`
+- To: `Running`
+
+### `AuthorizeMemberTrustUnwiringRunning`
+- From: `Running`
+- On: `AuthorizeMemberTrustUnwiring`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_currently_wired`
+  - `edge_matches_members`
+  - `a_member_peer_registered`
+  - `b_member_peer_registered`
+- Emits: `MemberTrustUnwiringRequested`
 - To: `Running`
 
 ### `AuthorizeExternalPeerReciprocalTrustRunning`

@@ -2147,6 +2147,18 @@ pub mod inputs {
         pub peer_id: PeerId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMemberTrustWiring {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub b_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMemberTrustUnwiring {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub b_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeExternalPeerReciprocalTrust {
         pub key: ExternalPeerKey,
         pub agent_identity: AgentIdentity,
@@ -2298,6 +2310,8 @@ pub enum Input {
     UnwireMembers(inputs::UnwireMembers),
     WireExternalPeer(inputs::WireExternalPeer),
     RegisterMemberPeer(inputs::RegisterMemberPeer),
+    AuthorizeMemberTrustWiring(inputs::AuthorizeMemberTrustWiring),
+    AuthorizeMemberTrustUnwiring(inputs::AuthorizeMemberTrustUnwiring),
     AuthorizeExternalPeerReciprocalTrust(inputs::AuthorizeExternalPeerReciprocalTrust),
     UnwireExternalPeer(inputs::UnwireExternalPeer),
     SessionIngressDetachedForMobDestroy(inputs::SessionIngressDetachedForMobDestroy),
@@ -2365,6 +2379,8 @@ impl Input {
             Self::UnwireMembers(_) => InputKind::UnwireMembers,
             Self::WireExternalPeer(_) => InputKind::WireExternalPeer,
             Self::RegisterMemberPeer(_) => InputKind::RegisterMemberPeer,
+            Self::AuthorizeMemberTrustWiring(_) => InputKind::AuthorizeMemberTrustWiring,
+            Self::AuthorizeMemberTrustUnwiring(_) => InputKind::AuthorizeMemberTrustUnwiring,
             Self::AuthorizeExternalPeerReciprocalTrust(_) => {
                 InputKind::AuthorizeExternalPeerReciprocalTrust
             }
@@ -2435,6 +2451,8 @@ pub enum InputKind {
     UnwireMembers,
     WireExternalPeer,
     RegisterMemberPeer,
+    AuthorizeMemberTrustWiring,
+    AuthorizeMemberTrustUnwiring,
     AuthorizeExternalPeerReciprocalTrust,
     UnwireExternalPeer,
     SessionIngressDetachedForMobDestroy,
@@ -2853,6 +2871,20 @@ pub mod effects {
         pub new_session_id: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberTrustWiringRequested {
+        pub edge: WiringEdge,
+        pub a_peer_id: PeerId,
+        pub b_peer_id: PeerId,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberTrustUnwiringRequested {
+        pub edge: WiringEdge,
+        pub a_peer_id: PeerId,
+        pub b_peer_id: PeerId,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WiringTrustRepairRequested {
         pub edge: WiringEdge,
     }
@@ -2908,6 +2940,8 @@ pub enum Effect {
     EmitKickoffLifecycleNotice(effects::EmitKickoffLifecycleNotice),
     WiringGraphChanged(effects::WiringGraphChanged),
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
+    MemberTrustWiringRequested(effects::MemberTrustWiringRequested),
+    MemberTrustUnwiringRequested(effects::MemberTrustUnwiringRequested),
     WiringTrustRepairRequested(effects::WiringTrustRepairRequested),
     ExternalPeerTrustRepairRequested(effects::ExternalPeerTrustRepairRequested),
     MemberPeerRegistered(effects::MemberPeerRegistered),
@@ -2940,6 +2974,8 @@ pub enum EffectKind {
     EmitKickoffLifecycleNotice,
     WiringGraphChanged,
     MemberSessionBindingChanged,
+    MemberTrustWiringRequested,
+    MemberTrustUnwiringRequested,
     WiringTrustRepairRequested,
     ExternalPeerTrustRepairRequested,
     MemberPeerRegistered,
@@ -3040,6 +3076,8 @@ pub enum TransitionId {
     WireExternalPeerRunning,
     WireExternalPeerAlreadyWired,
     RegisterMemberPeerRunning,
+    AuthorizeMemberTrustWiringRunning,
+    AuthorizeMemberTrustUnwiringRunning,
     AuthorizeExternalPeerReciprocalTrustRunning,
     RecoverExternalPeerWiringRunning,
     RecoverExternalPeerWiringAlreadyRecovered,

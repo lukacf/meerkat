@@ -4,12 +4,12 @@ use crate::store::SupervisorAuthorityRecord;
 use crate::tokio;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult,
-    InputStreamMode, PeerId, PeerRoute, SendReceipt, TrustedPeerDescriptor,
+    CommsCommand, InputStreamMode, PeerId, PeerRoute, SendReceipt, TrustedPeerDescriptor,
 };
 use meerkat_core::interaction::{InteractionContent, PeerInputCandidate, TerminalityClass};
 use meerkat_core::time_compat::{Duration, Instant};
 use meerkat_core::types::HandlingMode;
+use meerkat_runtime::meerkat_machine::dsl as mm_dsl;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -18,6 +18,7 @@ pub(crate) struct MobSupervisorBridge {
     participant_name: String,
     authority: RwLock<SupervisorAuthorityRecord>,
     runtime: RwLock<Arc<meerkat_comms::CommsRuntime>>,
+    dsl: RwLock<Arc<meerkat_runtime::HandleDslAuthority>>,
     buffered_candidates: Mutex<VecDeque<PeerInputCandidate>>,
     /// Serializes bridge command requests so that at most one
     /// request/response round-trip is in flight on this supervisor bridge
@@ -34,11 +35,12 @@ impl MobSupervisorBridge {
         authority: SupervisorAuthorityRecord,
     ) -> Result<Self, MobError> {
         let participant_name = format!("{mob_id}/__mob_supervisor__");
-        let runtime = Self::build_runtime(&participant_name, &authority)?;
+        let (runtime, dsl) = Self::build_runtime(&participant_name, &authority)?;
         Ok(Self {
             participant_name,
             authority: RwLock::new(authority),
             runtime: RwLock::new(runtime),
+            dsl: RwLock::new(dsl),
             buffered_candidates: Mutex::new(VecDeque::new()),
             request_lock: Mutex::new(()),
         })
@@ -47,7 +49,13 @@ impl MobSupervisorBridge {
     fn build_runtime(
         participant_name: &str,
         authority: &SupervisorAuthorityRecord,
-    ) -> Result<Arc<meerkat_comms::CommsRuntime>, MobError> {
+    ) -> Result<
+        (
+            Arc<meerkat_comms::CommsRuntime>,
+            Arc<meerkat_runtime::HandleDslAuthority>,
+        ),
+        MobError,
+    > {
         let runtime = meerkat_comms::CommsRuntime::inproc_only_with_keypair_and_silent_intents(
             participant_name,
             None,
@@ -60,8 +68,9 @@ impl MobSupervisorBridge {
             ))
         })?;
         let runtime = Arc::new(runtime);
-        Self::install_supervisor_peer_request_response_authority(&runtime, participant_name)?;
-        Ok(runtime)
+        let dsl =
+            Self::install_supervisor_peer_request_response_authority(&runtime, participant_name)?;
+        Ok((runtime, dsl))
     }
 
     /// Supervisor bridge runtimes intentionally issue semantic peer
@@ -70,7 +79,7 @@ impl MobSupervisorBridge {
     fn install_supervisor_peer_request_response_authority(
         runtime: &Arc<meerkat_comms::CommsRuntime>,
         participant_name: &str,
-    ) -> Result<(), MobError> {
+    ) -> Result<Arc<meerkat_runtime::HandleDslAuthority>, MobError> {
         let dsl = Arc::new(meerkat_runtime::HandleDslAuthority::ephemeral());
         dsl.apply_signal(
             meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
@@ -115,19 +124,22 @@ impl MobSupervisorBridge {
                 Arc::new(meerkat_runtime::RuntimePeerInteractionHandle::new(
                     Arc::clone(&dsl),
                 )),
-                Arc::new(meerkat_runtime::RuntimeInteractionStreamHandle::new(dsl)),
+                Arc::new(meerkat_runtime::RuntimeInteractionStreamHandle::new(
+                    Arc::clone(&dsl),
+                )),
             ),
         );
-        Ok(())
+        Ok(dsl)
     }
 
     pub(crate) async fn rotate(
         &self,
         authority: SupervisorAuthorityRecord,
     ) -> Result<(), MobError> {
-        let runtime = Self::build_runtime(&self.participant_name, &authority)?;
+        let (runtime, dsl) = Self::build_runtime(&self.participant_name, &authority)?;
         *self.authority.write().await = authority;
         *self.runtime.write().await = runtime;
+        *self.dsl.write().await = dsl;
         self.buffered_candidates.lock().await.clear();
         Ok(())
     }
@@ -146,24 +158,59 @@ impl MobSupervisorBridge {
 
     async fn apply_bridge_trust(
         runtime: &Arc<meerkat_comms::CommsRuntime>,
+        dsl: &Arc<meerkat_runtime::HandleDslAuthority>,
         recipient: TrustedPeerDescriptor,
-        epoch: u64,
     ) -> Result<(), MobError> {
-        let result = runtime
-            .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
-                authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(
-                    recipient.peer_id.to_string(),
-                    epoch,
-                ),
-                peer: recipient,
-            })
-            .await?;
-        match result {
-            CommsTrustMutationResult::Added => Ok(()),
-            other => Err(MobError::Internal(format!(
-                "supervisor bridge trust mutation returned unexpected result: {other:?}"
-            ))),
+        let endpoint = mm_dsl::PeerEndpoint::from(&recipient);
+        if dsl
+            .snapshot_state()
+            .direct_peer_endpoints
+            .contains(&endpoint)
+        {
+            return Ok(());
         }
+        let effects = dsl
+            .apply_input_with_effects(
+                mm_dsl::MeerkatMachineInput::AddDirectPeerEndpoint { endpoint },
+                "mob_supervisor_bridge::trust_recipient",
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "supervisor bridge DSL rejected recipient trust projection: {error}"
+                ))
+            })?;
+        let reconcile_epoch = effects
+            .iter()
+            .find_map(|effect| match effect {
+                mm_dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
+                    peer_projection_epoch,
+                } => Some(*peer_projection_epoch),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "supervisor bridge trust projection emitted no reconcile request".to_string(),
+                )
+            })?;
+        let state = dsl.snapshot_state();
+        let effective_peers = state
+            .direct_peer_endpoints
+            .iter()
+            .chain(state.mob_overlay_peer_endpoints.iter())
+            .cloned()
+            .collect();
+        let comms_runtime: Arc<dyn CoreCommsRuntime> = runtime.clone();
+        let reconciler =
+            meerkat_runtime::comms_trust_reconcile::CommsTrustReconciler::new(comms_runtime);
+        reconciler
+            .reconcile(reconcile_epoch, effective_peers)
+            .await
+            .map(|_report| ())
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "supervisor bridge generated trust reconciliation failed: {error}"
+                ))
+            })
     }
 
     pub(crate) async fn supervisor_spec(&self) -> Result<TrustedPeerDescriptor, MobError> {
@@ -207,8 +254,8 @@ impl MobSupervisorBridge {
             self.participant_name,
             uuid::Uuid::new_v4()
         );
-        let runtime = Self::build_runtime(&probe_participant_name, authority)?;
-        Self::apply_bridge_trust(&runtime, recipient.clone(), authority.epoch).await?;
+        let (runtime, dsl) = Self::build_runtime(&probe_participant_name, authority)?;
+        Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await?;
         self.request_json_with_runtime(
             &runtime,
             recipient,
@@ -224,8 +271,8 @@ impl MobSupervisorBridge {
         recipient: &TrustedPeerDescriptor,
     ) -> Result<(), MobError> {
         let runtime = self.runtime().await;
-        let authority = self.authority().await;
-        Self::apply_bridge_trust(&runtime, recipient.clone(), authority.epoch).await
+        let dsl = self.dsl.read().await.clone();
+        Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await
     }
 
     pub(crate) async fn request_json<T: serde::Serialize>(
@@ -561,7 +608,7 @@ mod tests {
             meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
             ),
         );
-        let runtime =
+        let (runtime, _dsl) =
             MobSupervisorBridge::build_runtime("mob/__mob_supervisor__/authority-test", &authority)
                 .expect("supervisor runtime should build");
 
@@ -585,7 +632,7 @@ mod tests {
             meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
             ),
         );
-        let runtime =
+        let (runtime, _dsl) =
             MobSupervisorBridge::build_runtime("mob/__mob_supervisor__/terminal-test", &authority)
                 .expect("supervisor runtime should build");
         let request_envelope_id = uuid::Uuid::new_v4();
@@ -617,7 +664,7 @@ mod tests {
             meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
             ),
         );
-        let runtime =
+        let (runtime, _dsl) =
             MobSupervisorBridge::build_runtime("mob/__mob_supervisor__/timeout-test", &authority)
                 .expect("supervisor runtime should build");
         let request_envelope_id = uuid::Uuid::new_v4();

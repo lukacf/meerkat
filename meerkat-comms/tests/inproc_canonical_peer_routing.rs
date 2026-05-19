@@ -8,7 +8,8 @@ use meerkat_comms::{
     TrustedPeers,
 };
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-use meerkat_core::comms::{CommsTrustMutation, CommsTrustMutationAuthority};
+use meerkat_core::comms::CommsTrustMutation;
+use meerkat_core::generated::comms_trust_authority;
 
 static INPROC_REGISTRY_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -64,7 +65,7 @@ async fn apply_generated_trust(
     CoreCommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
-            authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(
+            authority: comms_trust_authority::meerkat_machine_peer_projection(
                 peer.peer_id.to_string(),
                 0,
             ),

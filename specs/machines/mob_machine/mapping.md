@@ -288,6 +288,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RegisterMemberPeerRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `AuthorizeMemberTrustWiringRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `AuthorizeMemberTrustUnwiringRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `AuthorizeExternalPeerReciprocalTrustRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`
@@ -734,6 +740,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `MemberSessionBindingChanged`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
+- `MemberTrustWiringRequested`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `MemberTrustUnwiringRequested`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `WiringTrustRepairRequested`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`

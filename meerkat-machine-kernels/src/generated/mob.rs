@@ -1286,6 +1286,7 @@ impl std::fmt::Display for MemberLifecycleKind {
         f.write_str(self.as_str())
     }
 }
+pub type MemberPeerEndpoint = meerkat_machine_schema::catalog::dsl::mob_machine::MemberPeerEndpoint;
 #[derive(
     Debug,
     Clone,
@@ -1972,6 +1973,7 @@ pub struct State {
     pub identity_to_runtime: std::collections::BTreeMap<AgentIdentity, AgentRuntimeId>,
     pub member_session_bindings: std::collections::BTreeMap<AgentIdentity, SessionId>,
     pub member_peer_ids: std::collections::BTreeMap<AgentIdentity, PeerId>,
+    pub member_peer_endpoints: std::collections::BTreeMap<AgentIdentity, MemberPeerEndpoint>,
     pub pending_session_ingress_detach_runtime_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub topology_epoch: u64,
 }
@@ -2149,7 +2151,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RegisterMemberPeer {
         pub agent_identity: AgentIdentity,
-        pub peer_id: PeerId,
+        pub peer_endpoint: MemberPeerEndpoint,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeMemberTrustWiring {
@@ -2896,6 +2898,8 @@ pub mod effects {
         pub edge: WiringEdge,
         pub a_peer_id: PeerId,
         pub b_peer_id: PeerId,
+        pub a_endpoint: MemberPeerEndpoint,
+        pub b_endpoint: MemberPeerEndpoint,
         pub epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2937,6 +2941,7 @@ pub mod effects {
         pub key: ExternalPeerKey,
         pub edge: ExternalPeerEdge,
         pub peer_id: PeerId,
+        pub peer_endpoint: MemberPeerEndpoint,
         pub epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3414,6 +3419,7 @@ pub fn initial_state() -> State {
         identity_to_runtime: Default::default(),
         member_session_bindings: Default::default(),
         member_peer_ids: Default::default(),
+        member_peer_endpoints: Default::default(),
         pending_session_ingress_detach_runtime_ids: Default::default(),
         topology_epoch: 0,
     }

@@ -1089,6 +1089,16 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::type_path_struct(
+                "MemberPeerEndpoint",
+                "crate::catalog::dsl::mob_machine::MemberPeerEndpoint",
+                vec![
+                    TypePathStructField::named("name", "PeerName"),
+                    TypePathStructField::named("peer_id", "PeerId"),
+                    TypePathStructField::named("address", "PeerAddress"),
+                    TypePathStructField::named("signing_key", "PeerSigningKey"),
+                ],
+            ),
+            NamedTypeBinding::type_path_struct(
                 "ExternalPeerKey",
                 "crate::catalog::dsl::mob_machine::ExternalPeerKey",
                 vec![

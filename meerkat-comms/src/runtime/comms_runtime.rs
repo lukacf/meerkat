@@ -339,7 +339,7 @@ impl CoreCommsRuntime for CommsRuntime {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
                 authority
-                    .validate_public_add(peer.peer_id)
+                    .validate_public_add(&peer)
                     .map_err(SendError::Validation)?;
                 self.apply_trusted_peer_descriptor(peer).await?;
                 Ok(CommsTrustMutationResult::Added)
@@ -355,7 +355,7 @@ impl CoreCommsRuntime for CommsRuntime {
             }
             CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
                 authority
-                    .validate_private_add(peer.peer_id)
+                    .validate_private_add(&peer)
                     .map_err(SendError::Validation)?;
                 self.apply_private_trusted_peer_descriptor(peer).await?;
                 Ok(CommsTrustMutationResult::Added)
@@ -1130,57 +1130,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 )
             })?
         };
-        let mut trusted_peers: Vec<TrustedPeerDescriptor> = self
-            .trusted_peers
-            .read()
-            .iter()
-            .filter_map(|peer| {
-                if peer.pubkey.is_zero() {
-                    tracing::warn!(
-                        peer_name = %peer.name,
-                        "skipping zero-pubkey trusted peer in ingress runtime snapshot"
-                    );
-                    return None;
-                }
-                let name = match PeerName::new(peer.name.clone()) {
-                    Ok(name) => name,
-                    Err(err) => {
-                        tracing::warn!(
-                            peer_name = %peer.name,
-                            error = %err,
-                            "skipping trusted peer with invalid name in snapshot"
-                        );
-                        return None;
-                    }
-                };
-                let address = match parse_peer_address(&peer.addr) {
-                    Ok(address) => address,
-                    Err(err) => {
-                        tracing::warn!(
-                            peer_name = %peer.name,
-                            peer_id = %peer.pubkey.to_peer_id(),
-                            address = %peer.addr,
-                            error = %err,
-                            "skipping trusted peer with invalid address in snapshot"
-                        );
-                        return None;
-                    }
-                };
-                Some(TrustedPeerDescriptor {
-                    peer_id: self.router.peer_id_for_pubkey(&peer.pubkey),
-                    name,
-                    address,
-                    pubkey: *peer.pubkey.as_bytes(),
-                })
-            })
-            .collect();
-        trusted_peers.sort_by(|left, right| {
-            left.name
-                .as_str()
-                .cmp(right.name.as_str())
-                .then_with(|| left.peer_id.cmp(&right.peer_id))
-                .then_with(|| left.address.to_string().cmp(&right.address.to_string()))
-        });
+        let trusted_peers = self.trusted_peer_descriptors(true);
 
         Ok(meerkat_core::PeerIngressRuntimeSnapshot {
             self_peer_id: peer_id_from_pubkey(&self.public_key),
@@ -1190,6 +1140,12 @@ impl CoreCommsRuntime for CommsRuntime {
             submission_queue_len,
             queue,
         })
+    }
+
+    async fn public_trusted_peer_projection_snapshot(
+        &self,
+    ) -> Result<Vec<TrustedPeerDescriptor>, meerkat_core::CommsCapabilityError> {
+        Ok(self.trusted_peer_descriptors(false))
     }
 
     fn actionable_input_notify(
@@ -2020,6 +1976,65 @@ impl CommsRuntime {
         &self.router
     }
 
+    fn trusted_peer_descriptors(&self, include_private: bool) -> Vec<TrustedPeerDescriptor> {
+        let mut trusted_peers: Vec<TrustedPeerDescriptor> = self
+            .trusted_peers
+            .read()
+            .iter()
+            .filter_map(|peer| {
+                if peer.pubkey.is_zero() {
+                    tracing::warn!(
+                        peer_name = %peer.name,
+                        "skipping zero-pubkey trusted peer in ingress runtime snapshot"
+                    );
+                    return None;
+                }
+                let peer_id = self.router.peer_id_for_pubkey(&peer.pubkey);
+                if !include_private && self.router.is_private_peer_id(&peer_id) {
+                    return None;
+                }
+                let name = match PeerName::new(peer.name.clone()) {
+                    Ok(name) => name,
+                    Err(err) => {
+                        tracing::warn!(
+                            peer_name = %peer.name,
+                            error = %err,
+                            "skipping trusted peer with invalid name in snapshot"
+                        );
+                        return None;
+                    }
+                };
+                let address = match parse_peer_address(&peer.addr) {
+                    Ok(address) => address,
+                    Err(err) => {
+                        tracing::warn!(
+                            peer_name = %peer.name,
+                            peer_id = %peer_id,
+                            address = %peer.addr,
+                            error = %err,
+                            "skipping trusted peer with invalid address in snapshot"
+                        );
+                        return None;
+                    }
+                };
+                Some(TrustedPeerDescriptor {
+                    peer_id,
+                    name,
+                    address,
+                    pubkey: *peer.pubkey.as_bytes(),
+                })
+            })
+            .collect();
+        trusted_peers.sort_by(|left, right| {
+            left.name
+                .as_str()
+                .cmp(right.name.as_str())
+                .then_with(|| left.peer_id.cmp(&right.peer_id))
+                .then_with(|| left.address.to_string().cmp(&right.address.to_string()))
+        });
+        trusted_peers
+    }
+
     /// Compatibility trust-registration helper for callers without generated
     /// authority. It intentionally fails closed; use the `CoreCommsRuntime`
     /// `apply_trust_mutation` seam with a generated machine/composition
@@ -2055,6 +2070,11 @@ impl CommsRuntime {
     async fn apply_trusted_peer_removal(&self, peer_id: &str) -> Result<bool, SendError> {
         let peer_id = meerkat_core::comms::PeerId::parse(peer_id)
             .map_err(|err| SendError::Validation(err.to_string()))?;
+        if self.router.is_private_peer_id(&peer_id) {
+            return Err(SendError::Validation(format!(
+                "public trust authority cannot remove private trusted peer {peer_id}"
+            )));
+        }
         Ok(self.router.remove_trusted_peer(&peer_id))
     }
 
@@ -3063,6 +3083,75 @@ mod tests {
         .expect("generated remove should apply");
         assert_eq!(remove, CommsTrustMutationResult::Removed { removed: true });
         assert!(runtime.peers().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn generated_add_authority_rejects_descriptor_drift() {
+        let runtime = CommsRuntime::inproc_only("trust-mutator-descriptor-drift").expect("runtime");
+        let peer_key = Keypair::generate().public_key();
+        let descriptor = trusted_descriptor("peer", peer_key, "inproc://peer");
+        let drifted_descriptor =
+            trusted_descriptor("peer", peer_key, "inproc://peer-drifted-address");
+
+        let err = CoreCommsRuntime::apply_trust_mutation(
+            &runtime,
+            CommsTrustMutation::AddTrustedPeer {
+                peer: drifted_descriptor,
+                authority: test_projection_add_authority(&descriptor, 11),
+            },
+        )
+        .await
+        .expect_err("generated add authority must bind the full peer descriptor");
+        assert!(
+            matches!(err, SendError::Validation(ref message) if message.contains("descriptor")),
+            "unexpected descriptor drift rejection: {err:?}"
+        );
+        assert!(
+            runtime.peers().await.is_empty(),
+            "descriptor drift must not mutate public trust"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_trust_projection_excludes_and_cannot_remove_private_peer() {
+        let runtime = CommsRuntime::inproc_only("trust-mutator-private-split").expect("runtime");
+        let peer_key = Keypair::generate().public_key();
+        let descriptor = trusted_descriptor("private-peer", peer_key, "inproc://private-peer");
+        let peer_id = descriptor.peer_id.to_string();
+
+        runtime
+            .apply_private_trusted_peer_descriptor(descriptor.clone())
+            .await
+            .expect("test setup installs private trust");
+        let public_snapshot = CoreCommsRuntime::public_trusted_peer_projection_snapshot(&runtime)
+            .await
+            .expect("public trust snapshot");
+        assert!(
+            public_snapshot.is_empty(),
+            "private trust must not be exported as public reconciliation truth"
+        );
+
+        let err = CoreCommsRuntime::apply_trust_mutation(
+            &runtime,
+            CommsTrustMutation::RemoveTrustedPeer {
+                peer_id,
+                authority: test_projection_remove_authority(&descriptor, 12),
+            },
+        )
+        .await
+        .expect_err("public remove authority must not remove private trust");
+        assert!(
+            matches!(err, SendError::Validation(ref message) if message.contains("public trust authority cannot remove private trusted peer")),
+            "unexpected private removal rejection: {err:?}"
+        );
+        let runtime_snapshot = CoreCommsRuntime::peer_ingress_runtime_snapshot(&runtime)
+            .await
+            .expect("runtime snapshot");
+        assert_eq!(
+            runtime_snapshot.trusted_peers.len(),
+            1,
+            "private trust should remain installed for admission"
+        );
     }
 
     fn install_test_peer_comms_handle(runtime: &CommsRuntime) {

@@ -1813,7 +1813,7 @@ impl CoreCommsRuntime for LocalCommsRuntime {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
                 authority
-                    .validate_public_add(peer.peer_id)
+                    .validate_public_add(&peer)
                     .map_err(SendError::Validation)?;
                 TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
                     .map_err(SendError::Validation)?;
@@ -1834,7 +1834,7 @@ impl CoreCommsRuntime for LocalCommsRuntime {
             }
             CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
                 authority
-                    .validate_private_add(peer.peer_id)
+                    .validate_private_add(&peer)
                     .map_err(SendError::Validation)?;
                 TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
                     .map_err(SendError::Validation)?;

@@ -6,9 +6,9 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use meerkat_machine_schema::{
-    ClosurePolicy, CompositionSchema, EffectHandoffProtocol, FeedbackFieldSource, MachineSchema,
-    ProtocolGenerationMode, TypeRef, canonical_composition_schemas, canonical_machine_schemas,
-    compat_composition_schemas,
+    ClosurePolicy, CommsTrustAuthorityOperation, CompositionSchema, EffectHandoffProtocol,
+    FeedbackFieldSource, MachineSchema, ProtocolGenerationMode, TypeRef,
+    canonical_composition_schemas, canonical_machine_schemas, compat_composition_schemas,
 };
 
 use crate::public_contracts::repo_root;
@@ -390,6 +390,14 @@ fn emit_comms_trust_authority_source_impl(
         return Ok(());
     };
     let source_kind = trust_authority.source_kind.core_variant();
+    if trust_authority.allowed_operations.iter().any(|operation| {
+        matches!(
+            operation,
+            CommsTrustAuthorityOperation::PublicAdd | CommsTrustAuthorityOperation::PrivateAdd
+        )
+    }) {
+        emit_comms_trust_descriptor_helper(out, protocol, obligation_type)?;
+    }
 
     writeln!(
         out,
@@ -435,15 +443,230 @@ fn emit_comms_trust_authority_source_impl(
         "            return Err(format!(\"generated comms trust authority source already minted {{:?}} for peer {{:?}}\", request.operation(), request.peer_id()));"
     )?;
     writeln!(out, "        }}")?;
+    emit_comms_trust_grant_return(out, protocol)?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    Ok(())
+}
+
+fn emit_comms_trust_grant_return(out: &mut String, protocol: &EffectHandoffProtocol) -> Result<()> {
+    let trust_authority = protocol
+        .comms_trust_authority
+        .as_ref()
+        .context("comms trust authority metadata missing")?;
+    let has_add = trust_authority.allowed_operations.iter().any(|operation| {
+        matches!(
+            operation,
+            CommsTrustAuthorityOperation::PublicAdd | CommsTrustAuthorityOperation::PrivateAdd
+        )
+    });
+    if has_add {
+        writeln!(
+            out,
+            "        if matches!(request.operation(), Operation::PublicAdd | Operation::PrivateAdd) {{"
+        )?;
+        writeln!(
+            out,
+            "            let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;"
+        )?;
+        writeln!(
+            out,
+            "            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, {}, peer_descriptor);",
+            comms_trust_epoch_expr(protocol)?
+        )?;
+        writeln!(out, "        }}")?;
+    }
     writeln!(
         out,
         "        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, {}))",
         comms_trust_epoch_expr(protocol)?
     )?;
-    writeln!(out, "    }}")?;
+    Ok(())
+}
+
+fn emit_comms_trust_descriptor_helper(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+    obligation_type: &str,
+) -> Result<()> {
+    match protocol.name.as_str() {
+        "comms_trust_reconcile" => {
+            emit_endpoint_descriptor_converter(
+                out,
+                "trusted_peer_descriptor_from_peer_endpoint",
+                "crate::meerkat_machine::dsl::PeerEndpoint",
+            )?;
+            writeln!(
+                out,
+                "fn trusted_peer_descriptor_for_request(obligation: &{obligation_type}, peer_id: &str) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {{"
+            )?;
+            writeln!(
+                out,
+                "    let mut matches = obligation.direct_peer_endpoints.iter().chain(obligation.mob_overlay_peer_endpoints.iter()).filter(|endpoint| endpoint.peer_id.0 == peer_id);"
+            )?;
+            writeln!(out, "    let Some(endpoint) = matches.next() else {{")?;
+            writeln!(
+                out,
+                "        return Err(format!(\"MeerkatMachine peer projection did not request trust for peer {{peer_id:?}}\"));"
+            )?;
+            writeln!(out, "    }};")?;
+            writeln!(out, "    if matches.next().is_some() {{")?;
+            writeln!(
+                out,
+                "        return Err(format!(\"MeerkatMachine peer projection has ambiguous endpoint descriptors for peer {{peer_id:?}}\"));"
+            )?;
+            writeln!(out, "    }}")?;
+            writeln!(
+                out,
+                "    trusted_peer_descriptor_from_peer_endpoint(endpoint)"
+            )?;
+            writeln!(out, "}}")?;
+            writeln!(out)?;
+        }
+        "supervisor_trust_publish" => {
+            writeln!(
+                out,
+                "fn trusted_peer_descriptor_for_request(obligation: &{obligation_type}, peer_id: &str) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {{"
+            )?;
+            writeln!(out, "    if obligation.peer_id != peer_id {{")?;
+            writeln!(
+                out,
+                "        return Err(format!(\"MeerkatMachine supervisor trust obligation peer_id {{:?}} does not match requested peer {{peer_id:?}}\", obligation.peer_id));"
+            )?;
+            writeln!(out, "    }}")?;
+            writeln!(
+                out,
+                "    let signing_public_key = obligation.signing_public_key.as_ref().ok_or_else(|| \"generated supervisor trust publish obligation omitted signing public key\".to_string())?;"
+            )?;
+            writeln!(
+                out,
+                "    let pubkey = crate::comms_drain::decode_supervisor_signing_public_key(signing_public_key)?;"
+            )?;
+            writeln!(
+                out,
+                "    meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(obligation.name.clone(), obligation.peer_id.clone(), pubkey, obligation.address.clone())"
+            )?;
+            writeln!(out, "}}")?;
+            writeln!(out)?;
+        }
+        "mob_member_trust_wiring" => {
+            emit_endpoint_descriptor_converter(
+                out,
+                "trusted_peer_descriptor_from_member_endpoint",
+                "crate::machines::mob_machine::MemberPeerEndpoint",
+            )?;
+            writeln!(
+                out,
+                "fn trusted_peer_descriptor_for_request(obligation: &{obligation_type}, peer_id: &str) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {{"
+            )?;
+            writeln!(
+                out,
+                "    let a_matches = obligation.a_endpoint.peer_id.0 == peer_id;"
+            )?;
+            writeln!(
+                out,
+                "    let b_matches = obligation.b_endpoint.peer_id.0 == peer_id;"
+            )?;
+            writeln!(out, "    match (a_matches, b_matches) {{")?;
+            writeln!(
+                out,
+                "        (true, false) => trusted_peer_descriptor_from_member_endpoint(&obligation.a_endpoint),"
+            )?;
+            writeln!(
+                out,
+                "        (false, true) => trusted_peer_descriptor_from_member_endpoint(&obligation.b_endpoint),"
+            )?;
+            writeln!(
+                out,
+                "        (false, false) => Err(format!(\"MobMachine member trust obligation does not carry requested peer {{peer_id:?}}\")),"
+            )?;
+            writeln!(
+                out,
+                "        (true, true) => Err(format!(\"MobMachine member trust obligation has ambiguous endpoint descriptors for peer {{peer_id:?}}\")),"
+            )?;
+            writeln!(out, "    }}")?;
+            writeln!(out, "}}")?;
+            writeln!(out)?;
+        }
+        "mob_external_peer_trust_wiring" | "mob_external_peer_trust_repair" => {
+            emit_endpoint_descriptor_converter(
+                out,
+                "trusted_peer_descriptor_from_external_endpoint",
+                "crate::machines::mob_machine::ExternalPeerEndpoint",
+            )?;
+            writeln!(
+                out,
+                "fn trusted_peer_descriptor_for_request(obligation: &{obligation_type}, peer_id: &str) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {{"
+            )?;
+            writeln!(
+                out,
+                "    if obligation.edge.endpoint.peer_id.0 != peer_id {{"
+            )?;
+            writeln!(
+                out,
+                "        return Err(format!(\"MobMachine external trust obligation peer_id {{:?}} does not match requested peer {{peer_id:?}}\", obligation.edge.endpoint.peer_id.0));"
+            )?;
+            writeln!(out, "    }}")?;
+            writeln!(
+                out,
+                "    trusted_peer_descriptor_from_external_endpoint(&obligation.edge.endpoint)"
+            )?;
+            writeln!(out, "}}")?;
+            writeln!(out)?;
+        }
+        "mob_external_peer_reciprocal_trust" => {
+            emit_endpoint_descriptor_converter(
+                out,
+                "trusted_peer_descriptor_from_member_endpoint",
+                "crate::machines::mob_machine::MemberPeerEndpoint",
+            )?;
+            writeln!(
+                out,
+                "fn trusted_peer_descriptor_for_request(obligation: &{obligation_type}, peer_id: &str) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {{"
+            )?;
+            writeln!(
+                out,
+                "    if obligation.peer_endpoint.peer_id.0 != peer_id {{"
+            )?;
+            writeln!(
+                out,
+                "        return Err(format!(\"MobMachine external reciprocal trust obligation peer_id {{:?}} does not match requested peer {{peer_id:?}}\", obligation.peer_endpoint.peer_id.0));"
+            )?;
+            writeln!(out, "    }}")?;
+            writeln!(
+                out,
+                "    trusted_peer_descriptor_from_member_endpoint(&obligation.peer_endpoint)"
+            )?;
+            writeln!(out, "}}")?;
+            writeln!(out)?;
+        }
+        other => bail!("unsupported descriptor-bearing comms trust protocol `{other}`"),
+    }
+    Ok(())
+}
+
+fn emit_endpoint_descriptor_converter(
+    out: &mut String,
+    fn_name: &str,
+    endpoint_type: &str,
+) -> Result<()> {
+    writeln!(
+        out,
+        "fn {fn_name}(endpoint: &{endpoint_type}) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {{"
+    )?;
+    writeln!(
+        out,
+        "    meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey("
+    )?;
+    writeln!(out, "        endpoint.name.0.clone(),")?;
+    writeln!(out, "        endpoint.peer_id.0.as_str(),")?;
+    writeln!(out, "        endpoint.signing_key.0,")?;
+    writeln!(out, "        endpoint.address.0.as_str(),")?;
+    writeln!(out, "    )")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
-
     Ok(())
 }
 
@@ -741,7 +964,7 @@ fn generate_executor_helpers(
     )?;
     writeln!(
         out,
-        "    let obligation = transition.effects.iter().find_map(|effect| match effect {{"
+        "    let obligation = transition.effects().iter().find_map(|effect| match effect {{"
     )?;
     writeln!(
         out,
@@ -754,7 +977,7 @@ fn generate_executor_helpers(
     writeln!(out, "    }});")?;
     writeln!(
         out,
-        "    Ok({result_type} {{ effects: transition.effects, obligation }})"
+        "    Ok({result_type} {{ effects: transition.into_effects(), obligation }})"
     )?;
     writeln!(out, "}}")?;
     writeln!(out)?;
@@ -815,7 +1038,7 @@ fn generate_effect_extractor_helpers(
             out,
             "pub fn extract_obligations(transition: &{transition_type}) -> Vec<{obligation_type}> {{"
         )?;
-        writeln!(out, "    transition.effects")?;
+        writeln!(out, "    transition.effects()")?;
     } else {
         writeln!(
             out,
@@ -910,7 +1133,10 @@ fn generate_comms_trust_authority_helpers(
                 "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_public_add("
             )?;
             writeln!(out, "        obligation,")?;
-            writeln!(out, "        endpoint.peer_id.0.clone(),")?;
+            writeln!(
+                out,
+                "        trusted_peer_descriptor_from_peer_endpoint(endpoint)?,"
+            )?;
             writeln!(out, "    )")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
@@ -952,7 +1178,10 @@ fn generate_comms_trust_authority_helpers(
                 "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_private_add("
             )?;
             writeln!(out, "        obligation,")?;
-            writeln!(out, "        obligation.peer_id.clone(),")?;
+            writeln!(
+                out,
+                "        trusted_peer_descriptor_for_request(obligation, expected_peer_id)?,"
+            )?;
             writeln!(out, "    )")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
@@ -1126,7 +1355,14 @@ fn emit_member_authority_fn(
         "    meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
     )?;
     writeln!(out, "        obligation,")?;
-    writeln!(out, "        peer_id.to_owned(),")?;
+    if constructor_name.ends_with("_add") {
+        writeln!(
+            out,
+            "        trusted_peer_descriptor_for_request(obligation, peer_id)?,"
+        )?;
+    } else {
+        writeln!(out, "        peer_id.to_owned(),")?;
+    }
     writeln!(out, "    )")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
@@ -1154,7 +1390,14 @@ fn emit_external_peer_trust_helper(
         "    meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
     )?;
     writeln!(out, "        obligation,")?;
-    writeln!(out, "        obligation.peer_id.0.clone(),")?;
+    if constructor_name.ends_with("_add") {
+        writeln!(
+            out,
+            "        trusted_peer_descriptor_for_request(obligation, expected_peer_id)?,"
+        )?;
+    } else {
+        writeln!(out, "        obligation.peer_id.0.clone(),")?;
+    }
     writeln!(out, "    )")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
@@ -1450,7 +1693,7 @@ fn generate_feedback_submitter(
         )?
     )?;
     match return_kind {
-        FeedbackReturnKind::Effects => writeln!(out, "    Ok(transition.effects)")?,
+        FeedbackReturnKind::Effects => writeln!(out, "    Ok(transition.into_effects())")?,
         FeedbackReturnKind::Transition(_) => writeln!(out, "    Ok(transition)")?,
     }
     writeln!(out, "}}")?;
@@ -1517,7 +1760,7 @@ fn generate_notify_helper(
         ctor_field_list_from_bindings_without_obligation(target_variant, feedback)?
     )?;
     match return_kind {
-        FeedbackReturnKind::Effects => writeln!(out, "    Ok(transition.effects)")?,
+        FeedbackReturnKind::Effects => writeln!(out, "    Ok(transition.into_effects())")?,
         FeedbackReturnKind::Transition(_) => writeln!(out, "    Ok(transition)")?,
     }
     writeln!(out, "}}")?;

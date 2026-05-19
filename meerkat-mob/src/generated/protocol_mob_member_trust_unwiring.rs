@@ -3,7 +3,9 @@
 // Closure policy: AckRequired
 // Liveness: projection mutation is applied by the owning runtime after consuming this typed obligation
 
-use crate::machines::mob_machine::{MobMachineEffect, MobMachineTransition, PeerId, WiringEdge};
+use crate::machines::mob_machine::{
+    MemberPeerEndpoint, MobMachineEffect, MobMachineTransition, PeerId, WiringEdge,
+};
 
 #[derive(Debug, Clone)]
 pub struct MobMemberTrustUnwiringObligation {
@@ -83,7 +85,7 @@ pub fn extract_obligations(
     transition: &MobMachineTransition,
 ) -> Vec<MobMemberTrustUnwiringObligation> {
     transition
-        .effects
+        .effects()
         .iter()
         .filter_map(|effect| match effect {
             MobMachineEffect::MemberTrustUnwiringRequested {

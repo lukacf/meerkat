@@ -1195,13 +1195,13 @@ fn owner_actor(name: &str) -> ActorSchema {
 /// carrying one of these obligations through generated protocol helpers.
 fn comms_trust_bundle_composition() -> CompositionSchema {
     let member_imports = [
-        "use crate::machines::mob_machine::{MobMachineEffect, MobMachineTransition, PeerId, WiringEdge};",
+        "use crate::machines::mob_machine::{MemberPeerEndpoint, MobMachineEffect, MobMachineTransition, PeerId, WiringEdge};",
     ];
     let external_imports = [
         "use crate::machines::mob_machine::{ExternalPeerEdge, MobMachineEffect, MobMachineTransition, PeerId};",
     ];
     let reciprocal_imports = [
-        "use crate::machines::mob_machine::{ExternalPeerEdge, ExternalPeerKey, MobMachineEffect, MobMachineTransition, PeerId};",
+        "use crate::machines::mob_machine::{ExternalPeerEdge, ExternalPeerKey, MemberPeerEndpoint, MobMachineEffect, MobMachineTransition, PeerId};",
     ];
     CompositionSchema {
         name: comp_id("comms_trust_bundle"),
@@ -1253,7 +1253,14 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 realizing_actor: "mob_comms_trust_owner",
                 source_kind: CommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring,
                 allowed_operations: &[CommsTrustAuthorityOperation::PublicAdd],
-                obligation_fields: &["edge", "a_peer_id", "b_peer_id", "epoch"],
+                obligation_fields: &[
+                    "edge",
+                    "a_peer_id",
+                    "b_peer_id",
+                    "a_endpoint",
+                    "b_endpoint",
+                    "epoch",
+                ],
                 module_path: "meerkat-mob/src/generated/protocol_mob_member_trust_wiring.rs",
                 required_imports: &member_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
@@ -1318,7 +1325,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 realizing_actor: "mob_comms_trust_owner",
                 source_kind: CommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust,
                 allowed_operations: &[CommsTrustAuthorityOperation::PublicAdd],
-                obligation_fields: &["key", "edge", "peer_id", "epoch"],
+                obligation_fields: &["key", "edge", "peer_id", "peer_endpoint", "epoch"],
                 module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_reciprocal_trust.rs",
                 required_imports: &reciprocal_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",

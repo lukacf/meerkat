@@ -1010,6 +1010,20 @@ pub trait CommsRuntime: Send + Sync {
         ))
     }
 
+    /// Snapshot only the public trust projection owned by generated public
+    /// peer authority.
+    ///
+    /// Private/control-plane trust edges are admitted by separate generated
+    /// private authority and must not be reconciled or removed by public peer
+    /// projection owners.
+    async fn public_trusted_peer_projection_snapshot(
+        &self,
+    ) -> Result<Vec<crate::comms::TrustedPeerDescriptor>, CommsCapabilityError> {
+        Err(CommsCapabilityError::Unsupported(
+            "public_trusted_peer_projection_snapshot".to_string(),
+        ))
+    }
+
     /// Get a notification that fires only for actionable peer input.
     ///
     /// Default returns `Unsupported`. Comms-enabled runtimes must override.

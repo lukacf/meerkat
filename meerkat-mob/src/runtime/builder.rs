@@ -82,7 +82,7 @@ fn apply_seeded_mob_input(
 fn register_seeded_member_peer(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     agent_identity: &crate::ids::AgentIdentity,
-    peer_id: &str,
+    peer_descriptor: &meerkat_core::comms::TrustedPeerDescriptor,
     context: &'static str,
 ) -> Result<(), MobError> {
     apply_seeded_mob_input(
@@ -91,7 +91,7 @@ fn register_seeded_member_peer(
             agent_identity: crate::machines::mob_machine::AgentIdentity::from_domain(
                 agent_identity,
             ),
-            peer_id: crate::machines::mob_machine::PeerId::from(peer_id.to_string()),
+            peer_endpoint: crate::machines::mob_machine::MemberPeerEndpoint::from(peer_descriptor),
         },
         context,
     )
@@ -146,14 +146,14 @@ fn resume_member_repair_authority_from_transition(
     peer_id: &str,
     context: &'static str,
 ) -> Result<CommsTrustMutationAuthority, MobError> {
-    let effects = &transition.effects;
+    let effects = transition.effects();
     let graph_changed = seeded_effects_include_wiring_graph_change(effects);
     let repair_requested = effects.iter().any(|effect| {
         matches!(
             effect,
             crate::machines::mob_machine::MobMachineEffect::WiringTrustRepairRequested {
                 edge: effect_edge
-            } if effect_edge == edge
+            } if *effect_edge == *edge
         )
     });
     if !repair_requested || graph_changed {
@@ -204,7 +204,7 @@ fn resume_external_repair_authority_from_transition(
     peer_id: &str,
     context: &'static str,
 ) -> Result<CommsTrustMutationAuthority, MobError> {
-    let effects = &transition.effects;
+    let effects = transition.effects();
     let graph_changed = seeded_effects_include_wiring_graph_change(effects);
     let repair_obligation =
         crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations(transition)
@@ -765,7 +765,7 @@ async fn commit_recovered_flow_run_command(
             run_id,
             command.clone(),
             token,
-            &transition.effects,
+            transition.effects(),
         )?;
 
         let won = if let Some(next_status) = &next_status {
@@ -1729,17 +1729,25 @@ impl MobBuilder {
                     Some(peer_id_a),
                     Some(key_a.clone()),
                 );
+                let name_a = format!("{}/{}/{}", definition.id, entry.role, entry.agent_identity);
+                let spec = provisioner
+                    .trusted_peer_spec(&entry.member_ref, &name_a, &key_a)
+                    .await?;
                 register_seeded_member_peer(
                     dsl_authority,
                     &entry.agent_identity,
-                    &peer_id_a.to_string(),
+                    &spec,
                     "resume_register_member_peer",
                 )?;
             } else if let Some(peer_id) = entry.peer_id() {
+                let name = format!("{}/{}/{}", definition.id, entry.role, entry.agent_identity);
+                let spec = provisioner
+                    .trusted_peer_spec(&entry.member_ref, &name, &peer_id.to_string())
+                    .await?;
                 register_seeded_member_peer(
                     dsl_authority,
                     &entry.agent_identity,
-                    &peer_id.to_string(),
+                    &spec,
                     "resume_register_backend_member_peer",
                 )?;
             }

@@ -152,7 +152,7 @@ impl HandleDslAuthority {
         context: &'static str,
     ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, DslTransitionError> {
         self.apply_input_with_transition(input, context)
-            .map(|transition| transition.effects)
+            .map(|transition| transition.into_effects())
     }
 
     pub fn apply_input_with_transition(
@@ -212,7 +212,7 @@ impl HandleDslAuthority {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let effects = mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
-            .map(|transition| transition.effects)
+            .map(|transition| transition.into_effects())
             .map_err(|err| map_kernel_error(err, context))?;
         Ok(sample(&effects))
     }
@@ -238,7 +238,7 @@ impl HandleDslAuthority {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard
             .apply_signal(signal)
-            .map(|transition| transition.effects)
+            .map(|transition| transition.into_effects())
             .map_err(|err| map_kernel_error(err, context))
     }
 

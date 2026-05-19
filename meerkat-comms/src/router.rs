@@ -255,6 +255,10 @@ impl Router {
         true
     }
 
+    pub(crate) fn is_private_peer_id(&self, peer_id: &PeerId) -> bool {
+        self.private_peer_ids.read().contains(peer_id)
+    }
+
     fn trusted_peer_by_peer_id(&self, peer_id: &PeerId) -> TrustedPeerLookup {
         let peer_ids = self.trusted_peer_ids.read().clone();
         let trusted = self.trusted_peers.read();

@@ -45,7 +45,7 @@ impl WorkGraphMachine {
             },
         )
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
-        public_error_class_from_effects(&transition.effects)
+        public_error_class_from_effects(transition.effects())
     }
 
     pub fn create_item(
@@ -435,7 +435,7 @@ fn apply_new_item_dsl(
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     Ok(AppliedWorkGraphDsl {
         state: dsl_auth.state().clone(),
-        effects: transition.effects,
+        effects: transition.into_effects(),
     })
 }
 
@@ -447,7 +447,7 @@ fn apply_link_validation_dsl(
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
-    Ok(transition.effects)
+    Ok(transition.into_effects())
 }
 
 fn apply_item_dsl(
@@ -485,7 +485,7 @@ where
                 }
                 WorkGraphError::InvalidTransition(format!("{error:?}"))
             })?;
-        effects.extend(transition.effects);
+        effects.extend(transition.into_effects());
     }
     Ok(AppliedWorkGraphDsl {
         state: dsl_auth.state().clone(),

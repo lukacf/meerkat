@@ -211,9 +211,9 @@ impl CommsTrustReconciler {
     async fn canonical_trusted_peer_snapshot(
         &self,
     ) -> Result<BTreeSet<PeerEndpoint>, CommsTrustReconcileError> {
-        let snapshot = self.comms.peer_ingress_runtime_snapshot().await?;
-        snapshot
-            .trusted_peers
+        self.comms
+            .public_trusted_peer_projection_snapshot()
+            .await?
             .iter()
             .map(descriptor_to_endpoint)
             .collect()
@@ -293,9 +293,9 @@ mod tests {
         }
     }
 
-    const UUID_A: &str = "aaaaaaaa-0000-4000-8000-000000000001";
-    const UUID_B: &str = "bbbbbbbb-0000-4000-8000-000000000002";
-    const UUID_C: &str = "cccccccc-0000-4000-8000-000000000003";
+    const UUID_A: &str = "f805a14c-4089-5328-b4cb-39ede8b4464d";
+    const UUID_B: &str = "a576ebe3-ccd6-565d-8f48-5f29c0db055d";
+    const UUID_C: &str = "76f30618-7a02-578b-a8bc-6d82ae7ba8cf";
 
     /// Records every `add_trusted_peer` / `remove_trusted_peer` call
     /// for assertion in tests. Uses `std::sync::Mutex` for the
@@ -390,6 +390,18 @@ mod tests {
                 submission_queue_len: 0,
                 queue: PeerIngressQueueSnapshot::default(),
             })
+        }
+
+        async fn public_trusted_peer_projection_snapshot(
+            &self,
+        ) -> Result<Vec<TrustedPeerDescriptor>, CommsCapabilityError> {
+            self.trusted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(endpoint_to_descriptor)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| CommsCapabilityError::Unsupported(err.to_string()))
         }
     }
 

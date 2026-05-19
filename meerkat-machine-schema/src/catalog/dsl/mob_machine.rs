@@ -123,6 +123,7 @@ macro_rules! mob_catalog_machine_dsl {
             identity_to_runtime: Map<AgentIdentity, AgentRuntimeId>,
             member_session_bindings: Map<AgentIdentity, SessionId>,
             member_peer_ids: Map<AgentIdentity, PeerId>,
+            member_peer_endpoints: Map<AgentIdentity, MemberPeerEndpoint>,
             pending_session_ingress_detach_runtime_ids: Set<AgentRuntimeId>,
             topology_epoch: u64,
         }
@@ -223,6 +224,7 @@ macro_rules! mob_catalog_machine_dsl {
             identity_to_runtime = EmptyMap,
             member_session_bindings = EmptyMap,
             member_peer_ids = EmptyMap,
+            member_peer_endpoints = EmptyMap,
             pending_session_ingress_detach_runtime_ids = EmptySet,
             topology_epoch = 0,
         }
@@ -352,7 +354,7 @@ macro_rules! mob_catalog_machine_dsl {
             WireMembers { edge: WiringEdge },
             UnwireMembers { edge: WiringEdge },
             WireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
-            RegisterMemberPeer { agent_identity: AgentIdentity, peer_id: PeerId },
+            RegisterMemberPeer { agent_identity: AgentIdentity, peer_endpoint: MemberPeerEndpoint },
             AuthorizeMemberTrustWiring { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             AuthorizeMemberTrustUnwiring { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             AuthorizeMemberTrustCleanup { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
@@ -488,14 +490,14 @@ macro_rules! mob_catalog_machine_dsl {
             // snapshot.
             WiringGraphChanged { epoch: u64 },
             MemberSessionBindingChanged { epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId> },
-            MemberTrustWiringRequested { edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64 },
+            MemberTrustWiringRequested { edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, a_endpoint: MemberPeerEndpoint, b_endpoint: MemberPeerEndpoint, epoch: u64 },
             MemberTrustUnwiringRequested { edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64 },
             WiringTrustRepairRequested { edge: WiringEdge },
             ExternalPeerTrustWiringRequested { edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
             ExternalPeerTrustUnwiringRequested { edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
             ExternalPeerTrustRepairRequested { edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
             MemberPeerRegistered { agent_identity: AgentIdentity, peer_id: PeerId },
-            ExternalPeerReciprocalTrustRequested { key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
+            ExternalPeerReciprocalTrustRequested { key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint, epoch: u64 },
             // D-wiring-observability (#27): pair-valued notice emitted from
             // `WireMembers`/`UnwireMembers` alongside `WiringGraphChanged`.
             // Unlike `WiringGraphChanged` (opaque epoch bump), this carries
@@ -770,6 +772,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.topology_epoch += 1;
             }
@@ -784,6 +787,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
             }
             to Running
@@ -1373,6 +1377,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime = EmptyMap;
                 self.member_session_bindings = EmptyMap;
                 self.member_peer_ids = EmptyMap;
+                self.member_peer_endpoints = EmptyMap;
                 self.member_startup_binding_requested = EmptySet;
                 self.member_startup_runtime_ready = EmptySet;
                 self.member_startup_ready = EmptySet;
@@ -1650,14 +1655,15 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition RegisterMemberPeerRunning {
-            on input RegisterMemberPeer { agent_identity, peer_id }
+            on input RegisterMemberPeer { agent_identity, peer_endpoint }
             guard { self.lifecycle_phase == Phase::Running }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
             update {
-                self.member_peer_ids.insert(agent_identity, peer_id);
+                self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(peer_endpoint));
+                self.member_peer_endpoints.insert(agent_identity, peer_endpoint);
             }
             to Running
-            emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: peer_id }
+            emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: mob_machine_member_peer_endpoint_peer_id(peer_endpoint) }
         }
 
         transition AuthorizeMemberTrustWiringRunning {
@@ -1667,12 +1673,16 @@ macro_rules! mob_catalog_machine_dsl {
             guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
             guard "a_member_peer_registered" { self.member_peer_ids.contains_key(a_identity) == true }
             guard "b_member_peer_registered" { self.member_peer_ids.contains_key(b_identity) == true }
+            guard "a_member_endpoint_registered" { self.member_peer_endpoints.contains_key(a_identity) == true }
+            guard "b_member_endpoint_registered" { self.member_peer_endpoints.contains_key(b_identity) == true }
             update {}
             to Running
             emit MemberTrustWiringRequested {
                 edge: edge,
                 a_peer_id: self.member_peer_ids.get_cloned(a_identity).get("value"),
                 b_peer_id: self.member_peer_ids.get_cloned(b_identity).get("value"),
+                a_endpoint: self.member_peer_endpoints.get_cloned(a_identity).get("value"),
+                b_endpoint: self.member_peer_endpoints.get_cloned(b_identity).get("value"),
                 epoch: self.topology_epoch
             }
         }
@@ -1716,12 +1726,14 @@ macro_rules! mob_catalog_machine_dsl {
             guard "external_peer_key_already_wired" { self.external_peer_edges_by_key.contains_key(key) == true }
             guard "external_peer_key_matches_member" { mob_machine_external_peer_key_matches_local(key, agent_identity) }
             guard "member_peer_registered" { self.member_peer_ids.contains_key(agent_identity) == true }
+            guard "member_endpoint_registered" { self.member_peer_endpoints.contains_key(agent_identity) == true }
             update {}
             to Running
             emit ExternalPeerReciprocalTrustRequested {
                 key: key,
                 edge: self.external_peer_edges_by_key.get_cloned(key).get("value"),
                 peer_id: self.member_peer_ids.get_cloned(agent_identity).get("value"),
+                peer_endpoint: self.member_peer_endpoints.get_cloned(agent_identity).get("value"),
                 epoch: self.topology_epoch
             }
         }
@@ -3299,6 +3311,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
@@ -3319,6 +3332,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
             }
             to Running
@@ -3335,6 +3349,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
             }
             to Running
@@ -3353,6 +3368,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
@@ -3430,6 +3446,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
             }
             to Stopped
@@ -3446,6 +3463,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
             }
             to Stopped
@@ -3459,6 +3477,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
                 self.member_peer_ids = EmptyMap;
+                self.member_peer_endpoints = EmptyMap;
                 self.member_restore_failures = EmptyMap;
             }
             to Running
@@ -3472,6 +3491,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
                 self.member_peer_ids = EmptyMap;
+                self.member_peer_endpoints = EmptyMap;
                 self.member_restore_failures = EmptyMap;
             }
             to Stopped
@@ -3518,6 +3538,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime = EmptyMap;
                 self.member_session_bindings = EmptyMap;
                 self.member_peer_ids = EmptyMap;
+                self.member_peer_endpoints = EmptyMap;
                 self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
@@ -3674,6 +3695,10 @@ macro_rules! mob_catalog_machine_dsl {
 
         fn mob_machine_external_peer_edge_peer_id(edge: &ExternalPeerEdge) -> PeerId {
             edge.endpoint.peer_id.clone()
+        }
+
+        fn mob_machine_member_peer_endpoint_peer_id(endpoint: &MemberPeerEndpoint) -> PeerId {
+            endpoint.peer_id.clone()
         }
 
         fn mob_machine_wiring_edge_matches_members(
@@ -4522,6 +4547,39 @@ impl WiringEdge {
             Self { a: lhs, b: rhs }
         } else {
             Self { a: rhs, b: lhs }
+        }
+    }
+}
+
+/// Descriptor-bearing member trust endpoint. MobMachine owns this fact when a
+/// member runtime registers its comms identity, so member trust wiring can
+/// authorize the exact peer descriptor that will be installed.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct MemberPeerEndpoint {
+    pub name: PeerName,
+    pub peer_id: PeerId,
+    pub address: PeerAddress,
+    pub signing_key: PeerSigningKey,
+}
+
+impl From<&meerkat_core::comms::TrustedPeerDescriptor> for MemberPeerEndpoint {
+    fn from(spec: &meerkat_core::comms::TrustedPeerDescriptor) -> Self {
+        Self {
+            name: PeerName(spec.name.as_str().to_owned()),
+            peer_id: PeerId(spec.peer_id.to_string()),
+            address: PeerAddress(spec.address.to_string()),
+            signing_key: PeerSigningKey(spec.pubkey),
         }
     }
 }

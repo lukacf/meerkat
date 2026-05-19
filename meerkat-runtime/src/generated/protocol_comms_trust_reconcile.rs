@@ -28,6 +28,39 @@ impl CommsTrustReconcileObligation {
     }
 }
 
+fn trusted_peer_descriptor_from_peer_endpoint(
+    endpoint: &crate::meerkat_machine::dsl::PeerEndpoint,
+) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {
+    meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+        endpoint.name.0.clone(),
+        endpoint.peer_id.0.as_str(),
+        endpoint.signing_key.0,
+        endpoint.address.0.as_str(),
+    )
+}
+
+fn trusted_peer_descriptor_for_request(
+    obligation: &CommsTrustReconcileObligation,
+    peer_id: &str,
+) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {
+    let mut matches = obligation
+        .direct_peer_endpoints
+        .iter()
+        .chain(obligation.mob_overlay_peer_endpoints.iter())
+        .filter(|endpoint| endpoint.peer_id.0 == peer_id);
+    let Some(endpoint) = matches.next() else {
+        return Err(format!(
+            "MeerkatMachine peer projection did not request trust for peer {peer_id:?}"
+        ));
+    };
+    if matches.next().is_some() {
+        return Err(format!(
+            "MeerkatMachine peer projection has ambiguous endpoint descriptors for peer {peer_id:?}"
+        ));
+    }
+    trusted_peer_descriptor_from_peer_endpoint(endpoint)
+}
+
 impl meerkat_core::comms::generated_comms_trust_authority::Sealed
     for CommsTrustReconcileObligation
 {
@@ -94,6 +127,17 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for CommsTrustRecon
                 request.peer_id()
             ));
         }
+        if matches!(
+            request.operation(),
+            Operation::PublicAdd | Operation::PrivateAdd
+        ) {
+            let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;
+            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(
+                request,
+                self.peer_projection_epoch,
+                peer_descriptor,
+            );
+        }
         Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(
             request,
             self.peer_projection_epoch,
@@ -105,7 +149,7 @@ pub fn extract_obligations(
     transition: &MeerkatMachineTransition,
 ) -> Vec<CommsTrustReconcileObligation> {
     transition
-        .effects
+        .effects()
         .iter()
         .filter_map(|effect| match effect {
             MeerkatMachineEffect::CommsTrustReconcileRequested {
@@ -150,7 +194,7 @@ pub fn authority_for_endpoint(
     }
     meerkat_core::comms::CommsTrustMutationAuthority::from_generated_public_add(
         obligation,
-        endpoint.peer_id.0.clone(),
+        trusted_peer_descriptor_from_peer_endpoint(endpoint)?,
     )
 }
 

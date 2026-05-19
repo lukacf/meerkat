@@ -38,6 +38,28 @@ impl SupervisorTrustPublishObligation {
     }
 }
 
+fn trusted_peer_descriptor_for_request(
+    obligation: &SupervisorTrustPublishObligation,
+    peer_id: &str,
+) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {
+    if obligation.peer_id != peer_id {
+        return Err(format!(
+            "MeerkatMachine supervisor trust obligation peer_id {:?} does not match requested peer {peer_id:?}",
+            obligation.peer_id
+        ));
+    }
+    let signing_public_key = obligation.signing_public_key.as_ref().ok_or_else(|| {
+        "generated supervisor trust publish obligation omitted signing public key".to_string()
+    })?;
+    let pubkey = crate::comms_drain::decode_supervisor_signing_public_key(signing_public_key)?;
+    meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+        obligation.name.clone(),
+        obligation.peer_id.clone(),
+        pubkey,
+        obligation.address.clone(),
+    )
+}
+
 impl meerkat_core::comms::generated_comms_trust_authority::Sealed
     for SupervisorTrustPublishObligation
 {
@@ -79,6 +101,17 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for SupervisorTrust
                 request.peer_id()
             ));
         }
+        if matches!(
+            request.operation(),
+            Operation::PublicAdd | Operation::PrivateAdd
+        ) {
+            let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;
+            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(
+                request,
+                self.epoch,
+                peer_descriptor,
+            );
+        }
         Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(
             request, self.epoch,
         ))
@@ -89,7 +122,7 @@ pub fn extract_obligations(
     transition: &MeerkatMachineTransition,
 ) -> Vec<SupervisorTrustPublishObligation> {
     transition
-        .effects
+        .effects()
         .iter()
         .filter_map(|effect| match effect {
             MeerkatMachineEffect::PublishSupervisorTrustEdge {
@@ -136,6 +169,6 @@ pub fn publish_authority_for_peer(
     )?;
     meerkat_core::comms::CommsTrustMutationAuthority::from_generated_private_add(
         obligation,
-        obligation.peer_id.clone(),
+        trusted_peer_descriptor_for_request(obligation, expected_peer_id)?,
     )
 }

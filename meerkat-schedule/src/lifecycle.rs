@@ -339,7 +339,7 @@ impl Occurrence {
 
         // 5. Map effects
         let effects = transition
-            .effects
+            .effects()
             .iter()
             .map(map_occurrence_effect)
             .collect::<Result<Vec<_>, _>>()?;
@@ -1470,7 +1470,11 @@ fn map_schedule_effect(
 fn map_schedule_effects(
     transition: &sched_dsl::ScheduleLifecycleMachineTransition,
 ) -> Result<Vec<ScheduleLifecycleEffect>, ScheduleLifecycleError> {
-    transition.effects.iter().map(map_schedule_effect).collect()
+    transition
+        .effects()
+        .iter()
+        .map(map_schedule_effect)
+        .collect()
 }
 
 // ===========================================================================

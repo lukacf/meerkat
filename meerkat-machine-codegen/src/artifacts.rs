@@ -6406,6 +6406,12 @@ impl<'a> MachineTlaCompiler<'a> {
         .expect("write to string");
         writeln!(
             out,
+            "{}(endpoint) == endpoint.peer_id",
+            prefix("mob_machine_member_peer_endpoint_peer_id")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
             "{}(edge, a_identity, b_identity) ==",
             prefix("mob_machine_wiring_edge_matches_members")
         )

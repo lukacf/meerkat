@@ -4179,7 +4179,7 @@ impl MobRun {
             &self.run_id,
             command,
             authority_token,
-            &transition.effects,
+            transition.effects(),
         )?;
         self.flow_state = outcome.next_state;
         Ok(input)

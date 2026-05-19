@@ -36,7 +36,7 @@ pub fn extract_obligations(
     transition: &MobMachineTransition,
 ) -> Vec<MobDestroyingSessionIngressObligation> {
     transition
-        .effects
+        .effects()
         .iter()
         .filter_map(|effect| match effect {
             MobMachineEffect::RequestSessionIngressDetachForMobDestroy {

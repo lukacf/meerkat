@@ -4,7 +4,8 @@
 // Liveness: projection mutation is applied by the owning runtime after consuming this typed obligation
 
 use crate::machines::mob_machine::{
-    ExternalPeerEdge, ExternalPeerKey, MobMachineEffect, MobMachineTransition, PeerId,
+    ExternalPeerEdge, ExternalPeerKey, MemberPeerEndpoint, MobMachineEffect, MobMachineTransition,
+    PeerId,
 };
 
 #[derive(Debug, Clone)]
@@ -12,6 +13,7 @@ pub struct MobExternalPeerReciprocalTrustObligation {
     key: ExternalPeerKey,
     edge: ExternalPeerEdge,
     peer_id: PeerId,
+    peer_endpoint: MemberPeerEndpoint,
     epoch: u64,
     comms_trust_authority_claims:
         std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
@@ -30,9 +32,37 @@ impl MobExternalPeerReciprocalTrustObligation {
         &self.peer_id
     }
 
+    pub fn peer_endpoint(&self) -> &MemberPeerEndpoint {
+        &self.peer_endpoint
+    }
+
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
+}
+
+fn trusted_peer_descriptor_from_member_endpoint(
+    endpoint: &crate::machines::mob_machine::MemberPeerEndpoint,
+) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {
+    meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+        endpoint.name.0.clone(),
+        endpoint.peer_id.0.as_str(),
+        endpoint.signing_key.0,
+        endpoint.address.0.as_str(),
+    )
+}
+
+fn trusted_peer_descriptor_for_request(
+    obligation: &MobExternalPeerReciprocalTrustObligation,
+    peer_id: &str,
+) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {
+    if obligation.peer_endpoint.peer_id.0 != peer_id {
+        return Err(format!(
+            "MobMachine external reciprocal trust obligation peer_id {:?} does not match requested peer {peer_id:?}",
+            obligation.peer_endpoint.peer_id.0
+        ));
+    }
+    trusted_peer_descriptor_from_member_endpoint(&obligation.peer_endpoint)
 }
 
 impl meerkat_core::comms::generated_comms_trust_authority::Sealed
@@ -78,6 +108,17 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource
                 request.peer_id()
             ));
         }
+        if matches!(
+            request.operation(),
+            Operation::PublicAdd | Operation::PrivateAdd
+        ) {
+            let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;
+            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(
+                request,
+                self.epoch,
+                peer_descriptor,
+            );
+        }
         Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(
             request, self.epoch,
         ))
@@ -88,18 +129,20 @@ pub fn extract_obligations(
     transition: &MobMachineTransition,
 ) -> Vec<MobExternalPeerReciprocalTrustObligation> {
     transition
-        .effects
+        .effects()
         .iter()
         .filter_map(|effect| match effect {
             MobMachineEffect::ExternalPeerReciprocalTrustRequested {
                 key,
                 edge,
                 peer_id,
+                peer_endpoint,
                 epoch,
             } => Some(MobExternalPeerReciprocalTrustObligation {
                 key: key.clone(),
                 edge: edge.clone(),
                 peer_id: peer_id.clone(),
+                peer_endpoint: peer_endpoint.clone(),
                 epoch: *epoch,
                 comms_trust_authority_claims: Default::default(),
             }),
@@ -133,6 +176,6 @@ pub fn reciprocal_wiring_authority_for_peer(
     )?;
     meerkat_core::comms::CommsTrustMutationAuthority::from_generated_public_add(
         obligation,
-        obligation.peer_id.0.clone(),
+        trusted_peer_descriptor_for_request(obligation, expected_peer_id)?,
     )
 }

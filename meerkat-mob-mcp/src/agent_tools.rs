@@ -2465,7 +2465,7 @@ mod tests {
             match mutation {
                 CommsTrustMutation::AddTrustedPeer { peer, authority } => {
                     authority
-                        .validate_public_add(peer.peer_id)
+                        .validate_public_add(&peer)
                         .map_err(SendError::Validation)?;
                     self.add_trusted_peer(peer).await?;
                     Ok(CommsTrustMutationResult::Added)
@@ -2481,7 +2481,7 @@ mod tests {
                 }
                 CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
                     authority
-                        .validate_private_add(peer.peer_id)
+                        .validate_private_add(&peer)
                         .map_err(SendError::Validation)?;
                     self.add_private_trusted_peer(peer).await?;
                     Ok(CommsTrustMutationResult::Added)

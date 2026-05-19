@@ -74,7 +74,7 @@ pub fn extract_obligations(
     transition: &MeerkatMachineTransition,
 ) -> Vec<SupervisorTrustRevokeObligation> {
     transition
-        .effects
+        .effects()
         .iter()
         .filter_map(|effect| match effect {
             MeerkatMachineEffect::RevokeSupervisorTrustEdge { peer_id, epoch } => {

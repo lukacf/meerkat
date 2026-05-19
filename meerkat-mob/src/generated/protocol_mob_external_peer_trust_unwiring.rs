@@ -83,7 +83,7 @@ pub fn extract_obligations(
     transition: &MobMachineTransition,
 ) -> Vec<MobExternalPeerTrustUnwiringObligation> {
     transition
-        .effects
+        .effects()
         .iter()
         .filter_map(|effect| match effect {
             MobMachineEffect::ExternalPeerTrustUnwiringRequested {

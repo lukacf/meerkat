@@ -355,7 +355,7 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
     .expect("generated admission authority must accept runtime prompt metadata");
 
     transition
-        .effects
+        .into_effects()
         .into_iter()
         .find_map(|effect| match effect {
             meerkat_machine::dsl::MeerkatMachineEffect::AdmissionResolved {

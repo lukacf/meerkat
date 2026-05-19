@@ -116,8 +116,18 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         pub struct #transition_name {
             pub from_phase: #phase_name,
             pub to_phase: #phase_name,
-            pub effects: Vec<#effect_name>,
+            effects: Vec<#effect_name>,
             _origin: sealed::TransitionOrigin,
+        }
+
+        impl #transition_name {
+            pub fn effects(&self) -> &[#effect_name] {
+                &self.effects
+            }
+
+            pub fn into_effects(self) -> Vec<#effect_name> {
+                self.effects
+            }
         }
 
         #[derive(Debug, Clone, PartialEq, Eq)]

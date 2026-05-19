@@ -35,7 +35,7 @@ pub(crate) fn apply_dsl_transition_on_authority(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     dsl::MeerkatMachineMutator::apply(&mut *authority, input)
-        .map(|transition| DslTransitionEffects::new(transition.effects))
+        .map(|transition| DslTransitionEffects::new(transition.into_effects()))
         .map_err(|err| dsl_authority::map_error(err, context))
 }
 
@@ -137,7 +137,7 @@ impl MeerkatMachine {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous_snapshot = authority.snapshot();
         let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
-            .map(|transition| DslTransitionEffects::new(transition.effects))
+            .map(|transition| DslTransitionEffects::new(transition.into_effects()))
             .map_err(|err| dsl_authority::map_error(err, context))?;
         Ok(StagedSessionDslInput {
             previous_snapshot,
@@ -181,7 +181,7 @@ impl MeerkatMachine {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let previous_snapshot = authority.snapshot();
             let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
-                .map(|transition| DslTransitionEffects::new(transition.effects))
+                .map(|transition| DslTransitionEffects::new(transition.into_effects()))
                 .map_err(|err| dsl_authority::map_error(err, context))?;
             (previous_snapshot, effects)
         };

@@ -3,13 +3,17 @@
 // Closure policy: AckRequired
 // Liveness: projection mutation is applied by the owning runtime after consuming this typed obligation
 
-use crate::machines::mob_machine::{MobMachineEffect, MobMachineTransition, PeerId, WiringEdge};
+use crate::machines::mob_machine::{
+    MemberPeerEndpoint, MobMachineEffect, MobMachineTransition, PeerId, WiringEdge,
+};
 
 #[derive(Debug, Clone)]
 pub struct MobMemberTrustWiringObligation {
     edge: WiringEdge,
     a_peer_id: PeerId,
     b_peer_id: PeerId,
+    a_endpoint: MemberPeerEndpoint,
+    b_endpoint: MemberPeerEndpoint,
     epoch: u64,
     comms_trust_authority_claims:
         std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
@@ -28,8 +32,45 @@ impl MobMemberTrustWiringObligation {
         &self.b_peer_id
     }
 
+    pub fn a_endpoint(&self) -> &MemberPeerEndpoint {
+        &self.a_endpoint
+    }
+
+    pub fn b_endpoint(&self) -> &MemberPeerEndpoint {
+        &self.b_endpoint
+    }
+
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+}
+
+fn trusted_peer_descriptor_from_member_endpoint(
+    endpoint: &crate::machines::mob_machine::MemberPeerEndpoint,
+) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {
+    meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+        endpoint.name.0.clone(),
+        endpoint.peer_id.0.as_str(),
+        endpoint.signing_key.0,
+        endpoint.address.0.as_str(),
+    )
+}
+
+fn trusted_peer_descriptor_for_request(
+    obligation: &MobMemberTrustWiringObligation,
+    peer_id: &str,
+) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {
+    let a_matches = obligation.a_endpoint.peer_id.0 == peer_id;
+    let b_matches = obligation.b_endpoint.peer_id.0 == peer_id;
+    match (a_matches, b_matches) {
+        (true, false) => trusted_peer_descriptor_from_member_endpoint(&obligation.a_endpoint),
+        (false, true) => trusted_peer_descriptor_from_member_endpoint(&obligation.b_endpoint),
+        (false, false) => Err(format!(
+            "MobMachine member trust obligation does not carry requested peer {peer_id:?}"
+        )),
+        (true, true) => Err(format!(
+            "MobMachine member trust obligation has ambiguous endpoint descriptors for peer {peer_id:?}"
+        )),
     }
 }
 
@@ -73,6 +114,17 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for MobMemberTrustW
                 request.peer_id()
             ));
         }
+        if matches!(
+            request.operation(),
+            Operation::PublicAdd | Operation::PrivateAdd
+        ) {
+            let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;
+            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(
+                request,
+                self.epoch,
+                peer_descriptor,
+            );
+        }
         Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(
             request, self.epoch,
         ))
@@ -83,18 +135,22 @@ pub fn extract_obligations(
     transition: &MobMachineTransition,
 ) -> Vec<MobMemberTrustWiringObligation> {
     transition
-        .effects
+        .effects()
         .iter()
         .filter_map(|effect| match effect {
             MobMachineEffect::MemberTrustWiringRequested {
                 edge,
                 a_peer_id,
                 b_peer_id,
+                a_endpoint,
+                b_endpoint,
                 epoch,
             } => Some(MobMemberTrustWiringObligation {
                 edge: edge.clone(),
                 a_peer_id: a_peer_id.clone(),
                 b_peer_id: b_peer_id.clone(),
+                a_endpoint: a_endpoint.clone(),
+                b_endpoint: b_endpoint.clone(),
                 epoch: *epoch,
                 comms_trust_authority_claims: Default::default(),
             }),
@@ -152,7 +208,7 @@ pub fn wiring_authority_for_identity(
     let peer_id = required_peer_id_for_identity(obligation, identity, expected_peer_id)?;
     meerkat_core::comms::CommsTrustMutationAuthority::from_generated_public_add(
         obligation,
-        peer_id.to_owned(),
+        trusted_peer_descriptor_for_request(obligation, peer_id)?,
     )
 }
 
@@ -164,6 +220,6 @@ pub fn repair_authority_for_identity(
     let peer_id = required_peer_id_for_identity(obligation, identity, expected_peer_id)?;
     meerkat_core::comms::CommsTrustMutationAuthority::from_generated_public_add(
         obligation,
-        peer_id.to_owned(),
+        trusted_peer_descriptor_for_request(obligation, peer_id)?,
     )
 }

@@ -795,6 +795,39 @@ impl WiringEdge {
     }
 }
 
+/// Descriptor-bearing member trust endpoint. MobMachine owns this fact when a
+/// member runtime registers its comms identity, so member trust wiring can
+/// authorize the exact peer descriptor that will be installed.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct MemberPeerEndpoint {
+    pub name: PeerName,
+    pub peer_id: PeerId,
+    pub address: PeerAddress,
+    pub signing_key: PeerSigningKey,
+}
+
+impl From<&meerkat_core::comms::TrustedPeerDescriptor> for MemberPeerEndpoint {
+    fn from(spec: &meerkat_core::comms::TrustedPeerDescriptor) -> Self {
+        Self {
+            name: PeerName(spec.name.as_str().to_owned()),
+            peer_id: PeerId(spec.peer_id.to_string()),
+            address: PeerAddress(spec.address.to_string()),
+            signing_key: PeerSigningKey(spec.pubkey),
+        }
+    }
+}
+
 /// Descriptor-bearing external peer trust endpoint. Unlike `WiringEdge`, this
 /// preserves the routing id, transport address, and signing key that make an
 /// external trust edge authoritative.

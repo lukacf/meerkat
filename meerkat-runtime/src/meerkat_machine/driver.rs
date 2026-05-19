@@ -1039,7 +1039,7 @@ fn machine_apply_turn_run_failed(
             error: terminal_error.to_owned(),
         },
     )
-    .map(|transition| transition.effects)
+    .map(|transition| transition.into_effects())
     .map_err(|err| {
         RuntimeDriverError::Internal(format!(
             "failed to apply runtime turn failure for run {run_id}: {err}"
@@ -1595,7 +1595,7 @@ pub(crate) fn machine_apply_recovered_input_normalization(
         requeued,
         history_reason,
     )) =
-        transition.effects.into_iter().find_map(|effect| {
+        transition.into_effects().into_iter().find_map(|effect| {
             match effect {
         crate::meerkat_machine::dsl::MeerkatMachineEffect::RecoveredInputLifecycleNormalized {
             input_id,
@@ -1697,15 +1697,17 @@ pub(crate) fn machine_classify_recovered_input_durability(
         ))
     })?;
 
-    let Some((effect_input_id, disposition)) = transition.effects.into_iter().find_map(|effect| {
-        match effect {
+    let Some((effect_input_id, disposition)) =
+        transition.into_effects().into_iter().find_map(|effect| {
+            match effect {
             crate::meerkat_machine::dsl::MeerkatMachineEffect::RecoveredInputDurabilityClassified {
                 input_id,
                 disposition,
             } => Some((input_id, disposition)),
             _ => None,
         }
-    }) else {
+        })
+    else {
         return Err(RuntimeDriverError::Internal(format!(
             "ClassifyRecoveredInputDurability emitted no retention effect for '{input_id}'"
         )));

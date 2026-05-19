@@ -443,7 +443,7 @@ impl ShellState {
                     "DSL rejected ops transition ({context}): {err:?}"
                 ))
             })?;
-        Ok(transition.effects)
+        Ok(transition.into_effects())
     }
 
     /// Split a domain terminal outcome into a `(discriminant, payload)` pair
@@ -943,7 +943,7 @@ impl ShellState {
                 )));
             }
         };
-        Self::wait_all_satisfied_from_effects(&transition.effects)?
+        Self::wait_all_satisfied_from_effects(transition.effects())?
             .ok_or_else(|| {
                 OpsLifecycleError::Internal(
                     "generated wait_all authority accepted satisfaction without effect".into(),
@@ -1116,7 +1116,7 @@ impl ShellState {
                     "DSL rejected ops transition ({label}): {err:?}"
                 ))
             })?;
-        Ok(transition.effects)
+        Ok(transition.into_effects())
     }
 
     /// Check whether a pending barrier wait is now satisfied and resolve it.

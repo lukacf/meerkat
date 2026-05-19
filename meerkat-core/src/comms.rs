@@ -360,6 +360,7 @@ pub struct CommsTrustMutationAuthority {
     source_kind: GeneratedCommsTrustAuthoritySourceKind,
     operation: GeneratedCommsTrustAuthorityOperation,
     peer_id: String,
+    peer_descriptor: Option<TrustedPeerDescriptor>,
     epoch: u64,
     consumed: Arc<AtomicBool>,
 }
@@ -392,6 +393,7 @@ pub enum GeneratedCommsTrustAuthorityOperation {
 pub struct GeneratedCommsTrustAuthorityRequest<'a> {
     operation: GeneratedCommsTrustAuthorityOperation,
     peer_id: &'a str,
+    peer_descriptor: Option<&'a TrustedPeerDescriptor>,
 }
 
 impl<'a> GeneratedCommsTrustAuthorityRequest<'a> {
@@ -402,6 +404,10 @@ impl<'a> GeneratedCommsTrustAuthorityRequest<'a> {
     pub fn peer_id(&self) -> &'a str {
         self.peer_id
     }
+
+    pub fn peer_descriptor(&self) -> Option<&'a TrustedPeerDescriptor> {
+        self.peer_descriptor
+    }
 }
 
 #[doc(hidden)]
@@ -409,6 +415,7 @@ impl<'a> GeneratedCommsTrustAuthorityRequest<'a> {
 pub struct GeneratedCommsTrustAuthorityGrant {
     operation: GeneratedCommsTrustAuthorityOperation,
     peer_id: String,
+    peer_descriptor: Option<TrustedPeerDescriptor>,
     epoch: u64,
 }
 
@@ -417,8 +424,50 @@ impl GeneratedCommsTrustAuthorityGrant {
         Self {
             operation: request.operation,
             peer_id: request.peer_id.to_owned(),
+            peer_descriptor: None,
             epoch,
         }
+    }
+
+    pub fn new_add(
+        request: &GeneratedCommsTrustAuthorityRequest<'_>,
+        epoch: u64,
+        peer_descriptor: TrustedPeerDescriptor,
+    ) -> Result<Self, String> {
+        if !matches!(
+            request.operation,
+            GeneratedCommsTrustAuthorityOperation::PublicAdd
+                | GeneratedCommsTrustAuthorityOperation::PrivateAdd
+        ) {
+            return Err(format!(
+                "generated comms trust descriptor grant cannot authorize {:?}",
+                request.operation
+            ));
+        }
+        let Some(requested_descriptor) = request.peer_descriptor else {
+            return Err(format!(
+                "generated comms trust add for peer {:?} requires a trusted peer descriptor",
+                request.peer_id
+            ));
+        };
+        if peer_descriptor.peer_id.to_string() != request.peer_id {
+            return Err(format!(
+                "generated comms trust descriptor peer_id {} does not match requested {:?}",
+                peer_descriptor.peer_id, request.peer_id
+            ));
+        }
+        if requested_descriptor != &peer_descriptor {
+            return Err(format!(
+                "generated comms trust descriptor for peer {:?} does not match requested mutation descriptor",
+                request.peer_id
+            ));
+        }
+        Ok(Self {
+            operation: request.operation,
+            peer_id: request.peer_id.to_owned(),
+            peer_descriptor: Some(peer_descriptor),
+            epoch,
+        })
     }
 }
 
@@ -445,12 +494,12 @@ impl CommsTrustMutationAuthority {
     /// extracted from an unforgeable generated machine transition.
     pub fn from_generated_public_add(
         source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
-        peer_id: impl Into<String>,
+        peer: TrustedPeerDescriptor,
     ) -> Result<Self, String> {
-        Self::from_generated(
+        Self::from_generated_add(
             source,
             GeneratedCommsTrustAuthorityOperation::PublicAdd,
-            peer_id,
+            peer,
         )
     }
 
@@ -466,6 +515,7 @@ impl CommsTrustMutationAuthority {
             source,
             GeneratedCommsTrustAuthorityOperation::PublicRemove,
             peer_id,
+            None,
         )
     }
 
@@ -475,13 +525,22 @@ impl CommsTrustMutationAuthority {
     /// extracted from an unforgeable generated machine transition.
     pub fn from_generated_private_add(
         source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
-        peer_id: impl Into<String>,
+        peer: TrustedPeerDescriptor,
     ) -> Result<Self, String> {
-        Self::from_generated(
+        Self::from_generated_add(
             source,
             GeneratedCommsTrustAuthorityOperation::PrivateAdd,
-            peer_id,
+            peer,
         )
+    }
+
+    fn from_generated_add(
+        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
+        operation: GeneratedCommsTrustAuthorityOperation,
+        peer: TrustedPeerDescriptor,
+    ) -> Result<Self, String> {
+        let peer_id = peer.peer_id.to_string();
+        Self::from_generated(source, operation, peer_id, Some(peer))
     }
 
     #[doc(hidden)]
@@ -496,6 +555,7 @@ impl CommsTrustMutationAuthority {
             source,
             GeneratedCommsTrustAuthorityOperation::PrivateRemove,
             peer_id,
+            None,
         )
     }
 
@@ -503,6 +563,7 @@ impl CommsTrustMutationAuthority {
         source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
         operation: GeneratedCommsTrustAuthorityOperation,
         peer_id: impl Into<String>,
+        peer_descriptor: Option<TrustedPeerDescriptor>,
     ) -> Result<Self, String> {
         let source_kind = source.comms_trust_authority_source_kind();
         let source_type_name = std::any::type_name_of_val(source);
@@ -515,9 +576,20 @@ impl CommsTrustMutationAuthority {
             ));
         }
         let peer_id = peer_id.into();
+        if matches!(
+            operation,
+            GeneratedCommsTrustAuthorityOperation::PublicAdd
+                | GeneratedCommsTrustAuthorityOperation::PrivateAdd
+        ) && peer_descriptor.is_none()
+        {
+            return Err(format!(
+                "generated comms trust add for peer {peer_id:?} requires a trusted peer descriptor"
+            ));
+        }
         let request = GeneratedCommsTrustAuthorityRequest {
             operation,
             peer_id: peer_id.as_str(),
+            peer_descriptor: peer_descriptor.as_ref(),
         };
         let grant = source.authorize_comms_trust_authority(&request)?;
         if grant.operation != operation {
@@ -532,19 +604,31 @@ impl CommsTrustMutationAuthority {
                 grant.peer_id, peer_id,
             ));
         }
+        if matches!(
+            operation,
+            GeneratedCommsTrustAuthorityOperation::PublicAdd
+                | GeneratedCommsTrustAuthorityOperation::PrivateAdd
+        ) && grant.peer_descriptor.as_ref() != peer_descriptor.as_ref()
+        {
+            return Err(format!(
+                "generated comms trust source {source_kind:?} returned descriptor for peer {:?} that does not match requested mutation descriptor",
+                grant.peer_id,
+            ));
+        }
         Ok(Self {
             source_kind,
             operation,
             peer_id: grant.peer_id,
+            peer_descriptor: grant.peer_descriptor,
             epoch: grant.epoch,
             consumed: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    pub fn validate_public_add(&self, peer_id: PeerId) -> Result<(), String> {
-        self.validate_operation(
+    pub fn validate_public_add(&self, peer: &TrustedPeerDescriptor) -> Result<(), String> {
+        self.validate_add_operation(
             GeneratedCommsTrustAuthorityOperation::PublicAdd,
-            peer_id,
+            peer,
             "add a public trusted peer",
         )
     }
@@ -557,10 +641,10 @@ impl CommsTrustMutationAuthority {
         )
     }
 
-    pub fn validate_private_add(&self, peer_id: PeerId) -> Result<(), String> {
-        self.validate_operation(
+    pub fn validate_private_add(&self, peer: &TrustedPeerDescriptor) -> Result<(), String> {
+        self.validate_add_operation(
             GeneratedCommsTrustAuthorityOperation::PrivateAdd,
-            peer_id,
+            peer,
             "add a private trusted peer",
         )
     }
@@ -589,6 +673,23 @@ impl CommsTrustMutationAuthority {
         self.validate_peer_match(peer_id)
     }
 
+    fn validate_add_operation(
+        &self,
+        operation: GeneratedCommsTrustAuthorityOperation,
+        peer: &TrustedPeerDescriptor,
+        action: &'static str,
+    ) -> Result<(), String> {
+        if self.operation != operation {
+            return Err(format!(
+                "trust authority from {:?} for {:?} cannot {action}",
+                self.source_kind, self.operation,
+            ));
+        }
+        self.consume_once()?;
+        self.validate_peer_match(peer.peer_id)?;
+        self.validate_peer_descriptor_match(peer)
+    }
+
     fn consume_once(&self) -> Result<(), String> {
         self.consumed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -603,6 +704,23 @@ impl CommsTrustMutationAuthority {
         } else {
             Err(format!(
                 "trust authority peer_id {expected:?} does not match mutation peer_id {peer_id}"
+            ))
+        }
+    }
+
+    fn validate_peer_descriptor_match(&self, peer: &TrustedPeerDescriptor) -> Result<(), String> {
+        let Some(expected) = self.peer_descriptor.as_ref() else {
+            return Err(format!(
+                "trust authority from {:?} for {:?} did not carry a generated peer descriptor",
+                self.source_kind, self.operation,
+            ));
+        };
+        if expected == peer {
+            Ok(())
+        } else {
+            Err(format!(
+                "trust authority descriptor for peer {:?} does not match mutation descriptor",
+                self.peer_id()
             ))
         }
     }
@@ -1420,9 +1538,18 @@ mod tests {
 
     #[test]
     fn handwritten_generated_source_cannot_mint_trust_authority() {
+        let pubkey = [1u8; 32];
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let descriptor = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "fake",
+            peer_id.to_string(),
+            pubkey,
+            "inproc://fake",
+        )
+        .expect("valid descriptor");
         let err = CommsTrustMutationAuthority::from_generated_public_add(
             &FakeGeneratedSource,
-            PeerId::new().to_string(),
+            descriptor,
         )
         .expect_err("unregistered handwritten source type must not mint authority");
         assert!(

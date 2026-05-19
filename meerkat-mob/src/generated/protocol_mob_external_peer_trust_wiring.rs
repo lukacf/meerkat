@@ -30,6 +30,30 @@ impl MobExternalPeerTrustWiringObligation {
     }
 }
 
+fn trusted_peer_descriptor_from_external_endpoint(
+    endpoint: &crate::machines::mob_machine::ExternalPeerEndpoint,
+) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {
+    meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+        endpoint.name.0.clone(),
+        endpoint.peer_id.0.as_str(),
+        endpoint.signing_key.0,
+        endpoint.address.0.as_str(),
+    )
+}
+
+fn trusted_peer_descriptor_for_request(
+    obligation: &MobExternalPeerTrustWiringObligation,
+    peer_id: &str,
+) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {
+    if obligation.edge.endpoint.peer_id.0 != peer_id {
+        return Err(format!(
+            "MobMachine external trust obligation peer_id {:?} does not match requested peer {peer_id:?}",
+            obligation.edge.endpoint.peer_id.0
+        ));
+    }
+    trusted_peer_descriptor_from_external_endpoint(&obligation.edge.endpoint)
+}
+
 impl meerkat_core::comms::generated_comms_trust_authority::Sealed
     for MobExternalPeerTrustWiringObligation
 {
@@ -73,6 +97,17 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource
                 request.peer_id()
             ));
         }
+        if matches!(
+            request.operation(),
+            Operation::PublicAdd | Operation::PrivateAdd
+        ) {
+            let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;
+            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(
+                request,
+                self.epoch,
+                peer_descriptor,
+            );
+        }
         Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(
             request, self.epoch,
         ))
@@ -83,7 +118,7 @@ pub fn extract_obligations(
     transition: &MobMachineTransition,
 ) -> Vec<MobExternalPeerTrustWiringObligation> {
     transition
-        .effects
+        .effects()
         .iter()
         .filter_map(|effect| match effect {
             MobMachineEffect::ExternalPeerTrustWiringRequested {
@@ -126,6 +161,6 @@ pub fn wiring_authority_for_peer(
     )?;
     meerkat_core::comms::CommsTrustMutationAuthority::from_generated_public_add(
         obligation,
-        obligation.peer_id.0.clone(),
+        trusted_peer_descriptor_for_request(obligation, expected_peer_id)?,
     )
 }

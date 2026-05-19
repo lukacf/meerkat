@@ -39,7 +39,7 @@ use meerkat_runtime::meerkat_machine::dsl::{
 };
 use meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation;
 
-const UUID_A: &str = "aaaaaaaa-0000-4000-8000-000000000001";
+const UUID_A: &str = "f805a14c-4089-5328-b4cb-39ede8b4464d";
 
 fn endpoint(name: &str, peer_id_uuid: &str) -> PeerEndpoint {
     PeerEndpoint {
@@ -119,7 +119,7 @@ impl CommsRuntime for AddFailingCommsRuntime {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
                 authority
-                    .validate_public_add(peer.peer_id)
+                    .validate_public_add(&peer)
                     .map_err(SendError::Validation)?;
                 if self.fail_next_add.swap(false, Ordering::SeqCst) {
                     return Err(SendError::Unsupported("synthetic add failure".into()));
@@ -154,6 +154,12 @@ impl CommsRuntime for AddFailingCommsRuntime {
             submission_queue_len: 0,
             queue: PeerIngressQueueSnapshot::default(),
         })
+    }
+
+    async fn public_trusted_peer_projection_snapshot(
+        &self,
+    ) -> Result<Vec<TrustedPeerDescriptor>, CommsCapabilityError> {
+        Ok(self.successful_add_calls())
     }
 }
 

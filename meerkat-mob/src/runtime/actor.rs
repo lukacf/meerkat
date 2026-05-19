@@ -1909,7 +1909,7 @@ impl MobActor {
     ) -> Result<Vec<mob_dsl::MobMachineEffect>, MobError> {
         Ok(self
             .apply_dsl_input_collect_transition(input, context)?
-            .effects)
+            .into_effects())
     }
 
     fn apply_dsl_input_collect_transition(
@@ -1925,7 +1925,7 @@ impl MobActor {
                     "DSL authority ({context}) rejected {input_debug}: {e}"
                 ))
             })?;
-        self.queue_routed_effects_from(&transition.effects);
+        self.queue_routed_effects_from(transition.effects());
         if transition.from_phase != transition.to_phase {
             // Publish the projected phase for external observers. This is
             // the sole write seam for the dogma-#13 projection watch.
@@ -1969,7 +1969,7 @@ impl MobActor {
             if transition.from_phase != transition.to_phase {
                 phase_changed = true;
             }
-            effects.extend(transition.effects);
+            effects.extend(transition.into_effects());
         }
         Ok(PreparedDslInput {
             authority,
@@ -2101,7 +2101,7 @@ impl MobActor {
         edge: &mob_dsl::ExternalPeerEdge,
         context: &str,
     ) -> Result<WireTrustAuthority, MobError> {
-        let effects = &transition.effects;
+        let effects = transition.effects();
         let graph_changed = Self::effects_include_wiring_graph_change(effects);
         let wiring_obligation =
             crate::generated::protocol_mob_external_peer_trust_wiring::extract_obligations(
@@ -2266,7 +2266,7 @@ impl MobActor {
                     self.dsl_authority.state().runtime_fence_tokens,
                 ))
         })?;
-        self.queue_routed_effects_from(&transition.effects);
+        self.queue_routed_effects_from(transition.effects());
         if transition.from_phase != transition.to_phase {
             let _ = self.phase_watch_tx.send(self.state());
         }
@@ -2785,10 +2785,10 @@ impl MobActor {
         // routed variants (`Request*`) are NOT silently dropped by the
         // prior `_ => {}` arm — they're lifted through
         // `lift_routed_effect` and await `flush_routed_effects`.
-        self.queue_routed_effects_from(&transition.effects);
+        self.queue_routed_effects_from(transition.effects());
         self.publish_machine_state_projection();
 
-        for effect in transition.effects {
+        for effect in transition.into_effects() {
             match effect {
                 mob_dsl::MobMachineEffect::PersistKickoffUpdate {
                     member_id: _,
@@ -3216,7 +3216,7 @@ impl MobActor {
             }
         };
         let reason = transition
-            .effects
+            .into_effects()
             .into_iter()
             .find_map(|effect| match effect {
                 mob_dsl::MobMachineEffect::SubmitWorkRejected {
@@ -3317,7 +3317,7 @@ impl MobActor {
             }
         };
         let reason = transition
-            .effects
+            .into_effects()
             .into_iter()
             .find_map(|effect| match effect {
                 mob_dsl::MobMachineEffect::CancelAllWorkRejected {
@@ -6172,30 +6172,51 @@ impl MobActor {
         // and fails with `"autonomous member '{id}' missing roster entry for
         // startup readiness"` (#30 D-spawn-readiness-lookup).
         //
-        // `peer_id` is the canonical comms routing UUID. Keep the Ed25519
-        // public key in its own transport/auth slot so roster projections do
-        // not bind peer-directory lookups to key material.
-        let (peer_id, transport_public_key) =
+        // `peer_id` is the canonical comms routing UUID. The MobMachine also
+        // records the full descriptor so generated member trust authority is
+        // bound to the exact name/address/signing key that will be installed.
+        let (peer_descriptor, transport_public_key) =
             if let Some(session_id) = member_ref.bridge_session_id() {
                 match self.session_service.comms_runtime(session_id).await {
-                    Some(runtime) => (runtime.peer_id(), runtime.public_key()),
+                    Some(runtime) => {
+                        let public_key = runtime.public_key();
+                        let descriptor = match public_key.as_deref() {
+                            Some(public_key) => {
+                                let comms_name =
+                                    format!("{}/{}/{}", self.definition.id, profile_name, identity);
+                                Some(
+                                    self.provisioner
+                                        .trusted_peer_spec(&member_ref, &comms_name, public_key)
+                                        .await?,
+                                )
+                            }
+                            None => None,
+                        };
+                        (descriptor, public_key)
+                    }
                     None => (None, None),
                 }
-            } else if let MemberRef::BackendPeer { peer_id, .. } = &member_ref {
-                let parsed = meerkat_core::comms::PeerId::parse(peer_id).map_err(|error| {
-                    MobError::WiringError(format!(
-                        "spawn registered invalid backend peer id for '{identity}': {error}"
-                    ))
-                })?;
-                (Some(parsed), None)
+            } else if let MemberRef::BackendPeer {
+                peer_id,
+                address,
+                pubkey,
+                ..
+            } = &member_ref
+            {
+                let descriptor =
+                    Self::peer_only_spec_from_parts(peer_id, address, "finalize_spawn", *pubkey)?;
+                (Some(descriptor), None)
             } else {
                 (None, None)
             };
-        if let Some(peer_id) = peer_id {
+        let peer_id = peer_descriptor
+            .as_ref()
+            .map(|descriptor| descriptor.peer_id);
+        if let Some(descriptor) = peer_descriptor.as_ref() {
             self.apply_dsl_input(
                 mob_dsl::MobMachineInput::RegisterMemberPeer {
                     agent_identity: dsl_identity.clone(),
-                    peer_id: mob_dsl::PeerId::from(peer_id.to_string()),
+                    peer_endpoint: mob_dsl::MemberPeerEndpoint::from(descriptor),
                 },
                 "finalize_spawn_register_member_peer",
             )?;
@@ -8355,7 +8376,7 @@ impl MobActor {
             },
             "unwire_external_peer",
         )?;
-        let effects = &transition.effects;
+        let effects = transition.effects();
         if !Self::effects_include_wiring_graph_change(effects) {
             return Ok(None);
         }
@@ -12063,7 +12084,7 @@ impl MobActor {
         // machine schema has drifted. Drop the transition before the await
         // so the large `MobMachineTransition` struct doesn't balloon the
         // command-loop future size across yield points.
-        let ingress_admitted = transition.effects.iter().any(|effect| {
+        let ingress_admitted = transition.effects().iter().any(|effect| {
             matches!(
                 effect,
                 mob_dsl::MobMachineEffect::RequestRuntimeIngress { .. }
@@ -12140,7 +12161,7 @@ impl MobActor {
             let _ = self.phase_watch_tx.send(self.state());
         }
         self.publish_machine_state_projection();
-        let ingress_admitted = transition.effects.iter().any(|effect| {
+        let ingress_admitted = transition.effects().iter().any(|effect| {
             matches!(
                 effect,
                 mob_dsl::MobMachineEffect::RequestRuntimeIngress { .. }

@@ -162,7 +162,7 @@ pub fn classify_runtime_lifecycle_state(
     })?;
 
     transition
-        .effects
+        .into_effects()
         .into_iter()
         .find_map(|effect| match effect {
             dsl::MeerkatMachineEffect::RuntimeLifecycleStateClassified {
@@ -210,7 +210,7 @@ pub fn classify_runtime_loop_queue_admission(
     })?;
 
     transition
-        .effects
+        .into_effects()
         .into_iter()
         .find_map(|effect| match effect {
             dsl::MeerkatMachineEffect::RuntimeLoopQueueAdmissionClassified {
@@ -253,7 +253,7 @@ pub fn resolve_input_public_lifecycle_projection(
     })?;
 
     transition
-        .effects
+        .into_effects()
         .into_iter()
         .find_map(|effect| match effect {
             dsl::MeerkatMachineEffect::InputPublicLifecycleResolved { input_id, phase }
@@ -319,7 +319,7 @@ fn classify_input_behavioral_terminality(
     })?;
 
     let mut terminality = None;
-    for effect in transition.effects {
+    for effect in transition.into_effects() {
         match effect {
             dsl::MeerkatMachineEffect::InputBehavioralTerminalityResolved {
                 input_id,
@@ -358,7 +358,7 @@ fn resolve_input_public_terminal_projection(
     })?;
 
     transition
-        .effects
+        .into_effects()
         .into_iter()
         .find_map(|effect| match effect {
             dsl::MeerkatMachineEffect::InputPublicTerminalOutcomeResolved {
@@ -958,7 +958,7 @@ impl MeerkatMachine {
         let mut preview = dsl::MeerkatMachineAuthority::recover_from_state(state.clone())
             .map_err(|err| dsl_authority::map_error(err, context))?;
         dsl::MeerkatMachineMutator::apply(&mut preview, input)
-            .map(|transition| transition.effects)
+            .map(|transition| transition.into_effects())
             .map_err(|err| dsl_authority::map_error(err, context))
     }
 
@@ -1452,7 +1452,7 @@ impl MeerkatMachine {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let previous_snapshot = guard.snapshot();
             let effects = dsl::MeerkatMachineMutator::apply(&mut *guard, input)
-                .map(|transition| transition.effects)
+                .map(|transition| transition.into_effects())
                 .map_err(|err| format!("{err}"))?;
             (previous_snapshot, effects)
         };

@@ -111,6 +111,7 @@ fn renders_kernel_seam_composition_with_namespaced_mob_native_helpers() {
         "mob__mob_machine_external_peer_edge_has_matching_key(edges_by_key, edge) ==",
         "mob__mob_machine_external_peer_key_matches_edge(key, edge) ==",
         "mob__entry_packet__mob_machine_external_peer_key_matches_edge(key, edge) ==",
+        "mob__mob_machine_member_peer_endpoint_peer_id(endpoint) ==",
         "mob__mob_machine_node_terminal(status) ==",
         "mob__mob_machine_step_status_from_frame_node_status(status) ==",
         "mob__mob_machine_frame_node_status_after_admit(",

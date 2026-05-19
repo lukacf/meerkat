@@ -102,6 +102,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `identity_to_runtime`: `Map<AgentIdentity, AgentRuntimeId>`
 - `member_session_bindings`: `Map<AgentIdentity, SessionId>`
 - `member_peer_ids`: `Map<AgentIdentity, PeerId>`
+- `member_peer_endpoints`: `Map<AgentIdentity, MemberPeerEndpoint>`
 - `pending_session_ingress_detach_runtime_ids`: `Set<AgentRuntimeId>`
 - `topology_epoch`: `u64`
 
@@ -128,7 +129,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `WireMembers`(edge: WiringEdge)
 - `UnwireMembers`(edge: WiringEdge)
 - `WireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
-- `RegisterMemberPeer`(agent_identity: AgentIdentity, peer_id: PeerId)
+- `RegisterMemberPeer`(agent_identity: AgentIdentity, peer_endpoint: MemberPeerEndpoint)
 - `AuthorizeMemberTrustWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `AuthorizeMemberTrustUnwiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `AuthorizeMemberTrustCleanup`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
@@ -247,14 +248,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitKickoffLifecycleNotice`(member_id: String, intent: KickoffIntent)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
-- `MemberTrustWiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64)
+- `MemberTrustWiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, a_endpoint: MemberPeerEndpoint, b_endpoint: MemberPeerEndpoint, epoch: u64)
 - `MemberTrustUnwiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64)
 - `WiringTrustRepairRequested`(edge: WiringEdge)
 - `ExternalPeerTrustWiringRequested`(edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64)
 - `ExternalPeerTrustUnwiringRequested`(edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64)
 - `ExternalPeerTrustRepairRequested`(edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64)
 - `MemberPeerRegistered`(agent_identity: AgentIdentity, peer_id: PeerId)
-- `ExternalPeerReciprocalTrustRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64)
+- `ExternalPeerReciprocalTrustRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint, epoch: u64)
 - `EmitWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: WiringEdge)
 - `EmitExternalPeerWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: ExternalPeerEdge)
 
@@ -951,7 +952,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterMemberPeerRunning`
 - From: `Running`
-- On: `RegisterMemberPeer`(agent_identity, peer_id)
+- On: `RegisterMemberPeer`(agent_identity, peer_endpoint)
 - Guards:
   - `identity_present`
 - Emits: `MemberPeerRegistered`
@@ -965,6 +966,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `edge_matches_members`
   - `a_member_peer_registered`
   - `b_member_peer_registered`
+  - `a_member_endpoint_registered`
+  - `b_member_endpoint_registered`
 - Emits: `MemberTrustWiringRequested`
 - To: `Running`
 
@@ -996,6 +999,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `external_peer_key_already_wired`
   - `external_peer_key_matches_member`
   - `member_peer_registered`
+  - `member_endpoint_registered`
 - Emits: `ExternalPeerReciprocalTrustRequested`
 - To: `Running`
 

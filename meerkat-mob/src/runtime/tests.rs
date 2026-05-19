@@ -23234,7 +23234,7 @@ async fn test_cleanup_fail_step_routes_generated_supervisor_escalation_effect() 
         &run_id,
         start_command,
         start_authority,
-        &start_transition.effects,
+        start_transition.effects(),
     )
     .expect("project start");
     run.flow_state = start_outcome.next_state;

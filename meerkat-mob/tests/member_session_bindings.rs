@@ -106,7 +106,7 @@ fn recover_member_session_binding_signal(
 fn find_binding_changed(
     transition: &meerkat_mob::machines::mob_machine::MobMachineTransition,
 ) -> Option<(u64, AgentIdentity, Option<SessionId>, Option<SessionId>)> {
-    transition.effects.iter().find_map(|e| match e {
+    transition.effects().iter().find_map(|e| match e {
         MobMachineEffect::MemberSessionBindingChanged {
             epoch,
             agent_identity,
@@ -495,7 +495,7 @@ fn wire_members_inserts_edge_bumps_epoch_and_emits_wiring_graph_changed() {
         "topology_epoch must increment by exactly 1 per wire mutation",
     );
 
-    let epoch_from_effect = transition.effects.iter().find_map(|e| match e {
+    let epoch_from_effect = transition.effects().iter().find_map(|e| match e {
         MobMachineEffect::WiringGraphChanged { epoch } => Some(*epoch),
         _ => None,
     });
@@ -516,7 +516,7 @@ fn wire_members_idempotently_accepts_duplicate_edge_without_bumping_epoch() {
     let transition = MobMachineMutator::apply(&mut authority, wire_input("alpha", "beta"))
         .expect("re-wiring a present edge is an idempotent no-op");
     assert!(
-        transition.effects.iter().any(|effect| matches!(
+        transition.effects().iter().any(|effect| matches!(
             effect,
             MobMachineEffect::WiringTrustRepairRequested { edge }
                 if edge == &WiringEdge::new(identity("alpha"), identity("beta"))
@@ -525,7 +525,7 @@ fn wire_members_idempotently_accepts_duplicate_edge_without_bumping_epoch() {
     );
     assert!(
         !transition
-            .effects
+            .effects()
             .iter()
             .any(|effect| matches!(effect, MobMachineEffect::WiringGraphChanged { .. })),
         "idempotent wire must not emit a topology mutation effect",
@@ -556,7 +556,7 @@ fn unwire_members_removes_edge_bumps_epoch_and_emits_wiring_graph_changed() {
     );
     assert_eq!(authority.state().topology_epoch, 2);
 
-    let epoch_from_effect = transition.effects.iter().find_map(|e| match e {
+    let epoch_from_effect = transition.effects().iter().find_map(|e| match e {
         MobMachineEffect::WiringGraphChanged { epoch } => Some(*epoch),
         _ => None,
     });
@@ -568,7 +568,7 @@ fn unwire_members_idempotently_accepts_absent_edge_without_bumping_epoch() {
     let mut authority = MobMachineAuthority::new();
     let transition = MobMachineMutator::apply(&mut authority, unwire_input("alpha", "beta"))
         .expect("unwiring an absent edge is an idempotent no-op");
-    assert!(transition.effects.is_empty());
+    assert!(transition.effects().is_empty());
     assert_eq!(authority.state().topology_epoch, 0);
 }
 

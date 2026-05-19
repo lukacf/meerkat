@@ -369,8 +369,8 @@ impl EphemeralRuntimeDriver {
                 RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}"))
             })?
         };
-        self.absorb_dsl_effects(&transition.effects);
-        Ok(transition.effects)
+        self.absorb_dsl_effects(transition.effects());
+        Ok(transition.into_effects())
     }
 
     fn dsl_preview(
@@ -387,7 +387,7 @@ impl EphemeralRuntimeDriver {
                 RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}"))
             })?;
         mm_dsl::MeerkatMachineMutator::apply(&mut preview, input)
-            .map(|transition| transition.effects)
+            .map(|transition| transition.into_effects())
             .map_err(|err| RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}")))
     }
 

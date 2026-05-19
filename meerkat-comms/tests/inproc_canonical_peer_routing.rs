@@ -64,8 +64,11 @@ async fn apply_generated_trust(
     CoreCommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
+            authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(
+                peer.peer_id.to_string(),
+                0,
+            ),
             peer,
-            authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(0),
         },
     )
     .await

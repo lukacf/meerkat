@@ -46,8 +46,11 @@ async fn apply_generated_trust(runtime: &CommsRuntime, peer: TrustedPeerDescript
     meerkat_core::agent::CommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
+            authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(
+                peer.peer_id.to_string(),
+                0,
+            ),
             peer,
-            authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(0),
         },
     )
     .await
@@ -58,8 +61,11 @@ async fn revoke_generated_trust(runtime: &CommsRuntime, peer_id: String) -> bool
     match meerkat_core::agent::CommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::RemoveTrustedPeer {
+            authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(
+                peer_id.clone(),
+                0,
+            ),
             peer_id,
-            authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(0),
         },
     )
     .await

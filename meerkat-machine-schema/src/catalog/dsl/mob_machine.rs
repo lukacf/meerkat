@@ -122,6 +122,7 @@ macro_rules! mob_catalog_machine_dsl {
             // identity.
             identity_to_runtime: Map<AgentIdentity, AgentRuntimeId>,
             member_session_bindings: Map<AgentIdentity, SessionId>,
+            member_peer_ids: Map<AgentIdentity, PeerId>,
             pending_session_ingress_detach_runtime_ids: Set<AgentRuntimeId>,
             topology_epoch: u64,
         }
@@ -221,6 +222,7 @@ macro_rules! mob_catalog_machine_dsl {
             external_peer_edges_by_key = EmptyMap,
             identity_to_runtime = EmptyMap,
             member_session_bindings = EmptyMap,
+            member_peer_ids = EmptyMap,
             pending_session_ingress_detach_runtime_ids = EmptySet,
             topology_epoch = 0,
         }
@@ -349,7 +351,8 @@ macro_rules! mob_catalog_machine_dsl {
             WireMembers { edge: WiringEdge },
             UnwireMembers { edge: WiringEdge },
             WireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
-            AuthorizeExternalPeerReciprocalTrust { key: ExternalPeerKey },
+            RegisterMemberPeer { agent_identity: AgentIdentity, peer_id: PeerId },
+            AuthorizeExternalPeerReciprocalTrust { key: ExternalPeerKey, agent_identity: AgentIdentity },
             UnwireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
             SessionIngressDetachedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
             SessionIngressDetachFailedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String },
@@ -483,7 +486,8 @@ macro_rules! mob_catalog_machine_dsl {
             MemberSessionBindingChanged { epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId> },
             WiringTrustRepairRequested { edge: WiringEdge },
             ExternalPeerTrustRepairRequested { edge: ExternalPeerEdge },
-            ExternalPeerReciprocalTrustRequested { key: ExternalPeerKey, edge: ExternalPeerEdge },
+            MemberPeerRegistered { agent_identity: AgentIdentity, peer_id: PeerId },
+            ExternalPeerReciprocalTrustRequested { key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId },
             // D-wiring-observability (#27): pair-valued notice emitted from
             // `WireMembers`/`UnwireMembers` alongside `WiringGraphChanged`.
             // Unlike `WiringGraphChanged` (opaque epoch bump), this carries
@@ -523,6 +527,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition MemberSessionBindingChanged => external,
         disposition WiringTrustRepairRequested => local,
         disposition ExternalPeerTrustRepairRequested => local,
+        disposition MemberPeerRegistered => local,
         disposition ExternalPeerReciprocalTrustRequested => local,
         disposition EmitWiringLifecycleNotice => external,
         disposition EmitExternalPeerWiringLifecycleNotice => external,
@@ -752,6 +757,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_state_markers.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
+                self.member_peer_ids.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.topology_epoch += 1;
             }
@@ -765,6 +771,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.identity_to_runtime.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
+                self.member_peer_ids.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
             }
             to Running
@@ -1353,6 +1360,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.external_peer_edges_by_key = EmptyMap;
                 self.identity_to_runtime = EmptyMap;
                 self.member_session_bindings = EmptyMap;
+                self.member_peer_ids = EmptyMap;
                 self.member_startup_binding_requested = EmptySet;
                 self.member_startup_runtime_ready = EmptySet;
                 self.member_startup_ready = EmptySet;
@@ -1620,13 +1628,30 @@ macro_rules! mob_catalog_machine_dsl {
             emit ExternalPeerTrustRepairRequested { edge: edge }
         }
 
+        transition RegisterMemberPeerRunning {
+            on input RegisterMemberPeer { agent_identity, peer_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            update {
+                self.member_peer_ids.insert(agent_identity, peer_id);
+            }
+            to Running
+            emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: peer_id }
+        }
+
         transition AuthorizeExternalPeerReciprocalTrustRunning {
-            on input AuthorizeExternalPeerReciprocalTrust { key }
+            on input AuthorizeExternalPeerReciprocalTrust { key, agent_identity }
             guard { self.lifecycle_phase == Phase::Running }
             guard "external_peer_key_already_wired" { self.external_peer_edges_by_key.contains_key(key) == true }
+            guard "external_peer_key_matches_member" { mob_machine_external_peer_key_matches_local(key, agent_identity) }
+            guard "member_peer_registered" { self.member_peer_ids.contains_key(agent_identity) == true }
             update {}
             to Running
-            emit ExternalPeerReciprocalTrustRequested { key: key, edge: self.external_peer_edges_by_key.get_cloned(key).get("value") }
+            emit ExternalPeerReciprocalTrustRequested {
+                key: key,
+                edge: self.external_peer_edges_by_key.get_cloned(key).get("value"),
+                peer_id: self.member_peer_ids.get_cloned(agent_identity).get("value")
+            }
         }
 
         transition RecoverExternalPeerWiringRunning {
@@ -3196,6 +3221,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_session_bindings.remove(agent_identity);
+                self.member_peer_ids.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
@@ -3215,6 +3241,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_peer_ids.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
             }
             to Running
@@ -3230,6 +3257,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_peer_ids.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
             }
             to Running
@@ -3247,6 +3275,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_session_bindings.remove(agent_identity);
+                self.member_peer_ids.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
@@ -3305,6 +3334,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_peer_ids.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
             }
             to Stopped
@@ -3320,6 +3350,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_peer_ids.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
             }
             to Stopped
@@ -3332,6 +3363,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
+                self.member_peer_ids = EmptyMap;
                 self.member_restore_failures = EmptyMap;
             }
             to Running
@@ -3344,6 +3376,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
+                self.member_peer_ids = EmptyMap;
                 self.member_restore_failures = EmptyMap;
             }
             to Stopped
@@ -3389,6 +3422,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.external_peer_edges_by_key = EmptyMap;
                 self.identity_to_runtime = EmptyMap;
                 self.member_session_bindings = EmptyMap;
+                self.member_peer_ids = EmptyMap;
                 self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
@@ -3534,6 +3568,13 @@ macro_rules! mob_catalog_machine_dsl {
             edge: &ExternalPeerEdge,
         ) -> bool {
             key.local == edge.local && key.name == edge.endpoint.name
+        }
+
+        fn mob_machine_external_peer_key_matches_local(
+            key: &ExternalPeerKey,
+            agent_identity: &AgentIdentity,
+        ) -> bool {
+            key.local == *agent_identity
         }
 
         fn mob_machine_frame_node_status_after_admit(

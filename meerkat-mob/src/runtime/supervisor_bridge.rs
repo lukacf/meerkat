@@ -151,7 +151,10 @@ impl MobSupervisorBridge {
     ) -> Result<(), MobError> {
         let result = runtime
             .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
-                authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(epoch),
+                authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(
+                    recipient.peer_id.to_string(),
+                    epoch,
+                ),
                 peer: recipient,
             })
             .await?;

@@ -1679,6 +1679,16 @@ impl MobBuilder {
                     Some(peer_id_a),
                     Some(key_a.clone()),
                 );
+                apply_seeded_mob_input(
+                    dsl_authority,
+                    crate::machines::mob_machine::MobMachineInput::RegisterMemberPeer {
+                        agent_identity: crate::machines::mob_machine::AgentIdentity::from_domain(
+                            &entry.agent_identity,
+                        ),
+                        peer_id: crate::machines::mob_machine::PeerId::from(peer_id_a.to_string()),
+                    },
+                    "resume_register_member_peer",
+                )?;
             }
             let mut desired_trust = Vec::new();
 

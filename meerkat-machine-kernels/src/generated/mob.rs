@@ -1434,6 +1434,7 @@ impl std::fmt::Display for NodeRunStatus {
         f.write_str(self.as_str())
     }
 }
+pub type PeerId = meerkat_machine_schema::catalog::dsl::mob_machine::PeerId;
 #[derive(
     Debug,
     Clone,
@@ -1970,6 +1971,7 @@ pub struct State {
     pub external_peer_edges_by_key: std::collections::BTreeMap<ExternalPeerKey, ExternalPeerEdge>,
     pub identity_to_runtime: std::collections::BTreeMap<AgentIdentity, AgentRuntimeId>,
     pub member_session_bindings: std::collections::BTreeMap<AgentIdentity, SessionId>,
+    pub member_peer_ids: std::collections::BTreeMap<AgentIdentity, PeerId>,
     pub pending_session_ingress_detach_runtime_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub topology_epoch: u64,
 }
@@ -2140,8 +2142,14 @@ pub mod inputs {
         pub edge: ExternalPeerEdge,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RegisterMemberPeer {
+        pub agent_identity: AgentIdentity,
+        pub peer_id: PeerId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeExternalPeerReciprocalTrust {
         pub key: ExternalPeerKey,
+        pub agent_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct UnwireExternalPeer {
@@ -2289,6 +2297,7 @@ pub enum Input {
     WireMembers(inputs::WireMembers),
     UnwireMembers(inputs::UnwireMembers),
     WireExternalPeer(inputs::WireExternalPeer),
+    RegisterMemberPeer(inputs::RegisterMemberPeer),
     AuthorizeExternalPeerReciprocalTrust(inputs::AuthorizeExternalPeerReciprocalTrust),
     UnwireExternalPeer(inputs::UnwireExternalPeer),
     SessionIngressDetachedForMobDestroy(inputs::SessionIngressDetachedForMobDestroy),
@@ -2355,6 +2364,7 @@ impl Input {
             Self::WireMembers(_) => InputKind::WireMembers,
             Self::UnwireMembers(_) => InputKind::UnwireMembers,
             Self::WireExternalPeer(_) => InputKind::WireExternalPeer,
+            Self::RegisterMemberPeer(_) => InputKind::RegisterMemberPeer,
             Self::AuthorizeExternalPeerReciprocalTrust(_) => {
                 InputKind::AuthorizeExternalPeerReciprocalTrust
             }
@@ -2424,6 +2434,7 @@ pub enum InputKind {
     WireMembers,
     UnwireMembers,
     WireExternalPeer,
+    RegisterMemberPeer,
     AuthorizeExternalPeerReciprocalTrust,
     UnwireExternalPeer,
     SessionIngressDetachedForMobDestroy,
@@ -2850,9 +2861,15 @@ pub mod effects {
         pub edge: ExternalPeerEdge,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberPeerRegistered {
+        pub agent_identity: AgentIdentity,
+        pub peer_id: PeerId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ExternalPeerReciprocalTrustRequested {
         pub key: ExternalPeerKey,
         pub edge: ExternalPeerEdge,
+        pub peer_id: PeerId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EmitWiringLifecycleNotice {
@@ -2893,6 +2910,7 @@ pub enum Effect {
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
     WiringTrustRepairRequested(effects::WiringTrustRepairRequested),
     ExternalPeerTrustRepairRequested(effects::ExternalPeerTrustRepairRequested),
+    MemberPeerRegistered(effects::MemberPeerRegistered),
     ExternalPeerReciprocalTrustRequested(effects::ExternalPeerReciprocalTrustRequested),
     EmitWiringLifecycleNotice(effects::EmitWiringLifecycleNotice),
     EmitExternalPeerWiringLifecycleNotice(effects::EmitExternalPeerWiringLifecycleNotice),
@@ -2924,6 +2942,7 @@ pub enum EffectKind {
     MemberSessionBindingChanged,
     WiringTrustRepairRequested,
     ExternalPeerTrustRepairRequested,
+    MemberPeerRegistered,
     ExternalPeerReciprocalTrustRequested,
     EmitWiringLifecycleNotice,
     EmitExternalPeerWiringLifecycleNotice,
@@ -3020,6 +3039,7 @@ pub enum TransitionId {
     UnwireMembersAlreadyAbsent,
     WireExternalPeerRunning,
     WireExternalPeerAlreadyWired,
+    RegisterMemberPeerRunning,
     AuthorizeExternalPeerReciprocalTrustRunning,
     RecoverExternalPeerWiringRunning,
     RecoverExternalPeerWiringAlreadyRecovered,
@@ -3312,6 +3332,7 @@ pub fn initial_state() -> State {
         external_peer_edges_by_key: Default::default(),
         identity_to_runtime: Default::default(),
         member_session_bindings: Default::default(),
+        member_peer_ids: Default::default(),
         pending_session_ingress_detach_runtime_ids: Default::default(),
         topology_epoch: 0,
     }

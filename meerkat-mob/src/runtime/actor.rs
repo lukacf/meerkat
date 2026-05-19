@@ -5877,6 +5877,15 @@ impl MobActor {
             } else {
                 (None, None)
             };
+        if let Some(peer_id) = peer_id {
+            self.apply_dsl_input(
+                mob_dsl::MobMachineInput::RegisterMemberPeer {
+                    agent_identity: dsl_identity.clone(),
+                    peer_id: mob_dsl::PeerId::from(peer_id.to_string()),
+                },
+                "finalize_spawn_register_member_peer",
+            )?;
+        }
         {
             let mut roster = self.roster.write().await;
             roster.add_member(crate::roster::RosterAddEntry {
@@ -7842,47 +7851,26 @@ impl MobActor {
         &mut self,
         key: mob_dsl::ExternalPeerKey,
     ) -> Result<CommsTrustMutationAuthority, MobError> {
+        let local_identity = AgentIdentity::from(key.local.0.as_str());
         let effects = self.apply_dsl_input_collect_effects(
-            mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrust { key: key.clone() },
+            mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrust {
+                key: key.clone(),
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&local_identity),
+            },
             "authorize_external_peer_reciprocal_trust",
         )?;
-        let handoff = effects.iter().any(|effect| {
-            matches!(
-                effect,
-                mob_dsl::MobMachineEffect::ExternalPeerReciprocalTrustRequested {
-                    key: effect_key,
-                    ..
-                } if effect_key == &key
-            )
+        let authorized_peer_id = effects.iter().find_map(|effect| match effect {
+            mob_dsl::MobMachineEffect::ExternalPeerReciprocalTrustRequested {
+                key: effect_key,
+                peer_id,
+                ..
+            } if effect_key == &key => Some(peer_id.0.clone()),
+            _ => None,
         });
-        if !handoff {
+        let Some(peer_id) = authorized_peer_id else {
             return Err(MobError::WiringError(
                 "MobMachine produced no external reciprocal trust handoff".to_string(),
             ));
-        }
-        let local_identity = AgentIdentity::from(key.local.0.as_str());
-        let local_entry = {
-            let roster = self.roster.read().await;
-            roster
-                .get(&local_identity)
-                .ok_or_else(|| MobError::MemberNotFound(local_identity.clone()))?
-                .clone()
-        };
-        let peer_id = match self
-            .resolve_wiring_endpoint(&local_entry, "authorize_external_peer_reciprocal_trust")
-            .await
-        {
-            Ok(WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. }) => {
-                Self::trusted_peer_removal_key(&spec)
-            }
-            Err(_) => local_entry
-                .peer_id()
-                .map(|peer_id| peer_id.to_string())
-                .ok_or_else(|| {
-                    MobError::WiringError(format!(
-                        "authorize_external_peer_reciprocal_trust requires peer id for '{local_identity}'"
-                    ))
-                })?,
         };
         Ok(self.mob_peer_wiring_authority(&peer_id))
     }

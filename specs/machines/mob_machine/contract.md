@@ -101,6 +101,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `external_peer_edges_by_key`: `Map<ExternalPeerKey, ExternalPeerEdge>`
 - `identity_to_runtime`: `Map<AgentIdentity, AgentRuntimeId>`
 - `member_session_bindings`: `Map<AgentIdentity, SessionId>`
+- `member_peer_ids`: `Map<AgentIdentity, PeerId>`
 - `pending_session_ingress_detach_runtime_ids`: `Set<AgentRuntimeId>`
 - `topology_epoch`: `u64`
 
@@ -126,7 +127,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `WireMembers`(edge: WiringEdge)
 - `UnwireMembers`(edge: WiringEdge)
 - `WireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
-- `AuthorizeExternalPeerReciprocalTrust`(key: ExternalPeerKey)
+- `RegisterMemberPeer`(agent_identity: AgentIdentity, peer_id: PeerId)
+- `AuthorizeExternalPeerReciprocalTrust`(key: ExternalPeerKey, agent_identity: AgentIdentity)
 - `UnwireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
 - `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
@@ -243,7 +245,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
 - `WiringTrustRepairRequested`(edge: WiringEdge)
 - `ExternalPeerTrustRepairRequested`(edge: ExternalPeerEdge)
-- `ExternalPeerReciprocalTrustRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge)
+- `MemberPeerRegistered`(agent_identity: AgentIdentity, peer_id: PeerId)
+- `ExternalPeerReciprocalTrustRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId)
 - `EmitWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: WiringEdge)
 - `EmitExternalPeerWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: ExternalPeerEdge)
 
@@ -938,11 +941,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `ExternalPeerTrustRepairRequested`
 - To: `Running`
 
+### `RegisterMemberPeerRunning`
+- From: `Running`
+- On: `RegisterMemberPeer`(agent_identity, peer_id)
+- Guards:
+  - `identity_present`
+- Emits: `MemberPeerRegistered`
+- To: `Running`
+
 ### `AuthorizeExternalPeerReciprocalTrustRunning`
 - From: `Running`
-- On: `AuthorizeExternalPeerReciprocalTrust`(key)
+- On: `AuthorizeExternalPeerReciprocalTrust`(key, agent_identity)
 - Guards:
   - `external_peer_key_already_wired`
+  - `external_peer_key_matches_member`
+  - `member_peer_registered`
 - Emits: `ExternalPeerReciprocalTrustRequested`
 - To: `Running`
 

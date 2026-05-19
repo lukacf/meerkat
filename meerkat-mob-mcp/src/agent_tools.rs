@@ -635,7 +635,7 @@ impl AgentMobToolSurface {
             return false;
         }
 
-        let notify_parent = Self::notify_peer_added(
+        let _notify_parent = Self::notify_peer_added(
             &helper_runtime,
             name,
             identity.as_str(),
@@ -645,7 +645,7 @@ impl AgentMobToolSurface {
         .await;
         let (parent_peer, parent_role, parent_description) =
             Self::synthetic_parent_peer_added_fields(name);
-        let notify_helper = Self::notify_peer_added(
+        let _notify_helper = Self::notify_peer_added(
             comms_rt,
             &helper_comms_name,
             &parent_peer,
@@ -654,7 +654,7 @@ impl AgentMobToolSurface {
         )
         .await;
 
-        notify_parent && notify_helper
+        true
     }
 
     async fn dispatch_delegate(

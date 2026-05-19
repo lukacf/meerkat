@@ -763,7 +763,11 @@ fn rust_initial_value_expr(expr: &Expr, ty: &TypeRef) -> String {
             format!("Some({})", rust_initial_value_expr(inner, inner_ty))
         }
         Expr::Phase(value) => format!("Phase::{}", rust_ident(value.as_str())),
-        other => panic!("unsupported generated kernel state initializer expression: {other:?}"),
+        other => {
+            let message =
+                format!("unsupported generated kernel state initializer expression: {other:?}");
+            format!("{{ compile_error!({message:?}); Default::default() }}")
+        }
     }
 }
 

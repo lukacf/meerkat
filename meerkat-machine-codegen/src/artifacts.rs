@@ -6400,6 +6400,12 @@ impl<'a> MachineTlaCompiler<'a> {
         pushln!(out, "    /\\ key.name = edge.endpoint.name");
         writeln!(
             out,
+            "{}(key, agent_identity) == key.local = agent_identity",
+            prefix("mob_machine_external_peer_key_matches_local")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
             "{}(status) == status \\in {{\"Completed\", \"Failed\", \"Skipped\", \"Canceled\"}}",
             prefix("mob_machine_node_terminal")
         )

@@ -2993,7 +2993,10 @@ mod tests {
             &runtime,
             CommsTrustMutation::AddTrustedPeer {
                 peer: descriptor,
-                authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(7),
+                authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(
+                    peer_id.clone(),
+                    7,
+                ),
             },
         )
         .await
@@ -3004,8 +3007,8 @@ mod tests {
         let remove = CoreCommsRuntime::apply_trust_mutation(
             &runtime,
             CommsTrustMutation::RemoveTrustedPeer {
-                peer_id,
-                authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(8),
+                peer_id: peer_id.clone(),
+                authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(peer_id, 8),
             },
         )
         .await

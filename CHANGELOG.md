@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.18] - 2026-05-19
+
+Meerkat 0.6.18 is a runtime/session reliability hotfix release for persistent
+session checkpointing and lost mob session state.
+
+### Fixed
+
+- **Runtime-store session checkpointing** (#731) — fixes persistent session
+  checkpointing through the runtime store so session state is written and
+  recovered through the intended storage path.
+- **Lost mob session status** (#732) — marks lost mob sessions as broken,
+  preserving an explicit failed state instead of leaving unavailable sessions
+  looking active or recoverable.
+
 ## [0.6.17] - 2026-05-18
 
 Meerkat 0.6.17 improves mob spawn boundary configuration, task-workflow

@@ -148,7 +148,7 @@ impl CommsTrustReconciler {
             self.comms
                 .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
                     peer: descriptor,
-                    authority: CommsTrustMutationAuthority::MeerkatMachinePeerProjection { epoch },
+                    authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(epoch),
                 })
                 .await
                 .map_err(|source| CommsTrustReconcileError::AddTrustFailed {
@@ -163,7 +163,7 @@ impl CommsTrustReconciler {
                 .comms
                 .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
                     peer_id: endpoint.peer_id.0.clone(),
-                    authority: CommsTrustMutationAuthority::MeerkatMachinePeerProjection { epoch },
+                    authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(epoch),
                 })
                 .await
                 .map_err(|source| CommsTrustReconcileError::RemoveTrustFailed {

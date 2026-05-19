@@ -65,7 +65,7 @@ async fn apply_generated_trust(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
             peer,
-            authority: CommsTrustMutationAuthority::MeerkatMachinePeerProjection { epoch: 0 },
+            authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(0),
         },
     )
     .await

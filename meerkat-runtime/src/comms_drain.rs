@@ -932,10 +932,10 @@ async fn publish_supervisor_trust_from_generated_obligation(
     apply_generated_trust_add(
         comms_runtime,
         trusted_peer,
-        CommsTrustMutationAuthority::MeerkatMachineSupervisorPublish {
-            peer_id: obligation.peer_id.clone(),
-            epoch: obligation.epoch,
-        },
+        CommsTrustMutationAuthority::meerkat_machine_supervisor_publish(
+            obligation.peer_id.clone(),
+            obligation.epoch,
+        ),
     )
     .await?;
     adapter
@@ -1527,10 +1527,10 @@ async fn try_handle_supervisor_bridge_command(
             if let Err(error) = apply_generated_trust_add(
                 comms_runtime,
                 publish_spec,
-                CommsTrustMutationAuthority::MeerkatMachineSupervisorPublish {
-                    peer_id: publish_obligation.peer_id.clone(),
-                    epoch: publish_obligation.epoch,
-                },
+                CommsTrustMutationAuthority::meerkat_machine_supervisor_publish(
+                    publish_obligation.peer_id.clone(),
+                    publish_obligation.epoch,
+                ),
             )
             .await
             {
@@ -1804,10 +1804,10 @@ async fn try_handle_supervisor_bridge_command(
                 if let Err(error) = apply_generated_trust_remove(
                     comms_runtime,
                     revoke_obligation.peer_id.clone(),
-                    CommsTrustMutationAuthority::MeerkatMachineSupervisorRevoke {
-                        peer_id: revoke_obligation.peer_id.clone(),
-                        epoch: revoke_obligation.epoch,
-                    },
+                    CommsTrustMutationAuthority::meerkat_machine_supervisor_revoke(
+                        revoke_obligation.peer_id.clone(),
+                        revoke_obligation.epoch,
+                    ),
                 )
                 .await
                 {
@@ -1971,10 +1971,10 @@ async fn try_handle_supervisor_bridge_command(
             if let Err(error) = apply_generated_trust_remove(
                 comms_runtime,
                 revoke_obligation.peer_id.clone(),
-                CommsTrustMutationAuthority::MeerkatMachineSupervisorRevoke {
-                    peer_id: revoke_obligation.peer_id.clone(),
-                    epoch: revoke_obligation.epoch,
-                },
+                CommsTrustMutationAuthority::meerkat_machine_supervisor_revoke(
+                    revoke_obligation.peer_id.clone(),
+                    revoke_obligation.epoch,
+                ),
             )
             .await
             {

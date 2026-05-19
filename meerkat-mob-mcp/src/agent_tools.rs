@@ -35,7 +35,10 @@ use tokio_with_wasm::alias::{
 };
 
 use crate::MobMcpState;
-use meerkat_core::comms::{CommsCommand, PeerId, PeerName, PeerRoute};
+use meerkat_core::comms::{
+    CommsCommand, CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult,
+    PeerId, PeerName, PeerRoute, SendError, TrustedPeerDescriptor,
+};
 
 // ─── Tool name constants ─────────────────────────────────────────────────
 
@@ -104,17 +107,37 @@ impl AgentMobToolSurface {
         peer_id: PeerId,
         address: String,
         runtime: &dyn meerkat_core::agent::CommsRuntime,
-    ) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {
+    ) -> Result<TrustedPeerDescriptor, String> {
         let pubkey = runtime.public_key_bytes().ok_or_else(|| {
             format!("comms runtime for '{name}' does not expose public key bytes")
         })?;
         let address = runtime.advertised_address().unwrap_or(address);
-        meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+        TrustedPeerDescriptor::unsigned_with_pubkey(
             name.to_string(),
             peer_id.to_string(),
             pubkey,
             address,
         )
+    }
+
+    async fn apply_parent_trusted_peer_add(
+        comms: &Arc<dyn meerkat_core::agent::CommsRuntime>,
+        peer: TrustedPeerDescriptor,
+        topology_epoch: u64,
+    ) -> Result<(), SendError> {
+        let authority = CommsTrustMutationAuthority::mob_machine_peer_wiring(
+            peer.peer_id.to_string(),
+            topology_epoch,
+        );
+        match comms
+            .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer { peer, authority })
+            .await?
+        {
+            CommsTrustMutationResult::Added => Ok(()),
+            other => Err(SendError::Internal(format!(
+                "delegate helper trust mutation returned unexpected result: {other:?}"
+            ))),
+        }
     }
 
     fn synthetic_parent_peer_added_fields(parent_name: &str) -> (String, String, String) {
@@ -593,6 +616,10 @@ impl AgentMobToolSurface {
         if !helper_trusts_parent {
             return false;
         }
+        let topology_epoch = match handle.topology_epoch().await {
+            Ok(epoch) => epoch,
+            Err(_) => return false,
+        };
 
         let Ok(helper_spec) = Self::trusted_descriptor_from_runtime(
             &helper_comms_name,
@@ -603,7 +630,10 @@ impl AgentMobToolSurface {
             return false;
         };
 
-        if comms_rt.add_trusted_peer(helper_spec).await.is_err() {
+        if Self::apply_parent_trusted_peer_add(comms_rt, helper_spec, topology_epoch)
+            .await
+            .is_err()
+        {
             return false;
         }
 
@@ -2428,6 +2458,46 @@ mod tests {
 
         fn advertised_address(&self) -> Option<String> {
             Some(format!("inproc://{}", self.name))
+        }
+
+        async fn apply_trust_mutation(
+            &self,
+            mutation: CommsTrustMutation,
+        ) -> Result<CommsTrustMutationResult, SendError> {
+            match mutation {
+                CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                    authority
+                        .validate_public_add(peer.peer_id)
+                        .map_err(SendError::Validation)?;
+                    self.add_trusted_peer(peer).await?;
+                    Ok(CommsTrustMutationResult::Added)
+                }
+                CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
+                    authority
+                        .validate_public_remove(parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    let removed = self.remove_trusted_peer(&peer_id).await?;
+                    Ok(CommsTrustMutationResult::Removed { removed })
+                }
+                CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                    authority
+                        .validate_private_add(peer.peer_id)
+                        .map_err(SendError::Validation)?;
+                    self.add_private_trusted_peer(peer).await?;
+                    Ok(CommsTrustMutationResult::Added)
+                }
+                CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
+                    authority
+                        .validate_private_remove(parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    let removed = self.remove_trusted_peer(&peer_id).await?;
+                    Ok(CommsTrustMutationResult::Removed { removed })
+                }
+            }
         }
 
         async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {

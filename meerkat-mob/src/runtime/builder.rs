@@ -11,6 +11,19 @@ use std::collections::HashSet;
 
 const MOB_COMMAND_CHANNEL_CAPACITY: usize = 4096;
 
+struct ResumeDesiredTrust {
+    spec: TrustedPeerDescriptor,
+    source: ResumeTrustSource,
+}
+
+enum ResumeTrustSource {
+    Member(crate::machines::mob_machine::WiringEdge),
+    External {
+        key: crate::machines::mob_machine::ExternalPeerKey,
+        edge: crate::machines::mob_machine::ExternalPeerEdge,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // MobBuilder
 // ---------------------------------------------------------------------------
@@ -66,6 +79,22 @@ fn apply_seeded_mob_input(
     Ok(())
 }
 
+fn apply_seeded_mob_input_collect_effects(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    input: crate::machines::mob_machine::MobMachineInput,
+    context: &'static str,
+) -> Result<Vec<crate::machines::mob_machine::MobMachineEffect>, MobError> {
+    use crate::machines::mob_machine as mob_dsl;
+
+    let input_debug = format!("{input:?}");
+    let transition = mob_dsl::MobMachineMutator::apply(authority, input).map_err(|error| {
+        MobError::Internal(format!(
+            "MobMachine seeded authority ({context}) rejected {input_debug}: {error}"
+        ))
+    })?;
+    Ok(transition.effects)
+}
+
 fn apply_seeded_mob_signal(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     signal: crate::machines::mob_machine::MobMachineSignal,
@@ -81,6 +110,69 @@ fn apply_seeded_mob_signal(
     Ok(())
 }
 
+fn seeded_effects_include_wiring_graph_change(
+    effects: &[crate::machines::mob_machine::MobMachineEffect],
+) -> bool {
+    effects.iter().any(|effect| {
+        matches!(
+            effect,
+            crate::machines::mob_machine::MobMachineEffect::WiringGraphChanged { .. }
+        )
+    })
+}
+
+fn resume_member_repair_authority_from_effects(
+    effects: &[crate::machines::mob_machine::MobMachineEffect],
+    edge: &crate::machines::mob_machine::WiringEdge,
+    peer_id: &str,
+    epoch: u64,
+    context: &'static str,
+) -> Result<CommsTrustMutationAuthority, MobError> {
+    let graph_changed = seeded_effects_include_wiring_graph_change(effects);
+    let repair_requested = effects.iter().any(|effect| {
+        matches!(
+            effect,
+            crate::machines::mob_machine::MobMachineEffect::WiringTrustRepairRequested {
+                edge: effect_edge
+            } if effect_edge == edge
+        )
+    });
+    if repair_requested && !graph_changed {
+        return Ok(CommsTrustMutationAuthority::mob_machine_peer_repair(
+            peer_id, epoch,
+        ));
+    }
+    Err(MobError::WiringError(format!(
+        "{context} produced no generated member trust repair authority"
+    )))
+}
+
+fn resume_external_repair_authority_from_effects(
+    effects: &[crate::machines::mob_machine::MobMachineEffect],
+    edge: &crate::machines::mob_machine::ExternalPeerEdge,
+    peer_id: &str,
+    epoch: u64,
+    context: &'static str,
+) -> Result<CommsTrustMutationAuthority, MobError> {
+    let graph_changed = seeded_effects_include_wiring_graph_change(effects);
+    let repair_requested = effects.iter().any(|effect| {
+        matches!(
+            effect,
+            crate::machines::mob_machine::MobMachineEffect::ExternalPeerTrustRepairRequested {
+                edge: effect_edge
+            } if effect_edge == edge
+        )
+    });
+    if repair_requested && !graph_changed {
+        return Ok(CommsTrustMutationAuthority::mob_machine_peer_repair(
+            peer_id, epoch,
+        ));
+    }
+    Err(MobError::WiringError(format!(
+        "{context} produced no generated external trust repair authority"
+    )))
+}
+
 fn unexpected_resume_trust_mutation_result(
     operation: &'static str,
     result: CommsTrustMutationResult,
@@ -93,17 +185,10 @@ fn unexpected_resume_trust_mutation_result(
 async fn apply_resume_trusted_peer_add(
     comms: &(dyn CoreCommsRuntime + '_),
     peer: TrustedPeerDescriptor,
-    topology_epoch: u64,
+    authority: CommsTrustMutationAuthority,
 ) -> Result<(), SendError> {
-    let peer_id = peer.peer_id.to_string();
     match comms
-        .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
-            peer,
-            authority: CommsTrustMutationAuthority::MobMachineResumeRepair {
-                peer_id,
-                epoch: topology_epoch,
-            },
-        })
+        .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer { peer, authority })
         .await?
     {
         CommsTrustMutationResult::Added => Ok(()),
@@ -1563,7 +1648,6 @@ impl MobBuilder {
         let entries = roster.list().cloned().collect::<Vec<_>>();
         let machine_wiring_edges = dsl_authority.state().wiring_edges.clone();
         let machine_external_peer_edges = dsl_authority.state().external_peer_edges.clone();
-        let machine_topology_epoch = dsl_authority.state().topology_epoch;
         let broken_members = tool_handle
             .restore_diagnostics
             .read()
@@ -1596,7 +1680,7 @@ impl MobBuilder {
                     Some(key_a.clone()),
                 );
             }
-            let mut desired_specs = Vec::new();
+            let mut desired_trust = Vec::new();
 
             let local_dsl_identity =
                 crate::machines::mob_machine::AgentIdentity::from_domain(&entry.agent_identity);
@@ -1645,18 +1729,28 @@ impl MobBuilder {
                         }
                     },
                 };
-                desired_specs.push(
-                    provisioner
-                        .trusted_peer_spec(&peer_entry.member_ref, &name_b, &fallback_peer_id)
-                        .await?,
-                );
+                let spec = provisioner
+                    .trusted_peer_spec(&peer_entry.member_ref, &name_b, &fallback_peer_id)
+                    .await?;
+                desired_trust.push(ResumeDesiredTrust {
+                    spec,
+                    source: ResumeTrustSource::Member(edge.clone()),
+                });
             }
 
             for edge in &machine_external_peer_edges {
                 if edge.local == local_dsl_identity {
-                    desired_specs.push(trusted_peer_descriptor_from_dsl_external_endpoint(
-                        &edge.endpoint,
-                    )?);
+                    let spec = trusted_peer_descriptor_from_dsl_external_endpoint(&edge.endpoint)?;
+                    desired_trust.push(ResumeDesiredTrust {
+                        spec,
+                        source: ResumeTrustSource::External {
+                            key: crate::machines::mob_machine::ExternalPeerKey::new(
+                                edge.local.clone(),
+                                edge.endpoint.name.clone(),
+                            ),
+                            edge: edge.clone(),
+                        },
+                    });
                 }
             }
 
@@ -1665,37 +1759,76 @@ impl MobBuilder {
             // removing live trust requires a generated revoke/unwire
             // authority path, not a resume-time projection diff.
             let Some(comms_a) = local_comms else {
-                if desired_specs.is_empty() {
+                if desired_trust.is_empty() {
                     continue;
                 }
                 // Peer-only external members have no local comms runtime on
                 // the supervisor side; their trust lives on the remote
                 // process, so resume reconciles it through the supervisor
                 // bridge instead of mutating local state.
+                let desired_specs = desired_trust
+                    .iter()
+                    .map(|desired| desired.spec.clone())
+                    .collect::<Vec<_>>();
                 provisioner
                     .reconcile_peer_only_trust(&entry.member_ref, &desired_specs)
                     .await?;
                 continue;
             };
             let current_peers = comms_a.peers().await;
-            for spec in &desired_specs {
-                let spec_peer_id = spec.peer_id.to_string();
+            for desired in &desired_trust {
+                let spec_peer_id = desired.spec.peer_id.to_string();
                 if current_peers
                     .iter()
                     .any(|entry| entry.peer_id.to_string() == spec_peer_id)
                 {
                     continue;
                 }
+                let repair_authority = match &desired.source {
+                    ResumeTrustSource::Member(edge) => {
+                        let effects = apply_seeded_mob_input_collect_effects(
+                            dsl_authority,
+                            crate::machines::mob_machine::MobMachineInput::WireMembers {
+                                edge: edge.clone(),
+                            },
+                            "resume_member_trust_repair",
+                        )?;
+                        resume_member_repair_authority_from_effects(
+                            &effects,
+                            edge,
+                            &spec_peer_id,
+                            dsl_authority.state().topology_epoch,
+                            "resume_member_trust_repair",
+                        )?
+                    }
+                    ResumeTrustSource::External { key, edge } => {
+                        let effects = apply_seeded_mob_input_collect_effects(
+                            dsl_authority,
+                            crate::machines::mob_machine::MobMachineInput::WireExternalPeer {
+                                key: key.clone(),
+                                edge: edge.clone(),
+                            },
+                            "resume_external_trust_repair",
+                        )?;
+                        resume_external_repair_authority_from_effects(
+                            &effects,
+                            edge,
+                            &spec_peer_id,
+                            dsl_authority.state().topology_epoch,
+                            "resume_external_trust_repair",
+                        )?
+                    }
+                };
                 if let Err(error) = apply_resume_trusted_peer_add(
                     comms_a.as_ref(),
-                    spec.clone(),
-                    machine_topology_epoch,
+                    desired.spec.clone(),
+                    repair_authority,
                 )
                 .await
                 {
                     tracing::warn!(
                         agent_identity = %entry.agent_identity,
-                        peer = %spec.name,
+                        peer = %desired.spec.name,
                         %error,
                         "resume: failed to re-establish trust"
                     );

@@ -773,6 +773,13 @@ impl MobHandle {
         self.realtime_session_factory.as_ref().map(Arc::clone)
     }
 
+    /// Current MobMachine topology epoch. This is a read-only projection of
+    /// actor-owned generated state for authority handoffs that need to label a
+    /// trust mutation with the machine epoch that admitted the edge.
+    pub async fn topology_epoch(&self) -> Result<u64, MobError> {
+        Ok(self.query_machine_state().await?.topology_epoch)
+    }
+
     async fn member_machine_projection(
         &self,
         agent_identity: &MeerkatId,

@@ -351,22 +351,139 @@ pub struct TrustedPeerDescriptor {
 /// decide trust semantics itself. Callers that need to add or remove trust
 /// must carry the generated machine/composition handoff that authorized the
 /// mutation.
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommsTrustMutationAuthority {
+    #[non_exhaustive]
     MeerkatMachinePeerProjection { epoch: u64 },
+    #[non_exhaustive]
     MeerkatMachineSupervisorPublish { peer_id: String, epoch: u64 },
+    #[non_exhaustive]
     MeerkatMachineSupervisorRevoke { peer_id: String, epoch: u64 },
+    #[non_exhaustive]
     MobMachinePeerWiring { peer_id: String, epoch: u64 },
+    #[non_exhaustive]
     MobMachinePeerUnwiring { peer_id: String, epoch: u64 },
+    #[non_exhaustive]
     MobMachinePeerRepair { peer_id: String, epoch: u64 },
+    #[non_exhaustive]
     MobMachinePeerRetire { peer_id: String, epoch: u64 },
-    MobMachineResumeRepair { peer_id: String, epoch: u64 },
+}
+
+impl CommsTrustMutationAuthority {
+    pub fn meerkat_machine_peer_projection(epoch: u64) -> Self {
+        Self::MeerkatMachinePeerProjection { epoch }
+    }
+
+    pub fn meerkat_machine_supervisor_publish(peer_id: impl Into<String>, epoch: u64) -> Self {
+        Self::MeerkatMachineSupervisorPublish {
+            peer_id: peer_id.into(),
+            epoch,
+        }
+    }
+
+    pub fn meerkat_machine_supervisor_revoke(peer_id: impl Into<String>, epoch: u64) -> Self {
+        Self::MeerkatMachineSupervisorRevoke {
+            peer_id: peer_id.into(),
+            epoch,
+        }
+    }
+
+    pub fn mob_machine_peer_wiring(peer_id: impl Into<String>, epoch: u64) -> Self {
+        Self::MobMachinePeerWiring {
+            peer_id: peer_id.into(),
+            epoch,
+        }
+    }
+
+    pub fn mob_machine_peer_unwiring(peer_id: impl Into<String>, epoch: u64) -> Self {
+        Self::MobMachinePeerUnwiring {
+            peer_id: peer_id.into(),
+            epoch,
+        }
+    }
+
+    pub fn mob_machine_peer_repair(peer_id: impl Into<String>, epoch: u64) -> Self {
+        Self::MobMachinePeerRepair {
+            peer_id: peer_id.into(),
+            epoch,
+        }
+    }
+
+    pub fn mob_machine_peer_retire(peer_id: impl Into<String>, epoch: u64) -> Self {
+        Self::MobMachinePeerRetire {
+            peer_id: peer_id.into(),
+            epoch,
+        }
+    }
+
+    pub fn validate_public_add(&self, peer_id: PeerId) -> Result<(), String> {
+        match self {
+            Self::MeerkatMachinePeerProjection { .. }
+            | Self::MobMachinePeerWiring { .. }
+            | Self::MobMachinePeerRepair { .. } => self.validate_peer_match(peer_id),
+            other => Err(format!(
+                "trust authority {other:?} cannot add a public trusted peer"
+            )),
+        }
+    }
+
+    pub fn validate_public_remove(&self, peer_id: PeerId) -> Result<(), String> {
+        match self {
+            Self::MeerkatMachinePeerProjection { .. }
+            | Self::MobMachinePeerUnwiring { .. }
+            | Self::MobMachinePeerRetire { .. } => self.validate_peer_match(peer_id),
+            other => Err(format!(
+                "trust authority {other:?} cannot remove a public trusted peer"
+            )),
+        }
+    }
+
+    pub fn validate_private_add(&self, peer_id: PeerId) -> Result<(), String> {
+        match self {
+            Self::MeerkatMachineSupervisorPublish { .. } => self.validate_peer_match(peer_id),
+            other => Err(format!(
+                "trust authority {other:?} cannot add a private trusted peer"
+            )),
+        }
+    }
+
+    pub fn validate_private_remove(&self, peer_id: PeerId) -> Result<(), String> {
+        match self {
+            Self::MeerkatMachineSupervisorRevoke { .. } => self.validate_peer_match(peer_id),
+            other => Err(format!(
+                "trust authority {other:?} cannot remove a private trusted peer"
+            )),
+        }
+    }
+
+    fn validate_peer_match(&self, peer_id: PeerId) -> Result<(), String> {
+        let Some(expected) = self.peer_id() else {
+            return Ok(());
+        };
+        if expected == peer_id.to_string() {
+            Ok(())
+        } else {
+            Err(format!(
+                "trust authority peer_id {expected:?} does not match mutation peer_id {peer_id}"
+            ))
+        }
+    }
+
+    fn peer_id(&self) -> Option<&str> {
+        match self {
+            Self::MeerkatMachinePeerProjection { .. } => None,
+            Self::MeerkatMachineSupervisorPublish { peer_id, .. }
+            | Self::MeerkatMachineSupervisorRevoke { peer_id, .. }
+            | Self::MobMachinePeerWiring { peer_id, .. }
+            | Self::MobMachinePeerUnwiring { peer_id, .. }
+            | Self::MobMachinePeerRepair { peer_id, .. }
+            | Self::MobMachinePeerRetire { peer_id, .. } => Some(peer_id),
+        }
+    }
 }
 
 /// Trust-store projection mutation requested by generated authority.
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommsTrustMutation {
     AddTrustedPeer {
         peer: TrustedPeerDescriptor,

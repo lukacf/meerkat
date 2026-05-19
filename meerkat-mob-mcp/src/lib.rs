@@ -1811,10 +1811,10 @@ impl CoreCommsRuntime for LocalCommsRuntime {
         mutation: CommsTrustMutation,
     ) -> Result<CommsTrustMutationResult, SendError> {
         match mutation {
-            CommsTrustMutation::AddTrustedPeer {
-                peer,
-                authority: _authority,
-            } => {
+            CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                authority
+                    .validate_public_add(peer.peer_id)
+                    .map_err(SendError::Validation)?;
                 TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
                     .map_err(SendError::Validation)?;
                 self.trusted
@@ -1823,25 +1823,31 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                     .insert(peer.peer_id.as_str().to_string());
                 Ok(CommsTrustMutationResult::Added)
             }
-            CommsTrustMutation::RemoveTrustedPeer {
-                peer_id,
-                authority: _authority,
-            } => {
+            CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                let parsed_peer_id = PeerId::parse(&peer_id)
+                    .map_err(|err| SendError::Validation(err.to_string()))?;
+                authority
+                    .validate_public_remove(parsed_peer_id)
+                    .map_err(SendError::Validation)?;
                 let removed = self.trusted.write().await.remove(&peer_id);
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
-            CommsTrustMutation::AddPrivateTrustedPeer {
-                peer,
-                authority: _authority,
-            } => {
+            CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                authority
+                    .validate_private_add(peer.peer_id)
+                    .map_err(SendError::Validation)?;
                 TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
                     .map_err(SendError::Validation)?;
                 Ok(CommsTrustMutationResult::Added)
             }
-            CommsTrustMutation::RemovePrivateTrustedPeer {
-                peer_id: _peer_id,
-                authority: _authority,
-            } => Ok(CommsTrustMutationResult::Removed { removed: false }),
+            CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                let parsed_peer_id = PeerId::parse(&peer_id)
+                    .map_err(|err| SendError::Validation(err.to_string()))?;
+                authority
+                    .validate_private_remove(parsed_peer_id)
+                    .map_err(SendError::Validation)?;
+                Ok(CommsTrustMutationResult::Removed { removed: false })
+            }
         }
     }
 
@@ -3405,10 +3411,7 @@ mod tests {
         let added = runtime
             .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
                 peer: peer.clone(),
-                authority: CommsTrustMutationAuthority::MobMachinePeerWiring {
-                    peer_id: peer_id.clone(),
-                    epoch: 1,
-                },
+                authority: CommsTrustMutationAuthority::mob_machine_peer_wiring(peer_id.clone(), 1),
             })
             .await
             .expect("authorized add succeeds");
@@ -3424,10 +3427,10 @@ mod tests {
         let removed = runtime
             .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
-                authority: CommsTrustMutationAuthority::MobMachinePeerUnwiring {
-                    peer_id: peer_id.clone(),
-                    epoch: 2,
-                },
+                authority: CommsTrustMutationAuthority::mob_machine_peer_unwiring(
+                    peer_id.clone(),
+                    2,
+                ),
             })
             .await
             .expect("authorized remove succeeds");

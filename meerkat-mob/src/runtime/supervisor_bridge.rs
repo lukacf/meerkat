@@ -4,7 +4,8 @@ use crate::store::SupervisorAuthorityRecord;
 use crate::tokio;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, InputStreamMode, PeerId, PeerRoute, SendReceipt, TrustedPeerDescriptor,
+    CommsCommand, CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult,
+    InputStreamMode, PeerId, PeerRoute, SendReceipt, TrustedPeerDescriptor,
 };
 use meerkat_core::interaction::{InteractionContent, PeerInputCandidate, TerminalityClass};
 use meerkat_core::time_compat::{Duration, Instant};
@@ -143,6 +144,25 @@ impl MobSupervisorBridge {
         self.runtime().await as Arc<dyn CoreCommsRuntime>
     }
 
+    async fn apply_bridge_trust(
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+        recipient: TrustedPeerDescriptor,
+        epoch: u64,
+    ) -> Result<(), MobError> {
+        let result = runtime
+            .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
+                authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(epoch),
+                peer: recipient,
+            })
+            .await?;
+        match result {
+            CommsTrustMutationResult::Added => Ok(()),
+            other => Err(MobError::Internal(format!(
+                "supervisor bridge trust mutation returned unexpected result: {other:?}"
+            ))),
+        }
+    }
+
     pub(crate) async fn supervisor_spec(&self) -> Result<TrustedPeerDescriptor, MobError> {
         let authority = self.authority().await;
         let public_key = authority.keypair().public_key();
@@ -185,10 +205,7 @@ impl MobSupervisorBridge {
             uuid::Uuid::new_v4()
         );
         let runtime = Self::build_runtime(&probe_participant_name, authority)?;
-        runtime
-            .add_trusted_peer(recipient.clone())
-            .await
-            .map_err(MobError::from)?;
+        Self::apply_bridge_trust(&runtime, recipient.clone(), authority.epoch).await?;
         self.request_json_with_runtime(
             &runtime,
             recipient,
@@ -204,10 +221,8 @@ impl MobSupervisorBridge {
         recipient: &TrustedPeerDescriptor,
     ) -> Result<(), MobError> {
         let runtime = self.runtime().await;
-        runtime
-            .add_trusted_peer(recipient.clone())
-            .await
-            .map_err(MobError::from)
+        let authority = self.authority().await;
+        Self::apply_bridge_trust(&runtime, recipient.clone(), authority.epoch).await
     }
 
     pub(crate) async fn request_json<T: serde::Serialize>(

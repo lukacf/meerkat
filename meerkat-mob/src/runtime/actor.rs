@@ -519,45 +519,27 @@ impl MobActor {
     }
 
     fn mob_peer_wiring_authority(&self, peer_id: &str) -> CommsTrustMutationAuthority {
-        CommsTrustMutationAuthority::MobMachinePeerWiring {
-            peer_id: peer_id.to_string(),
-            epoch: self.trust_epoch(),
-        }
+        CommsTrustMutationAuthority::mob_machine_peer_wiring(peer_id, self.trust_epoch())
     }
 
     fn mob_peer_unwiring_authority(&self, peer_id: &str) -> CommsTrustMutationAuthority {
-        CommsTrustMutationAuthority::MobMachinePeerUnwiring {
-            peer_id: peer_id.to_string(),
-            epoch: self.trust_epoch(),
-        }
+        CommsTrustMutationAuthority::mob_machine_peer_unwiring(peer_id, self.trust_epoch())
     }
 
     fn mob_peer_repair_authority(&self, peer_id: &str) -> CommsTrustMutationAuthority {
-        CommsTrustMutationAuthority::MobMachinePeerRepair {
-            peer_id: peer_id.to_string(),
-            epoch: self.trust_epoch(),
-        }
+        CommsTrustMutationAuthority::mob_machine_peer_repair(peer_id, self.trust_epoch())
     }
 
     fn mob_peer_retire_authority(&self, peer_id: &str) -> CommsTrustMutationAuthority {
-        CommsTrustMutationAuthority::MobMachinePeerRetire {
-            peer_id: peer_id.to_string(),
-            epoch: self.trust_epoch(),
-        }
+        CommsTrustMutationAuthority::mob_machine_peer_retire(peer_id, self.trust_epoch())
     }
 
     fn supervisor_publish_authority(peer_id: &str, epoch: u64) -> CommsTrustMutationAuthority {
-        CommsTrustMutationAuthority::MeerkatMachineSupervisorPublish {
-            peer_id: peer_id.to_string(),
-            epoch,
-        }
+        CommsTrustMutationAuthority::meerkat_machine_supervisor_publish(peer_id, epoch)
     }
 
     fn supervisor_revoke_authority(peer_id: &str, epoch: u64) -> CommsTrustMutationAuthority {
-        CommsTrustMutationAuthority::MeerkatMachineSupervisorRevoke {
-            peer_id: peer_id.to_string(),
-            epoch,
-        }
+        CommsTrustMutationAuthority::meerkat_machine_supervisor_revoke(peer_id, epoch)
     }
 
     fn unexpected_trust_mutation_result(

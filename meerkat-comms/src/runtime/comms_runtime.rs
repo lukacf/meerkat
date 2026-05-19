@@ -346,31 +346,35 @@ impl CoreCommsRuntime for CommsRuntime {
         mutation: CommsTrustMutation,
     ) -> Result<CommsTrustMutationResult, SendError> {
         match mutation {
-            CommsTrustMutation::AddTrustedPeer {
-                peer,
-                authority: _authority,
-            } => {
+            CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                authority
+                    .validate_public_add(peer.peer_id)
+                    .map_err(SendError::Validation)?;
                 self.apply_trusted_peer_descriptor(peer).await?;
                 Ok(CommsTrustMutationResult::Added)
             }
-            CommsTrustMutation::RemoveTrustedPeer {
-                peer_id,
-                authority: _authority,
-            } => {
+            CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                let parsed_peer_id = meerkat_core::comms::PeerId::parse(&peer_id)
+                    .map_err(|err| SendError::Validation(err.to_string()))?;
+                authority
+                    .validate_public_remove(parsed_peer_id)
+                    .map_err(SendError::Validation)?;
                 let removed = self.apply_trusted_peer_removal(&peer_id).await?;
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
-            CommsTrustMutation::AddPrivateTrustedPeer {
-                peer,
-                authority: _authority,
-            } => {
+            CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                authority
+                    .validate_private_add(peer.peer_id)
+                    .map_err(SendError::Validation)?;
                 self.apply_private_trusted_peer_descriptor(peer).await?;
                 Ok(CommsTrustMutationResult::Added)
             }
-            CommsTrustMutation::RemovePrivateTrustedPeer {
-                peer_id,
-                authority: _authority,
-            } => {
+            CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                let parsed_peer_id = meerkat_core::comms::PeerId::parse(&peer_id)
+                    .map_err(|err| SendError::Validation(err.to_string()))?;
+                authority
+                    .validate_private_remove(parsed_peer_id)
+                    .map_err(SendError::Validation)?;
                 let removed = self.apply_private_trusted_peer_removal(&peer_id).await?;
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
@@ -2989,7 +2993,7 @@ mod tests {
             &runtime,
             CommsTrustMutation::AddTrustedPeer {
                 peer: descriptor,
-                authority: CommsTrustMutationAuthority::MeerkatMachinePeerProjection { epoch: 7 },
+                authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(7),
             },
         )
         .await
@@ -3001,7 +3005,7 @@ mod tests {
             &runtime,
             CommsTrustMutation::RemoveTrustedPeer {
                 peer_id,
-                authority: CommsTrustMutationAuthority::MeerkatMachinePeerProjection { epoch: 8 },
+                authority: CommsTrustMutationAuthority::meerkat_machine_peer_projection(8),
             },
         )
         .await

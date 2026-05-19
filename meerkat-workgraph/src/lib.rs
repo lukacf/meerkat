@@ -20,7 +20,9 @@ mod tools;
 mod types;
 
 pub use error::WorkGraphError;
-pub use machine::{WorkGraphMachine, WorkGraphPublicErrorClass};
+pub use machine::{
+    WorkGraphEdgeCommit, WorkGraphItemCommit, WorkGraphMachine, WorkGraphPublicErrorClass,
+};
 pub use rest_contract::{
     WORKGRAPH_REST_PATHS, WorkGraphRestOperationDescriptor, WorkGraphRestPathDescriptor,
     WorkGraphRestRoute, workgraph_rest_path_catalog, workgraph_rest_response_schema,

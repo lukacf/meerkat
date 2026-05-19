@@ -1,10 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use serde_json::json;
-
 use crate::WorkGraphError;
-use crate::machine::{WorkGraphMachine, effect_labels};
+use crate::machine::WorkGraphMachine;
 use crate::store::{WorkGraphEventFilter, WorkGraphStore};
 use crate::types::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
@@ -54,8 +52,8 @@ impl WorkGraphService {
     pub async fn create(&self, request: CreateWorkItemRequest) -> Result<WorkItem, WorkGraphError> {
         let now = self.store.get_store_time_utc().await?;
         let (realm_id, namespace) = self.scope(request.realm_id.clone(), request.namespace.clone());
-        let (item, event) = WorkGraphMachine::create_item(request, realm_id, namespace, now)?;
-        self.store.insert_item(item, event).await
+        let commit = WorkGraphMachine::create_item(request, realm_id, namespace, now)?;
+        self.store.insert_item(commit).await
     }
 
     pub async fn get(
@@ -183,14 +181,14 @@ impl WorkGraphService {
         let unresolved_blockers = self
             .unresolved_blocker_count_for_item(&realm_id, &namespace, &item)
             .await?;
-        let (item, event) = WorkGraphMachine::claim_item_with_unresolved_blockers(
+        let commit = WorkGraphMachine::claim_item_with_unresolved_blockers(
             item,
             unresolved_blockers,
             request,
             now,
         )?;
         self.store
-            .update_item_cas(item, expected_previous_revision, event)
+            .update_item_cas(commit, expected_previous_revision)
             .await
     }
 
@@ -207,9 +205,9 @@ impl WorkGraphService {
             )
             .await?;
         let expected_previous_revision = item.revision;
-        let (item, event) = WorkGraphMachine::release_item(item, request, now)?;
+        let commit = WorkGraphMachine::release_item(item, request, now)?;
         self.store
-            .update_item_cas(item, expected_previous_revision, event)
+            .update_item_cas(commit, expected_previous_revision)
             .await
     }
 
@@ -223,9 +221,9 @@ impl WorkGraphService {
             )
             .await?;
         let expected_previous_revision = item.revision;
-        let (item, event) = WorkGraphMachine::update_item(item, request, now)?;
+        let commit = WorkGraphMachine::update_item(item, request, now)?;
         self.store
-            .update_item_cas(item, expected_previous_revision, event)
+            .update_item_cas(commit, expected_previous_revision)
             .await
     }
 
@@ -239,9 +237,9 @@ impl WorkGraphService {
         let now = self.store.get_store_time_utc().await?;
         let item = self.get(realm_id, namespace, id).await?;
         let expected_previous_revision = item.revision;
-        let (item, event) = WorkGraphMachine::block_item(item, expected_revision, now)?;
+        let commit = WorkGraphMachine::block_item(item, expected_revision, now)?;
         self.store
-            .update_item_cas(item, expected_previous_revision, event)
+            .update_item_cas(commit, expected_previous_revision)
             .await
     }
 
@@ -255,10 +253,10 @@ impl WorkGraphService {
             )
             .await?;
         let expected_previous_revision = item.revision;
-        let (item, event) = WorkGraphMachine::close_item(item, request, now)?;
+        let commit = WorkGraphMachine::close_item(item, request, now)?;
         let closed = self
             .store
-            .update_item_cas(item, expected_previous_revision, event)
+            .update_item_cas(commit, expected_previous_revision)
             .await?;
         self.best_effort_refresh_dependents_after_blocker_change(&closed, now)
             .await;
@@ -289,16 +287,8 @@ impl WorkGraphService {
                 ..WorkItemFilter::default()
             })
             .await?;
-        let event_authority =
-            WorkGraphMachine::validate_link(&edge, &existing_items, &existing_edges)?;
-        let event = WorkGraphEvent::graph(
-            edge.realm_id.clone(),
-            edge.namespace.clone(),
-            event_authority.kind,
-            now,
-            json!({ "edge": edge, "machine_effects": effect_labels(&event_authority.effects) }),
-        );
-        let inserted = self.store.insert_edge(edge, event).await?;
+        let commit = WorkGraphMachine::link_edge(edge, &existing_items, &existing_edges, now)?;
+        let inserted = self.store.insert_edge(commit).await?;
         if inserted.kind == WorkEdgeKind::Blocks {
             self.best_effort_refresh_item_eligibility(
                 &inserted.realm_id,
@@ -324,9 +314,9 @@ impl WorkGraphService {
             )
             .await?;
         let expected_previous_revision = item.revision;
-        let (item, event) = WorkGraphMachine::add_evidence(item, request, now)?;
+        let commit = WorkGraphMachine::add_evidence(item, request, now)?;
         self.store
-            .update_item_cas(item, expected_previous_revision, event)
+            .update_item_cas(commit, expected_previous_revision)
             .await
     }
 
@@ -521,12 +511,11 @@ impl WorkGraphService {
             .collect::<BTreeMap<_, _>>();
         let edges = self.store.list_edges(realm_id, namespace).await?;
         let unresolved_blockers = unresolved_blocker_count(&item, &all_items, &edges)?;
-        if let Some((item, event)) =
-            WorkGraphMachine::refresh_eligibility(item, unresolved_blockers, now)?
+        if let Some(commit) = WorkGraphMachine::refresh_eligibility(item, unresolved_blockers, now)?
         {
-            let expected_previous_revision = item.revision;
+            let expected_previous_revision = commit.item().revision;
             self.store
-                .update_item_cas(item, expected_previous_revision, event)
+                .update_item_cas(commit, expected_previous_revision)
                 .await?;
         }
         Ok(())
@@ -583,19 +572,18 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use async_trait::async_trait;
-    use chrono::{DateTime, Utc};
-    use serde_json::json;
-
     use crate::store::WorkGraphEventFilter;
     use crate::types::{
         ClaimWorkItemRequest, LinkWorkItemsRequest, WorkEdge, WorkEdgeKind, WorkGraphEvent,
         WorkGraphEventKind, WorkItem, WorkItemFilter, WorkOwner, WorkOwnerKey,
     };
     use crate::{
-        CreateWorkItemRequest, MemoryWorkGraphStore, UpdateWorkItemRequest, WorkGraphService,
-        WorkGraphStore, WorkGraphStoreKind, WorkItemId, WorkNamespace,
+        CreateWorkItemRequest, MemoryWorkGraphStore, UpdateWorkItemRequest, WorkGraphEdgeCommit,
+        WorkGraphItemCommit, WorkGraphMachine, WorkGraphService, WorkGraphStore,
+        WorkGraphStoreKind, WorkItemId, WorkNamespace,
     };
+    use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
 
     fn create_req(title: &str) -> CreateWorkItemRequest {
         CreateWorkItemRequest {
@@ -644,19 +632,17 @@ mod tests {
 
         async fn insert_item(
             &self,
-            item: WorkItem,
-            event: WorkGraphEvent,
+            commit: WorkGraphItemCommit,
         ) -> Result<WorkItem, crate::WorkGraphError> {
-            self.inner.insert_item(item, event).await
+            self.inner.insert_item(commit).await
         }
 
         async fn update_item_cas(
             &self,
-            item: WorkItem,
+            commit: WorkGraphItemCommit,
             expected_previous_revision: u64,
-            event: WorkGraphEvent,
         ) -> Result<WorkItem, crate::WorkGraphError> {
-            if event.kind == WorkGraphEventKind::Updated
+            if commit.event().kind == WorkGraphEventKind::Updated
                 && self
                     .fail_updated_events
                     .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -665,13 +651,13 @@ mod tests {
                     .is_ok()
             {
                 return Err(crate::WorkGraphError::StaleRevision {
-                    id: item.id,
+                    id: commit.item().id.clone(),
                     expected: expected_previous_revision,
                     actual: expected_previous_revision.saturating_add(1),
                 });
             }
             self.inner
-                .update_item_cas(item, expected_previous_revision, event)
+                .update_item_cas(commit, expected_previous_revision)
                 .await
         }
 
@@ -693,10 +679,9 @@ mod tests {
 
         async fn insert_edge(
             &self,
-            edge: WorkEdge,
-            event: WorkGraphEvent,
+            commit: WorkGraphEdgeCommit,
         ) -> Result<WorkEdge, crate::WorkGraphError> {
-            self.inner.insert_edge(edge, event).await
+            self.inner.insert_edge(commit).await
         }
 
         async fn list_edges(
@@ -973,26 +958,21 @@ mod tests {
             .await
             .expect("dependent");
         let now = store.get_store_time_utc().await.expect("time");
+        let edge = WorkEdge {
+            realm_id: "realm".to_string(),
+            namespace: WorkNamespace::default(),
+            kind: WorkEdgeKind::Blocks,
+            from_id: blocker.id.clone(),
+            to_id: dependent.id.clone(),
+            created_at: now,
+        };
+        let commit =
+            WorkGraphMachine::link_edge(edge, &[blocker.clone(), dependent.clone()], &[], now)
+                .expect("generated edge commit");
         store
-            .insert_edge(
-                WorkEdge {
-                    realm_id: "realm".to_string(),
-                    namespace: WorkNamespace::default(),
-                    kind: WorkEdgeKind::Blocks,
-                    from_id: blocker.id,
-                    to_id: dependent.id.clone(),
-                    created_at: now,
-                },
-                WorkGraphEvent::graph(
-                    "realm".to_string(),
-                    WorkNamespace::default(),
-                    WorkGraphEventKind::Linked,
-                    now,
-                    json!({ "test": "stale-projection" }),
-                ),
-            )
+            .insert_edge(commit)
             .await
-            .expect("raw edge insert");
+            .expect("generated edge insert");
 
         let error = service
             .claim(ClaimWorkItemRequest {

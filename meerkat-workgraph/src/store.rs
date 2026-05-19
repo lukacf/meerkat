@@ -9,11 +9,11 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
 
 use crate::WorkGraphError;
-use crate::WorkGraphMachine;
 use crate::types::{
     WorkEdge, WorkGraphEvent, WorkGraphEventKind, WorkItem, WorkItemFilter, WorkItemId,
     WorkNamespace,
 };
+use crate::{WorkGraphEdgeCommit, WorkGraphItemCommit, WorkGraphMachine};
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::sync::RwLock;
@@ -62,17 +62,12 @@ pub trait WorkGraphStore: Send + Sync {
 
     async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, WorkGraphError>;
 
-    async fn insert_item(
-        &self,
-        item: WorkItem,
-        event: WorkGraphEvent,
-    ) -> Result<WorkItem, WorkGraphError>;
+    async fn insert_item(&self, commit: WorkGraphItemCommit) -> Result<WorkItem, WorkGraphError>;
 
     async fn update_item_cas(
         &self,
-        item: WorkItem,
+        commit: WorkGraphItemCommit,
         expected_previous_revision: u64,
-        event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError>;
 
     async fn get_item(
@@ -84,11 +79,7 @@ pub trait WorkGraphStore: Send + Sync {
 
     async fn list_items(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError>;
 
-    async fn insert_edge(
-        &self,
-        edge: WorkEdge,
-        event: WorkGraphEvent,
-    ) -> Result<WorkEdge, WorkGraphError>;
+    async fn insert_edge(&self, commit: WorkGraphEdgeCommit) -> Result<WorkEdge, WorkGraphError>;
 
     async fn list_edges(
         &self,
@@ -116,19 +107,14 @@ impl WorkGraphStore for DisabledWorkGraphStore {
         Err(unsupported(self.kind()))
     }
 
-    async fn insert_item(
-        &self,
-        _item: WorkItem,
-        _event: WorkGraphEvent,
-    ) -> Result<WorkItem, WorkGraphError> {
+    async fn insert_item(&self, _commit: WorkGraphItemCommit) -> Result<WorkItem, WorkGraphError> {
         Err(unsupported(self.kind()))
     }
 
     async fn update_item_cas(
         &self,
-        _item: WorkItem,
+        _commit: WorkGraphItemCommit,
         _expected_previous_revision: u64,
-        _event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError> {
         Err(unsupported(self.kind()))
     }
@@ -146,11 +132,7 @@ impl WorkGraphStore for DisabledWorkGraphStore {
         Err(unsupported(self.kind()))
     }
 
-    async fn insert_edge(
-        &self,
-        _edge: WorkEdge,
-        _event: WorkGraphEvent,
-    ) -> Result<WorkEdge, WorkGraphError> {
+    async fn insert_edge(&self, _commit: WorkGraphEdgeCommit) -> Result<WorkEdge, WorkGraphError> {
         Err(unsupported(self.kind()))
     }
 
@@ -204,11 +186,8 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         Ok(Utc::now())
     }
 
-    async fn insert_item(
-        &self,
-        item: WorkItem,
-        event: WorkGraphEvent,
-    ) -> Result<WorkItem, WorkGraphError> {
+    async fn insert_item(&self, commit: WorkGraphItemCommit) -> Result<WorkItem, WorkGraphError> {
+        let (item, event) = commit.into_parts();
         WorkGraphMachine::validate_item_projection(&item)?;
         let mut guard = self.inner.write().await;
         let key = item_key(&item.realm_id, &item.namespace, &item.id);
@@ -225,10 +204,10 @@ impl WorkGraphStore for MemoryWorkGraphStore {
 
     async fn update_item_cas(
         &self,
-        item: WorkItem,
+        commit: WorkGraphItemCommit,
         expected_previous_revision: u64,
-        event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError> {
+        let (item, event) = commit.into_parts();
         WorkGraphMachine::validate_item_projection(&item)?;
         let mut guard = self.inner.write().await;
         let key = item_key(&item.realm_id, &item.namespace, &item.id);
@@ -280,11 +259,8 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         Ok(items)
     }
 
-    async fn insert_edge(
-        &self,
-        edge: WorkEdge,
-        event: WorkGraphEvent,
-    ) -> Result<WorkEdge, WorkGraphError> {
+    async fn insert_edge(&self, commit: WorkGraphEdgeCommit) -> Result<WorkEdge, WorkGraphError> {
+        let (edge, event) = commit.into_parts();
         let mut guard = self.inner.write().await;
         if guard.edges.iter().any(|existing| existing == &edge) {
             return Err(duplicate_edge_error(&edge));
@@ -466,11 +442,8 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         Ok(Utc::now())
     }
 
-    async fn insert_item(
-        &self,
-        item: WorkItem,
-        event: WorkGraphEvent,
-    ) -> Result<WorkItem, WorkGraphError> {
+    async fn insert_item(&self, commit: WorkGraphItemCommit) -> Result<WorkItem, WorkGraphError> {
+        let (item, event) = commit.into_parts();
         WorkGraphMachine::validate_item_projection(&item)?;
         self.with_connection(|conn| {
             let tx = conn
@@ -486,10 +459,10 @@ impl WorkGraphStore for SqliteWorkGraphStore {
 
     async fn update_item_cas(
         &self,
-        item: WorkItem,
+        commit: WorkGraphItemCommit,
         expected_previous_revision: u64,
-        event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError> {
+        let (item, event) = commit.into_parts();
         WorkGraphMachine::validate_item_projection(&item)?;
         self.with_connection(|conn| {
             let tx = conn
@@ -531,11 +504,8 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         self.with_connection(|conn| list_sqlite_items(conn, &filter))
     }
 
-    async fn insert_edge(
-        &self,
-        edge: WorkEdge,
-        event: WorkGraphEvent,
-    ) -> Result<WorkEdge, WorkGraphError> {
+    async fn insert_edge(&self, commit: WorkGraphEdgeCommit) -> Result<WorkEdge, WorkGraphError> {
+        let (edge, event) = commit.into_parts();
         self.with_connection(|conn| {
             let tx = conn
                 .transaction()
@@ -894,35 +864,45 @@ mod tests {
     use std::collections::BTreeSet;
 
     use chrono::Utc;
-    use serde_json::json;
 
+    use crate::WorkGraphMachine;
     use crate::types::WorkEdge;
     use crate::{
         CreateWorkItemRequest, LinkWorkItemsRequest, MemoryWorkGraphStore, WorkEdgeKind,
-        WorkGraphError, WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind, WorkGraphService,
-        WorkGraphStore, WorkItem, WorkItemFilter, WorkItemId, WorkNamespace,
+        WorkGraphEdgeCommit, WorkGraphError, WorkGraphEventFilter, WorkGraphService,
+        WorkGraphStore, WorkItem, WorkItemFilter, WorkNamespace,
     };
-    use crate::{WorkGraphMachine, machines::workgraph_lifecycle as wg_dsl};
 
-    fn test_edge() -> WorkEdge {
-        WorkEdge {
+    fn test_edge_with_items() -> (WorkEdge, Vec<WorkItem>) {
+        let now = Utc::now();
+        let from = test_item("from", now);
+        let to = test_item("to", now);
+        let edge = WorkEdge {
             realm_id: "realm".to_string(),
             namespace: WorkNamespace::default(),
             kind: WorkEdgeKind::Blocks,
-            from_id: WorkItemId::generated(),
-            to_id: WorkItemId::generated(),
-            created_at: Utc::now(),
-        }
+            from_id: from.id.clone(),
+            to_id: to.id.clone(),
+            created_at: now,
+        };
+        (edge, vec![from, to])
     }
 
-    fn link_event(edge: &WorkEdge) -> WorkGraphEvent {
-        WorkGraphEvent::graph(
-            edge.realm_id.clone(),
-            edge.namespace.clone(),
-            WorkGraphEventKind::Linked,
-            edge.created_at,
-            json!({ "edge": edge }),
+    fn test_item(title: &str, now: chrono::DateTime<Utc>) -> WorkItem {
+        WorkGraphMachine::create_item(
+            create_request(title),
+            "realm".to_string(),
+            WorkNamespace::default(),
+            now,
         )
+        .expect("create item")
+        .into_parts()
+        .0
+    }
+
+    fn link_commit(edge: &WorkEdge, items: &[WorkItem]) -> WorkGraphEdgeCommit {
+        WorkGraphMachine::link_edge(edge.clone(), items, &[], edge.created_at)
+            .expect("generated link commit")
     }
 
     fn create_request(title: &str) -> CreateWorkItemRequest {
@@ -984,25 +964,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_store_rejects_unrecoverable_work_item_machine_state() {
+    async fn memory_store_accepts_generated_work_item_commit() {
         let now = Utc::now();
-        let (mut item, event) = WorkGraphMachine::create_item(
-            create_request("invalid machine state"),
+        let commit = WorkGraphMachine::create_item(
+            create_request("generated commit"),
             "realm".to_string(),
             WorkNamespace::default(),
             now,
         )
         .expect("create item");
-        item.status = crate::WorkStatus::Completed;
-        item.machine_state.lifecycle_phase = wg_dsl::WorkLifecycleState::Completed;
 
-        let error = MemoryWorkGraphStore::new()
-            .insert_item(item, event)
+        let stored = MemoryWorkGraphStore::new()
+            .insert_item(commit)
             .await
-            .expect_err("store must reject invalid recovered machine state");
-        assert!(
-            matches!(error, WorkGraphError::Store(message) if message.contains("generated WorkGraphLifecycleMachine rejected"))
-        );
+            .expect("store should accept generated commit");
+        assert_eq!(stored.status, crate::WorkStatus::Open);
     }
 
     #[tokio::test]
@@ -1065,14 +1041,15 @@ mod tests {
     #[tokio::test]
     async fn memory_store_duplicate_edge_does_not_append_event() {
         let store = MemoryWorkGraphStore::new();
-        let edge = test_edge();
+        let (edge, items) = test_edge_with_items();
+        let commit = link_commit(&edge, &items);
         store
-            .insert_edge(edge.clone(), link_event(&edge))
+            .insert_edge(commit.clone())
             .await
             .expect("insert edge");
 
         let error = store
-            .insert_edge(edge.clone(), link_event(&edge))
+            .insert_edge(commit)
             .await
             .expect_err("duplicate edge should fail");
         assert!(matches!(error, WorkGraphError::Conflict(_)));
@@ -1439,14 +1416,15 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("workgraph.sqlite3");
         let store = crate::SqliteWorkGraphStore::open(&path).expect("open");
-        let edge = test_edge();
+        let (edge, items) = test_edge_with_items();
+        let commit = link_commit(&edge, &items);
         store
-            .insert_edge(edge.clone(), link_event(&edge))
+            .insert_edge(commit.clone())
             .await
             .expect("insert edge");
 
         let error = store
-            .insert_edge(edge.clone(), link_event(&edge))
+            .insert_edge(commit)
             .await
             .expect_err("duplicate edge should fail");
         assert!(matches!(error, WorkGraphError::Conflict(_)));

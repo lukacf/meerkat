@@ -8019,16 +8019,6 @@
           "capabilities": {
             "$ref": "#/$defs/PeerCapabilitySet"
           },
-          "last_unreachable_reason": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/PeerReachabilityReason"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "meta": {
             "$ref": "#/$defs/PeerMeta",
             "description": "Supplementary discovery metadata (description, labels)."
@@ -8040,9 +8030,6 @@
           "peer_id": {
             "$ref": "#/$defs/PeerId",
             "description": "Canonical runtime identity — the routing key."
-          },
-          "reachability": {
-            "$ref": "#/$defs/PeerReachability"
           },
           "sendable_kinds": {
             "items": {
@@ -8061,7 +8048,6 @@
           "source",
           "sendable_kinds",
           "capabilities",
-          "reachability",
           "meta"
         ],
         "type": "object"
@@ -8102,30 +8088,6 @@
       "PeerName": {
         "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
         "type": "string"
-      },
-      "PeerReachability": {
-        "enum": [
-          "unknown",
-          "reachable",
-          "unreachable"
-        ],
-        "type": "string"
-      },
-      "PeerReachabilityReason": {
-        "oneOf": [
-          {
-            "enum": [
-              "offline_or_no_ack",
-              "transport_error"
-            ],
-            "type": "string"
-          },
-          {
-            "const": "admission_dropped",
-            "description": "The peer admitted the transport but rejected our envelope at its\ningress policy gate (untrusted sender, full inbox, etc.). The peer\nis still reachable at the transport level; policy denied us.",
-            "type": "string"
-          }
-        ]
       },
       "PeerSendability": {
         "enum": [
@@ -10469,7 +10431,8 @@
               "memory": false,
               "mob": false,
               "schedule": false,
-              "shell": false
+              "shell": false,
+              "workgraph": false
             }
           }
         },
@@ -10624,6 +10587,10 @@
             "type": "boolean"
           },
           "shell": {
+            "default": false,
+            "type": "boolean"
+          },
+          "workgraph": {
             "default": false,
             "type": "boolean"
           }
@@ -13956,30 +13923,6 @@
         "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
         "type": "string"
       },
-      "PeerReachability": {
-        "enum": [
-          "unknown",
-          "reachable",
-          "unreachable"
-        ],
-        "type": "string"
-      },
-      "PeerReachabilityReason": {
-        "oneOf": [
-          {
-            "enum": [
-              "offline_or_no_ack",
-              "transport_error"
-            ],
-            "type": "string"
-          },
-          {
-            "const": "admission_dropped",
-            "description": "The peer admitted the transport but rejected our envelope at its\ningress policy gate (untrusted sender, full inbox, etc.). The peer\nis still reachable at the transport level; policy denied us.",
-            "type": "string"
-          }
-        ]
-      },
       "PeerSendability": {
         "enum": [
           "peer_message",
@@ -14018,16 +13961,6 @@
       "capabilities": {
         "$ref": "#/$defs/PeerCapabilitySet"
       },
-      "last_unreachable_reason": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/PeerReachabilityReason"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
       "meta": {
         "$ref": "#/$defs/PeerMeta",
         "description": "Supplementary discovery metadata (description, labels)."
@@ -14039,9 +13972,6 @@
       "peer_id": {
         "$ref": "#/$defs/PeerId",
         "description": "Canonical runtime identity — the routing key."
-      },
-      "reachability": {
-        "$ref": "#/$defs/PeerReachability"
       },
       "sendable_kinds": {
         "items": {
@@ -14060,7 +13990,6 @@
       "source",
       "sendable_kinds",
       "capabilities",
-      "reachability",
       "meta"
     ],
     "title": "PeerDirectoryEntry",
@@ -14111,16 +14040,6 @@
           "capabilities": {
             "$ref": "#/$defs/PeerCapabilitySet"
           },
-          "last_unreachable_reason": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/PeerReachabilityReason"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "meta": {
             "$ref": "#/$defs/PeerMeta",
             "description": "Supplementary discovery metadata (description, labels)."
@@ -14132,9 +14051,6 @@
           "peer_id": {
             "$ref": "#/$defs/PeerId",
             "description": "Canonical runtime identity — the routing key."
-          },
-          "reachability": {
-            "$ref": "#/$defs/PeerReachability"
           },
           "sendable_kinds": {
             "items": {
@@ -14153,7 +14069,6 @@
           "source",
           "sendable_kinds",
           "capabilities",
-          "reachability",
           "meta"
         ],
         "type": "object"
@@ -14194,30 +14109,6 @@
       "PeerName": {
         "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
         "type": "string"
-      },
-      "PeerReachability": {
-        "enum": [
-          "unknown",
-          "reachable",
-          "unreachable"
-        ],
-        "type": "string"
-      },
-      "PeerReachabilityReason": {
-        "oneOf": [
-          {
-            "enum": [
-              "offline_or_no_ack",
-              "transport_error"
-            ],
-            "type": "string"
-          },
-          {
-            "const": "admission_dropped",
-            "description": "The peer admitted the transport but rejected our envelope at its\ningress policy gate (untrusted sender, full inbox, etc.). The peer\nis still reachable at the transport level; policy denied us.",
-            "type": "string"
-          }
-        ]
       },
       "PeerSendability": {
         "enum": [
@@ -14285,34 +14176,6 @@
     "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
     "title": "PeerName",
     "type": "string"
-  },
-  "PeerReachability": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "enum": [
-      "unknown",
-      "reachable",
-      "unreachable"
-    ],
-    "title": "PeerReachability",
-    "type": "string"
-  },
-  "PeerReachabilityReason": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "oneOf": [
-      {
-        "enum": [
-          "offline_or_no_ack",
-          "transport_error"
-        ],
-        "type": "string"
-      },
-      {
-        "const": "admission_dropped",
-        "description": "The peer admitted the transport but rejected our envelope at its\ningress policy gate (untrusted sender, full inbox, etc.). The peer\nis still reachable at the transport level; policy denied us.",
-        "type": "string"
-      }
-    ],
-    "title": "PeerReachabilityReason"
   },
   "PeerResponseTerminalStatusWire": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -15734,13 +15597,11 @@
             ]
           },
           "planning_horizon_days": {
-            "default": 30,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
           },
           "planning_horizon_occurrences": {
-            "default": 64,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -15778,6 +15639,8 @@
           "trigger",
           "target",
           "next_occurrence_ordinal",
+          "planning_horizon_days",
+          "planning_horizon_occurrences",
           "created_at_utc",
           "updated_at_utc"
         ],
@@ -25781,6 +25644,10 @@
           "shell": {
             "default": false,
             "type": "boolean"
+          },
+          "workgraph": {
+            "default": false,
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -25841,7 +25708,8 @@
           "memory": false,
           "mob": false,
           "schedule": false,
-          "shell": false
+          "shell": false,
+          "workgraph": false
         }
       }
     },
@@ -25897,6 +25765,10 @@
         "type": "boolean"
       },
       "shell": {
+        "default": false,
+        "type": "boolean"
+      },
+      "workgraph": {
         "default": false,
         "type": "boolean"
       }

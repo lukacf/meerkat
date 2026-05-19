@@ -166,7 +166,7 @@ mod tests {
     use meerkat_contracts::CommsCommandRequest;
     use meerkat_core::comms::{
         PeerAddress, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName,
-        PeerReachability, PeerSendability, PeerTransport,
+        PeerSendability, PeerTransport,
     };
 
     #[test]
@@ -302,8 +302,6 @@ mod tests {
             sendable_kinds: vec![PeerSendability::PeerMessage, PeerSendability::PeerRequest],
             capabilities: PeerCapabilitySet::default()
                 .with_extension("vendor.echo", serde_json::json!({ "enabled": true })),
-            reachability: PeerReachability::Reachable,
-            last_unreachable_reason: None,
             meta: meerkat_core::PeerMeta::default(),
         }
     }

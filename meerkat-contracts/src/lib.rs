@@ -246,8 +246,6 @@ pub use wire::{
     PeerDirectoryListing,
     PeerDirectorySource,
     PeerId,
-    PeerReachability,
-    PeerReachabilityReason,
     PeerResponseTerminalStatusWire,
     PeerSendability,
     PeerTransport,

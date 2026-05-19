@@ -25,8 +25,7 @@ use meerkat_core::ToolDispatchContext;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, InputStreamMode, PeerAddress, PeerCapabilitySet, PeerDirectoryEntry,
-    PeerDirectorySource, PeerId, PeerName, PeerReachability, PeerRoute, PeerSendability, SendError,
-    SendReceipt,
+    PeerDirectorySource, PeerId, PeerName, PeerRoute, PeerSendability, SendError, SendReceipt,
 };
 use meerkat_core::interaction::{InteractionId, ResponseStatus};
 use meerkat_core::tool_catalog::ToolUnavailableReason;
@@ -244,7 +243,7 @@ pub fn tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "peers",
-            "description": "List all visible peers with connection info and optional metadata (description, labels, capabilities, reachability).\n\nAlways call peers before sending any message to pick the canonical peer_id. Names are display labels and may not be unique. The returned list includes:\n- peer_id: Unique cryptographic identity to use in send_message / send_request / send_response.\n- name: Display label only.\n- address: Transport address.\n- reachability: Whether the peer is currently reachable.\n- capabilities / meta: What the peer can do and its role description.\n\nExample output:\n{\"peers\": [{\"name\": \"helper-1\", \"peer_id\": \"018f...\", \"address\": \"tcp://...\", \"reachability\": \"reachable\", \"meta\": {\"description\": \"Code review helper\"}}]}",
+            "description": "List all visible peers with connection info and optional metadata (description, labels, capabilities).\n\nAlways call peers before sending any message to pick the canonical peer_id. Names are display labels and may not be unique. The returned list includes:\n- peer_id: Unique cryptographic identity to use in send_message / send_request / send_response.\n- name: Display label only.\n- address: Transport address.\n- capabilities / meta: What the peer can do and its role description.\n\nExample output:\n{\"peers\": [{\"name\": \"helper-1\", \"peer_id\": \"018f...\", \"address\": \"tcp://...\", \"meta\": {\"description\": \"Code review helper\"}}]}",
             "inputSchema": schema_for::<PeersInput>()
         }),
     ]
@@ -740,8 +739,6 @@ fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
                 source: PeerDirectorySource::Trusted,
                 sendable_kinds: sendable_kinds.clone(),
                 capabilities: PeerCapabilitySet::default(),
-                reachability: PeerReachability::Unknown,
-                last_unreachable_reason: None,
                 meta: p.meta.clone(),
             })
         })
@@ -775,8 +772,7 @@ mod tests {
         supervisor_bridge_current_protocol_version,
     };
     use meerkat_core::comms::{
-        PeerAddress, PeerCapabilitySet, PeerDirectorySource, PeerReachability, PeerSendability,
-        PeerTransport,
+        PeerAddress, PeerCapabilitySet, PeerDirectorySource, PeerSendability, PeerTransport,
     };
     use parking_lot::Mutex;
     use std::sync::LazyLock;
@@ -1607,8 +1603,6 @@ mod tests {
             sendable_kinds: vec![PeerSendability::PeerMessage, PeerSendability::PeerRequest],
             capabilities: PeerCapabilitySet::default()
                 .with_extension("vendor.echo", json!({ "enabled": true })),
-            reachability: PeerReachability::Reachable,
-            last_unreachable_reason: None,
             meta: crate::PeerMeta::default(),
         };
         let peer_keypair = Keypair::generate();
@@ -1633,7 +1627,6 @@ mod tests {
             peer["capabilities"]["extensions"]["vendor.echo"]["enabled"],
             true
         );
-        assert_eq!(peer["reachability"], "reachable");
     }
 
     #[tokio::test]
@@ -1651,8 +1644,6 @@ mod tests {
         assert_eq!(peer["sendable_kinds"], json!(["peer_message"]));
         assert_eq!(peer["capabilities"]["version"], 1);
         assert_eq!(peer["capabilities"]["extensions"], json!({}));
-        assert_eq!(peer["reachability"], "unknown");
-        assert_eq!(peer["last_unreachable_reason"], Value::Null);
         assert!(peer["meta"].is_object());
     }
 

@@ -267,8 +267,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "PeerDirectorySource": schema_for!(crate::wire::PeerDirectorySource),
         "PeerSendability": schema_for!(crate::wire::PeerSendability),
         "PeerCapabilitySet": schema_for!(crate::wire::PeerCapabilitySet),
-        "PeerReachability": schema_for!(crate::wire::PeerReachability),
-        "PeerReachabilityReason": schema_for!(crate::wire::PeerReachabilityReason),
         "PeerDirectoryEntry": schema_for!(crate::wire::PeerDirectoryEntry),
         "PeerDirectoryListing": schema_for!(crate::wire::PeerDirectoryListing),
         "CommsPeersResult": schema_for!(crate::wire::CommsPeersResult),

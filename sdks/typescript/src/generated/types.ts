@@ -273,6 +273,7 @@ export interface WireMobToolConfig {
   mob?: boolean;
   schedule?: boolean;
   shell?: boolean;
+  workgraph?: boolean;
 }
 
 export interface WireMobProfile {
@@ -742,6 +743,7 @@ export interface MobToolConfigInput {
   mob?: boolean;
   schedule?: boolean;
   shell?: boolean;
+  workgraph?: boolean;
 }
 
 export interface MobTopologyRuleInput {
@@ -918,11 +920,9 @@ export interface PeerCapabilitySet {
 export interface PeerDirectoryEntry {
   address: PeerAddress;
   capabilities: PeerCapabilitySet;
-  last_unreachable_reason?: PeerReachabilityReason;
   meta: Record<string, unknown>;
   name: PeerName;
   peer_id: PeerId;
-  reachability: PeerReachability;
   sendable_kinds: PeerSendability[];
   source: PeerDirectorySource;
 }
@@ -1621,10 +1621,6 @@ export type PeerTransport = "inproc" | "uds" | "tcp";
 export type PeerDirectorySource = "trusted" | "inproc" | "trusted_and_inproc" | "unknown";
 
 export type PeerSendability = "peer_message" | "peer_request" | "peer_response";
-
-export type PeerReachability = "unknown" | "reachable" | "unreachable";
-
-export type PeerReachabilityReason = "offline_or_no_ack" | "transport_error" | "admission_dropped";
 
 export interface WireRenderMetadata {
   class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";

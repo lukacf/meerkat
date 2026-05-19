@@ -3281,16 +3281,6 @@
           "capabilities": {
             "$ref": "#/components/schemas/PeerCapabilitySet"
           },
-          "last_unreachable_reason": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PeerReachabilityReason"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "meta": {
             "$ref": "#/components/schemas/PeerMeta",
             "description": "Supplementary discovery metadata (description, labels)."
@@ -3302,9 +3292,6 @@
           "peer_id": {
             "$ref": "#/components/schemas/PeerId",
             "description": "Canonical runtime identity — the routing key."
-          },
-          "reachability": {
-            "$ref": "#/components/schemas/PeerReachability"
           },
           "sendable_kinds": {
             "items": {
@@ -3323,7 +3310,6 @@
           "source",
           "sendable_kinds",
           "capabilities",
-          "reachability",
           "meta"
         ],
         "type": "object"
@@ -3373,30 +3359,6 @@
       "PeerName": {
         "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
         "type": "string"
-      },
-      "PeerReachability": {
-        "enum": [
-          "unknown",
-          "reachable",
-          "unreachable"
-        ],
-        "type": "string"
-      },
-      "PeerReachabilityReason": {
-        "oneOf": [
-          {
-            "enum": [
-              "offline_or_no_ack",
-              "transport_error"
-            ],
-            "type": "string"
-          },
-          {
-            "const": "admission_dropped",
-            "description": "The peer admitted the transport but rejected our envelope at its\ningress policy gate (untrusted sender, full inbox, etc.). The peer\nis still reachable at the transport level; policy denied us.",
-            "type": "string"
-          }
-        ]
       },
       "PeerResponseTerminalStatusWire": {
         "description": "Terminal status for dedicated correlated peer-response ingress.",
@@ -4468,13 +4430,11 @@
             ]
           },
           "planning_horizon_days": {
-            "default": 30,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
           },
           "planning_horizon_occurrences": {
-            "default": 64,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -4512,6 +4472,8 @@
           "trigger",
           "target",
           "next_occurrence_ordinal",
+          "planning_horizon_days",
+          "planning_horizon_occurrences",
           "created_at_utc",
           "updated_at_utc"
         ],

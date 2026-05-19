@@ -24,9 +24,8 @@ use meerkat_core::Provider;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, CommsTrustMutation, CommsTrustMutationResult, PeerCapabilitySet,
-    PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName, PeerReachability,
-    PeerReachabilityReason, PeerRoute, PeerSendability, SendError, SendReceipt,
-    TrustedPeerDescriptor,
+    PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName, PeerRoute, PeerSendability,
+    SendError, SendReceipt, TrustedPeerDescriptor,
 };
 use meerkat_core::error::ToolError;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
@@ -291,7 +290,6 @@ struct MockCommsRuntime {
     private_ack_rejections_remaining: std::sync::Mutex<usize>,
     remove_failures_remaining: std::sync::Mutex<usize>,
     trusted_peers: RwLock<HashMap<String, TrustedPeerDescriptor>>,
-    peer_statuses: RwLock<HashMap<String, (PeerReachability, Option<PeerReachabilityReason>)>>,
     sent_intents: RwLock<Vec<String>>,
     inbox_notify: Arc<tokio::sync::Notify>,
 }
@@ -331,7 +329,6 @@ impl MockCommsRuntime {
                 behavior.fail_remove_trust_once,
             )),
             trusted_peers: RwLock::new(HashMap::new()),
-            peer_statuses: RwLock::new(HashMap::new()),
             sent_intents: RwLock::new(Vec::new()),
             inbox_notify: Arc::new(tokio::sync::Notify::new()),
         }
@@ -397,18 +394,6 @@ impl MockCommsRuntime {
 
     async fn sent_intents(&self) -> Vec<String> {
         self.sent_intents.read().await.clone()
-    }
-
-    async fn set_peer_status(
-        &self,
-        peer_name: &str,
-        reachability: PeerReachability,
-        reason: Option<PeerReachabilityReason>,
-    ) {
-        self.peer_statuses
-            .write()
-            .await
-            .insert(peer_name.to_string(), (reachability, reason));
     }
 }
 
@@ -679,16 +664,11 @@ impl CoreCommsRuntime for MockCommsRuntime {
 
     async fn peers(&self) -> Vec<PeerDirectoryEntry> {
         let trusted = self.trusted_peers.read().await;
-        let peer_statuses = self.peer_statuses.read().await;
         trusted
             .iter()
             .filter_map(|(peer_id, peer)| {
                 let peer_id = meerkat_core::comms::PeerId::parse(peer_id).ok()?;
                 let name = peer.name.clone();
-                let (reachability, last_unreachable_reason) = peer_statuses
-                    .get(peer.name.as_str())
-                    .copied()
-                    .unwrap_or((PeerReachability::Unknown, None));
                 Some(PeerDirectoryEntry {
                     name,
                     peer_id,
@@ -696,8 +676,6 @@ impl CoreCommsRuntime for MockCommsRuntime {
                     source: PeerDirectorySource::Trusted,
                     sendable_kinds: PeerSendability::directory_defaults(),
                     capabilities: PeerCapabilitySet::default(),
-                    reachability,
-                    last_unreachable_reason,
                     meta: meerkat_core::PeerMeta::default(),
                 })
             })
@@ -1035,24 +1013,6 @@ impl MockSessionService {
         };
         if let Some(runtime) = runtime {
             runtime.clear_public_key();
-        }
-    }
-
-    async fn set_peer_status(
-        &self,
-        session_id: &SessionId,
-        peer_name: &str,
-        reachability: PeerReachability,
-        reason: Option<PeerReachabilityReason>,
-    ) {
-        let runtime = {
-            let sessions = self.sessions.read().await;
-            sessions.get(session_id).cloned()
-        };
-        if let Some(runtime) = runtime {
-            runtime
-                .set_peer_status(peer_name, reachability, reason)
-                .await;
         }
     }
 
@@ -15010,11 +14970,11 @@ async fn test_member_roster_surfaces_peer_id() {
 }
 
 #[tokio::test]
-async fn test_member_status_projects_unreachable_peer_connectivity() {
-    let (handle, service) = create_test_mob(sample_definition()).await;
+async fn test_member_status_projects_unknown_peer_connectivity() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
     let left_id = MeerkatId::from("l-1");
     let right_id = MeerkatId::from("w-1");
-    let left_session_id = handle
+    let _left_session_id = handle
         .spawn(ProfileName::from("lead"), left_id.clone(), None)
         .await
         .expect("spawn lead")
@@ -15030,25 +14990,6 @@ async fn test_member_status_projects_unreachable_peer_connectivity() {
         .await
         .expect("wire local peers");
 
-    let right_entry = handle
-        .get_member(&AgentIdentity::from(right_id.as_str()))
-        .await
-        .expect("right member exists");
-    let right_name = format!(
-        "{}/{}/{}",
-        handle.mob_id(),
-        right_entry.role,
-        right_entry.agent_identity
-    );
-    service
-        .set_peer_status(
-            &left_session_id,
-            &right_name,
-            PeerReachability::Unreachable,
-            Some(PeerReachabilityReason::OfflineOrNoAck),
-        )
-        .await;
-
     let snapshot = handle
         .member_status(&AgentIdentity::from(left_id.as_str()))
         .await
@@ -15057,17 +14998,12 @@ async fn test_member_status_projects_unreachable_peer_connectivity() {
         .peer_connectivity
         .expect("live comms runtime should project peer connectivity");
     assert_eq!(connectivity.reachable_peer_count, 0);
-    assert_eq!(connectivity.unknown_peer_count, 0);
-    assert_eq!(connectivity.unreachable_peers.len(), 1);
-    assert_eq!(connectivity.unreachable_peers[0].peer, right_name);
-    assert_eq!(
-        connectivity.unreachable_peers[0].reason,
-        Some(PeerReachabilityReason::OfflineOrNoAck)
-    );
+    assert_eq!(connectivity.unknown_peer_count, 1);
+    assert!(connectivity.unreachable_peers.is_empty());
 }
 
 #[tokio::test]
-async fn test_member_status_matches_connectivity_by_canonical_peer_id_when_public_key_differs() {
+async fn test_member_status_keeps_connectivity_unknown_when_public_key_differs() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let left_id = MeerkatId::from("l-1");
     let right_id = MeerkatId::from("w-1");
@@ -15117,14 +15053,7 @@ async fn test_member_status_matches_connectivity_by_canonical_peer_id_when_publi
     service
         .force_add_trust_from_spec(&left_session_id, alias_spec)
         .await;
-    service
-        .set_peer_status(
-            &left_session_id,
-            &alias_name,
-            PeerReachability::Unreachable,
-            Some(PeerReachabilityReason::OfflineOrNoAck),
-        )
-        .await;
+    drop(alias_name);
 
     let snapshot = handle
         .member_status(&AgentIdentity::from(left_id.as_str()))
@@ -15134,13 +15063,8 @@ async fn test_member_status_matches_connectivity_by_canonical_peer_id_when_publi
         .peer_connectivity
         .expect("live comms runtime should project peer connectivity");
     assert_eq!(connectivity.reachable_peer_count, 0);
-    assert_eq!(connectivity.unknown_peer_count, 0);
-    assert_eq!(connectivity.unreachable_peers.len(), 1);
-    assert_eq!(connectivity.unreachable_peers[0].peer, alias_name);
-    assert_eq!(
-        connectivity.unreachable_peers[0].reason,
-        Some(PeerReachabilityReason::OfflineOrNoAck)
-    );
+    assert_eq!(connectivity.unknown_peer_count, 1);
+    assert!(connectivity.unreachable_peers.is_empty());
 }
 
 #[tokio::test]

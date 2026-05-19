@@ -22,8 +22,7 @@ use crate::runtime::terminalization::{TerminalizationOutcome, TerminalizationTar
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::comms::{
-    CommsCommand, CommsTrustMutationAuthority, PeerDirectoryEntry, PeerId, PeerReachability,
-    PeerReachabilityReason, SendReceipt, TrustedPeerDescriptor,
+    CommsCommand, CommsTrustMutationAuthority, PeerId, SendReceipt, TrustedPeerDescriptor,
 };
 use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
@@ -223,7 +222,7 @@ pub struct MobPeerConnectivitySnapshot {
 #[non_exhaustive]
 pub struct MobUnreachablePeer {
     pub peer: String,
-    pub reason: Option<PeerReachabilityReason>,
+    pub reason: Option<String>,
 }
 
 /// Execution status for a mob member.
@@ -1767,80 +1766,19 @@ impl MobHandle {
         }
     }
 
-    fn derived_comms_name(&self, entry: &RosterEntry) -> String {
-        format!(
-            "{}/{}/{}",
-            self.definition.id, entry.role, entry.agent_identity
-        )
-    }
-
     async fn resolve_peer_connectivity(
         &self,
         entry: &RosterEntry,
         bridge_session_id: &SessionId,
-        roster_snapshot: &Roster,
+        _roster_snapshot: &Roster,
     ) -> Option<MobPeerConnectivitySnapshot> {
-        let comms = self
-            .session_service
+        self.session_service
             .comms_runtime(bridge_session_id)
             .await?;
-        let peers = comms.peers().await;
-        let peers_by_id: HashMap<PeerId, &PeerDirectoryEntry> =
-            peers.iter().map(|peer| (peer.peer_id, peer)).collect();
-        let peers_by_name: HashMap<&str, &PeerDirectoryEntry> = peers
-            .iter()
-            .map(|peer| (peer.name.as_str(), peer))
-            .collect();
 
-        let mut reachable_peer_count = 0usize;
-        let mut unknown_peer_count = 0usize;
-        let mut unreachable_peers = Vec::new();
-
-        for wired_peer in &entry.wired_to {
-            let wired_peer_meerkat = MeerkatId::from(wired_peer);
-            let matched = if let Some(spec) = entry.external_peer_specs.get(&wired_peer_meerkat) {
-                peers_by_id
-                    .get(&spec.peer_id)
-                    .copied()
-                    .or_else(|| peers_by_name.get(spec.name.as_str()).copied())
-            } else {
-                let local_entry = roster_snapshot.get(&wired_peer_meerkat);
-                let live_peer_id = match local_entry
-                    .and_then(|peer_entry| peer_entry.member_ref.bridge_session_id())
-                {
-                    Some(target_session_id) => self
-                        .session_service
-                        .comms_runtime(target_session_id)
-                        .await
-                        .and_then(|runtime| runtime.peer_id()),
-                    None => None,
-                };
-                live_peer_id
-                    .and_then(|peer_id| peers_by_id.get(&peer_id).copied())
-                    .or_else(|| {
-                        local_entry
-                            .and_then(|peer_entry| peer_entry.peer_id.as_ref())
-                            .and_then(|peer_id| peers_by_id.get(peer_id).copied())
-                    })
-                    .or_else(|| {
-                        local_entry
-                            .map(|peer_entry| self.derived_comms_name(peer_entry))
-                            .and_then(|name| peers_by_name.get(name.as_str()).copied())
-                    })
-            };
-
-            match matched {
-                Some(peer) => match peer.reachability {
-                    PeerReachability::Reachable => reachable_peer_count += 1,
-                    PeerReachability::Unknown => unknown_peer_count += 1,
-                    PeerReachability::Unreachable => unreachable_peers.push(MobUnreachablePeer {
-                        peer: peer.name.as_string(),
-                        reason: peer.last_unreachable_reason,
-                    }),
-                },
-                None => unknown_peer_count += 1,
-            }
-        }
+        let reachable_peer_count = 0usize;
+        let unknown_peer_count = entry.wired_to.len();
+        let unreachable_peers = Vec::new();
 
         Some(MobPeerConnectivitySnapshot {
             reachable_peer_count,
@@ -1854,7 +1792,7 @@ impl MobHandle {
     /// This includes structural roster fields plus current runtime status,
     /// error/finality state, and the current session binding when known.
     /// It intentionally skips live peer-connectivity fanout so ordinary
-    /// membership polling cannot stall on comms reachability lookups.
+    /// membership polling cannot stall on comms connectivity lookups.
     /// For low-level structural roster visibility without runtime projection,
     /// use [`list_all_members`](Self::list_all_members).
     pub async fn list_members(&self) -> Vec<MobMemberListEntry> {
@@ -1867,7 +1805,7 @@ impl MobHandle {
     ///
     /// Like [`list_members`](Self::list_members), this intentionally avoids
     /// live peer-connectivity fanout. Use [`member_status`](Self::member_status)
-    /// for deep per-member inspection including live comms reachability.
+    /// for deep per-member inspection including live comms connectivity.
     pub async fn list_members_including_retiring(&self) -> Vec<MobMemberListEntry> {
         self.project_member_list_entries_from_current_machine_state(true)
             .await

@@ -151,8 +151,6 @@ COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES = [
     "PeerTransport",
     "PeerDirectorySource",
     "PeerSendability",
-    "PeerReachability",
-    "PeerReachabilityReason",
 ]
 
 MCP_LIVE_CONTRACT_TYPES = [

@@ -109,8 +109,8 @@ pub use budget::{
 pub use checkpoint::SessionCheckpointer;
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
-    PeerDirectorySource, PeerName, PeerReachability, PeerReachabilityReason, PeerRoute,
-    SUPERVISOR_BRIDGE_INTENT, SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
+    PeerDirectorySource, PeerName, PeerRoute, SUPERVISOR_BRIDGE_INTENT, SendAndStreamError,
+    SendError, SendReceipt, StreamError, StreamScope,
 };
 pub use compact::{
     CompactionConfig, CompactionContext, CompactionResult, Compactor,

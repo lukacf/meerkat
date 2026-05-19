@@ -380,6 +380,7 @@ class WireMobToolConfig:
     mob: Optional[bool] = None
     schedule: Optional[bool] = None
     shell: Optional[bool] = None
+    workgraph: Optional[bool] = None
 
 
 @dataclass
@@ -1011,6 +1012,7 @@ class MobToolConfigInput:
     mob: Optional[bool] = None
     schedule: Optional[bool] = None
     shell: Optional[bool] = None
+    workgraph: Optional[bool] = None
 
 
 @dataclass
@@ -1278,10 +1280,8 @@ class PeerDirectoryEntry:
     meta: dict[str, Any]
     name: PeerName
     peer_id: PeerId
-    reachability: PeerReachability
     sendable_kinds: list[PeerSendability]
     source: PeerDirectorySource
-    last_unreachable_reason: Optional[PeerReachabilityReason] = None
 
 
 @dataclass
@@ -3385,9 +3385,3 @@ PeerDirectorySource = Literal['trusted', 'inproc', 'trusted_and_inproc', 'unknow
 
 # Comms/session-stream RPC contract for PeerSendability.
 PeerSendability = Literal['peer_message', 'peer_request', 'peer_response']
-
-# Comms/session-stream RPC contract for PeerReachability.
-PeerReachability = Literal['unknown', 'reachable', 'unreachable']
-
-# Comms/session-stream RPC contract for PeerReachabilityReason.
-PeerReachabilityReason = Literal['offline_or_no_ack', 'transport_error'] | Literal['admission_dropped']

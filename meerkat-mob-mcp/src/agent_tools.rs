@@ -2148,8 +2148,8 @@ mod tests {
     use async_trait::async_trait;
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
     use meerkat_core::comms::{
-        CommsCommand, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerReachability,
-        PeerSendability, SendError, SendReceipt, TrustedPeerDescriptor,
+        CommsCommand, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerSendability,
+        SendError, SendReceipt, TrustedPeerDescriptor,
     };
     use meerkat_core::event::AgentEvent;
     use meerkat_core::event_injector::{InteractionSubscription, SubscribableInjector};
@@ -2581,8 +2581,6 @@ mod tests {
                         source: PeerDirectorySource::Trusted,
                         sendable_kinds: vec![PeerSendability::PeerRequest],
                         capabilities: PeerCapabilitySet::default(),
-                        reachability: PeerReachability::Reachable,
-                        last_unreachable_reason: None,
                         meta: Default::default(),
                     })
                 })

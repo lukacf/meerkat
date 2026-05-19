@@ -8,19 +8,17 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `MeerkatMachine`
 
 ### Code Anchors
-- `meerkat_machine`: `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify input terminality, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
+- `meerkat_machine`: `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify input terminality, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, peer ready operation, peer request, peer response, peer ingress, peer endpoint projection, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
 - `meerkat_public_surface`: `meerkat/src/meerkat_machine.rs` — MeerkatMachine snapshot/diagnostic facade
-- `peer_directory_reachability_authority`: `meerkat-comms/src/peer_directory_reachability_authority.rs` — peer directory reachability state now owned as a MeerkatMachine-internal region
 
 ### Scenarios
 - `bind-run-boundary-terminal` — runtime binds, runs work, applies a boundary, and reports a terminal outcome
 - `retire-reset-destroy` — runtime retires, resets, stops, and destroys without reopening superseded work
 - `staged_visibility_apply` — tool visibility staged state promotes into the committed visible revision at a boundary
 - `turn_interrupt_and_shutdown` — running work records interrupt and shutdown intent without escaping the Meerkat authority boundary
-- `peer_reachability_probe` — resolved peer directory updates and send outcomes mutate Meerkat-owned peer reachability state
 - `session_registration_and_binding` — initialize, recover initializing, register, unregister, reconfigure session identity, prepare bindings, ensure executor, attach session ingress, detach ingress, drain exit, and runtime bound/retired/destroyed notices
-- `input_admission_and_queueing` — ingest and publish event, accept input with or without completion, classify input terminality, classify external envelope or plain event, prepare run work, primitive applied conversation or immediate, enter extraction, extraction validation passed, recoverable or fatal failure, budget exhausted, steer accepted, increment attempt count, consume on accept, enqueue classified entry, resolve admission, submit admitted ingress effect, post admission signal, and input or ingress notices
-- `ops_completion_and_waiters` — abort, wait, abort all, request cancellation at boundary, completion produced/resolved, wait all satisfied, collect completed result, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, evict completed op, collect completed op, submit op event, resolve op lifecycle transition rejected feedback, notify op watcher, reject surface call, retain discard or evict completed terminal records
+- `input_admission_and_queueing` — ingest and publish event, accept input with or without completion, classify input terminality, classify external envelope or plain event, classify peer message, peer request, peer response, and peer ingress, prepare run work, primitive applied conversation or immediate, enter extraction, extraction validation passed, recoverable or fatal failure, budget exhausted, steer accepted, increment attempt count, consume on accept, enqueue classified entry, resolve admission, submit admitted ingress effect, post admission signal, and input or ingress notices
+- `ops_completion_and_waiters` — abort, wait, abort all, peer ready operation, request cancellation at boundary, completion produced/resolved, wait all satisfied, collect completed result, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, evict completed op, collect completed op, submit op event, resolve op lifecycle transition rejected feedback, notify op watcher, reject surface call, retain discard or evict completed terminal records
 - `realtime_connection_projection` — project realtime intent, begin replace detach binding, require reattach, publish signal, reconnect progress, MCP server connect/connected/failed/disconnected/reload, advance session context, interaction stream reserved/attached/completed/expired/closed early, freshness, policy, and binding rotation
 - `product_turn_streaming` — product turn in flight, committed, output started, interrupted, terminal, realtime projection advance/refreshed/reset, client input submitted, mid turn activity, and turn terminated classification
 - `recycle_and_compaction` — recycle from idle or retired, initiate recycle, check compaction, and re-enter ready runtime ownership without preserving stale completed records
@@ -270,19 +268,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `staged_visibility_apply`, `model_routing_and_image_operation`
 - `RequestDeferredToolsIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `RequestDeferredToolsAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `model_routing_and_image_operation`
 - `RequestDeferredToolsRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
 - `RequestDeferredToolsRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `RequestDeferredToolsStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
 - `PrepareBindingsInitializing`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
@@ -303,49 +301,49 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `session_registration_and_binding`
 - `SetPeerIngressContextIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`
 - `SetPeerIngressContextAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`
 - `SetPeerIngressContextRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`
 - `SetPeerIngressContextRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
 - `SetPeerIngressContextStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveClosedIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveClosedAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `realtime_connection_projection`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveClosedRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveClosedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveClosedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveFullIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveFullAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveFullRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveFullRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveFullStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceivePlainEventIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -363,79 +361,79 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveTrustedIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveTrustedAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveTrustedRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveTrustedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveTrustedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveAuthExemptUntrustedIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveAuthExemptUntrustedAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveAuthExemptUntrustedRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveAuthExemptUntrustedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveAuthExemptUntrustedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveAuthOpenUntrustedIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveAuthOpenUntrustedAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveAuthOpenUntrustedRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveAuthOpenUntrustedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveAuthOpenUntrustedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveUntrustedQueuedDropIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveUntrustedQueuedDropAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveUntrustedQueuedDropRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveUntrustedQueuedDropRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveUntrustedQueuedDropStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveUntrustedEmptyDropIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveUntrustedEmptyDropAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveUntrustedEmptyDropRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveUntrustedEmptyDropRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressReceiveUntrustedEmptyDropStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressDequeuePlainEventIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -468,34 +466,34 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressDequeueRequiredRemainingIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressDequeueRequiredRemainingAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressDequeueRequiredRemainingRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressDequeueRequiredRemainingRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressDequeueRequiredRemainingStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressDequeueRequiredEmptyIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressDequeueRequiredEmptyAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressDequeueRequiredEmptyRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressDequeueRequiredEmptyRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolvePeerIngressDequeueRequiredEmptyStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `NotifyDrainExitedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
@@ -1152,22 +1150,22 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `input_admission_and_queueing`
 - `ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolveAdmissionPlanPeerResponseProgressIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolveAdmissionPlanPeerResponseProgressAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `realtime_connection_projection`
+  - scenarios: `input_admission_and_queueing`
 - `ResolveAdmissionPlanPeerResponseProgressRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - scenarios: `input_admission_and_queueing`
 - `ResolveAdmissionPlanDefaultPeerResponseTerminalIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -1353,40 +1351,40 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `input_admission_and_queueing`
 - `ClassifyPeerResponseReplyCompletedInitializing`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `ClassifyPeerResponseReplyCompletedIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `ClassifyPeerResponseReplyCompletedAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `ClassifyPeerResponseReplyCompletedRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `ClassifyPeerResponseReplyCompletedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `ClassifyPeerResponseReplyCompletedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `ClassifyPeerResponseReplyFailedInitializing`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - scenarios: `input_admission_and_queueing`
 - `ClassifyPeerResponseReplyFailedIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`
+  - scenarios: `input_admission_and_queueing`
 - `ClassifyPeerResponseReplyFailedAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - scenarios: `input_admission_and_queueing`
 - `ClassifyPeerResponseReplyFailedRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - scenarios: `input_admission_and_queueing`
 - `ClassifyPeerResponseReplyFailedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`
+  - scenarios: `input_admission_and_queueing`
 - `ClassifyPeerResponseReplyFailedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - scenarios: `input_admission_and_queueing`
 - `PrepareIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
@@ -1446,10 +1444,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `ops_completion_and_waiters`
 - `ToolCallsResolvedToCalling`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `peer_reachability_probe`, `ops_completion_and_waiters`
+  - scenarios: `staged_visibility_apply`, `ops_completion_and_waiters`
 - `ToolCallsResolvedToBoundary`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `peer_reachability_probe`, `ops_completion_and_waiters`
+  - scenarios: `staged_visibility_apply`, `ops_completion_and_waiters`
 - `OpsBarrierSatisfied`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -1493,7 +1491,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `model_routing_and_image_operation`
 - `CancelNow`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `RequestCancelAfterBoundary`
   - anchors: `meerkat_machine`
@@ -2141,20 +2139,20 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`, `live_topology_and_supervision`
 - `PeerReadyOpIdle`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `recycle_and_compaction`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `PeerReadyOpAttached`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `recycle_and_compaction`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `PeerReadyOpRunning`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `recycle_and_compaction`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `PeerReadyOpRetired`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `recycle_and_compaction`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `PeerReadyOpStopped`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `recycle_and_compaction`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `ProgressReportedOpIdle`
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
@@ -2573,125 +2571,125 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
 - `PeerRequestSentIdle`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerRequestSentAttached`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`, `model_routing_and_image_operation`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerRequestSentRunning`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerRequestSentRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerRequestSentStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerResponseProgressArrivedIdle`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `realtime_connection_projection`, `recycle_and_compaction`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `PeerResponseProgressArrivedAttached`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `realtime_connection_projection`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`
 - `PeerResponseProgressArrivedRunning`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `realtime_connection_projection`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `PeerResponseProgressArrivedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `realtime_connection_projection`, `recycle_and_compaction`
+  - scenarios: `input_admission_and_queueing`
 - `PeerResponseProgressArrivedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `realtime_connection_projection`
+  - scenarios: `input_admission_and_queueing`
 - `PeerResponseTerminalArrivedCompletedIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerResponseTerminalArrivedCompletedAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerResponseTerminalArrivedCompletedRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerResponseTerminalArrivedCompletedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerResponseTerminalArrivedCompletedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerResponseTerminalArrivedFailedIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`
 - `PeerResponseTerminalArrivedFailedAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - scenarios: `input_admission_and_queueing`
 - `PeerResponseTerminalArrivedFailedRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`
 - `PeerResponseTerminalArrivedFailedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`
 - `PeerResponseTerminalArrivedFailedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`
 - `PeerResponseRejectedIdle`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerResponseRejectedAttached`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerResponseRejectedRunning`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `ops_completion_and_waiters`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerResponseRejectedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerResponseRejectedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerRequestTimedOutIdle`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`
 - `PeerRequestTimedOutAttached`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`
 - `PeerRequestTimedOutRunning`
   - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`
 - `PeerRequestTimedOutRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`
 - `PeerRequestTimedOutStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`
 - `PeerRequestReceivedIdle`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerRequestReceivedAttached`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `realtime_connection_projection`, `model_routing_and_image_operation`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerRequestReceivedRunning`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerRequestReceivedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerRequestReceivedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerResponseRepliedIdle`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `recycle_and_compaction`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `PeerResponseRepliedAttached`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `realtime_connection_projection`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `PeerResponseRepliedRunning`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `PeerResponseRepliedRetired`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `PeerResponseRepliedStopped`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `AdvanceSessionContextIdle`
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
@@ -2966,32 +2964,32 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `live_topology_and_supervision`
 - `AddDirectPeerEndpointIdle`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
 - `AddDirectPeerEndpointAttached`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
 - `AddDirectPeerEndpointRunning`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
 - `RemoveDirectPeerEndpointIdle`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
 - `RemoveDirectPeerEndpointAttached`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
 - `RemoveDirectPeerEndpointRunning`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
 - `ApplyMobPeerOverlayIdle`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `staged_visibility_apply`, `peer_reachability_probe`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: `meerkat_machine`
+  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
 - `ApplyMobPeerOverlayAttached`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `staged_visibility_apply`, `peer_reachability_probe`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: `meerkat_machine`
+  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
 - `ApplyMobPeerOverlayRunning`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`, `live_topology_and_supervision`
+  - anchors: `meerkat_machine`
+  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
 
 ### Effects
 - `RuntimeBound`
@@ -3083,13 +3081,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `input_admission_and_queueing`
 - `AdmissionResolved`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `AdmissionValidationResolved`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `AdmissionIdempotencyResolved`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `RecoveredInputLifecycleNormalized`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -3101,13 +3099,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `ops_completion_and_waiters`
 - `InputPublicTerminalOutcomeResolved`
   - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+  - scenarios: `bind-run-boundary-terminal`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
 - `InputBehavioralTerminalityResolved`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `RuntimeLifecycleStateClassified`
   - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
 - `RuntimeLoopQueueAdmissionClassified`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -3148,8 +3146,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `ExposeOperationPeer`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `RetainTerminalRecord`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -3170,7 +3168,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `ops_completion_and_waiters`
 - `OpRegistrationAdmissionResolved`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `OpLifecycleTransitionRejected`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -3187,17 +3185,17 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `PeerIngressClassified`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `PeerResponseReplyClassified`
-  - anchors: `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `PeerIngressReceiveResolved`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerIngressDequeueResolved`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `SpawnDrainTask`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
@@ -3230,13 +3228,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `realtime_connection_projection`
 - `PeerInteractionStateChanged`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`
+  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `model_routing_and_image_operation`
 - `PeerInteractionCleanup`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `realtime_connection_projection`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
 - `InboundPeerInteractionStateChanged`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`
+  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `model_routing_and_image_operation`
 - `SessionContextAdvanced`
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
@@ -3250,8 +3248,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `live_topology_and_supervision`
 - `PeerProjectionChanged`
-  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
-  - scenarios: `peer_reachability_probe`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
 - `CommsTrustReconcileRequested`
   - anchors: `meerkat_machine`
   - scenarios: `live_topology_and_supervision`
@@ -3277,7 +3275,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`
 - `peer_ingress_owner_consistency`
   - anchors: `meerkat_machine`
-  - scenarios: `peer_reachability_probe`, `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+  - scenarios: `input_admission_and_queueing`
 - `supervisor_binding_consistency`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `realtime_connection_projection`, `live_topology_and_supervision`

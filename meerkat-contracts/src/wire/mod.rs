@@ -38,8 +38,8 @@ pub use comms::{
     HandlingMode as WireCommsHandlingMode, InputSource as WireCommsInputSource,
     InputStreamMode as WireCommsInputStreamMode, PeerAddress, PeerCapabilitySet,
     PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
-    PeerName as WireCommsPeerName, PeerReachability, PeerReachabilityReason, PeerSendability,
-    PeerTransport, ResponseStatus as WireCommsResponseStatus,
+    PeerName as WireCommsPeerName, PeerSendability, PeerTransport,
+    ResponseStatus as WireCommsResponseStatus,
 };
 pub use connection::{
     BindingIdParams, CreateProfileParams, DeviceCompleteParams, DeviceStartParams,

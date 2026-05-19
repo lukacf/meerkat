@@ -7,9 +7,6 @@ use crate::InboxSender;
 use crate::agent::types::CommsMessage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::handle_connection;
-use crate::peer_directory_reachability_authority::{
-    PeerDirectoryReachabilityAuthority, ReachabilityKey,
-};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::{InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers, TrustedPeersView};
@@ -20,8 +17,8 @@ use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, CommsTrustMutation, CommsTrustMutationResult, EventStream, InputStreamMode,
     PeerAddress, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName,
-    PeerReachabilityReason, PeerRoute, PeerSendability, SendAndStreamError, SendError, SendReceipt,
-    StreamError, StreamScope, TrustedPeerDescriptor,
+    PeerRoute, PeerSendability, SendAndStreamError, SendError, SendReceipt, StreamError,
+    StreamScope, TrustedPeerDescriptor,
 };
 use meerkat_core::config::PlainEventSource;
 #[cfg(not(target_arch = "wasm32"))]
@@ -138,12 +135,6 @@ struct ResolvedPeer {
     address: meerkat_core::comms::PeerAddress,
     source: PeerDirectorySource,
     meta: crate::PeerMeta,
-}
-
-impl ResolvedPeer {
-    fn reachability_key(&self) -> ReachabilityKey {
-        ReachabilityKey::new(self.name.as_str(), self.peer_id.as_str())
-    }
 }
 
 /// Derive a stable [`meerkat_core::comms::PeerId`] from a signing pubkey.
@@ -1310,7 +1301,6 @@ pub struct CommsRuntime {
     dismiss_flag: AtomicBool,
     subscriber_registry: crate::event_injector::SubscriberRegistry,
     interaction_stream_registry: InteractionStreamRegistry,
-    peer_directory_reachability: Arc<Mutex<PeerDirectoryReachabilityAuthority>>,
     peer_comms_handle: crate::classify::PeerCommsHandleSlot,
     require_peer_comms_machine_authority: Arc<AtomicBool>,
     /// Narrow notify that fires only for actionable peer input (messages/requests).
@@ -1437,9 +1427,6 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
-            peer_directory_reachability: Arc::new(Mutex::new(
-                PeerDirectoryReachabilityAuthority::new(),
-            )),
             peer_comms_handle,
             require_peer_comms_machine_authority,
             actionable_notify,
@@ -1548,9 +1535,6 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
-            peer_directory_reachability: Arc::new(Mutex::new(
-                PeerDirectoryReachabilityAuthority::new(),
-            )),
             peer_comms_handle,
             require_peer_comms_machine_authority,
             actionable_notify,
@@ -1671,9 +1655,6 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
-            peer_directory_reachability: Arc::new(Mutex::new(
-                PeerDirectoryReachabilityAuthority::new(),
-            )),
             peer_comms_handle,
             require_peer_comms_machine_authority,
             actionable_notify,
@@ -2154,12 +2135,9 @@ impl CommsRuntime {
     /// included when auth is disabled.
     async fn resolve_peer_directory(&self) -> Vec<PeerDirectoryEntry> {
         let resolved = self.resolved_peers_snapshot().await;
-        self.reconcile_peer_directory(&resolved);
         let sendable_kinds = self.peer_request_response_sendable_kinds();
         let mut peers = Vec::new();
-        let reachability = self.peer_directory_reachability.lock();
         for peer in resolved {
-            let snapshot = reachability.snapshot_for(&peer.reachability_key());
             peers.push(PeerDirectoryEntry {
                 name: peer.name,
                 peer_id: peer.peer_id,
@@ -2167,8 +2145,6 @@ impl CommsRuntime {
                 source: peer.source,
                 sendable_kinds: sendable_kinds.clone(),
                 capabilities: PeerCapabilitySet::default(),
-                reachability: snapshot.reachability,
-                last_unreachable_reason: snapshot.last_unreachable_reason,
                 meta: peer.meta,
             });
         }
@@ -2185,12 +2161,6 @@ impl CommsRuntime {
         let mut peers = Vec::new();
         self.for_each_resolved_peer(|peer| peers.push(peer)).await;
         peers
-    }
-
-    fn reconcile_peer_directory(&self, peers: &[ResolvedPeer]) {
-        self.peer_directory_reachability
-            .lock()
-            .reconcile_resolved_directory(peers.iter().map(ResolvedPeer::reachability_key));
     }
 
     async fn for_each_resolved_peer<F>(&self, mut on_peer: F) -> usize
@@ -2360,11 +2330,6 @@ impl CommsRuntime {
         envelope_id: Uuid,
         kind: crate::types::MessageKind,
     ) -> Result<Uuid, SendError> {
-        let resolved = self.resolved_peers_snapshot().await;
-        self.reconcile_peer_directory(&resolved);
-        let resolved_peer = resolved
-            .into_iter()
-            .find(|peer| peer.peer_id == route.peer_id);
         let dest_peer_id = route.peer_id;
         let kind = self.hydrate_message_kind_for_transport(kind).await?;
         let result = self
@@ -2372,61 +2337,23 @@ impl CommsRuntime {
             .send_with_id(dest_peer_id, envelope_id, kind)
             .await;
         match result {
-            Ok(envelope_id) => {
-                if let Some(peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability
-                        .lock()
-                        .record_send_succeeded(&peer.reachability_key());
-                }
-                Ok(envelope_id)
-            }
+            Ok(envelope_id) => Ok(envelope_id),
             Err(crate::router::SendError::PeerNotFound(peer_id)) => {
-                if let Some(resolved_peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability.lock().record_send_failed(
-                        &resolved_peer.reachability_key(),
-                        PeerReachabilityReason::OfflineOrNoAck,
-                    );
-                }
                 Err(SendError::PeerNotFound(peer_id.to_string()))
             }
-            Err(crate::router::SendError::PeerOffline) => {
-                if let Some(peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability.lock().record_send_failed(
-                        &peer.reachability_key(),
-                        PeerReachabilityReason::OfflineOrNoAck,
-                    );
-                }
-                Err(SendError::PeerOffline)
-            }
+            Err(crate::router::SendError::PeerOffline) => Err(SendError::PeerOffline),
             Err(crate::router::SendError::AdmissionDropped { reason }) => {
                 // Transport worked; the receiver's ingress admission policy
                 // rejected us. Surface the typed reason all the way to the
                 // public API error payload so clients see e.g.
                 // `untrusted_sender` rather than the old `PeerOffline` lie.
-                // Reachability stays distinct too: the peer is still live
-                // at the transport layer, so we record `AdmissionDropped`
-                // rather than `OfflineOrNoAck`.
-                if let Some(peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability.lock().record_send_failed(
-                        &peer.reachability_key(),
-                        PeerReachabilityReason::AdmissionDropped,
-                    );
-                }
                 Err(SendError::AdmissionDropped {
                     reason: reason.into(),
                 })
             }
             Err(
                 error @ (crate::router::SendError::Transport(_) | crate::router::SendError::Io(_)),
-            ) => {
-                if let Some(peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability.lock().record_send_failed(
-                        &peer.reachability_key(),
-                        PeerReachabilityReason::TransportError,
-                    );
-                }
-                Err(SendError::Internal(error.to_string()))
-            }
+            ) => Err(SendError::Internal(error.to_string())),
         }
     }
 
@@ -2938,8 +2865,8 @@ mod tests {
         BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, SendError,
         comms::{
             CommsTrustMutation, CommsTrustMutationResult, InputSource, InputStreamMode,
-            PeerDirectorySource, PeerId, PeerName, PeerReachability, PeerReachabilityReason,
-            PeerRoute, PeerSendability, StreamError, StreamScope, TrustedPeerDescriptor,
+            PeerDirectorySource, PeerId, PeerName, PeerRoute, PeerSendability, StreamError,
+            StreamScope, TrustedPeerDescriptor,
         },
         interaction::InteractionId,
         types::{ContentBlock, ImageData, SessionId},
@@ -2990,6 +2917,21 @@ mod tests {
             &endpoint,
         )
         .expect("generated peer projection add authority")
+    }
+
+    async fn add_trusted_peer_with_generated_authority(
+        runtime: &CommsRuntime,
+        peer: TrustedPeerDescriptor,
+    ) {
+        CoreCommsRuntime::apply_trust_mutation(
+            runtime,
+            CommsTrustMutation::AddTrustedPeer {
+                authority: test_projection_authority(&peer, 0),
+                peer,
+            },
+        )
+        .await
+        .expect("generated add trusted peer should apply");
     }
 
     #[tokio::test]
@@ -3877,7 +3819,7 @@ mod tests {
         }
         // Peer must also trust the runtime: the receive-side admission gate
         // now drops untrusted envelopes with `UntrustedSender` instead of
-        // silently reporting success, and reachability upstream reflects that.
+        // silently reporting success.
         // Use `add_trusted_peer` so the classified inbox's canonical
         // `trusted_peers` BTreeSet is synced too, not just the RwLock.
         CoreCommsRuntime::add_trusted_peer(
@@ -6170,8 +6112,6 @@ mod tests {
         );
         assert_eq!(peer.address.to_string(), format!("inproc://{peer_name}"));
         assert_eq!(peer.sendable_kinds, vec![PeerSendability::PeerMessage]);
-        assert_eq!(peer.reachability, PeerReachability::Unknown);
-        assert_eq!(peer.last_unreachable_reason, None);
     }
 
     #[tokio::test]
@@ -6312,14 +6252,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_core_peers_send_success_marks_peer_reachable() {
+    async fn test_core_peers_send_success_keeps_peer_directory_projection() {
         let suffix = Uuid::new_v4().simple().to_string();
         let sender_name = format!("reach-sender-{suffix}");
         let receiver_name = format!("reach-receiver-{suffix}");
         let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
         let receiver = inproc_only_with_test_peer_authority(&receiver_name);
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &sender,
             trusted_descriptor(
                 &receiver_name,
@@ -6327,14 +6267,13 @@ mod tests {
                 &format!("inproc://{receiver_name}"),
             ),
         )
-        .await
-        .expect("add trusted peer");
+        .await;
         // Receiver must trust the sender too: `require_peer_auth` is on by
         // default, and with typed drop-reasons the receiver no longer silently
         // accepts untrusted envelopes as `Ok(())` — the admission gate now
         // reports `Dropped { UntrustedSender }`, which surfaces to this caller
         // as `PeerOffline`. Mutual trust mirrors real deployments.
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &receiver,
             trusted_descriptor(
                 &sender_name,
@@ -6342,15 +6281,7 @@ mod tests {
                 &format!("inproc://{sender_name}"),
             ),
         )
-        .await
-        .expect("add trusted peer");
-
-        let peers_before = CoreCommsRuntime::peers(&sender).await;
-        let before = peers_before
-            .iter()
-            .find(|entry| entry.name.as_str() == receiver_name)
-            .expect("receiver should be listed before send");
-        assert_eq!(before.reachability, PeerReachability::Unknown);
+        .await;
 
         CoreCommsRuntime::send(
             &sender,
@@ -6369,23 +6300,21 @@ mod tests {
             .iter()
             .find(|entry| entry.name.as_str() == receiver_name)
             .expect("receiver should still be listed");
-        assert_eq!(after.reachability, PeerReachability::Reachable);
-        assert_eq!(after.last_unreachable_reason, None);
+        assert_eq!(after.peer_id, receiver.public_key().to_peer_id());
     }
 
     #[tokio::test]
-    async fn test_core_peers_transport_failure_marks_peer_unreachable() {
+    async fn test_core_peers_transport_failure_keeps_directory_projection() {
         let suffix = Uuid::new_v4().simple().to_string();
         let sender = CommsRuntime::inproc_only(&format!("transport-sender-{suffix}")).unwrap();
         let peer_name = format!("transport-peer-{suffix}");
         let peer_pubkey = Keypair::generate().public_key();
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &sender,
             trusted_descriptor(&peer_name, peer_pubkey, "tcp://127.0.0.1:9"),
         )
-        .await
-        .expect("add trusted peer");
+        .await;
 
         let result = CoreCommsRuntime::send(
             &sender,
@@ -6407,11 +6336,7 @@ mod tests {
             .iter()
             .find(|listed| listed.name.as_str() == peer_name)
             .expect("trusted peer should remain listed after transport failure");
-        assert_eq!(entry.reachability, PeerReachability::Unreachable);
-        assert_eq!(
-            entry.last_unreachable_reason,
-            Some(PeerReachabilityReason::TransportError)
-        );
+        assert_eq!(entry.peer_id, peer_pubkey.to_peer_id());
     }
 
     #[tokio::test]
@@ -6420,8 +6345,8 @@ mod tests {
         // receiver-side ingress rejection into `PeerOffline`. That made a
         // policy failure indistinguishable from a transport failure in
         // REST/RPC/MCP payloads. Now it must come through as
-        // `SendError::AdmissionDropped { UntrustedSender }` with reachability
-        // recorded as `AdmissionDropped` (transport was live).
+        // `SendError::AdmissionDropped { UntrustedSender }`; peer directory
+        // liveness is intentionally not updated from this send result.
         let suffix = Uuid::new_v4().simple().to_string();
         let sender_name = format!("admit-sender-{suffix}");
         let receiver_name = format!("admit-receiver-{suffix}");
@@ -6431,7 +6356,7 @@ mod tests {
         // Sender trusts receiver; receiver does NOT trust sender. Receiver
         // has `require_peer_auth: true` by default, so our envelope lands
         // at its ingress gate and gets rejected with `UntrustedSender`.
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &sender,
             trusted_descriptor(
                 &receiver_name,
@@ -6439,8 +6364,7 @@ mod tests {
                 &format!("inproc://{receiver_name}"),
             ),
         )
-        .await
-        .expect("sender must trust receiver");
+        .await;
 
         let result = CoreCommsRuntime::send(
             &sender,
@@ -6464,15 +6388,10 @@ mod tests {
         );
 
         let peers = CoreCommsRuntime::peers(&sender).await;
-        let entry = peers
+        peers
             .iter()
             .find(|listed| listed.name.as_str() == receiver_name)
             .expect("trusted peer should remain listed after admission drop");
-        assert_eq!(
-            entry.last_unreachable_reason,
-            Some(PeerReachabilityReason::AdmissionDropped),
-            "policy rejection must record AdmissionDropped, not OfflineOrNoAck"
-        );
     }
 
     #[tokio::test]
@@ -6506,7 +6425,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_core_peers_resolved_peer_not_found_marks_peer_unreachable() {
+    async fn test_core_peers_resolved_peer_not_found_keeps_directory_projection() {
         let suffix = Uuid::new_v4().simple().to_string();
         let sender =
             CommsRuntime::inproc_only(&format!("resolved-missing-sender-{suffix}")).unwrap();
@@ -6514,7 +6433,7 @@ mod tests {
         let missing_pubkey = Keypair::generate().public_key();
         let missing_peer_id = missing_pubkey.to_peer_id().as_str();
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &sender,
             trusted_descriptor(
                 &missing_name,
@@ -6522,8 +6441,7 @@ mod tests {
                 &format!("inproc://{missing_name}"),
             ),
         )
-        .await
-        .expect("add trusted peer");
+        .await;
 
         let result = CoreCommsRuntime::send(
             &sender,
@@ -6545,11 +6463,7 @@ mod tests {
             .iter()
             .find(|listed| listed.name.as_str() == missing_name)
             .expect("trusted peer should remain listed after failed send");
-        assert_eq!(entry.reachability, PeerReachability::Unreachable);
-        assert_eq!(
-            entry.last_unreachable_reason,
-            Some(PeerReachabilityReason::OfflineOrNoAck)
-        );
+        assert_eq!(entry.peer_id, missing_pubkey.to_peer_id());
     }
 
     /// Truthfulness invariant: every peer/kind in peers() must be sendable.

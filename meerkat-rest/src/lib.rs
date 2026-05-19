@@ -8832,8 +8832,6 @@ mod tests {
             ],
             capabilities: meerkat_core::comms::PeerCapabilitySet::default()
                 .with_extension("vendor.echo", serde_json::json!({ "enabled": true })),
-            reachability: meerkat_core::comms::PeerReachability::Reachable,
-            last_unreachable_reason: None,
             meta: meerkat_core::PeerMeta::default(),
         }
     }

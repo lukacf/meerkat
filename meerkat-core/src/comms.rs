@@ -325,8 +325,8 @@ impl PeerRoute {
 /// with typed atoms: `PeerId` (runtime routing key), `PeerName` (display
 /// slug), `PeerAddress` (transport + endpoint), and a 32-byte signing
 /// public key that lets the receiver verify envelope signatures. Richer
-/// trust-store metadata (reachability snapshots, discovery labels) stays
-/// in `meerkat-comms::trust::TrustedPeer` — this descriptor is the
+/// trust-store metadata (discovery labels) stays in
+/// `meerkat-comms::trust::TrustedPeer` — this descriptor is the
 /// minimal typed subset the core seam needs to route and admit a peer.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1123,28 +1123,6 @@ impl Default for PeerCapabilitySet {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PeerReachability {
-    Unknown,
-    Reachable,
-    Unreachable,
-}
-
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum PeerReachabilityReason {
-    OfflineOrNoAck,
-    TransportError,
-    /// The peer admitted the transport but rejected our envelope at its
-    /// ingress policy gate (untrusted sender, full inbox, etc.). The peer
-    /// is still reachable at the transport level; policy denied us.
-    AdmissionDropped,
-}
-
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerDirectoryEntry {
     /// Canonical runtime identity — the routing key.
@@ -1159,8 +1137,6 @@ pub struct PeerDirectoryEntry {
     pub source: PeerDirectorySource,
     pub sendable_kinds: Vec<PeerSendability>,
     pub capabilities: PeerCapabilitySet,
-    pub reachability: PeerReachability,
-    pub last_unreachable_reason: Option<PeerReachabilityReason>,
     /// Supplementary discovery metadata (description, labels).
     pub meta: crate::PeerMeta,
 }
@@ -1305,8 +1281,6 @@ mod tests {
             source: PeerDirectorySource::Inproc,
             sendable_kinds: vec![PeerSendability::PeerMessage],
             capabilities: PeerCapabilitySet::default(),
-            reachability: PeerReachability::Unknown,
-            last_unreachable_reason: None,
             meta: crate::PeerMeta::default(),
         };
         assert_eq!(entry.name.as_str(), "agent");
@@ -1327,8 +1301,6 @@ mod tests {
             sendable_kinds: vec![PeerSendability::PeerMessage, PeerSendability::PeerRequest],
             capabilities: PeerCapabilitySet::default()
                 .with_extension("vendor.echo", serde_json::json!({ "enabled": true })),
-            reachability: PeerReachability::Reachable,
-            last_unreachable_reason: None,
             meta: crate::PeerMeta::default(),
         };
 

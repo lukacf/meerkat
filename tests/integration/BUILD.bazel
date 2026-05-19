@@ -341,7 +341,6 @@ rust_test(
     ],
     srcs = [
         "tests/e2e_fast_lane.rs",
-        "tests/peer_directory_reachability_kernel.rs",
         "tests/phase1_wiring.rs",
         "tests/phase2_mode_routing.rs",
     ],
@@ -699,70 +698,6 @@ rust_test(
         "integration",
         "live",
         "required-feature",
-    ],
-    data = [],
-    env = {
-        "RUST_MIN_STACK": "16777216",
-    },
-    proc_macro_deps = all_crate_deps(
-        package_name = "tests/integration",
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp",
-        "//meerkat-mob:meerkat_mob",
-        "//meerkat-rpc:meerkat_rpc",
-        "//meerkat:meerkat",
-        "//meerkat:meerkat_auth_core_agent_factory_build",
-        "//meerkat:meerkat_client_agent_factory_build",
-        "//meerkat:meerkat_comms_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_machine_kernels_agent_factory_build",
-        "//meerkat:meerkat_machine_schema_agent_factory_build",
-        "//meerkat:meerkat_models_agent_factory_build",
-        "//meerkat:meerkat_providers_agent_factory_build",
-        "//meerkat:meerkat_runtime_agent_factory_build",
-        "//meerkat:meerkat_session_agent_factory_build",
-        "//meerkat:meerkat_store_agent_factory_build",
-        "//meerkat:meerkat_tools_agent_factory_build",
-        "//tests/integration:meerkat_integration_tests",
-    ] + all_crate_deps(
-        package_name = "tests/integration",
-        normal = True,
-        normal_dev = True,
-    ),
-)
-
-rust_test(
-    name = "peer_directory_reachability_kernel_test",
-    aliases = aliases(
-        package_name = "tests/integration",
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    crate_name = "peer_directory_reachability_kernel",
-    crate_root = "tests/peer_directory_reachability_kernel.rs",
-    crate_features = [
-        "integration-real-tests",
-    ],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-    ],
-    srcs = [
-        "tests/peer_directory_reachability_kernel.rs",
-    ],
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.15",
-        "CARGO_BIN_NAME": "peer_directory_reachability_kernel",
-        "CARGO_MANIFEST_DIR": "./tests/integration",
-    },
-    tags = [
-        "integration",
     ],
     data = [],
     env = {

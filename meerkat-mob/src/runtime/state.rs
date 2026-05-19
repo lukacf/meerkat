@@ -276,10 +276,11 @@ pub(super) enum MobCommand {
     QueryMachineState {
         reply_tx: oneshot::Sender<mob_dsl::MobMachineState>,
     },
-    AuthorizeExternalPeerReciprocalTrust {
+    ApplyExternalPeerReciprocalTrust {
         key: mob_dsl::ExternalPeerKey,
-        reply_tx:
-            oneshot::Sender<Result<meerkat_core::comms::CommsTrustMutationAuthority, MobError>>,
+        target_comms: std::sync::Arc<dyn meerkat_core::agent::CommsRuntime>,
+        peer: meerkat_core::comms::TrustedPeerDescriptor,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     ProjectMachineSignal {
         signal: mob_dsl::MobMachineSignal,

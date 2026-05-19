@@ -3311,6 +3311,7 @@ name = "meerkat-mob-mcp"
 version = "0.6.15"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "futures",
  "indexmap",

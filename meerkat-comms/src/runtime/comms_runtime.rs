@@ -339,7 +339,7 @@ impl CoreCommsRuntime for CommsRuntime {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
                 authority
-                    .validate_public_add(&peer)
+                    .validate_public_add(self.peer_id(), &peer)
                     .map_err(SendError::Validation)?;
                 self.apply_trusted_peer_descriptor(peer, authority.trust_row_owner_kind())
                     .await?;
@@ -349,7 +349,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 let parsed_peer_id = meerkat_core::comms::PeerId::parse(&peer_id)
                     .map_err(|err| SendError::Validation(err.to_string()))?;
                 authority
-                    .validate_public_remove(parsed_peer_id)
+                    .validate_public_remove(self.peer_id(), parsed_peer_id)
                     .map_err(SendError::Validation)?;
                 let removed = self
                     .apply_trusted_peer_removal(&peer_id, authority.trust_row_owner_kind())
@@ -358,7 +358,7 @@ impl CoreCommsRuntime for CommsRuntime {
             }
             CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
                 authority
-                    .validate_private_add(&peer)
+                    .validate_private_add(self.peer_id(), &peer)
                     .map_err(SendError::Validation)?;
                 self.apply_private_trusted_peer_descriptor(peer, authority.trust_row_owner_kind())
                     .await?;
@@ -368,7 +368,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 let parsed_peer_id = meerkat_core::comms::PeerId::parse(&peer_id)
                     .map_err(|err| SendError::Validation(err.to_string()))?;
                 authority
-                    .validate_private_remove(parsed_peer_id)
+                    .validate_private_remove(self.peer_id(), parsed_peer_id)
                     .map_err(SendError::Validation)?;
                 let removed = self
                     .apply_private_trusted_peer_removal(&peer_id, authority.trust_row_owner_kind())

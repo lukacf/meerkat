@@ -154,9 +154,21 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for MobMemberTrustW
             Operation::PublicAdd | Operation::PrivateAdd
         ) {
             let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;
-            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring, peer_descriptor);
+            let grant = meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring, peer_descriptor)?;
+            return Ok(
+                grant.with_trust_store_peer_id(if self.a_peer_id.0 == request.peer_id() {
+                    self.b_peer_id.0.as_str()
+                } else if self.b_peer_id.0 == request.peer_id() {
+                    self.a_peer_id.0.as_str()
+                } else {
+                    return Err(format!(
+                        "MobMachine member trust obligation does not carry requested peer {:?}",
+                        request.peer_id()
+                    ));
+                }),
+            );
         }
-        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring))
+        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring).with_trust_store_peer_id(if self.a_peer_id.0 == request.peer_id() { self.b_peer_id.0.as_str() } else if self.b_peer_id.0 == request.peer_id() { self.a_peer_id.0.as_str() } else { return Err(format!("MobMachine member trust obligation does not carry requested peer {:?}", request.peer_id())); }))
     }
 }
 

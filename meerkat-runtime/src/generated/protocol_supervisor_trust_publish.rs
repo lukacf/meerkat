@@ -106,7 +106,8 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for SupervisorTrust
             Operation::PublicAdd | Operation::PrivateAdd
         ) {
             let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;
-            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish, peer_descriptor);
+            let grant = meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish, peer_descriptor)?;
+            return Ok(grant);
         }
         Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish))
     }

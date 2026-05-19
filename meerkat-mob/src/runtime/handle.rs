@@ -21,9 +21,8 @@ use crate::runtime::reconcile::{
 use crate::runtime::terminalization::{TerminalizationOutcome, TerminalizationTarget};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use meerkat_core::comms::{
-    CommsCommand, CommsTrustMutationAuthority, PeerId, SendReceipt, TrustedPeerDescriptor,
-};
+use meerkat_core::agent::CommsRuntime;
+use meerkat_core::comms::{CommsCommand, PeerId, SendReceipt, TrustedPeerDescriptor};
 use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{MobToolAuthorityContext, SessionError};
@@ -774,18 +773,23 @@ impl MobHandle {
 
     /// Authorize an external peer to trust a local mob member after
     /// `WireExternalPeer` has established the MobMachine-owned edge.
-    pub async fn authorize_external_peer_reciprocal_trust(
+    pub async fn apply_external_peer_reciprocal_trust(
         &self,
         local: &AgentIdentity,
         external_peer_name: &str,
-    ) -> Result<CommsTrustMutationAuthority, MobError> {
+        target_comms: std::sync::Arc<dyn CommsRuntime>,
+        peer: TrustedPeerDescriptor,
+    ) -> Result<(), MobError> {
         let key = mob_dsl::ExternalPeerKey::new(
             mob_dsl::AgentIdentity::from_domain(local),
             mob_dsl::PeerName::from(external_peer_name),
         );
-        self.send_actor_command(
-            |reply_tx| MobCommand::AuthorizeExternalPeerReciprocalTrust { key, reply_tx },
-        )
+        self.send_actor_command(|reply_tx| MobCommand::ApplyExternalPeerReciprocalTrust {
+            key,
+            target_comms,
+            peer,
+            reply_tx,
+        })
         .await?
     }
 

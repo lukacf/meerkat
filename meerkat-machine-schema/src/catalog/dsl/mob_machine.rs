@@ -493,9 +493,9 @@ macro_rules! mob_catalog_machine_dsl {
             MemberTrustWiringRequested { edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, a_endpoint: MemberPeerEndpoint, b_endpoint: MemberPeerEndpoint, epoch: u64 },
             MemberTrustUnwiringRequested { edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64 },
             WiringTrustRepairRequested { edge: WiringEdge },
-            ExternalPeerTrustWiringRequested { edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
-            ExternalPeerTrustUnwiringRequested { edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
-            ExternalPeerTrustRepairRequested { edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
+            ExternalPeerTrustWiringRequested { edge: ExternalPeerEdge, local_peer_id: PeerId, peer_id: PeerId, epoch: u64 },
+            ExternalPeerTrustUnwiringRequested { edge: ExternalPeerEdge, local_peer_id: PeerId, peer_id: PeerId, epoch: u64 },
+            ExternalPeerTrustRepairRequested { edge: ExternalPeerEdge, local_peer_id: PeerId, peer_id: PeerId, epoch: u64 },
             MemberPeerRegistered { agent_identity: AgentIdentity, peer_id: PeerId },
             ExternalPeerReciprocalTrustRequested { key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint, epoch: u64 },
             // D-wiring-observability (#27): pair-valued notice emitted from
@@ -1624,6 +1624,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
             guard "external_peer_key_not_already_wired" { self.external_peer_edges_by_key.contains_key(key) == false }
             guard "external_peer_edge_not_already_wired" { self.external_peer_edges.contains(edge) == false }
+            guard "local_member_peer_registered" { self.member_peer_ids.contains_key(mob_machine_external_peer_edge_local(edge)) == true }
             update {
                 self.external_peer_edges.insert(edge);
                 self.external_peer_edges_by_key.insert(key, edge);
@@ -1633,6 +1634,7 @@ macro_rules! mob_catalog_machine_dsl {
             emit WiringGraphChanged { epoch: self.topology_epoch }
             emit ExternalPeerTrustWiringRequested {
                 edge: edge,
+                local_peer_id: self.member_peer_ids.get_cloned(mob_machine_external_peer_edge_local(edge)).get("value"),
                 peer_id: mob_machine_external_peer_edge_peer_id(edge),
                 epoch: self.topology_epoch
             }
@@ -1645,10 +1647,12 @@ macro_rules! mob_catalog_machine_dsl {
             guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
             guard "external_peer_key_already_wired" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
             guard "external_peer_edge_already_wired" { self.external_peer_edges.contains(edge) == true }
+            guard "local_member_peer_registered" { self.member_peer_ids.contains_key(mob_machine_external_peer_edge_local(edge)) == true }
             update {}
             to Running
             emit ExternalPeerTrustRepairRequested {
                 edge: edge,
+                local_peer_id: self.member_peer_ids.get_cloned(mob_machine_external_peer_edge_local(edge)).get("value"),
                 peer_id: mob_machine_external_peer_edge_peer_id(edge),
                 epoch: self.topology_epoch
             }
@@ -1788,6 +1792,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
             guard "external_peer_key_currently_wired" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
             guard "external_peer_edge_currently_wired" { self.external_peer_edges.contains(edge) == true }
+            guard "local_member_peer_registered" { self.member_peer_ids.contains_key(mob_machine_external_peer_edge_local(edge)) == true }
             update {
                 self.external_peer_edges.remove(edge);
                 self.external_peer_edges_by_key.remove(key);
@@ -1797,6 +1802,7 @@ macro_rules! mob_catalog_machine_dsl {
             emit WiringGraphChanged { epoch: self.topology_epoch }
             emit ExternalPeerTrustUnwiringRequested {
                 edge: edge,
+                local_peer_id: self.member_peer_ids.get_cloned(mob_machine_external_peer_edge_local(edge)).get("value"),
                 peer_id: mob_machine_external_peer_edge_peer_id(edge),
                 epoch: self.topology_epoch
             }
@@ -3695,6 +3701,10 @@ macro_rules! mob_catalog_machine_dsl {
 
         fn mob_machine_external_peer_edge_peer_id(edge: &ExternalPeerEdge) -> PeerId {
             edge.endpoint.peer_id.clone()
+        }
+
+        fn mob_machine_external_peer_edge_local(edge: &ExternalPeerEdge) -> AgentIdentity {
+            edge.local.clone()
         }
 
         fn mob_machine_member_peer_endpoint_peer_id(endpoint: &MemberPeerEndpoint) -> PeerId {

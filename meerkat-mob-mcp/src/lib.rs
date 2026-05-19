@@ -1831,7 +1831,7 @@ impl CoreCommsRuntime for LocalCommsRuntime {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
                 authority
-                    .validate_public_add(&peer)
+                    .validate_public_add(self.peer_id(), &peer)
                     .map_err(SendError::Validation)?;
                 TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
                     .map_err(SendError::Validation)?;
@@ -1847,7 +1847,7 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                 let parsed_peer_id = PeerId::parse(&peer_id)
                     .map_err(|err| SendError::Validation(err.to_string()))?;
                 authority
-                    .validate_public_remove(parsed_peer_id)
+                    .validate_public_remove(self.peer_id(), parsed_peer_id)
                     .map_err(SendError::Validation)?;
                 let mut trusted = self.trusted.write().await;
                 let removed =
@@ -1856,7 +1856,7 @@ impl CoreCommsRuntime for LocalCommsRuntime {
             }
             CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
                 authority
-                    .validate_private_add(&peer)
+                    .validate_private_add(self.peer_id(), &peer)
                     .map_err(SendError::Validation)?;
                 TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
                     .map_err(SendError::Validation)?;
@@ -1866,7 +1866,7 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                 let parsed_peer_id = PeerId::parse(&peer_id)
                     .map_err(|err| SendError::Validation(err.to_string()))?;
                 authority
-                    .validate_private_remove(parsed_peer_id)
+                    .validate_private_remove(self.peer_id(), parsed_peer_id)
                     .map_err(SendError::Validation)?;
                 Ok(CommsTrustMutationResult::Removed { removed: false })
             }
@@ -3438,6 +3438,41 @@ mod tests {
             external_edge.endpoint.name.clone(),
         );
         let mut mob_authority = meerkat_mob::machines::mob_machine::MobMachineAuthority::new();
+        let local_identity = meerkat_mob::machines::mob_machine::AgentIdentity("local".to_string());
+        meerkat_mob::machines::mob_machine::MobMachineMutator::apply(
+            &mut mob_authority,
+            meerkat_mob::machines::mob_machine::MobMachineInput::Spawn {
+                agent_identity: local_identity.clone(),
+                agent_runtime_id: meerkat_mob::machines::mob_machine::AgentRuntimeId(
+                    "local-runtime".to_string(),
+                ),
+                fence_token: meerkat_mob::machines::mob_machine::FenceToken(1),
+                generation: meerkat_mob::machines::mob_machine::Generation(1),
+                external_addressable: true,
+                bridge_session_id: meerkat_mob::machines::mob_machine::SessionId(
+                    "local-session".to_string(),
+                ),
+                replacing: None,
+            },
+        )
+        .expect("spawn local member");
+        let local_descriptor = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "local".to_string(),
+            runtime.peer_id.to_string(),
+            runtime.public_key_bytes,
+            runtime.address.clone(),
+        )
+        .expect("valid local descriptor");
+        meerkat_mob::machines::mob_machine::MobMachineMutator::apply(
+            &mut mob_authority,
+            meerkat_mob::machines::mob_machine::MobMachineInput::RegisterMemberPeer {
+                agent_identity: local_identity,
+                peer_endpoint: meerkat_mob::machines::mob_machine::MemberPeerEndpoint::from(
+                    &local_descriptor,
+                ),
+            },
+        )
+        .expect("register local member peer");
         let wiring_transition = meerkat_mob::machines::mob_machine::MobMachineMutator::apply(
             &mut mob_authority,
             meerkat_mob::machines::mob_machine::MobMachineInput::WireExternalPeer {
@@ -3453,6 +3488,27 @@ mod tests {
             )
             .pop()
             .expect("generated wiring obligation");
+        let wrong_runtime = LocalCommsRuntime::new("wrong-target");
+        let wrong_target_error = wrong_runtime
+            .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
+                peer: peer.clone(),
+                authority: meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::wiring_authority_for_peer(
+                    &meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::extract_obligations_with_freshness(
+                        &wiring_transition,
+                        meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::MobTopologyFreshnessAuthority::from_authority(&mob_authority),
+                    )
+                    .pop()
+                    .expect("generated wiring obligation for wrong target"),
+                    &peer_id,
+                )
+                .expect("generated wiring obligation covers peer"),
+            })
+            .await
+            .expect_err("generated authority must be bound to target trust store");
+        assert!(
+            matches!(wrong_target_error, SendError::Validation(ref reason) if reason.contains("targets trust-store peer_id")),
+            "unexpected wrong-target error: {wrong_target_error:?}"
+        );
 
         let added = runtime
             .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {

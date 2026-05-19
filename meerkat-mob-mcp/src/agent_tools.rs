@@ -36,8 +36,8 @@ use tokio_with_wasm::alias::{
 
 use crate::MobMcpState;
 use meerkat_core::comms::{
-    CommsCommand, CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult,
-    PeerId, PeerName, PeerRoute, SendError, TrustedPeerDescriptor,
+    CommsCommand, CommsTrustMutation, CommsTrustMutationResult, PeerId, PeerName, PeerRoute,
+    SendError, TrustedPeerDescriptor,
 };
 
 // ─── Tool name constants ─────────────────────────────────────────────────
@@ -118,22 +118,6 @@ impl AgentMobToolSurface {
             pubkey,
             address,
         )
-    }
-
-    async fn apply_parent_trusted_peer_add(
-        comms: &Arc<dyn meerkat_core::agent::CommsRuntime>,
-        peer: TrustedPeerDescriptor,
-        authority: CommsTrustMutationAuthority,
-    ) -> Result<(), SendError> {
-        match comms
-            .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer { peer, authority })
-            .await?
-        {
-            CommsTrustMutationResult::Added => Ok(()),
-            other => Err(SendError::Internal(format!(
-                "delegate helper trust mutation returned unexpected result: {other:?}"
-            ))),
-        }
     }
 
     fn synthetic_parent_peer_added_fields(parent_name: &str) -> (String, String, String) {
@@ -621,14 +605,13 @@ impl AgentMobToolSurface {
         ) else {
             return false;
         };
-        let Ok(parent_trust_authority) = handle
-            .authorize_external_peer_reciprocal_trust(identity, name.as_str())
-            .await
-        else {
-            return false;
-        };
-
-        if Self::apply_parent_trusted_peer_add(comms_rt, helper_spec, parent_trust_authority)
+        if handle
+            .apply_external_peer_reciprocal_trust(
+                identity,
+                name.as_str(),
+                Arc::clone(comms_rt),
+                helper_spec,
+            )
             .await
             .is_err()
         {
@@ -2446,6 +2429,15 @@ mod tests {
             Some(self.peer_id)
         }
 
+        fn public_key(&self) -> Option<String> {
+            use base64::Engine as _;
+
+            Some(format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(self.public_key_bytes)
+            ))
+        }
+
         fn public_key_bytes(&self) -> Option<[u8; 32]> {
             Some(self.public_key_bytes)
         }
@@ -2465,7 +2457,7 @@ mod tests {
             match mutation {
                 CommsTrustMutation::AddTrustedPeer { peer, authority } => {
                     authority
-                        .validate_public_add(&peer)
+                        .validate_public_add(self.peer_id(), &peer)
                         .map_err(SendError::Validation)?;
                     self.add_trusted_peer(peer).await?;
                     Ok(CommsTrustMutationResult::Added)
@@ -2474,14 +2466,14 @@ mod tests {
                     let parsed_peer_id = PeerId::parse(&peer_id)
                         .map_err(|err| SendError::Validation(err.to_string()))?;
                     authority
-                        .validate_public_remove(parsed_peer_id)
+                        .validate_public_remove(self.peer_id(), parsed_peer_id)
                         .map_err(SendError::Validation)?;
                     let removed = self.remove_trusted_peer(&peer_id).await?;
                     Ok(CommsTrustMutationResult::Removed { removed })
                 }
                 CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
                     authority
-                        .validate_private_add(&peer)
+                        .validate_private_add(self.peer_id(), &peer)
                         .map_err(SendError::Validation)?;
                     self.add_private_trusted_peer(peer).await?;
                     Ok(CommsTrustMutationResult::Added)
@@ -2490,7 +2482,7 @@ mod tests {
                     let parsed_peer_id = PeerId::parse(&peer_id)
                         .map_err(|err| SendError::Validation(err.to_string()))?;
                     authority
-                        .validate_private_remove(parsed_peer_id)
+                        .validate_private_remove(self.peer_id(), parsed_peer_id)
                         .map_err(SendError::Validation)?;
                     let removed = self.remove_trusted_peer(&peer_id).await?;
                     Ok(CommsTrustMutationResult::Removed { removed })

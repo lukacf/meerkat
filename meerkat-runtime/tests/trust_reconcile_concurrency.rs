@@ -130,7 +130,7 @@ impl CommsRuntime for RecordingCommsRuntime {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
                 authority
-                    .validate_public_add(&peer)
+                    .validate_public_add(None, &peer)
                     .map_err(SendError::Validation)?;
                 self.add_count.fetch_add(1, Ordering::SeqCst);
                 self.adds
@@ -147,7 +147,7 @@ impl CommsRuntime for RecordingCommsRuntime {
                 let parsed_peer_id = meerkat_core::comms::PeerId::parse(&peer_id)
                     .map_err(|error| SendError::Validation(error.to_string()))?;
                 authority
-                    .validate_public_remove(parsed_peer_id)
+                    .validate_public_remove(None, parsed_peer_id)
                     .map_err(SendError::Validation)?;
                 self.removes
                     .lock()

@@ -125,7 +125,7 @@ impl CommsRuntime for AddFailingCommsRuntime {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
                 authority
-                    .validate_public_add(&peer)
+                    .validate_public_add(None, &peer)
                     .map_err(SendError::Validation)?;
                 if self.fail_next_add.swap(false, Ordering::SeqCst) {
                     return Err(SendError::Unsupported("synthetic add failure".into()));

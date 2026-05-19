@@ -6392,6 +6392,12 @@ impl<'a> MachineTlaCompiler<'a> {
         pushln!(out, "       /\\ edges_by_key[key] = edge");
         writeln!(
             out,
+            "{}(edge) == edge.local",
+            prefix("mob_machine_external_peer_edge_local")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
             "{}(key, edge) ==",
             prefix("mob_machine_external_peer_key_matches_edge")
         )

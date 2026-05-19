@@ -26694,6 +26694,43 @@ async fn test_stale_external_peer_trust_obligation_cannot_readd_trust_when_machi
         stale_edge.endpoint.name.clone(),
     );
     let mut stale_authority = crate::machines::mob_machine::MobMachineAuthority::new();
+    let local_peer_id = comms.peer_id().expect("local comms peer id");
+    let local_pubkey = comms.public_key_bytes().expect("local comms pubkey bytes");
+    let local_name = test_comms_name("lead", "l-1");
+    let local_descriptor = TrustedPeerDescriptor::unsigned_with_pubkey(
+        local_name.clone(),
+        local_peer_id.to_string(),
+        local_pubkey,
+        comms.advertised_address(),
+    )
+    .expect("valid local trusted spec");
+    crate::machines::mob_machine::MobMachineMutator::apply(
+        &mut stale_authority,
+        crate::machines::mob_machine::MobMachineInput::Spawn {
+            agent_identity: stale_edge.local.clone(),
+            agent_runtime_id: crate::machines::mob_machine::AgentRuntimeId(
+                "stale-l-1-runtime".to_string(),
+            ),
+            fence_token: crate::machines::mob_machine::FenceToken(1),
+            generation: crate::machines::mob_machine::Generation(1),
+            external_addressable: true,
+            bridge_session_id: crate::machines::mob_machine::SessionId(
+                "stale-l-1-session".to_string(),
+            ),
+            replacing: None,
+        },
+    )
+    .expect("spawn stale local member");
+    crate::machines::mob_machine::MobMachineMutator::apply(
+        &mut stale_authority,
+        crate::machines::mob_machine::MobMachineInput::RegisterMemberPeer {
+            agent_identity: stale_edge.local.clone(),
+            peer_endpoint: crate::machines::mob_machine::MemberPeerEndpoint::from(
+                &local_descriptor,
+            ),
+        },
+    )
+    .expect("register stale local member peer");
     let stale_transition = crate::machines::mob_machine::MobMachineMutator::apply(
         &mut stale_authority,
         crate::machines::mob_machine::MobMachineInput::WireExternalPeer {

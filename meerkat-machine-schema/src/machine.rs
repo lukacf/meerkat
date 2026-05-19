@@ -8,6 +8,7 @@ use std::fmt;
 
 const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_machine_external_peer_edge_has_matching_key",
+    "mob_machine_external_peer_edge_local",
     "mob_machine_external_peer_edge_peer_id",
     "mob_machine_external_peer_key_matches_edge",
     "mob_machine_external_peer_key_matches_local",

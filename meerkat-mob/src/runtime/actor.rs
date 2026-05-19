@@ -4284,8 +4284,15 @@ impl MobActor {
                 MobCommand::QueryMachineState { reply_tx } => {
                     let _ = reply_tx.send(self.dsl_authority.state().clone());
                 }
-                MobCommand::AuthorizeExternalPeerReciprocalTrust { key, reply_tx } => {
-                    let result = self.authorize_external_peer_reciprocal_trust(key).await;
+                MobCommand::ApplyExternalPeerReciprocalTrust {
+                    key,
+                    target_comms,
+                    peer,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .apply_external_peer_reciprocal_trust(key, target_comms, peer)
+                        .await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ProjectMachineSignal { signal } => {
@@ -8341,17 +8348,19 @@ impl MobActor {
         self.wire_external_authority_from_transition(&transition, edge, "wire_external_peer")
     }
 
-    async fn authorize_external_peer_reciprocal_trust(
+    async fn apply_external_peer_reciprocal_trust(
         &mut self,
         key: mob_dsl::ExternalPeerKey,
-    ) -> Result<CommsTrustMutationAuthority, MobError> {
+        target_comms: Arc<dyn CoreCommsRuntime>,
+        peer: TrustedPeerDescriptor,
+    ) -> Result<(), MobError> {
         let local_identity = AgentIdentity::from(key.local.0.as_str());
         let transition = self.apply_dsl_input_collect_transition(
             mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrust {
                 key: key.clone(),
                 agent_identity: mob_dsl::AgentIdentity::from_domain(&local_identity),
             },
-            "authorize_external_peer_reciprocal_trust",
+            "apply_external_peer_reciprocal_trust",
         )?;
         let Some(obligation) =
             crate::generated::protocol_mob_external_peer_reciprocal_trust::extract_obligations_with_freshness(
@@ -8365,12 +8374,26 @@ impl MobActor {
                 "MobMachine produced no external reciprocal trust obligation".to_string(),
             ));
         };
+        let target_peer_id = target_comms.peer_id().ok_or_else(|| {
+            MobError::WiringError(
+                "external reciprocal trust target runtime did not expose peer_id".to_string(),
+            )
+        })?;
+        if target_peer_id.to_string() != obligation.edge().endpoint.peer_id.0 {
+            return Err(MobError::WiringError(format!(
+                "external reciprocal trust target peer_id {target_peer_id} does not match MobMachine external edge peer_id {}",
+                obligation.edge().endpoint.peer_id.0
+            )));
+        }
         let peer_id = obligation.peer_id().0.clone();
-        crate::generated::protocol_mob_external_peer_reciprocal_trust::reciprocal_wiring_authority_for_peer(
+        let authority = crate::generated::protocol_mob_external_peer_reciprocal_trust::reciprocal_wiring_authority_for_peer(
             &obligation,
             &peer_id,
         )
-            .map_err(MobError::WiringError)
+        .map_err(MobError::WiringError)?;
+        Self::apply_trusted_peer_add(target_comms.as_ref(), peer, authority)
+            .await
+            .map_err(MobError::CommsError)
     }
 
     fn apply_unwire_external_peer_idempotent(

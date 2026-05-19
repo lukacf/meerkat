@@ -362,6 +362,7 @@ pub struct CommsTrustMutationAuthority {
     trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
     operation: GeneratedCommsTrustAuthorityOperation,
     peer_id: String,
+    trust_store_peer_id: Option<String>,
     peer_descriptor: Option<TrustedPeerDescriptor>,
     consumed: Arc<AtomicBool>,
 }
@@ -418,6 +419,7 @@ pub struct GeneratedCommsTrustAuthorityGrant {
     source_epoch: u64,
     trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
     peer_id: String,
+    trust_store_peer_id: Option<String>,
     peer_descriptor: Option<TrustedPeerDescriptor>,
 }
 
@@ -432,6 +434,7 @@ impl GeneratedCommsTrustAuthorityGrant {
             source_epoch,
             trust_row_owner_kind,
             peer_id: request.peer_id.to_owned(),
+            trust_store_peer_id: None,
             peer_descriptor: None,
         }
     }
@@ -475,8 +478,14 @@ impl GeneratedCommsTrustAuthorityGrant {
             source_epoch,
             trust_row_owner_kind,
             peer_id: request.peer_id.to_owned(),
+            trust_store_peer_id: None,
             peer_descriptor: Some(peer_descriptor),
         })
+    }
+
+    pub fn with_trust_store_peer_id(mut self, peer_id: impl Into<String>) -> Self {
+        self.trust_store_peer_id = Some(peer_id.into());
+        self
     }
 }
 
@@ -630,38 +639,59 @@ impl CommsTrustMutationAuthority {
             trust_row_owner_kind: grant.trust_row_owner_kind,
             operation,
             peer_id: grant.peer_id,
+            trust_store_peer_id: grant.trust_store_peer_id,
             peer_descriptor: grant.peer_descriptor,
             consumed: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    pub fn validate_public_add(&self, peer: &TrustedPeerDescriptor) -> Result<(), String> {
+    pub fn validate_public_add(
+        &self,
+        trust_store_peer_id: Option<PeerId>,
+        peer: &TrustedPeerDescriptor,
+    ) -> Result<(), String> {
         self.validate_add_operation(
             GeneratedCommsTrustAuthorityOperation::PublicAdd,
+            trust_store_peer_id,
             peer,
             "add a public trusted peer",
         )
     }
 
-    pub fn validate_public_remove(&self, peer_id: PeerId) -> Result<(), String> {
+    pub fn validate_public_remove(
+        &self,
+        trust_store_peer_id: Option<PeerId>,
+        peer_id: PeerId,
+    ) -> Result<(), String> {
         self.validate_operation(
             GeneratedCommsTrustAuthorityOperation::PublicRemove,
+            trust_store_peer_id,
             peer_id,
             "remove a public trusted peer",
         )
     }
 
-    pub fn validate_private_add(&self, peer: &TrustedPeerDescriptor) -> Result<(), String> {
+    pub fn validate_private_add(
+        &self,
+        trust_store_peer_id: Option<PeerId>,
+        peer: &TrustedPeerDescriptor,
+    ) -> Result<(), String> {
         self.validate_add_operation(
             GeneratedCommsTrustAuthorityOperation::PrivateAdd,
+            trust_store_peer_id,
             peer,
             "add a private trusted peer",
         )
     }
 
-    pub fn validate_private_remove(&self, peer_id: PeerId) -> Result<(), String> {
+    pub fn validate_private_remove(
+        &self,
+        trust_store_peer_id: Option<PeerId>,
+        peer_id: PeerId,
+    ) -> Result<(), String> {
         self.validate_operation(
             GeneratedCommsTrustAuthorityOperation::PrivateRemove,
+            trust_store_peer_id,
             peer_id,
             "remove a private trusted peer",
         )
@@ -670,6 +700,7 @@ impl CommsTrustMutationAuthority {
     fn validate_operation(
         &self,
         operation: GeneratedCommsTrustAuthorityOperation,
+        trust_store_peer_id: Option<PeerId>,
         peer_id: PeerId,
         action: &'static str,
     ) -> Result<(), String> {
@@ -679,13 +710,15 @@ impl CommsTrustMutationAuthority {
                 self.source_kind, self.operation,
             ));
         }
-        self.consume_once()?;
-        self.validate_peer_match(peer_id)
+        self.validate_peer_match(peer_id)?;
+        self.validate_trust_store_peer_match(trust_store_peer_id)?;
+        self.consume_once()
     }
 
     fn validate_add_operation(
         &self,
         operation: GeneratedCommsTrustAuthorityOperation,
+        trust_store_peer_id: Option<PeerId>,
         peer: &TrustedPeerDescriptor,
         action: &'static str,
     ) -> Result<(), String> {
@@ -695,9 +728,10 @@ impl CommsTrustMutationAuthority {
                 self.source_kind, self.operation,
             ));
         }
-        self.consume_once()?;
         self.validate_peer_match(peer.peer_id)?;
-        self.validate_peer_descriptor_match(peer)
+        self.validate_peer_descriptor_match(peer)?;
+        self.validate_trust_store_peer_match(trust_store_peer_id)?;
+        self.consume_once()
     }
 
     fn consume_once(&self) -> Result<(), String> {
@@ -714,6 +748,30 @@ impl CommsTrustMutationAuthority {
         } else {
             Err(format!(
                 "trust authority peer_id {expected:?} does not match mutation peer_id {peer_id}"
+            ))
+        }
+    }
+
+    fn validate_trust_store_peer_match(
+        &self,
+        trust_store_peer_id: Option<PeerId>,
+    ) -> Result<(), String> {
+        let Some(expected) = self.trust_store_peer_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(actual) = trust_store_peer_id else {
+            return Err(format!(
+                "trust authority from {:?} requires trust-store peer_id {expected:?}, but the target runtime did not expose one",
+                self.source_kind,
+            ));
+        };
+        if expected == actual.to_string() {
+            Ok(())
+        } else {
+            Err(format!(
+                "trust authority from {:?} for peer {:?} targets trust-store peer_id {expected:?}, not {actual}",
+                self.source_kind,
+                self.peer_id(),
             ))
         }
     }

@@ -42,6 +42,7 @@ impl MobTopologyFreshnessAuthority {
 #[derive(Debug, Clone)]
 pub struct MobExternalPeerTrustWiringObligation {
     edge: ExternalPeerEdge,
+    local_peer_id: PeerId,
     peer_id: PeerId,
     epoch: u64,
     comms_trust_authority_claims:
@@ -52,6 +53,10 @@ pub struct MobExternalPeerTrustWiringObligation {
 impl MobExternalPeerTrustWiringObligation {
     pub fn edge(&self) -> &ExternalPeerEdge {
         &self.edge
+    }
+
+    pub fn local_peer_id(&self) -> &PeerId {
+        &self.local_peer_id
     }
 
     pub fn peer_id(&self) -> &PeerId {
@@ -137,9 +142,10 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource
             Operation::PublicAdd | Operation::PrivateAdd
         ) {
             let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;
-            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring, peer_descriptor);
+            let grant = meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring, peer_descriptor)?;
+            return Ok(grant.with_trust_store_peer_id(self.local_peer_id.0.as_str()));
         }
-        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring))
+        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring).with_trust_store_peer_id(self.local_peer_id.0.as_str()))
     }
 }
 
@@ -159,10 +165,12 @@ pub fn extract_obligations_with_freshness(
         .filter_map(|effect| match effect {
             MobMachineEffect::ExternalPeerTrustWiringRequested {
                 edge,
+                local_peer_id,
                 peer_id,
                 epoch,
             } => Some(MobExternalPeerTrustWiringObligation {
                 edge: edge.clone(),
+                local_peer_id: local_peer_id.clone(),
                 peer_id: peer_id.clone(),
                 epoch: *epoch,
                 comms_trust_authority_claims: Default::default(),

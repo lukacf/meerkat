@@ -626,18 +626,35 @@ fn emit_comms_trust_grant_return(out: &mut String, protocol: &EffectHandoffProto
         )?;
         writeln!(
             out,
-            "            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, {}, {}, peer_descriptor);",
+            "            let grant = meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, {}, {}, peer_descriptor)?;",
             comms_trust_epoch_expr(protocol)?,
             row_owner_kind_expr,
         )?;
+        if let Some(target_peer_expr) = comms_trust_target_peer_expr(protocol)? {
+            writeln!(
+                out,
+                "            return Ok(grant.with_trust_store_peer_id({target_peer_expr}));"
+            )?;
+        } else {
+            writeln!(out, "            return Ok(grant);")?;
+        }
         writeln!(out, "        }}")?;
     }
-    writeln!(
-        out,
-        "        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, {}, {}))",
-        comms_trust_epoch_expr(protocol)?,
-        row_owner_kind_expr,
-    )?;
+    if let Some(target_peer_expr) = comms_trust_target_peer_expr(protocol)? {
+        writeln!(
+            out,
+            "        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, {}, {}).with_trust_store_peer_id({target_peer_expr}))",
+            comms_trust_epoch_expr(protocol)?,
+            row_owner_kind_expr,
+        )?;
+    } else {
+        writeln!(
+            out,
+            "        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, {}, {}))",
+            comms_trust_epoch_expr(protocol)?,
+            row_owner_kind_expr,
+        )?;
+    }
     Ok(())
 }
 
@@ -944,6 +961,22 @@ fn comms_trust_epoch_expr(protocol: &EffectHandoffProtocol) -> Result<&'static s
         | "mob_external_peer_trust_unwiring"
         | "mob_external_peer_trust_repair"
         | "mob_external_peer_reciprocal_trust" => Ok("self.epoch"),
+        other => bail!("unsupported comms trust authority protocol `{other}`"),
+    }
+}
+
+fn comms_trust_target_peer_expr(protocol: &EffectHandoffProtocol) -> Result<Option<&'static str>> {
+    match protocol.name.as_str() {
+        "mob_member_trust_wiring" | "mob_member_trust_unwiring" => Ok(Some(
+            "if self.a_peer_id.0 == request.peer_id() { self.b_peer_id.0.as_str() } else if self.b_peer_id.0 == request.peer_id() { self.a_peer_id.0.as_str() } else { return Err(format!(\"MobMachine member trust obligation does not carry requested peer {:?}\", request.peer_id())); }",
+        )),
+        "mob_external_peer_trust_wiring"
+        | "mob_external_peer_trust_unwiring"
+        | "mob_external_peer_trust_repair" => Ok(Some("self.local_peer_id.0.as_str()")),
+        "mob_external_peer_reciprocal_trust" => Ok(Some("self.edge.endpoint.peer_id.0.as_str()")),
+        "comms_trust_reconcile" | "supervisor_trust_publish" | "supervisor_trust_revoke" => {
+            Ok(None)
+        }
         other => bail!("unsupported comms trust authority protocol `{other}`"),
     }
 }

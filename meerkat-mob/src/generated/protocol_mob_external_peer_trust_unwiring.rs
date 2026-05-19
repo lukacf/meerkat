@@ -42,6 +42,7 @@ impl MobTopologyFreshnessAuthority {
 #[derive(Debug, Clone)]
 pub struct MobExternalPeerTrustUnwiringObligation {
     edge: ExternalPeerEdge,
+    local_peer_id: PeerId,
     peer_id: PeerId,
     epoch: u64,
     comms_trust_authority_claims:
@@ -52,6 +53,10 @@ pub struct MobExternalPeerTrustUnwiringObligation {
 impl MobExternalPeerTrustUnwiringObligation {
     pub fn edge(&self) -> &ExternalPeerEdge {
         &self.edge
+    }
+
+    pub fn local_peer_id(&self) -> &PeerId {
+        &self.local_peer_id
     }
 
     pub fn peer_id(&self) -> &PeerId {
@@ -108,7 +113,7 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource
                 request.peer_id()
             ));
         }
-        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring))
+        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring).with_trust_store_peer_id(self.local_peer_id.0.as_str()))
     }
 }
 
@@ -128,10 +133,12 @@ pub fn extract_obligations_with_freshness(
         .filter_map(|effect| match effect {
             MobMachineEffect::ExternalPeerTrustUnwiringRequested {
                 edge,
+                local_peer_id,
                 peer_id,
                 epoch,
             } => Some(MobExternalPeerTrustUnwiringObligation {
                 edge: edge.clone(),
+                local_peer_id: local_peer_id.clone(),
                 peer_id: peer_id.clone(),
                 epoch: *epoch,
                 comms_trust_authority_claims: Default::default(),

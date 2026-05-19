@@ -183,7 +183,8 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for CommsTrustRecon
             Operation::PublicAdd | Operation::PrivateAdd
         ) {
             let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;
-            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, self.peer_projection_epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection, peer_descriptor);
+            let grant = meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, self.peer_projection_epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection, peer_descriptor)?;
+            return Ok(grant);
         }
         Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.peer_projection_epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection))
     }

@@ -1068,6 +1068,7 @@ pub struct AuthLeaseRestoreSnapshot {
     lease_key: LeaseKey,
     snapshot: AuthLeaseSnapshot,
     captured_by: std::any::TypeId,
+    captured_by_instance: usize,
 }
 
 impl AuthLeaseRestoreSnapshot {
@@ -1075,11 +1076,13 @@ impl AuthLeaseRestoreSnapshot {
         lease_key: LeaseKey,
         snapshot: AuthLeaseSnapshot,
         captured_by: std::any::TypeId,
+        captured_by_instance: usize,
     ) -> Self {
         Self {
             lease_key,
             snapshot,
             captured_by,
+            captured_by_instance,
         }
     }
 
@@ -1094,6 +1097,11 @@ impl AuthLeaseRestoreSnapshot {
     #[doc(hidden)]
     pub fn captured_by_type_id(&self) -> std::any::TypeId {
         self.captured_by
+    }
+
+    #[doc(hidden)]
+    pub fn captured_by_instance_id(&self) -> usize {
+        self.captured_by_instance
     }
 }
 
@@ -1119,9 +1127,9 @@ impl AuthLeaseTransition {
         self.credential_published_at_millis
     }
 
-    #[cfg(any(test, feature = "test-authority"))]
+    #[cfg(test)]
     #[doc(hidden)]
-    pub fn __from_test_authority(
+    pub(crate) fn __from_test_authority(
         generation: u64,
         credential_published_at_millis: Option<u64>,
     ) -> Self {
@@ -1330,7 +1338,13 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
             lease_key.clone(),
             self.snapshot(lease_key),
             self.type_id(),
+            self.auth_lifecycle_restore_instance_id(),
         )
+    }
+
+    #[doc(hidden)]
+    fn auth_lifecycle_restore_instance_id(&self) -> usize {
+        (self as *const Self as *const ()) as usize
     }
 
     /// Restore a captured lifecycle snapshot after a later durable write failed.

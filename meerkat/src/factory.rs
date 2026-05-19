@@ -5605,10 +5605,16 @@ mod tests {
             fn complete_refresh(
                 &self,
                 _lease_key: &LeaseKey,
-                _new_expires_at: u64,
+                new_expires_at: u64,
                 _now: u64,
             ) -> Result<AuthLeaseTransition, DslTransitionError> {
-                Ok(AuthLeaseTransition::__from_test_authority(0, None))
+                let handle = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+                let lease_key = LeaseKey::new(
+                    meerkat_core::RealmId::parse("test").unwrap(),
+                    meerkat_core::BindingId::parse("auth_transition").unwrap(),
+                    None,
+                );
+                handle.acquire_lease(&lease_key, new_expires_at)
             }
 
             fn refresh_failed(

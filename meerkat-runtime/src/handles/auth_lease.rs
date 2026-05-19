@@ -1050,10 +1050,12 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         &self,
         captured: &AuthLeaseRestoreSnapshot,
     ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
-        if captured.captured_by_type_id() != std::any::TypeId::of::<RuntimeAuthLeaseHandle>() {
+        if captured.captured_by_type_id() != std::any::TypeId::of::<RuntimeAuthLeaseHandle>()
+            || captured.captured_by_instance_id() != self.auth_lifecycle_restore_instance_id()
+        {
             return Err(DslTransitionError::new(
                 "AuthLeaseHandle::restore_auth_lifecycle_snapshot",
-                "auth lifecycle restore snapshot was not captured from RuntimeAuthLeaseHandle",
+                "auth lifecycle restore snapshot was not captured from this RuntimeAuthLeaseHandle",
             ));
         }
         let lease_key = captured.lease_key();
@@ -1153,6 +1155,10 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             to_phase,
         );
         Ok(Some(auth_transition))
+    }
+
+    fn auth_lifecycle_restore_instance_id(&self) -> usize {
+        Arc::as_ptr(&self.machines) as usize
     }
 
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
@@ -1567,6 +1573,29 @@ mod tests {
         assert!(!restored.credential_present);
         assert_eq!(restored.generation, 0);
         assert_eq!(restored.credential_published_at_millis, None);
+    }
+
+    #[test]
+    fn restore_snapshot_rejects_capture_from_different_runtime_handle() {
+        let first = RuntimeAuthLeaseHandle::new();
+        let second = RuntimeAuthLeaseHandle::new();
+        let key = lease("dev", "shared");
+        first.acquire_lease(&key, 1_800_000_000).unwrap();
+        let captured = first.capture_auth_lifecycle_restore_snapshot(&key);
+
+        let err = second
+            .restore_auth_lifecycle_snapshot(&captured)
+            .unwrap_err();
+
+        assert_eq!(
+            err.context,
+            "AuthLeaseHandle::restore_auth_lifecycle_snapshot"
+        );
+        assert!(
+            err.reason.contains("this RuntimeAuthLeaseHandle"),
+            "restore must reject snapshots captured from a different runtime handle: {err:?}"
+        );
+        assert_eq!(second.snapshot(&key).phase, None);
     }
 
     #[test]

@@ -37,6 +37,14 @@ use meerkat_core::{BindingId, HttpAuthorizationRequest, HttpAuthorizer, ProfileI
 
 const TEST_PRIVATE_KEY: &str = include_str!("fixtures/test_sa_key.pem");
 
+fn generated_auth_transition_lease_key_for_test() -> LeaseKey {
+    LeaseKey::new(
+        RealmId::parse("test").unwrap(),
+        BindingId::parse("auth_transition").unwrap(),
+        None,
+    )
+}
+
 #[derive(Deserialize, Clone, Debug)]
 #[allow(dead_code)]
 struct OAuthForm {
@@ -140,6 +148,7 @@ struct RecordingAuthLeaseHandle {
     snapshot: Mutex<AuthLeaseSnapshot>,
     generation: Mutex<u64>,
     fail_action: Mutex<Option<&'static str>>,
+    transition_authority: meerkat_runtime::RuntimeAuthLeaseHandle,
 }
 
 impl Default for RecordingAuthLeaseHandle {
@@ -155,6 +164,7 @@ impl Default for RecordingAuthLeaseHandle {
             }),
             generation: Mutex::new(0),
             fail_action: Mutex::new(None),
+            transition_authority: meerkat_runtime::RuntimeAuthLeaseHandle::new(),
         }
     }
 }
@@ -209,15 +219,18 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             .lock()
             .unwrap()
             .push(LeaseEvent::Acquire(lease_key.clone(), expires_at));
-        let generation = self.next_generation();
+        let transition = self
+            .transition_authority
+            .acquire_lease(&generated_auth_transition_lease_key_for_test(), expires_at)?;
+        let generation = transition.generation();
         *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some(expires_at),
             credential_present: true,
             generation,
-            credential_published_at_millis: None,
+            credential_published_at_millis: transition.credential_published_at_millis(),
         };
-        Ok(AuthLeaseTransition::__from_test_authority(generation, None))
+        Ok(transition)
     }
 
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -258,15 +271,19 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
                 lease_key.clone(),
                 new_expires_at,
             ));
-        let generation = self.next_generation();
+        let transition = self.transition_authority.acquire_lease(
+            &generated_auth_transition_lease_key_for_test(),
+            new_expires_at,
+        )?;
+        let generation = transition.generation();
         *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some(new_expires_at),
             credential_present: true,
             generation,
-            credential_published_at_millis: None,
+            credential_published_at_millis: transition.credential_published_at_millis(),
         };
-        Ok(AuthLeaseTransition::__from_test_authority(generation, None))
+        Ok(transition)
     }
 
     fn refresh_failed(

@@ -92,6 +92,56 @@ fn default_auth_binding() -> AuthBindingRef {
     }
 }
 
+fn generated_auth_transition_for_test(expires_at: u64) -> AuthLeaseTransition {
+    let handle = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+    let lease_key = LeaseKey::new(
+        RealmId::parse("test").unwrap(),
+        BindingId::parse("auth_transition").unwrap(),
+        None,
+    );
+    handle.acquire_lease(&lease_key, expires_at).unwrap()
+}
+
+fn mark_tokens_lifecycle_published_for_test(
+    tokens: &PersistedTokens,
+    generation: u64,
+    credential_published_at_millis: Option<u64>,
+) -> PersistedTokens {
+    let mut marked = tokens.clone();
+    let mut marker = serde_json::json!({
+        "published": true,
+        "version": 2,
+        "generation": generation,
+        "expires_at": meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
+    });
+    if let Some(credential_published_at_millis) = credential_published_at_millis
+        && let Some(marker) = marker.as_object_mut()
+    {
+        marker.insert(
+            "credential_published_at_millis".to_string(),
+            serde_json::json!(credential_published_at_millis),
+        );
+    }
+    match &mut marked.metadata {
+        serde_json::Value::Object(map) => {
+            map.insert("meerkat_auth_lifecycle".to_string(), marker);
+        }
+        serde_json::Value::Null => {
+            let mut metadata = serde_json::Map::new();
+            metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
+            marked.metadata = serde_json::Value::Object(metadata);
+        }
+        _ => {
+            let previous = std::mem::replace(&mut marked.metadata, serde_json::Value::Null);
+            let mut metadata = serde_json::Map::new();
+            metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
+            metadata.insert("meerkat_previous_metadata".to_string(), previous);
+            marked.metadata = serde_json::Value::Object(metadata);
+        }
+    }
+    marked
+}
+
 async fn assert_claude_ai_authorizer_headers(connection: &ResolvedConnection, token: &str) {
     let authorizer = connection
         .resolved_authorizer()
@@ -139,12 +189,9 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
     fn acquire_lease(
         &self,
         _lease_key: &LeaseKey,
-        _expires_at: u64,
+        expires_at: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(AuthLeaseTransition::__from_test_authority(
-            1,
-            self.credential_published_at_millis,
-        ))
+        Ok(generated_auth_transition_for_test(expires_at))
     }
 
     fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -158,13 +205,10 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
     fn complete_refresh(
         &self,
         _lease_key: &LeaseKey,
-        _new_expires_at: u64,
+        new_expires_at: u64,
         _now: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(AuthLeaseTransition::__from_test_authority(
-            1,
-            self.credential_published_at_millis,
-        ))
+        Ok(generated_auth_transition_for_test(new_expires_at))
     }
 
     fn refresh_failed(
@@ -247,12 +291,10 @@ impl AuthLeaseHandle for MutableAuthLeaseHandle {
         snapshot.phase = Some(AuthLeasePhase::Valid);
         snapshot.expires_at = Some(new_expires_at);
         snapshot.credential_present = true;
-        snapshot.generation = snapshot.generation.saturating_add(1);
-        snapshot.credential_published_at_millis = Some(2_000);
-        Ok(AuthLeaseTransition::__from_test_authority(
-            snapshot.generation,
-            snapshot.credential_published_at_millis,
-        ))
+        let transition = generated_auth_transition_for_test(new_expires_at);
+        snapshot.generation = transition.generation();
+        snapshot.credential_published_at_millis = transition.credential_published_at_millis();
+        Ok(transition)
     }
 
     fn refresh_failed(
@@ -393,10 +435,7 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
     store
         .save(
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &persisted,
-                AuthLeaseTransition::__from_test_authority(1, Some(1_000)),
-            ),
+            &mark_tokens_lifecycle_published_for_test(&persisted, 1, Some(1_000)),
         )
         .await
         .unwrap();
@@ -482,10 +521,7 @@ async fn claude_ai_oauth_reauth_required_is_typed() {
     store
         .save(
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &persisted,
-                AuthLeaseTransition::__from_test_authority(1, None),
-            ),
+            &mark_tokens_lifecycle_published_for_test(&persisted, 1, None),
         )
         .await
         .unwrap();
@@ -633,10 +669,7 @@ async fn claude_ai_oauth_expired_authmachine_lease_refreshes_through_provider_ru
     store
         .save(
             &key,
-            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &expired,
-                AuthLeaseTransition::__from_test_authority(1, Some(1_000)),
-            ),
+            &mark_tokens_lifecycle_published_for_test(&expired, 1, Some(1_000)),
         )
         .await
         .unwrap();
@@ -696,10 +729,7 @@ async fn claude_ai_oauth_refresh_failure_is_typed() {
     store
         .save(
             &key,
-            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &expired,
-                AuthLeaseTransition::__from_test_authority(1, Some(1_000)),
-            ),
+            &mark_tokens_lifecycle_published_for_test(&expired, 1, Some(1_000)),
         )
         .await
         .unwrap();
@@ -748,10 +778,7 @@ async fn claude_ai_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() 
     store
         .save(
             &key,
-            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &fresh,
-                AuthLeaseTransition::__from_test_authority(1, Some(1_000)),
-            ),
+            &mark_tokens_lifecycle_published_for_test(&fresh, 1, Some(1_000)),
         )
         .await
         .unwrap();
@@ -811,10 +838,7 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
     store
         .save(
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &persisted,
-                meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
-            ),
+            &mark_tokens_lifecycle_published_for_test(&persisted, 1, None),
         )
         .await
         .unwrap();

@@ -110,7 +110,6 @@ skills = ["meerkat/skills"]
 integration-real-tests = []
 
 [dev-dependencies]
-meerkat-core = { workspace = true, features = ["test-authority"] }
 parking_lot = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }

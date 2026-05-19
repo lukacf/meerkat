@@ -12750,6 +12750,47 @@ mod tests {
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    fn mark_tokens_lifecycle_published_for_test(
+        tokens: &meerkat_providers::auth_store::PersistedTokens,
+        generation: u64,
+        credential_published_at_millis: Option<u64>,
+    ) -> meerkat_providers::auth_store::PersistedTokens {
+        let mut marked = tokens.clone();
+        let mut marker = serde_json::json!({
+            "published": true,
+            "version": 2,
+            "generation": generation,
+            "expires_at": meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
+        });
+        if let Some(credential_published_at_millis) = credential_published_at_millis
+            && let Some(marker) = marker.as_object_mut()
+        {
+            marker.insert(
+                "credential_published_at_millis".to_string(),
+                serde_json::json!(credential_published_at_millis),
+            );
+        }
+        match &mut marked.metadata {
+            serde_json::Value::Object(map) => {
+                map.insert("meerkat_auth_lifecycle".to_string(), marker);
+            }
+            serde_json::Value::Null => {
+                let mut metadata = serde_json::Map::new();
+                metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
+                marked.metadata = serde_json::Value::Object(metadata);
+            }
+            _ => {
+                let previous = std::mem::replace(&mut marked.metadata, serde_json::Value::Null);
+                let mut metadata = serde_json::Map::new();
+                metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
+                metadata.insert("meerkat_previous_metadata".to_string(), previous);
+                marked.metadata = serde_json::Value::Object(metadata);
+            }
+        }
+        marked
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
     async fn test_cli_auth_status_does_not_rehydrate_marked_oauth_token_after_restart() {
         use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
@@ -12762,10 +12803,7 @@ mod tests {
         store
             .save(
                 &TokenKey::from_auth_binding(&auth_binding),
-                &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                    &tokens,
-                    meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
-                ),
+                &mark_tokens_lifecycle_published_for_test(&tokens, 1, None),
             )
             .await
             .expect("token save succeeds");

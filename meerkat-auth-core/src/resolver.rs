@@ -1274,6 +1274,58 @@ mod tests {
     };
     use meerkat_llm_core::provider_runtime::{ProviderRuntimeCatalog, ValidatedBinding};
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn generated_auth_transition_for_test(expires_at: u64) -> AuthLeaseTransition {
+        let handle = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let lease_key = LeaseKey::new(
+            meerkat_core::connection::RealmId::parse("test").unwrap(),
+            meerkat_core::connection::BindingId::parse("auth_transition").unwrap(),
+            None,
+        );
+        handle.acquire_lease(&lease_key, expires_at).unwrap()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn mark_tokens_lifecycle_published_for_test(
+        tokens: &PersistedTokens,
+        generation: u64,
+        credential_published_at_millis: Option<u64>,
+    ) -> PersistedTokens {
+        let mut marked = tokens.clone();
+        let mut marker = serde_json::json!({
+            "published": true,
+            "version": 2,
+            "generation": generation,
+            "expires_at": meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
+        });
+        if let Some(credential_published_at_millis) = credential_published_at_millis
+            && let Some(marker) = marker.as_object_mut()
+        {
+            marker.insert(
+                "credential_published_at_millis".to_string(),
+                serde_json::json!(credential_published_at_millis),
+            );
+        }
+        match &mut marked.metadata {
+            serde_json::Value::Object(map) => {
+                map.insert("meerkat_auth_lifecycle".to_string(), marker);
+            }
+            serde_json::Value::Null => {
+                let mut metadata = serde_json::Map::new();
+                metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
+                marked.metadata = serde_json::Value::Object(metadata);
+            }
+            _ => {
+                let previous = std::mem::replace(&mut marked.metadata, serde_json::Value::Null);
+                let mut metadata = serde_json::Map::new();
+                metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
+                metadata.insert("meerkat_previous_metadata".to_string(), previous);
+                marked.metadata = serde_json::Value::Object(metadata);
+            }
+        }
+        marked
+    }
+
     #[test]
     fn extract_secret_inline_variant() {
         let env = ResolvedAuthEnvelope::InlineSecret {
@@ -1558,12 +1610,10 @@ mod tests {
                 Some(expires_at)
             };
             snapshot.credential_present = true;
-            snapshot.generation += 1;
-            snapshot.credential_published_at_millis = Some(10_000);
-            Ok(AuthLeaseTransition::__from_test_authority(
-                snapshot.generation,
-                snapshot.credential_published_at_millis,
-            ))
+            let transition = generated_auth_transition_for_test(expires_at);
+            snapshot.generation = transition.generation();
+            snapshot.credential_published_at_millis = transition.credential_published_at_millis();
+            Ok(transition)
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -1594,12 +1644,10 @@ mod tests {
                 Some(new_expires_at)
             };
             snapshot.credential_present = true;
-            snapshot.generation += 1;
-            snapshot.credential_published_at_millis = Some(10_000);
-            Ok(AuthLeaseTransition::__from_test_authority(
-                snapshot.generation,
-                snapshot.credential_published_at_millis,
-            ))
+            let transition = generated_auth_transition_for_test(new_expires_at);
+            snapshot.generation = transition.generation();
+            snapshot.credential_published_at_millis = transition.credential_published_at_millis();
+            Ok(transition)
         }
 
         fn refresh_failed(
@@ -1639,10 +1687,7 @@ mod tests {
             let snapshot = captured.snapshot();
             *self.snapshot.lock().expect("snapshot lock") = snapshot.clone();
             Ok(snapshot.credential_present.then(|| {
-                AuthLeaseTransition::__from_test_authority(
-                    snapshot.generation,
-                    snapshot.credential_published_at_millis,
-                )
+                generated_auth_transition_for_test(snapshot.expires_at.unwrap_or(u64::MAX))
             }))
         }
 
@@ -1658,9 +1703,8 @@ mod tests {
             _lease_key: &LeaseKey,
             _expires_at: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition::__from_test_authority(
-                self.snapshot.generation,
-                None,
+            Ok(generated_auth_transition_for_test(
+                self.snapshot.expires_at.unwrap_or(u64::MAX),
             ))
         }
 
@@ -1678,9 +1722,8 @@ mod tests {
             _new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition::__from_test_authority(
-                self.snapshot.generation,
-                None,
+            Ok(generated_auth_transition_for_test(
+                self.snapshot.expires_at.unwrap_or(u64::MAX),
             ))
         }
 
@@ -1932,9 +1975,7 @@ mod tests {
         let mut tokens = chatgpt_oauth_tokens("expiring-access");
         tokens.expires_at = Some(chrono::Utc::now() + chrono::Duration::seconds(30));
         let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
-        let transition = AuthLeaseTransition::__from_test_authority(7, Some(2_000));
-        let marked =
-            meerkat_core::mark_tokens_lifecycle_published_for_transition(&tokens, transition);
+        let marked = mark_tokens_lifecycle_published_for_test(&tokens, 7, Some(2_000));
         store.save(&key, &marked).await.unwrap();
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
@@ -2042,10 +2083,7 @@ mod tests {
         store
             .save(
                 &key,
-                &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                    &tokens,
-                    AuthLeaseTransition::__from_test_authority(1, published_at),
-                ),
+                &mark_tokens_lifecycle_published_for_test(&tokens, 1, published_at),
             )
             .await
             .unwrap();
@@ -2083,10 +2121,7 @@ mod tests {
         store
             .save(
                 &key,
-                &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                    &tokens,
-                    AuthLeaseTransition::__from_test_authority(1, None),
-                ),
+                &mark_tokens_lifecycle_published_for_test(&tokens, 1, None),
             )
             .await
             .unwrap();
@@ -2130,10 +2165,7 @@ mod tests {
         store
             .save(
                 &key,
-                &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                    &tokens,
-                    meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
-                ),
+                &mark_tokens_lifecycle_published_for_test(&tokens, 1, None),
             )
             .await
             .unwrap();
@@ -2176,10 +2208,7 @@ mod tests {
         store
             .save(
                 &key,
-                &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                    &tokens,
-                    AuthLeaseTransition::__from_test_authority(1, publication_time),
-                ),
+                &mark_tokens_lifecycle_published_for_test(&tokens, 1, publication_time),
             )
             .await
             .unwrap();
@@ -2214,10 +2243,7 @@ mod tests {
         store
             .save(
                 &key,
-                &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                    &tokens,
-                    AuthLeaseTransition::__from_test_authority(2, Some(3_000)),
-                ),
+                &mark_tokens_lifecycle_published_for_test(&tokens, 2, Some(3_000)),
             )
             .await
             .unwrap();
@@ -2263,28 +2289,19 @@ mod tests {
             credential_published_at_millis: Some(2_000),
         };
 
-        let older = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &tokens,
-            AuthLeaseTransition::__from_test_authority(2, Some(1_000)),
-        );
+        let older = mark_tokens_lifecycle_published_for_test(&tokens, 2, Some(1_000));
         assert_eq!(
             oauth_lifecycle_marker_relation(&older, &snapshot),
             OAuthLifecycleMarkerRelation::TokenStale
         );
 
-        let newer = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &tokens,
-            AuthLeaseTransition::__from_test_authority(2, Some(3_000)),
-        );
+        let newer = mark_tokens_lifecycle_published_for_test(&tokens, 2, Some(3_000));
         assert_eq!(
             oauth_lifecycle_marker_relation(&newer, &snapshot),
             OAuthLifecycleMarkerRelation::TokenNewer
         );
 
-        let matching = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &tokens,
-            AuthLeaseTransition::__from_test_authority(2, Some(2_000)),
-        );
+        let matching = mark_tokens_lifecycle_published_for_test(&tokens, 2, Some(2_000));
         assert_eq!(
             oauth_lifecycle_marker_relation(&matching, &snapshot),
             OAuthLifecycleMarkerRelation::Matches
@@ -2305,10 +2322,7 @@ mod tests {
 
         let mut older_longer = chatgpt_oauth_tokens("older-longer-access");
         older_longer.expires_at = Some(snapshot_expires_at + chrono::Duration::hours(1));
-        let older_longer = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &older_longer,
-            AuthLeaseTransition::__from_test_authority(2, Some(1_000)),
-        );
+        let older_longer = mark_tokens_lifecycle_published_for_test(&older_longer, 2, Some(1_000));
         assert_eq!(
             oauth_lifecycle_marker_relation(&older_longer, &snapshot),
             OAuthLifecycleMarkerRelation::TokenStale
@@ -2316,10 +2330,8 @@ mod tests {
 
         let mut newer_shorter = chatgpt_oauth_tokens("newer-shorter-access");
         newer_shorter.expires_at = Some(snapshot_expires_at - chrono::Duration::hours(1));
-        let newer_shorter = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &newer_shorter,
-            AuthLeaseTransition::__from_test_authority(2, Some(3_000)),
-        );
+        let newer_shorter =
+            mark_tokens_lifecycle_published_for_test(&newer_shorter, 2, Some(3_000));
         assert_eq!(
             oauth_lifecycle_marker_relation(&newer_shorter, &snapshot),
             OAuthLifecycleMarkerRelation::TokenNewer
@@ -2340,10 +2352,8 @@ mod tests {
 
         let mut same_time_longer = chatgpt_oauth_tokens("same-time-longer-access");
         same_time_longer.expires_at = Some(snapshot_expires_at + chrono::Duration::hours(1));
-        let same_time_longer = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &same_time_longer,
-            AuthLeaseTransition::__from_test_authority(2, Some(2_000)),
-        );
+        let same_time_longer =
+            mark_tokens_lifecycle_published_for_test(&same_time_longer, 2, Some(2_000));
         assert_eq!(
             oauth_lifecycle_marker_relation(&same_time_longer, &snapshot),
             OAuthLifecycleMarkerRelation::Invalid,
@@ -2352,10 +2362,8 @@ mod tests {
 
         let mut same_time_shorter = chatgpt_oauth_tokens("same-time-shorter-access");
         same_time_shorter.expires_at = Some(snapshot_expires_at - chrono::Duration::hours(1));
-        let same_time_shorter = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &same_time_shorter,
-            AuthLeaseTransition::__from_test_authority(2, Some(2_000)),
-        );
+        let same_time_shorter =
+            mark_tokens_lifecycle_published_for_test(&same_time_shorter, 2, Some(2_000));
         assert_eq!(
             oauth_lifecycle_marker_relation(&same_time_shorter, &snapshot),
             OAuthLifecycleMarkerRelation::Invalid,
@@ -2365,11 +2373,11 @@ mod tests {
         let mut same_time_same_expiry_future_generation =
             chatgpt_oauth_tokens("same-time-same-expiry-future-generation-access");
         same_time_same_expiry_future_generation.expires_at = Some(snapshot_expires_at);
-        let same_time_same_expiry_future_generation =
-            meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &same_time_same_expiry_future_generation,
-                AuthLeaseTransition::__from_test_authority(3, Some(2_000)),
-            );
+        let same_time_same_expiry_future_generation = mark_tokens_lifecycle_published_for_test(
+            &same_time_same_expiry_future_generation,
+            3,
+            Some(2_000),
+        );
         assert_eq!(
             oauth_lifecycle_marker_relation(&same_time_same_expiry_future_generation, &snapshot),
             OAuthLifecycleMarkerRelation::Invalid
@@ -2389,10 +2397,7 @@ mod tests {
         };
         let mut tokens = chatgpt_oauth_tokens("same-time-same-expiry-stale-generation-access");
         tokens.expires_at = Some(snapshot_expires_at);
-        let stale_same_time = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &tokens,
-            AuthLeaseTransition::__from_test_authority(1, Some(2_000)),
-        );
+        let stale_same_time = mark_tokens_lifecycle_published_for_test(&tokens, 1, Some(2_000));
 
         assert_eq!(
             oauth_lifecycle_marker_relation(&stale_same_time, &snapshot),
@@ -2414,10 +2419,7 @@ mod tests {
             generation: 2,
             credential_published_at_millis: None,
         };
-        let marker = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &tokens,
-            meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
-        );
+        let marker = mark_tokens_lifecycle_published_for_test(&tokens, 1, None);
 
         assert_eq!(
             oauth_lifecycle_marker_relation(&marker, &snapshot),
@@ -2465,14 +2467,8 @@ mod tests {
         let lease_key = LeaseKey::from_auth_binding(binding.auth_binding_ref());
         let tokens = chatgpt_oauth_tokens("token-newer-refresh-access");
         let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
-        let previous_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &tokens,
-            AuthLeaseTransition::__from_test_authority(1, Some(2_000)),
-        );
-        let current_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &tokens,
-            AuthLeaseTransition::__from_test_authority(2, Some(3_000)),
-        );
+        let previous_tokens = mark_tokens_lifecycle_published_for_test(&tokens, 1, Some(2_000));
+        let current_tokens = mark_tokens_lifecycle_published_for_test(&tokens, 2, Some(3_000));
         store.save(&key, &current_tokens).await.unwrap();
         let initial_snapshot = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
@@ -2526,9 +2522,10 @@ mod tests {
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
         let lease_key = LeaseKey::from_auth_binding(binding.auth_binding_ref());
-        let previous_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+        let previous_tokens = mark_tokens_lifecycle_published_for_test(
             &chatgpt_oauth_tokens("expired-access"),
-            AuthLeaseTransition::__from_test_authority(1, Some(2_000)),
+            1,
+            Some(2_000),
         );
         store.save(&key, &previous_tokens).await.unwrap();
         let previous_expires_at =
@@ -2686,10 +2683,7 @@ mod tests {
         let lease_key = LeaseKey::from_auth_binding(binding.auth_binding_ref());
         let mut expired_tokens = chatgpt_oauth_tokens("transient-refresh-access");
         expired_tokens.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(5));
-        let tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &expired_tokens,
-            AuthLeaseTransition::__from_test_authority(1, Some(2_000)),
-        );
+        let tokens = mark_tokens_lifecycle_published_for_test(&expired_tokens, 1, Some(2_000));
         store.save(&key, &tokens).await.unwrap();
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Expiring),
@@ -2957,9 +2951,10 @@ mod tests {
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
-        let initial_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+        let initial_tokens = mark_tokens_lifecycle_published_for_test(
             &chatgpt_oauth_tokens("expired-access"),
-            meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
+            1,
+            None,
         );
         store.save(&key, &initial_tokens).await.unwrap();
         let auth_lease = StaticAuthLeaseHandle::valid_generation_with_expiry(
@@ -3060,9 +3055,10 @@ mod tests {
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
         let lease_key = LeaseKey::from_auth_binding(binding.auth_binding_ref());
-        let previous_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+        let previous_tokens = mark_tokens_lifecycle_published_for_test(
             &chatgpt_oauth_tokens("expired-access"),
-            meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
+            1,
+            None,
         );
         let auth_lease = StaticAuthLeaseHandle::valid_generation_with_expiry(
             1,
@@ -3106,16 +3102,14 @@ mod tests {
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
         let lease_key = LeaseKey::from_auth_binding(binding.auth_binding_ref());
-        let previous_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+        let previous_tokens = mark_tokens_lifecycle_published_for_test(
             &chatgpt_oauth_tokens("expired-access"),
-            AuthLeaseTransition::__from_test_authority(1, Some(2_000)),
+            1,
+            Some(2_000),
         );
         let mut refreshed = chatgpt_oauth_tokens("shared-refresh-complete-access");
         refreshed.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(2));
-        let shared_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &refreshed,
-            AuthLeaseTransition::__from_test_authority(2, Some(3_000)),
-        );
+        let shared_tokens = mark_tokens_lifecycle_published_for_test(&refreshed, 2, Some(3_000));
         store.save(&key, &previous_tokens).await.unwrap();
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Refreshing),

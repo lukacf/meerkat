@@ -1895,6 +1895,56 @@ mod tests {
         }
     }
 
+    fn generated_auth_transition_for_test(expires_at: u64) -> AuthLeaseTransition {
+        let handle = RuntimeAuthLeaseHandle::new();
+        let lease_key = LeaseKey::new(
+            meerkat_core::RealmId::parse("test").unwrap(),
+            meerkat_core::BindingId::parse("auth_transition").unwrap(),
+            None,
+        );
+        handle.acquire_lease(&lease_key, expires_at).unwrap()
+    }
+
+    fn mark_tokens_lifecycle_published_for_test(
+        tokens: &PersistedTokens,
+        generation: u64,
+        credential_published_at_millis: Option<u64>,
+    ) -> PersistedTokens {
+        let mut marked = tokens.clone();
+        let mut marker = serde_json::json!({
+            "published": true,
+            "version": 2,
+            "generation": generation,
+            "expires_at": meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
+        });
+        if let Some(credential_published_at_millis) = credential_published_at_millis
+            && let Some(marker) = marker.as_object_mut()
+        {
+            marker.insert(
+                "credential_published_at_millis".to_string(),
+                serde_json::json!(credential_published_at_millis),
+            );
+        }
+        match &mut marked.metadata {
+            serde_json::Value::Object(map) => {
+                map.insert("meerkat_auth_lifecycle".to_string(), marker);
+            }
+            serde_json::Value::Null => {
+                let mut metadata = serde_json::Map::new();
+                metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
+                marked.metadata = serde_json::Value::Object(metadata);
+            }
+            _ => {
+                let previous = std::mem::replace(&mut marked.metadata, serde_json::Value::Null);
+                let mut metadata = serde_json::Map::new();
+                metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
+                metadata.insert("meerkat_previous_metadata".to_string(), previous);
+                marked.metadata = serde_json::Value::Object(metadata);
+            }
+        }
+        marked
+    }
+
     fn test_runtime_with_config(config: meerkat_core::Config) -> SessionRuntime {
         let token_store: Arc<dyn TokenStore> =
             Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new());
@@ -2279,10 +2329,10 @@ mod tests {
         fn complete_refresh(
             &self,
             _lease_key: &LeaseKey,
-            _new_expires_at: u64,
+            new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition::__from_test_authority(1, None))
+            Ok(generated_auth_transition_for_test(new_expires_at))
         }
 
         fn refresh_failed(
@@ -2318,9 +2368,9 @@ mod tests {
         fn acquire_lease(
             &self,
             _lease_key: &LeaseKey,
-            _expires_at: u64,
+            expires_at: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition::__from_test_authority(1, None))
+            Ok(generated_auth_transition_for_test(expires_at))
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -2334,10 +2384,10 @@ mod tests {
         fn complete_refresh(
             &self,
             _lease_key: &LeaseKey,
-            _new_expires_at: u64,
+            new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition::__from_test_authority(1, None))
+            Ok(generated_auth_transition_for_test(new_expires_at))
         }
 
         fn refresh_failed(
@@ -3209,10 +3259,7 @@ mod tests {
         store
             .save(
                 &TokenKey::from_auth_binding(&auth_binding),
-                &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                    &tokens,
-                    meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
-                ),
+                &mark_tokens_lifecycle_published_for_test(&tokens, 1, None),
             )
             .await
             .unwrap();

@@ -292,6 +292,16 @@ mod tests {
     use meerkat_core::handles::{AuthLeaseSnapshot, AuthLeaseTransition};
     use std::sync::Mutex;
 
+    fn generated_auth_transition_for_test(expires_at: u64) -> AuthLeaseTransition {
+        let handle = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let lease_key = LeaseKey::new(
+            RealmId::parse("test").unwrap(),
+            BindingId::parse("auth_transition").unwrap(),
+            None,
+        );
+        handle.acquire_lease(&lease_key, expires_at).unwrap()
+    }
+
     struct SnapshotRaceAuthLeaseHandle {
         snapshot: Mutex<AuthLeaseSnapshot>,
         generation: Mutex<u64>,
@@ -335,10 +345,9 @@ mod tests {
                 generation: accepted_generation + 1,
                 credential_published_at_millis: None,
             };
-            Ok(AuthLeaseTransition::__from_test_authority(
-                accepted_generation,
-                None,
-            ))
+            let transition = generated_auth_transition_for_test(expires_at);
+            assert_eq!(transition.generation(), accepted_generation);
+            Ok(transition)
         }
 
         fn accepted_generations(&self) -> Vec<u64> {

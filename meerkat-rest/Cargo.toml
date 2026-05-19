@@ -78,7 +78,6 @@ workgraph = ["meerkat/workgraph"]
 integration-real-tests = []
 
 [dev-dependencies]
-meerkat-core = { workspace = true, features = ["test-authority"] }
 hyper = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }

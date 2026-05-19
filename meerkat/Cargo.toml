@@ -60,7 +60,6 @@ tempfile = { workspace = true }
 meerkat-core = { workspace = true, features = [
     "jsonschema",
     "__meerkat-facade-agent-factory-build",
-    "test-authority",
 ] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 serde = { workspace = true }

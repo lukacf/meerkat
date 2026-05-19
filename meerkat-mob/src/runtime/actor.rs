@@ -1711,7 +1711,7 @@ impl MobActor {
     }
 
     async fn machine_member_material(
-        &self,
+        &mut self,
         agent_identity: &MeerkatId,
         include_session_details: bool,
     ) -> CanonicalMemberSnapshotMaterial {
@@ -1734,10 +1734,6 @@ impl MobActor {
             .and_then(|dsl_session_id| SessionId::parse(&dsl_session_id.0).ok());
         let current_bridge_session_id = current_bridge_session_id.or(machine_bridge_session_id);
         let member_present = roster_entry.is_some();
-        let machine_lifecycle = self
-            .dsl_authority
-            .state
-            .member_lifecycle_for_identity(&dsl_identity, member_present);
 
         let (output_preview, tokens_used) = match current_bridge_session_id.as_ref() {
             None => (None, 0),
@@ -1747,12 +1743,25 @@ impl MobActor {
                         view.state.last_assistant_text.clone(),
                         view.billing.total_tokens,
                     ),
-                    Err(meerkat_core::service::SessionError::NotFound { .. }) => (None, 0),
+                    Err(meerkat_core::service::SessionError::NotFound { .. }) => {
+                        let _ = self
+                            .record_missing_member_bridge_session(
+                                agent_identity,
+                                bridge_session_id,
+                                "member_status",
+                            )
+                            .await;
+                        (None, 0)
+                    }
                     Err(_) => (None, 0),
                 }
             }
             Some(_) => (None, 0),
         };
+        let machine_lifecycle = self
+            .dsl_authority
+            .state
+            .member_lifecycle_for_identity(&dsl_identity, member_present);
 
         MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
             member_present,
@@ -1777,8 +1786,66 @@ impl MobActor {
         })
     }
 
+    async fn record_missing_member_bridge_session(
+        &mut self,
+        agent_identity: &MeerkatId,
+        bridge_session_id: &SessionId,
+        context: &'static str,
+    ) -> Option<String> {
+        let domain_identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
+        let current_binding_matches = self
+            .dsl_authority
+            .state
+            .member_session_bindings
+            .get(&dsl_identity)
+            .is_some_and(|session_id| session_id.0 == bridge_session_id.to_string());
+        if !current_binding_matches {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %agent_identity,
+                bridge_session_id = %bridge_session_id,
+                context,
+                "observed missing bridge session for a stale/non-current member binding"
+            );
+            return None;
+        }
+        if let Some(reason) = self
+            .dsl_authority
+            .state
+            .member_restore_failures
+            .get(&dsl_identity)
+            .cloned()
+        {
+            return Some(reason);
+        }
+
+        let reason = format!("missing bridge session snapshot for '{bridge_session_id}'");
+        self.dsl_authority
+            .state
+            .member_restore_failures
+            .insert(dsl_identity, reason.clone());
+        self.restore_diagnostics.write().await.insert(
+            agent_identity.clone(),
+            super::handle::RestoreFailureDiagnostic {
+                bridge_session_id: Some(bridge_session_id.clone()),
+                reason: reason.clone(),
+            },
+        );
+        self.publish_machine_state_projection();
+        tracing::error!(
+            mob_id = %self.definition.id,
+            agent_identity = %agent_identity,
+            bridge_session_id = %bridge_session_id,
+            context,
+            reason = %reason,
+            "member bridge session is missing; marked member broken"
+        );
+        Some(reason)
+    }
+
     async fn project_member_list_from_machine(
-        &self,
+        &mut self,
         include_retiring: bool,
     ) -> Vec<MobMemberListEntry> {
         let entries: Vec<_> = {
@@ -10881,7 +10948,7 @@ impl MobActor {
     }
 
     async fn dispatch_member_turn(
-        &self,
+        &mut self,
         entry: &RosterEntry,
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
@@ -10900,13 +10967,37 @@ impl MobActor {
     }
 
     async fn dispatch_member_turn_after_machine_admission(
-        &self,
+        &mut self,
         entry: &RosterEntry,
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         ack_mode: crate::mob_machine::SubmitWorkAckMode,
     ) -> Result<(), MobError> {
+        if let Some(bridge_session_id) = entry.member_ref.bridge_session_id() {
+            match self.session_service.read(bridge_session_id).await {
+                Ok(_) => {}
+                Err(meerkat_core::service::SessionError::NotFound { .. }) => {
+                    let reason = self
+                        .record_missing_member_bridge_session(
+                            &entry.agent_identity,
+                            bridge_session_id,
+                            "dispatch_member_turn",
+                        )
+                        .await
+                        .unwrap_or_else(|| {
+                            format!("missing bridge session snapshot for '{bridge_session_id}'")
+                        });
+                    return Err(MobError::MemberRestoreFailed {
+                        member_id: entry.agent_identity.clone(),
+                        session_id: Some(bridge_session_id.clone()),
+                        reason,
+                    });
+                }
+                Err(error) => return Err(MobError::SessionError(error)),
+            }
+        }
+
         match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
                 let bridge_session_id = entry.member_ref.bridge_session_id().ok_or_else(|| {

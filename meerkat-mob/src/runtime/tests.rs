@@ -26592,6 +26592,172 @@ async fn test_member_status_round_trips_through_machine_command_surface() {
 }
 
 #[tokio::test]
+async fn test_member_status_marks_current_missing_bridge_session_broken() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+
+    service
+        .archive(&bridge_session_id)
+        .await
+        .expect("test should remove the live bridge session");
+
+    let snapshot = handle
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member status should still return a diagnostic snapshot");
+    assert_eq!(snapshot.status, crate::runtime::MobMemberStatus::Broken);
+    assert!(snapshot.is_final);
+    assert_eq!(snapshot.current_session_id, Some(bridge_session_id.clone()));
+    assert!(snapshot.peer_connectivity.is_none());
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("missing bridge session")),
+        "broken member should surface the missing-session reason: {snapshot:?}"
+    );
+
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state");
+    let machine_identity =
+        crate::machines::mob_machine::AgentIdentity::from_domain(&AgentIdentity::from("w-1"));
+    assert_eq!(
+        machine_state.member_lifecycle_for_identity(&machine_identity, true),
+        crate::machines::mob_machine::MobMemberLifecycleMaterial {
+            status: crate::machines::mob_machine::MobMemberLifecycleStatus::Broken,
+            terminal_class: crate::machines::mob_machine::MobMemberTerminalClass::TerminalFailure,
+            error: Some(format!(
+                "missing bridge session snapshot for '{bridge_session_id}'"
+            )),
+        },
+        "missing bridge-session classification must be owned by MobMachine state"
+    );
+}
+
+#[tokio::test]
+async fn test_missing_bridge_session_stops_member_from_looking_runnable_after_status_probe() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+
+    service
+        .archive(&bridge_session_id)
+        .await
+        .expect("test should remove the live bridge session");
+
+    let _ = handle
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("status probe should record the missing session");
+
+    let listed = handle.list_members().await;
+    let entry = listed
+        .iter()
+        .find(|entry| entry.agent_identity == "w-1")
+        .expect("member remains visible for diagnostics");
+    assert_eq!(entry.status, crate::runtime::MobMemberStatus::Broken);
+    assert!(entry.is_final);
+    assert_eq!(entry.current_session_id, Some(bridge_session_id.clone()));
+
+    let error = handle
+        .internal_turn(
+            AgentIdentity::from("w-1"),
+            ContentInput::from("should fail fast".to_string()),
+        )
+        .await
+        .expect_err("broken member must reject queued work");
+    match error {
+        MobError::MemberRestoreFailed {
+            member_id,
+            session_id,
+            reason,
+        } => {
+            assert_eq!(member_id, MeerkatId::from("w-1"));
+            assert_eq!(session_id, Some(bridge_session_id));
+            assert!(
+                reason.contains("missing bridge session"),
+                "unexpected restore failure reason: {reason}"
+            );
+        }
+        other => panic!("expected MemberRestoreFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_submit_work_marks_missing_bridge_session_broken_without_prior_status_probe() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+    let active = handle
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("initial member status");
+    let (runtime_id, fence_token) = active.runtime_identity_fields();
+    let runtime_id = runtime_id.clone();
+
+    service
+        .archive(&bridge_session_id)
+        .await
+        .expect("test should remove the live bridge session");
+
+    let error = handle
+        .submit_work(
+            runtime_id,
+            fence_token,
+            WorkRef::new(),
+            WorkSpec::new(
+                ContentInput::from("dispatch should fail fast".to_string()),
+                WorkOrigin::Internal,
+            ),
+        )
+        .await
+        .expect_err("submit_work should diagnose the missing bridge session");
+    match error {
+        MobError::MemberRestoreFailed {
+            member_id,
+            session_id,
+            reason,
+        } => {
+            assert_eq!(member_id, MeerkatId::from("w-1"));
+            assert_eq!(session_id, Some(bridge_session_id.clone()));
+            assert!(
+                reason.contains("missing bridge session"),
+                "unexpected restore failure reason: {reason}"
+            );
+        }
+        other => panic!("expected MemberRestoreFailed, got {other:?}"),
+    }
+
+    let after = handle
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("post-failure member status");
+    assert_eq!(after.status, crate::runtime::MobMemberStatus::Broken);
+    assert_eq!(after.current_session_id, Some(bridge_session_id));
+}
+
+#[tokio::test]
 async fn test_member_status_surface_exposes_current_session_id_for_diagnostics_only() {
     // `current_session_id` remains observable for status/continuity
     // diagnostics, but it is not a realtime routing contract. Public

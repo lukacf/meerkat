@@ -495,6 +495,7 @@ feature_only="$(printf 'scripts/run-surface-feature-matrix\n' | scripts/buildbud
 audit_only="$(printf 'deny.toml\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
 machine_runtime="$(printf 'meerkat-runtime/src/meerkat_machine_tests.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
 session_core="$(printf 'meerkat-session/src/persistent.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
+mob_core="$(printf 'meerkat-mob/src/runtime/actor.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
 if grep -Fq 'sdk_changed=true' <<<"${sdk_only}" &&
   grep -Fq 'wasm_changed=false' <<<"${sdk_only}" &&
   grep -Fq 'wasm_changed=true' <<<"${wasm_only}" &&
@@ -512,7 +513,12 @@ if grep -Fq 'sdk_changed=true' <<<"${sdk_only}" &&
   grep -Fq 'sdk_changed=true' <<<"${session_core}" &&
   grep -Fq 'minimal_changed=true' <<<"${session_core}" &&
   grep -Fq 'feature_changed=true' <<<"${session_core}" &&
-  grep -Fq 'audit_changed=true' <<<"${session_core}"; then
+  grep -Fq 'audit_changed=true' <<<"${session_core}" &&
+  grep -Fq 'wasm_changed=true' <<<"${mob_core}" &&
+  grep -Fq 'sdk_changed=true' <<<"${mob_core}" &&
+  grep -Fq 'minimal_changed=true' <<<"${mob_core}" &&
+  grep -Fq 'feature_changed=true' <<<"${mob_core}" &&
+  grep -Fq 'audit_changed=true' <<<"${mob_core}"; then
   pass "BuildBuddy edge lane detector keeps WASM separate from SDK, feature, and audit-only changes"
 else
   bad "BuildBuddy edge lane detector is over-triggering WASM edge lanes"

@@ -38,7 +38,7 @@ mark_path() {
       mark_all
       return
       ;;
-    meerkat-machine-schema/*|meerkat-machine-kernels/*|meerkat-runtime/*|meerkat-session/*|specs/machines/*|specs/compositions/*)
+    meerkat-machine-schema/*|meerkat-machine-kernels/*|meerkat-runtime/*|meerkat-session/*|meerkat-mob/*|specs/machines/*|specs/compositions/*)
       mark_all
       return
       ;;

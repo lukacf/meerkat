@@ -602,12 +602,12 @@ mod tests {
             .insert(endpoint("B", UUID_B));
 
         let report = reconciler
-            .reconcile(&obligation(4, BTreeSet::from([endpoint("A", UUID_A)])))
+            .reconcile(&obligation(6, BTreeSet::from([endpoint("A", UUID_A)])))
             .await
             .expect("reconcile should read canonical trust store");
         assert_eq!(report.added, vec![endpoint("A", UUID_A)]);
         assert_eq!(report.removed, vec![endpoint("B", UUID_B)]);
-        assert_eq!(report.applied_epoch, 4);
+        assert_eq!(report.applied_epoch, 6);
 
         assert_eq!(comms.add_calls().len(), 2);
         assert_eq!(comms.remove_calls(), vec![UUID_B.to_string()]);

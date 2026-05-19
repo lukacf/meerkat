@@ -15,10 +15,10 @@ use futures::Stream;
 use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, CommsTrustMutation, CommsTrustMutationResult, EventStream, InputStreamMode,
-    PeerAddress, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName,
-    PeerRoute, PeerSendability, SendAndStreamError, SendError, SendReceipt, StreamError,
-    StreamScope, TrustedPeerDescriptor,
+    CommsCommand, CommsTrustMutation, CommsTrustMutationResult, EventStream,
+    GeneratedCommsTrustAuthoritySourceKind, InputStreamMode, PeerAddress, PeerCapabilitySet,
+    PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName, PeerRoute, PeerSendability,
+    SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
 };
 use meerkat_core::config::PlainEventSource;
 #[cfg(not(target_arch = "wasm32"))]
@@ -341,6 +341,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 authority
                     .validate_public_add(&peer)
                     .map_err(SendError::Validation)?;
+                self.validate_trust_authority_epoch(&authority)?;
                 self.apply_trusted_peer_descriptor(peer).await?;
                 Ok(CommsTrustMutationResult::Added)
             }
@@ -350,6 +351,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 authority
                     .validate_public_remove(parsed_peer_id)
                     .map_err(SendError::Validation)?;
+                self.validate_trust_authority_epoch(&authority)?;
                 let removed = self.apply_trusted_peer_removal(&peer_id).await?;
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
@@ -357,6 +359,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 authority
                     .validate_private_add(&peer)
                     .map_err(SendError::Validation)?;
+                self.validate_trust_authority_epoch(&authority)?;
                 self.apply_private_trusted_peer_descriptor(peer).await?;
                 Ok(CommsTrustMutationResult::Added)
             }
@@ -366,6 +369,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 authority
                     .validate_private_remove(parsed_peer_id)
                     .map_err(SendError::Validation)?;
+                self.validate_trust_authority_epoch(&authority)?;
                 let removed = self.apply_private_trusted_peer_removal(&peer_id).await?;
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
@@ -1281,9 +1285,30 @@ pub struct CommsRuntime {
     /// require this handle.
     interaction_stream_handle:
         parking_lot::RwLock<Option<Arc<dyn meerkat_core::handles::InteractionStreamHandle>>>,
+    trust_authority_epoch_watermarks:
+        Arc<Mutex<HashMap<GeneratedCommsTrustAuthoritySourceKind, u64>>>,
 }
 
 impl CommsRuntime {
+    fn validate_trust_authority_epoch(
+        &self,
+        authority: &meerkat_core::comms::CommsTrustMutationAuthority,
+    ) -> Result<(), SendError> {
+        let source_kind = authority.source_kind();
+        let epoch = authority.epoch();
+        let mut watermarks = self.trust_authority_epoch_watermarks.lock();
+        let previous = watermarks.entry(source_kind).or_insert(epoch);
+        if epoch < *previous {
+            return Err(SendError::Validation(format!(
+                "stale generated comms trust authority for {source_kind:?}: epoch {epoch} is older than observed epoch {previous}"
+            )));
+        }
+        if epoch > *previous {
+            *previous = epoch;
+        }
+        Ok(())
+    }
+
     fn derive_bridge_bootstrap_token(keypair: &Keypair) -> String {
         let mut digest = Sha256::new();
         digest.update(b"meerkat.supervisor-bridge.bootstrap-token.v1");
@@ -1292,6 +1317,21 @@ impl CommsRuntime {
             &base64::engine::general_purpose::URL_SAFE_NO_PAD,
             digest.finalize(),
         )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reject_persisted_trusted_peers_seed(
+        path: &std::path::Path,
+    ) -> Result<(), CommsRuntimeError> {
+        let peers = TrustedPeers::load_or_default(path)
+            .map_err(|err| CommsRuntimeError::TrustLoadError(err.to_string()))?;
+        if peers.has_peers() {
+            return Err(CommsRuntimeError::TrustLoadError(format!(
+                "persisted trusted peer seed at {} is not authoritative; generated comms trust mutation authority required",
+                path.display()
+            )));
+        }
+        Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1331,14 +1371,14 @@ impl CommsRuntime {
         _silent_intents: Arc<HashSet<String>>,
         require_machine_authority: bool,
     ) -> Result<Self, CommsRuntimeError> {
-        // Always load keypair and trusted peers — outbound routing needs them
-        // regardless of auth mode. The auth mode only affects the external
-        // event listener, not the signed agent-to-agent path.
+        // Always load keypair regardless of auth mode. Trust rows are not
+        // seeded from config; live trust changes must arrive through generated
+        // machine/composition authority.
         let keypair = Keypair::load_or_generate(&config.identity_dir)
             .await
             .map_err(|e| CommsRuntimeError::IdentityError(e.to_string()))?;
-        let trusted_peers = TrustedPeers::load_or_default(&config.trusted_peers_path)
-            .map_err(|e| CommsRuntimeError::TrustLoadError(e.to_string()))?;
+        Self::reject_persisted_trusted_peers_seed(&config.trusted_peers_path)?;
+        let trusted_peers = TrustedPeers::new();
         let public_key = keypair.public_key();
         // Single source of truth for trust state — shared internally by the
         // Router and IngressClassificationContext.
@@ -1389,6 +1429,7 @@ impl CommsRuntime {
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
+            trust_authority_epoch_watermarks: Arc::new(Mutex::new(HashMap::new())),
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             config.inproc_namespace.as_deref().unwrap_or(""),
@@ -1497,6 +1538,7 @@ impl CommsRuntime {
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
+            trust_authority_epoch_watermarks: Arc::new(Mutex::new(HashMap::new())),
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             namespace.as_deref().unwrap_or(""),
@@ -1617,6 +1659,7 @@ impl CommsRuntime {
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
+            trust_authority_epoch_watermarks: Arc::new(Mutex::new(HashMap::new())),
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             namespace.as_deref().unwrap_or(""),
@@ -2906,9 +2949,10 @@ mod tests {
 
     fn test_projection_add_authority(
         peer: &TrustedPeerDescriptor,
-        _epoch: u64,
+        epoch: u64,
     ) -> meerkat_core::comms::CommsTrustMutationAuthority {
         let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
+        let target_epoch = epoch.max(1);
         let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
         authority
             .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
@@ -2922,6 +2966,23 @@ mod tests {
             },
         )
         .expect("RegisterSession input");
+        for filler_index in 1..target_epoch {
+            let filler_key = Keypair::generate().public_key();
+            let filler = trusted_descriptor(
+                &format!("filler-add-{filler_index}"),
+                filler_key,
+                &format!("inproc://filler-add-{filler_index}"),
+            );
+            let filler_endpoint =
+                meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&filler);
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut authority,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
+                    endpoint: filler_endpoint,
+                },
+            )
+            .expect("AddDirectPeerEndpoint filler input");
+        }
         let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
             &mut authority,
             meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
@@ -2941,9 +3002,10 @@ mod tests {
 
     fn test_projection_remove_authority(
         peer: &TrustedPeerDescriptor,
-        _epoch: u64,
+        epoch: u64,
     ) -> meerkat_core::comms::CommsTrustMutationAuthority {
         let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
+        let target_epoch = epoch.max(2);
         let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
         authority
             .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
@@ -2964,6 +3026,23 @@ mod tests {
             },
         )
         .expect("AddDirectPeerEndpoint input");
+        for filler_index in 2..target_epoch {
+            let filler_key = Keypair::generate().public_key();
+            let filler = trusted_descriptor(
+                &format!("filler-remove-{filler_index}"),
+                filler_key,
+                &format!("inproc://filler-remove-{filler_index}"),
+            );
+            let filler_endpoint =
+                meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&filler);
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut authority,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
+                    endpoint: filler_endpoint,
+                },
+            )
+            .expect("AddDirectPeerEndpoint filler input");
+        }
         let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
             &mut authority,
             meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RemoveDirectPeerEndpoint {
@@ -3083,6 +3162,44 @@ mod tests {
         .expect("generated remove should apply");
         assert_eq!(remove, CommsTrustMutationResult::Removed { removed: true });
         assert!(runtime.peers().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_generated_trust_authority_is_rejected() {
+        let runtime = CommsRuntime::inproc_only("trust-mutator-stale-epoch").expect("runtime");
+        let current_key = Keypair::generate().public_key();
+        let current = trusted_descriptor("current-peer", current_key, "inproc://current-peer");
+        let stale_key = Keypair::generate().public_key();
+        let stale = trusted_descriptor("stale-peer", stale_key, "inproc://stale-peer");
+
+        CoreCommsRuntime::apply_trust_mutation(
+            &runtime,
+            CommsTrustMutation::AddTrustedPeer {
+                peer: current.clone(),
+                authority: test_projection_add_authority(&current, 5),
+            },
+        )
+        .await
+        .expect("current generated trust authority should apply");
+
+        let stale_authority = test_projection_add_authority(&stale, 3);
+        let stale_result = CoreCommsRuntime::apply_trust_mutation(
+            &runtime,
+            CommsTrustMutation::AddTrustedPeer {
+                peer: stale,
+                authority: stale_authority,
+            },
+        )
+        .await
+        .expect_err("older generated trust authority must fail closed");
+
+        assert!(
+            matches!(stale_result, SendError::Validation(ref message) if message.contains("stale generated comms trust authority")),
+            "unexpected stale authority rejection: {stale_result:?}"
+        );
+        let peers = runtime.peers().await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_id, current.peer_id);
     }
 
     #[tokio::test]
@@ -6078,6 +6195,41 @@ mod tests {
             CommsRuntimeError::TrustLoadError(message) => {
                 assert!(
                     message.contains("pubkey") && message.contains("non-zero"),
+                    "unexpected trust-load error: {message}"
+                );
+            }
+            other => panic!("unexpected runtime startup error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_runtime_startup_rejects_persisted_trusted_peer_seed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_runtime_config("persisted-trust-seed", &tmp);
+        let peer_key = Keypair::generate().public_key();
+        tokio::fs::write(
+            &config.trusted_peers_path,
+            serde_json::json!({
+                "peers": [{
+                    "name": "persisted-peer",
+                    "pubkey": peer_key.to_pubkey_string(),
+                    "addr": "inproc://persisted-peer"
+                }]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let error = match CommsRuntime::new(config).await {
+            Ok(_) => panic!("runtime startup must reject persisted trust seeds"),
+            Err(error) => error,
+        };
+
+        match error {
+            CommsRuntimeError::TrustLoadError(message) => {
+                assert!(
+                    message.contains("generated comms trust mutation authority"),
                     "unexpected trust-load error: {message}"
                 );
             }

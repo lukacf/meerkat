@@ -366,7 +366,7 @@ pub struct CommsTrustMutationAuthority {
 }
 
 #[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum GeneratedCommsTrustAuthoritySourceKind {
     MeerkatMachinePeerProjection,
     MeerkatMachineSupervisorPublish,
@@ -731,6 +731,10 @@ impl CommsTrustMutationAuthority {
 
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    pub fn source_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind {
+        self.source_kind
     }
 }
 

@@ -17,20 +17,20 @@
 //! * §6 #1 — Concurrent reconciles read from the canonical trust store;
 //!   there is no helper-local applied view for overlapping calls to
 //!   corrupt.
-//! * §6 #2 — Epoch is reported for observability only. A lower-epoch
-//!   reconcile still diffs against canonical runtime trust, not against
-//!   a reconciler-local watermark.
+//! * §6 #2 — A lower-epoch generated reconcile handoff fails closed at
+//!   the trust mutation seam instead of mutating current canonical trust.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
 use meerkat_core::comms::{
-    CommsTrustMutation, CommsTrustMutationResult, SendError, TrustedPeerDescriptor,
+    CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult,
+    GeneratedCommsTrustAuthoritySourceKind, SendError, TrustedPeerDescriptor,
 };
 use meerkat_core::{
     PeerIngressAuthorityPhase, PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot,
@@ -99,6 +99,7 @@ struct RecordingCommsRuntime {
     adds: std::sync::Mutex<Vec<TrustedPeerDescriptor>>,
     removes: std::sync::Mutex<Vec<String>>,
     trusted: std::sync::Mutex<Vec<TrustedPeerDescriptor>>,
+    epoch_watermarks: std::sync::Mutex<HashMap<GeneratedCommsTrustAuthoritySourceKind, u64>>,
     add_count: AtomicUsize,
     remove_count: AtomicUsize,
 }
@@ -128,6 +129,7 @@ impl CommsRuntime for RecordingCommsRuntime {
                 authority
                     .validate_public_add(&peer)
                     .map_err(SendError::Validation)?;
+                self.validate_authority_epoch(&authority)?;
                 self.add_count.fetch_add(1, Ordering::SeqCst);
                 self.adds
                     .lock()
@@ -145,6 +147,7 @@ impl CommsRuntime for RecordingCommsRuntime {
                 authority
                     .validate_public_remove(parsed_peer_id)
                     .map_err(SendError::Validation)?;
+                self.validate_authority_epoch(&authority)?;
                 self.remove_count.fetch_add(1, Ordering::SeqCst);
                 self.removes
                     .lock()
@@ -198,6 +201,28 @@ impl CommsRuntime for RecordingCommsRuntime {
 }
 
 impl RecordingCommsRuntime {
+    fn validate_authority_epoch(
+        &self,
+        authority: &CommsTrustMutationAuthority,
+    ) -> Result<(), SendError> {
+        let source_kind = authority.source_kind();
+        let epoch = authority.epoch();
+        let mut watermarks = self
+            .epoch_watermarks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = watermarks.entry(source_kind).or_insert(epoch);
+        if epoch < *previous {
+            return Err(SendError::Validation(format!(
+                "stale generated comms trust authority for {source_kind:?}: epoch {epoch} is older than observed epoch {previous}"
+            )));
+        }
+        if epoch > *previous {
+            *previous = epoch;
+        }
+        Ok(())
+    }
+
     fn add_calls(&self) -> Vec<TrustedPeerDescriptor> {
         self.adds
             .lock()
@@ -259,9 +284,9 @@ async fn concurrent_reconciles_complete_against_canonical_store() {
     );
 }
 
-/// §6 #2 — lower-epoch reconciles still diff against canonical trust.
+/// §6 #2 — lower-epoch reconciles fail closed against canonical trust.
 #[tokio::test]
-async fn lower_epoch_reconcile_reads_canonical_store() {
+async fn lower_epoch_reconcile_is_rejected_as_stale() {
     let comms = Arc::new(RecordingCommsRuntime::default());
     let reconciler = CommsTrustReconciler::new(comms.clone());
 
@@ -274,25 +299,32 @@ async fn lower_epoch_reconcile_reads_canonical_store() {
     assert_eq!(comms.add_count.load(Ordering::SeqCst), 1);
     assert_eq!(comms.remove_count.load(Ordering::SeqCst), 0);
 
-    // Lower epoch arrives with a different set {B}. Expected: canonical diff
-    // removes A and adds B; no helper-local watermark short-circuits it.
+    // Lower epoch arrives with a different set {B}. Expected: the generated
+    // authority replay guard rejects it before stale trust can mutate.
     let lower = reconciler
         .reconcile(&obligation(3, BTreeSet::from([endpoint("B", UUID_B)])))
         .await
-        .expect("lower-epoch reconcile");
-    assert_eq!(lower.applied_epoch, 3);
-    assert_eq!(lower.added, vec![endpoint("B", UUID_B)]);
-    assert_eq!(lower.removed, vec![endpoint("A", UUID_A)]);
+        .expect_err("lower-epoch reconcile must fail closed");
+    assert!(
+        matches!(
+            lower,
+            meerkat_runtime::comms_trust_reconcile::CommsTrustReconcileError::AddTrustFailed {
+                source: SendError::Validation(ref message),
+                ..
+            } if message.contains("stale generated comms trust authority")
+        ),
+        "unexpected stale reconcile rejection: {lower:?}",
+    );
 
     assert_eq!(
         comms.add_count.load(Ordering::SeqCst),
-        2,
-        "lower-epoch reconcile adds peer B from canonical diff",
+        1,
+        "stale lower-epoch reconcile must not add peer B",
     );
     assert_eq!(
         comms.remove_count.load(Ordering::SeqCst),
-        1,
-        "lower-epoch reconcile removes peer A from canonical diff",
+        0,
+        "stale lower-epoch reconcile must not remove peer A",
     );
     let added_peer_ids: BTreeSet<String> = comms
         .add_calls()
@@ -301,11 +333,11 @@ async fn lower_epoch_reconcile_reads_canonical_store() {
         .collect();
     assert_eq!(
         added_peer_ids,
-        BTreeSet::from([UUID_A.to_string(), UUID_B.to_string()]),
-        "both successful adds should be recorded",
+        BTreeSet::from([UUID_A.to_string()]),
+        "only the current generated add should be recorded",
     );
     assert_eq!(
         comms.trusted_peer_ids(),
-        BTreeSet::from([UUID_B.to_string()])
+        BTreeSet::from([UUID_A.to_string()])
     );
 }

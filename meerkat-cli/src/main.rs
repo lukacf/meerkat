@@ -10906,34 +10906,23 @@ async fn hydrate_mob_state(
             continue;
         }
         let storage = meerkat_mob::MobStorage::in_memory();
-        if persisted.events.is_empty() {
-            let definition = persisted.definition.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "mob registry entry '{mob_id}' has no persisted events and no legacy definition"
-                )
-            })?;
-            storage
-                .import_legacy_registry_definition(definition)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-        } else {
-            for event in &persisted.events {
-                storage
-                    .import_legacy_registry_event(event)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-            }
-        }
-
-        for run in persisted.runs.values() {
-            if !run.status().is_terminal() {
-                continue;
-            }
-            storage
-                .import_legacy_registry_run(run)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-        }
+        let terminal_runs = persisted
+            .runs
+            .values()
+            .filter(|run| run.status().is_terminal())
+            .cloned()
+            .collect();
+        let handoff = meerkat_mob::MobLegacyRegistryHandoff::try_from_legacy_registry_snapshot(
+            meerkat_mob::MobId::from(mob_id.clone()),
+            persisted.definition.clone(),
+            persisted.events.clone(),
+            terminal_runs,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        storage
+            .import_validated_legacy_registry(handoff)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let mut builder = meerkat_mob::MobBuilder::for_resume(storage)
             .with_session_service(session_service.clone())

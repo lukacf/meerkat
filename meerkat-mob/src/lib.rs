@@ -136,7 +136,7 @@ pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisp
 pub use runtime_mode::MobRuntimeMode;
 pub use snapshot::ParentToolScopeSnapshot;
 pub use spec::SpecValidator;
-pub use storage::MobStorage;
+pub use storage::{MobLegacyRegistryHandoff, MobStorage};
 pub use store::{
     ExternalBindingOverlayRecord, ExternalBindingOverlayStatus, InMemoryMobEventStore,
     InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore,

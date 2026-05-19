@@ -554,6 +554,15 @@ fn seed_mob_authority_sync_from_events(
     Ok(())
 }
 
+pub(crate) fn validate_mob_events_with_generated_recovery(
+    events: &[crate::event::MobEvent],
+    definition: &MobDefinition,
+) -> Result<MobState, MobError> {
+    let mut authority = Box::new(seed_mob_authority());
+    seed_mob_authority_sync_from_events(&mut authority, events, definition)?;
+    Ok(seeded_mob_public_phase(authority.state()))
+}
+
 async fn seed_mob_authority_sync_from_flow_runs(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     run_store: Arc<dyn crate::store::MobRunStore>,

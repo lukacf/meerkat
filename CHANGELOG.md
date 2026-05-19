@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.19] - 2026-05-19
+
+Meerkat 0.6.19 is a runtime/session projection hotfix release for
+runtime-committed session checkpointing.
+
+### Fixed
+
+- **Runtime-committed session projections** (#733) — checkpoints committed
+  runtime snapshots back into the `SessionStore` projection after the machine
+  commit succeeds, restoring per-turn projection saves for MobKit and
+  UnifiedRuntime consumers without introducing a pre-commit split-brain.
+
 ## [0.6.18] - 2026-05-19
 
 Meerkat 0.6.18 is a runtime/session reliability hotfix release for persistent

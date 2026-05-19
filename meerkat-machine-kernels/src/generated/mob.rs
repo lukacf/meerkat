@@ -2194,6 +2194,10 @@ pub mod inputs {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RetireAbsent {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestPendingSessionIngressDetachForMobDestroy {
         pub mob_id: MobId,
         pub agent_runtime_id: AgentRuntimeId,
@@ -2336,7 +2340,9 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Shutdown {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ForceCancel {}
+    pub struct ForceCancel {
+        pub agent_identity: AgentIdentity,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct KickoffMarkPending {
         pub member_id: String,
@@ -2391,6 +2397,7 @@ pub enum Input {
     EnsureMember(inputs::EnsureMember),
     Reconcile(inputs::Reconcile),
     Retire(inputs::Retire),
+    RetireAbsent(inputs::RetireAbsent),
     RequestPendingSessionIngressDetachForMobDestroy(
         inputs::RequestPendingSessionIngressDetachForMobDestroy,
     ),
@@ -2464,6 +2471,7 @@ impl Input {
             Self::EnsureMember(_) => InputKind::EnsureMember,
             Self::Reconcile(_) => InputKind::Reconcile,
             Self::Retire(_) => InputKind::Retire,
+            Self::RetireAbsent(_) => InputKind::RetireAbsent,
             Self::RequestPendingSessionIngressDetachForMobDestroy(_) => {
                 InputKind::RequestPendingSessionIngressDetachForMobDestroy
             }
@@ -2540,6 +2548,7 @@ pub enum InputKind {
     EnsureMember,
     Reconcile,
     Retire,
+    RetireAbsent,
     RequestPendingSessionIngressDetachForMobDestroy,
     Respawn,
     RetireAll,
@@ -3342,6 +3351,8 @@ pub enum TransitionId {
     SessionIngressDetachFailedForMobDestroyStopped,
     RetireStoppedPreservingBinding,
     RetireStoppedNoBinding,
+    RetireAbsentRunning,
+    RetireAbsentStopped,
     RetireAllRunning,
     RetireAllStopped,
     CompleteSpawnRunning,

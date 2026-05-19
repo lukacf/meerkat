@@ -340,6 +340,7 @@ macro_rules! mob_catalog_machine_dsl {
             EnsureMember { agent_identity: AgentIdentity },
             Reconcile { desired: Set<AgentIdentity>, retire_stale: bool },
             Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: SessionId },
+            RetireAbsent { agent_identity: AgentIdentity },
             RequestPendingSessionIngressDetachForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
             Respawn { agent_runtime_id: AgentRuntimeId },
             RetireAll,
@@ -386,7 +387,7 @@ macro_rules! mob_catalog_machine_dsl {
             GetMember,
             SetSpawnPolicy,
             Shutdown,
-            ForceCancel,
+            ForceCancel { agent_identity: AgentIdentity },
             KickoffMarkPending { member_id: String },
             KickoffMarkStarting { member_id: String },
             StartupMarkReady { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
@@ -1905,8 +1906,11 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition ForceCancelRunning {
-            on input ForceCancel
+            on input ForceCancel { agent_identity }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_known" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring) }
             update {
                 self.active_run_count = 0;
             }
@@ -3609,16 +3613,26 @@ macro_rules! mob_catalog_machine_dsl {
             emit RequestRuntimeRetire { session_id: session_id }
         }
 
+        transition RetireAbsentRunning {
+            on input RetireAbsent { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Running
+        }
+
+        transition RetireAbsentStopped {
+            on input RetireAbsent { agent_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Stopped
+        }
+
         transition RetireAllRunning {
             on input RetireAll
             guard { self.lifecycle_phase == Phase::Running }
-            update {
-                self.live_runtime_ids = EmptySet;
-                self.runtime_fence_tokens = EmptyMap;
-                self.member_peer_ids = EmptyMap;
-                self.member_peer_endpoints = EmptyMap;
-                self.member_restore_failures = EmptyMap;
-            }
+            update {}
             to Running
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retiring }
         }
@@ -3626,13 +3640,7 @@ macro_rules! mob_catalog_machine_dsl {
         transition RetireAllStopped {
             on input RetireAll
             guard { self.lifecycle_phase == Phase::Stopped }
-            update {
-                self.live_runtime_ids = EmptySet;
-                self.runtime_fence_tokens = EmptyMap;
-                self.member_peer_ids = EmptyMap;
-                self.member_peer_endpoints = EmptyMap;
-                self.member_restore_failures = EmptyMap;
-            }
+            update {}
             to Stopped
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retiring }
         }

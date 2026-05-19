@@ -645,6 +645,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RetireStoppedNoBinding`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `RetireAbsentRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `RetireAbsentStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
 - `RetireAllRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`

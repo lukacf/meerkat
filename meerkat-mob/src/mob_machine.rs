@@ -302,6 +302,7 @@ pub enum MobMachineCatalogInput {
     EnsureMember,
     Reconcile,
     Retire,
+    RetireAbsent,
     Respawn,
     RetireAll,
     WireMembers,
@@ -363,6 +364,7 @@ impl MobMachineCatalogInput {
         Self::EnsureMember,
         Self::Reconcile,
         Self::Retire,
+        Self::RetireAbsent,
         Self::Respawn,
         Self::RetireAll,
         Self::WireMembers,
@@ -425,6 +427,7 @@ impl MobMachineCatalogInput {
             Self::EnsureMember => MobMachineInputVariant::EnsureMember,
             Self::Reconcile => MobMachineInputVariant::Reconcile,
             Self::Retire => MobMachineInputVariant::Retire,
+            Self::RetireAbsent => MobMachineInputVariant::RetireAbsent,
             Self::Respawn => MobMachineInputVariant::Respawn,
             Self::RetireAll => MobMachineInputVariant::RetireAll,
             Self::WireMembers => MobMachineInputVariant::WireMembers,
@@ -512,6 +515,7 @@ impl MobMachineCatalogInput {
             Self::EnsureMember => "EnsureMember",
             Self::Reconcile => "Reconcile",
             Self::Retire => "Retire",
+            Self::RetireAbsent => "RetireAbsent",
             Self::Respawn => "Respawn",
             Self::RetireAll => "RetireAll",
             Self::WireMembers => "WireMembers",
@@ -651,6 +655,7 @@ pub enum MobMachineRuntimeInternalReason {
     RuntimeRejectionFeedback,
     SessionIngressDetachFeedback,
     StartupKickoffLifecycle,
+    RetireIdempotencyAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -710,6 +715,10 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::ResolveCancelAllWorkRejection,
         reason: MobMachineRuntimeInternalReason::RuntimeRejectionFeedback,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RetireAbsent,
+        reason: MobMachineRuntimeInternalReason::RetireIdempotencyAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
         input: session_ingress_detached_for_mob_destroy_catalog_input(),

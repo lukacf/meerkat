@@ -4391,23 +4391,7 @@ impl MobActor {
                     agent_identity,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Stopped]) {
-                        Ok(()) => {
-                            let canceled = self.cancel_pending_spawns_for_member(
-                                &agent_identity,
-                                "retire command received",
-                            );
-                            if canceled > 0 {
-                                tracing::info!(
-                                    agent_identity = %agent_identity,
-                                    canceled,
-                                    "retire canceled pending spawn lineage before roster retirement"
-                                );
-                            }
-                            self.handle_retire(agent_identity).await
-                        }
-                        Err(error) => Err(error),
-                    };
+                    let result = self.handle_retire(agent_identity).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Respawn {
@@ -4420,10 +4404,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::RetireAll { reply_tx } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Stopped]) {
-                        Ok(()) => self.retire_all_members("retire_all").await,
-                        Err(error) => Err(error),
-                    };
+                    let result = self.retire_all_members("retire_all").await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SubmitWork { payload, reply_tx } => {
@@ -4958,10 +4939,7 @@ impl MobActor {
                     agent_identity,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running]) {
-                        Ok(()) => self.handle_force_cancel(agent_identity).await,
-                        Err(error) => Err(error),
-                    };
+                    let result = self.handle_force_cancel(agent_identity).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Wire {
@@ -6801,16 +6779,28 @@ impl MobActor {
     /// Does NOT retire the member — the member remains in the roster and can
     /// receive new turns. Use [`handle_retire`] to fully remove a member.
     async fn handle_force_cancel(&mut self, agent_identity: MeerkatId) -> Result<(), MobError> {
+        let prepared = self.prepare_command_admission(
+            mob_dsl::MobMachineInput::ForceCancel {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(
+                    agent_identity.as_str(),
+                )),
+            },
+            MobState::Running,
+            "force_cancel",
+        )?;
         let roster = self.roster.read().await;
         let entry = roster
             .get(&agent_identity)
-            .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "MobMachine admitted force-cancel for '{agent_identity}', but roster projection is missing"
+                ))
+            })?;
         let member_ref = entry.member_ref.clone();
         drop(roster);
 
-        self.preview_dsl_input(mob_dsl::MobMachineInput::ForceCancel, "force_cancel")?;
         self.provisioner.interrupt_member(&member_ref).await?;
-        self.apply_dsl_input(mob_dsl::MobMachineInput::ForceCancel, "force_cancel")?;
+        self.commit_prepared_dsl_input(prepared);
         Ok(())
     }
 
@@ -9180,6 +9170,15 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("handle_retire preflight")?;
         self.handle_retire_inner(&agent_identity, false, false)
             .await?;
+        let canceled =
+            self.cancel_pending_spawns_for_member(&agent_identity, "retire command accepted");
+        if canceled > 0 {
+            tracing::info!(
+                agent_identity = %agent_identity,
+                canceled,
+                "retire canceled pending spawn lineage after generated retirement admission"
+            );
+        }
         self.ensure_pending_spawn_alignment("handle_retire completion")
     }
 
@@ -9402,15 +9401,24 @@ impl MobActor {
         // Idempotent: already retired / never existed is success.
         let entry = {
             let roster = self.roster.read().await;
-            let Some(entry) = roster.get(agent_identity).cloned() else {
-                tracing::warn!(
-                    mob_id = %self.definition.id,
-                    agent_identity = %agent_identity,
-                    "retire requested for unknown meerkat id"
-                );
-                return Ok(());
-            };
-            entry
+            roster.get(agent_identity).cloned()
+        };
+        let Some(entry) = entry else {
+            self.apply_command_admission(
+                mob_dsl::MobMachineInput::RetireAbsent {
+                    agent_identity: mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(
+                        agent_identity.as_str(),
+                    )),
+                },
+                MobState::Running,
+                "handle_retire_inner_absent",
+            )?;
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %agent_identity,
+                "retire requested for unknown meerkat id; MobMachine accepted RetireAbsent"
+            );
+            return Ok(());
         };
 
         // Mark as Retiring in the DSL (blocks re-spawn with same ID).
@@ -12207,6 +12215,12 @@ impl MobActor {
     /// If any member fails to retire the operation is aborted — the caller
     /// can retry since already-retired members are idempotent.
     async fn retire_all_members(&mut self, context: &str) -> Result<(), MobError> {
+        let prepared_retire_all = self.prepare_command_admission(
+            mob_dsl::MobMachineInput::RetireAll,
+            MobState::Running,
+            context,
+        )?;
+        self.commit_prepared_dsl_input(prepared_retire_all);
         self.ensure_pending_spawn_alignment("retire_all_members preflight")?;
         let pending_reason = format!("{context}: draining pending spawns before bulk retirement");
         self.fail_all_pending_spawns(&pending_reason).await;

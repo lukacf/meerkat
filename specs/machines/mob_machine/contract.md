@@ -123,6 +123,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: SessionId)
+- `RetireAbsent`(agent_identity: AgentIdentity)
 - `RequestPendingSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `Respawn`(agent_runtime_id: AgentRuntimeId)
 - `RetireAll`
@@ -161,7 +162,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `GetMember`
 - `SetSpawnPolicy`
 - `Shutdown`
-- `ForceCancel`
+- `ForceCancel`(agent_identity: AgentIdentity)
 - `KickoffMarkPending`(member_id: String)
 - `KickoffMarkStarting`(member_id: String)
 - `StartupMarkReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
@@ -1075,7 +1076,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ForceCancelRunning`
 - From: `Running`
-- On: `ForceCancel`()
+- On: `ForceCancel`(agent_identity)
+- Guards:
+  - `identity_known`
+  - `runtime_live`
+  - `member_not_retiring`
 - Emits: `FlowTerminalized`
 - To: `Running`
 
@@ -2135,6 +2140,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_prior_session_binding`
   - `releasing_absent`
 - Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`
+- To: `Stopped`
+
+### `RetireAbsentRunning`
+- From: `Running`
+- On: `RetireAbsent`(agent_identity)
+- Guards:
+  - `identity_absent`
+- To: `Running`
+
+### `RetireAbsentStopped`
+- From: `Stopped`
+- On: `RetireAbsent`(agent_identity)
+- Guards:
+  - `identity_absent`
 - To: `Stopped`
 
 ### `RetireAllRunning`

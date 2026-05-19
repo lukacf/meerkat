@@ -130,6 +130,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }
             | mob_dsl::MobMachineInput::Retire { .. }
+            | mob_dsl::MobMachineInput::RetireAbsent { .. }
             | mob_dsl::MobMachineInput::RequestPendingSessionIngressDetachForMobDestroy { .. }
             | mob_dsl::MobMachineInput::Respawn { .. }
             | mob_dsl::MobMachineInput::RetireAll
@@ -166,7 +167,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::GetMember
             | mob_dsl::MobMachineInput::SetSpawnPolicy
             | mob_dsl::MobMachineInput::Shutdown
-            | mob_dsl::MobMachineInput::ForceCancel
+            | mob_dsl::MobMachineInput::ForceCancel { .. }
             | mob_dsl::MobMachineInput::KickoffMarkPending { .. }
             | mob_dsl::MobMachineInput::KickoffMarkStarting { .. }
             | mob_dsl::MobMachineInput::StartupMarkReady { .. }
@@ -1208,6 +1209,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }
             | mob_dsl::MobMachineInput::Retire { .. }
+            | mob_dsl::MobMachineInput::RetireAbsent { .. }
             | mob_dsl::MobMachineInput::RequestPendingSessionIngressDetachForMobDestroy {
                 ..
             }
@@ -1246,7 +1248,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::GetMember
             | mob_dsl::MobMachineInput::SetSpawnPolicy
             | mob_dsl::MobMachineInput::Shutdown
-            | mob_dsl::MobMachineInput::ForceCancel
+            | mob_dsl::MobMachineInput::ForceCancel { .. }
             | mob_dsl::MobMachineInput::KickoffMarkPending { .. }
             | mob_dsl::MobMachineInput::KickoffMarkStarting { .. }
             | mob_dsl::MobMachineInput::StartupMarkReady { .. }

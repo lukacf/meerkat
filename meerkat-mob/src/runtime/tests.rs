@@ -9567,11 +9567,14 @@ fn test_mob_command_admission_arms_do_not_shadow_mob_machine_guards() {
     let source = include_str!("actor.rs");
     for command in [
         "Spawn",
+        "Retire",
+        "RetireAll",
         "Respawn",
         "RunFlow",
         "CancelFlow",
         "SubmitWork",
         "CancelAllWork",
+        "ForceCancel",
     ] {
         let arm = mob_command_arm_source(source, command);
         for disallowed in [

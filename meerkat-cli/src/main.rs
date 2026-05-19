@@ -10754,6 +10754,11 @@ async fn save_mob_registry(
 }
 
 #[cfg(feature = "mob")]
+// Compatibility registry snapshots are display-only mirrors; canonical restore
+// reads persistent mob storage instead of this JSON event copy.
+const MOB_REGISTRY_COMPAT_EVENT_LIMIT: usize = 10_000;
+
+#[cfg(feature = "mob")]
 async fn sync_mob_events(
     state: &meerkat_mob_mcp::MobMcpState,
     registry: &mut PersistedMobRegistry,
@@ -10764,7 +10769,11 @@ async fn sync_mob_events(
         .get_mut(mob_id)
         .ok_or_else(|| anyhow::anyhow!("mob not found in persisted registry: {mob_id}"))?;
     mob.events = state
-        .mob_events(&meerkat_mob::MobId::from(mob_id.to_string()), 0, usize::MAX)
+        .mob_events(
+            &meerkat_mob::MobId::from(mob_id.to_string()),
+            0,
+            MOB_REGISTRY_COMPAT_EVENT_LIMIT,
+        )
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     mob.status = Some(
@@ -13600,16 +13609,28 @@ default_model = "gemma"
     }
 
     struct TestCommsRuntime {
-        key: String,
+        name: String,
+        address: String,
+        public_key: [u8; 32],
         trusted: RwLock<HashSet<String>>,
         notify: Arc<tokio::sync::Notify>,
     }
 
     impl TestCommsRuntime {
         fn new(name: &str) -> Self {
-            let _ = name;
+            let mut public_key = [0u8; 32];
+            for (idx, byte) in name.bytes().enumerate() {
+                let slot = idx % public_key.len();
+                public_key[slot] = public_key[slot]
+                    .wrapping_add(byte)
+                    .rotate_left((idx % 8) as u32)
+                    .wrapping_add((idx as u8).wrapping_mul(31));
+            }
+            public_key[0] |= 1;
             Self {
-                key: meerkat_core::comms::PeerId::new().to_string(),
+                name: name.to_string(),
+                address: format!("inproc://{name}"),
+                public_key,
                 trusted: RwLock::new(HashSet::new()),
                 notify: Arc::new(tokio::sync::Notify::new()),
             }
@@ -13618,8 +13639,26 @@ default_model = "gemma"
 
     #[async_trait]
     impl CoreCommsRuntime for TestCommsRuntime {
+        fn peer_id(&self) -> Option<PeerId> {
+            Some(PeerId::from_ed25519_pubkey(&self.public_key))
+        }
+
         fn public_key(&self) -> Option<String> {
-            Some(self.key.clone())
+            use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+            Some(format!("ed25519:{}", BASE64.encode(self.public_key)))
+        }
+
+        fn public_key_bytes(&self) -> Option<[u8; 32]> {
+            Some(self.public_key)
+        }
+
+        fn comms_name(&self) -> Option<String> {
+            Some(self.name.clone())
+        }
+
+        fn advertised_address(&self) -> Option<String> {
+            Some(self.address.clone())
         }
 
         async fn apply_trust_mutation(
@@ -13906,6 +13945,13 @@ default_model = "gemma"
             _mob_id: &meerkat_mob::MobId,
         ) -> bool {
             true
+        }
+
+        async fn archive_with_mob_lifecycle_authority(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            <Self as SessionService>::archive(self, session_id).await
         }
     }
 

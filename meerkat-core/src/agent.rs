@@ -17,8 +17,9 @@ mod state;
 pub(crate) mod test_turn_state_handle;
 use crate::budget::Budget;
 use crate::comms::{
-    CommsCommand, EventStream, PeerDirectoryEntry, PeerId, SendAndStreamError, SendError,
-    SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
+    CommsCommand, CommsTrustMutation, CommsTrustMutationResult, EventStream, PeerDirectoryEntry,
+    PeerId, SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
+    TrustedPeerDescriptor,
 };
 use crate::compact::SessionCompactionCadence;
 use crate::completion_feed::CompletionSeq;
@@ -754,25 +755,38 @@ pub trait CommsRuntime: Send + Sync {
         None
     }
 
-    /// Register a trusted peer for future peer sends.
+    /// Apply a comms trust projection mutation authorized by generated
+    /// machine/composition authority.
     ///
-    /// Runtimes that manage trust dynamically should accept this as a mutable
-    /// control-plane operation and return `SendError::Unsupported` if not
-    /// available.
-    async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+    /// This is the only mutable trust-store seam. The compatibility
+    /// add/remove helpers below intentionally fail closed when no generated
+    /// handoff is provided.
+    async fn apply_trust_mutation(
+        &self,
+        _mutation: CommsTrustMutation,
+    ) -> Result<CommsTrustMutationResult, SendError> {
         Err(SendError::Unsupported(
-            "add_trusted_peer not supported for this CommsRuntime".to_string(),
+            "apply_trust_mutation not supported for this CommsRuntime".to_string(),
         ))
     }
 
-    /// Remove a previously trusted peer by peer ID.
+    /// Compatibility helper for legacy callers without generated authority.
     ///
-    /// Returns `true` if the peer was found and removed, `false` if it
-    /// was not present. After removal, messages from this peer should be
-    /// rejected and `peers()` should no longer return it.
+    /// This fails closed by default so public surfaces cannot mutate trust
+    /// without the generated handoff required by [`Self::apply_trust_mutation`].
+    async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "generated comms trust mutation authority required".to_string(),
+        ))
+    }
+
+    /// Compatibility helper for legacy callers without generated authority.
+    ///
+    /// This fails closed by default so public surfaces cannot mutate trust
+    /// without the generated handoff required by [`Self::apply_trust_mutation`].
     async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
         Err(SendError::Unsupported(
-            "remove_trusted_peer not supported for this CommsRuntime".to_string(),
+            "generated comms trust mutation authority required".to_string(),
         ))
     }
 
@@ -791,7 +805,7 @@ pub trait CommsRuntime: Send + Sync {
         _peer: TrustedPeerDescriptor,
     ) -> Result<(), SendError> {
         Err(SendError::Unsupported(
-            "add_private_trusted_peer not supported for this CommsRuntime".to_string(),
+            "generated comms private trust mutation authority required".to_string(),
         ))
     }
 
@@ -801,7 +815,7 @@ pub trait CommsRuntime: Send + Sync {
     /// was not.
     async fn remove_private_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
         Err(SendError::Unsupported(
-            "remove_private_trusted_peer not supported for this CommsRuntime".to_string(),
+            "generated comms private trust mutation authority required".to_string(),
         ))
     }
 

@@ -18,9 +18,9 @@
 //! * This handler owns the mechanical reconciliation: it reads the
 //!   canonical trust store, computes the add / remove delta against a
 //!   fresh effective peer set, and calls
-//!   `CommsRuntime::add_trusted_peer` / `remove_trusted_peer`
-//!   mechanically. No semantic decisions live here; failures surface
-//!   through typed errors.
+//!   `CommsRuntime::apply_trust_mutation` with the generated peer-projection
+//!   epoch. No semantic decisions live here; failures surface through typed
+//!   errors.
 //!
 //! The handler is stateless about the DSL — it does not read machine
 //! snapshots directly. Callers supply the effective peer set
@@ -41,7 +41,10 @@ use std::sync::Arc;
 
 use crate::meerkat_machine::dsl::PeerEndpoint;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
-use meerkat_core::comms::{PeerAddress, PeerId, PeerName, SendError, TrustedPeerDescriptor};
+use meerkat_core::comms::{
+    CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, PeerAddress, PeerId,
+    PeerName, SendError, TrustedPeerDescriptor,
+};
 
 /// Typed error surfaced by the reconciliation handler.
 #[derive(Debug, thiserror::Error)]
@@ -143,7 +146,10 @@ impl CommsTrustReconciler {
         for endpoint in to_add {
             let descriptor = endpoint_to_descriptor(&endpoint)?;
             self.comms
-                .add_trusted_peer(descriptor)
+                .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
+                    peer: descriptor,
+                    authority: CommsTrustMutationAuthority::MeerkatMachinePeerProjection { epoch },
+                })
                 .await
                 .map_err(|source| CommsTrustReconcileError::AddTrustFailed {
                     peer_id: endpoint.peer_id.0.clone(),
@@ -153,13 +159,25 @@ impl CommsTrustReconciler {
         }
 
         for endpoint in to_remove {
-            self.comms
-                .remove_trusted_peer(endpoint.peer_id.0.as_str())
+            let result = self
+                .comms
+                .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
+                    peer_id: endpoint.peer_id.0.clone(),
+                    authority: CommsTrustMutationAuthority::MeerkatMachinePeerProjection { epoch },
+                })
                 .await
                 .map_err(|source| CommsTrustReconcileError::RemoveTrustFailed {
                     peer_id: endpoint.peer_id.0.clone(),
                     source,
                 })?;
+            if !matches!(result, CommsTrustMutationResult::Removed { .. }) {
+                return Err(CommsTrustReconcileError::RemoveTrustFailed {
+                    peer_id: endpoint.peer_id.0.clone(),
+                    source: SendError::Internal(
+                        "generated trust removal returned non-removal result".to_string(),
+                    ),
+                });
+            }
             removed.push(endpoint);
         }
 
@@ -289,34 +307,43 @@ mod tests {
             Arc::new(tokio::sync::Notify::new())
         }
 
-        async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-            if self.fail_next_add.swap(false, Ordering::SeqCst) {
-                return Err(SendError::Unsupported("synthetic failure".into()));
+        async fn apply_trust_mutation(
+            &self,
+            mutation: CommsTrustMutation,
+        ) -> Result<CommsTrustMutationResult, SendError> {
+            match mutation {
+                CommsTrustMutation::AddTrustedPeer { peer, .. } => {
+                    if self.fail_next_add.swap(false, Ordering::SeqCst) {
+                        return Err(SendError::Unsupported("synthetic failure".into()));
+                    }
+                    self.adds
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(peer.clone());
+                    self.trusted
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(descriptor_to_endpoint(&peer).expect("test descriptor should map"));
+                    Ok(CommsTrustMutationResult::Added)
+                }
+                CommsTrustMutation::RemoveTrustedPeer { peer_id, .. } => {
+                    if self.fail_next_remove.swap(false, Ordering::SeqCst) {
+                        return Err(SendError::Unsupported("synthetic failure".into()));
+                    }
+                    self.removes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(peer_id.clone());
+                    self.trusted
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .retain(|endpoint| endpoint.peer_id.0 != peer_id);
+                    Ok(CommsTrustMutationResult::Removed { removed: true })
+                }
+                _ => Err(SendError::Unsupported(
+                    "test runtime only supports public trust projection".into(),
+                )),
             }
-            self.adds
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(peer.clone());
-            self.trusted
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(descriptor_to_endpoint(&peer).expect("test descriptor should map"));
-            Ok(())
-        }
-
-        async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-            if self.fail_next_remove.swap(false, Ordering::SeqCst) {
-                return Err(SendError::Unsupported("synthetic failure".into()));
-            }
-            self.removes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(peer_id.to_string());
-            self.trusted
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .retain(|endpoint| endpoint.peer_id.0 != peer_id);
-            Ok(true)
         }
 
         async fn peer_ingress_runtime_snapshot(

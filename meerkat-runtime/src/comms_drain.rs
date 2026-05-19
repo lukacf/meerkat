@@ -12,7 +12,10 @@ use std::time::Duration;
 
 use meerkat_core::agent::CommsRuntime;
 #[allow(unused_imports)]
-use meerkat_core::comms::{CommsCommand, PeerId, PeerRoute, TrustedPeerDescriptor};
+use meerkat_core::comms::{
+    CommsCommand, CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult,
+    PeerId, PeerRoute, TrustedPeerDescriptor,
+};
 use meerkat_core::event::AgentEvent;
 use meerkat_core::interaction::{
     InteractionContent, PeerIngressFact, PeerInputCandidate, PeerInputClass,
@@ -885,6 +888,40 @@ fn validate_supervisor_publish_obligation(
     Ok(())
 }
 
+async fn apply_generated_trust_add(
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    peer: TrustedPeerDescriptor,
+    authority: CommsTrustMutationAuthority,
+) -> Result<(), String> {
+    match comms_runtime
+        .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer { peer, authority })
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        CommsTrustMutationResult::Added => Ok(()),
+        other => Err(format!(
+            "generated trust add returned unexpected result: {other:?}"
+        )),
+    }
+}
+
+async fn apply_generated_trust_remove(
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    peer_id: String,
+    authority: CommsTrustMutationAuthority,
+) -> Result<bool, String> {
+    match comms_runtime
+        .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer { peer_id, authority })
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        CommsTrustMutationResult::Removed { removed } => Ok(removed),
+        other => Err(format!(
+            "generated trust remove returned unexpected result: {other:?}"
+        )),
+    }
+}
+
 async fn publish_supervisor_trust_from_generated_obligation(
     adapter: &Arc<MeerkatMachine>,
     session_id: &SessionId,
@@ -892,10 +929,15 @@ async fn publish_supervisor_trust_from_generated_obligation(
     obligation: &crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation,
 ) -> Result<(), String> {
     let trusted_peer = trusted_peer_descriptor_from_supervisor_publish_obligation(obligation)?;
-    comms_runtime
-        .add_trusted_peer(trusted_peer)
-        .await
-        .map_err(|error| error.to_string())?;
+    apply_generated_trust_add(
+        comms_runtime,
+        trusted_peer,
+        CommsTrustMutationAuthority::MeerkatMachineSupervisorPublish {
+            peer_id: obligation.peer_id.clone(),
+            epoch: obligation.epoch,
+        },
+    )
+    .await?;
     adapter
         .stage_supervisor_trust_published(session_id, obligation.peer_id.clone(), obligation.epoch)
         .await
@@ -1482,13 +1524,22 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            if let Err(error) = comms_runtime.add_trusted_peer(publish_spec).await {
+            if let Err(error) = apply_generated_trust_add(
+                comms_runtime,
+                publish_spec,
+                CommsTrustMutationAuthority::MeerkatMachineSupervisorPublish {
+                    peer_id: publish_obligation.peer_id.clone(),
+                    epoch: publish_obligation.epoch,
+                },
+            )
+            .await
+            {
                 let _ = adapter
                     .stage_supervisor_trust_publish_failed(
                         session_id,
                         publish_obligation.peer_id.clone(),
                         publish_obligation.epoch,
-                        error.to_string(),
+                        error.clone(),
                     )
                     .await;
                 let reason = match rollback_bind_after_trust_publication_failure(
@@ -1750,16 +1801,22 @@ async fn try_handle_supervisor_bridge_command(
                         return true;
                     }
                 };
-                if let Err(error) = comms_runtime
-                    .remove_trusted_peer(&revoke_obligation.peer_id)
-                    .await
+                if let Err(error) = apply_generated_trust_remove(
+                    comms_runtime,
+                    revoke_obligation.peer_id.clone(),
+                    CommsTrustMutationAuthority::MeerkatMachineSupervisorRevoke {
+                        peer_id: revoke_obligation.peer_id.clone(),
+                        epoch: revoke_obligation.epoch,
+                    },
+                )
+                .await
                 {
                     let feedback = adapter
                         .stage_supervisor_trust_revoke_failed(
                             session_id,
                             revoke_obligation.peer_id.clone(),
                             revoke_obligation.epoch,
-                            error.to_string(),
+                            error.clone(),
                         )
                         .await;
                     let mut reason = format!(
@@ -1911,16 +1968,22 @@ async fn try_handle_supervisor_bridge_command(
                 .await;
                 return true;
             };
-            if let Err(error) = comms_runtime
-                .remove_trusted_peer(&revoke_obligation.peer_id)
-                .await
+            if let Err(error) = apply_generated_trust_remove(
+                comms_runtime,
+                revoke_obligation.peer_id.clone(),
+                CommsTrustMutationAuthority::MeerkatMachineSupervisorRevoke {
+                    peer_id: revoke_obligation.peer_id.clone(),
+                    epoch: revoke_obligation.epoch,
+                },
+            )
+            .await
             {
                 let feedback_result = adapter
                     .stage_supervisor_trust_revoke_failed(
                         session_id,
                         revoke_obligation.peer_id.clone(),
                         revoke_obligation.epoch,
-                        error.to_string(),
+                        error.clone(),
                     )
                     .await;
                 let mut reason = format!(

@@ -174,7 +174,7 @@ async fn router_send_filters_late_shared_raw_zero_pubkey_trust_mutation() {
 }
 
 #[tokio::test]
-async fn router_add_trusted_peer_raw_zero_pubkey_trust_is_not_sendable() {
+async fn shared_trust_upsert_raw_zero_pubkey_trust_is_not_sendable() {
     let _lock = INPROC_REGISTRY_LOCK.lock().await;
     let registry = InprocRegistry::global();
     registry.clear();
@@ -192,9 +192,11 @@ async fn router_add_trusted_peer_raw_zero_pubkey_trust_is_not_sendable() {
     );
     assert!(
         router
-            .add_trusted_peer(raw_zero_trusted_peer(&target_name))
+            .shared_trusted_peers()
+            .write()
+            .upsert(raw_zero_trusted_peer(&target_name))
             .is_err(),
-        "raw Router::add_trusted_peer zero-pubkey trust must be rejected"
+        "raw trusted-peer upsert of zero-pubkey trust must be rejected"
     );
 
     let dest = zero_pubkey().to_peer_id();
@@ -202,11 +204,11 @@ async fn router_add_trusted_peer_raw_zero_pubkey_trust_is_not_sendable() {
 
     assert!(
         matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
-        "raw Router::add_trusted_peer zero-pubkey trust must not be sendable: {result:?}"
+        "raw trusted-peer upsert zero-pubkey trust must not be sendable: {result:?}"
     );
     assert!(
         target_inbox.try_drain().is_empty(),
-        "zero-pubkey registry target must not receive from raw add_trusted_peer trust"
+        "zero-pubkey registry target must not receive from raw trusted-peer upsert"
     );
 
     registry.clear();
@@ -534,7 +536,7 @@ async fn router_auth_disabled_fallback_rejects_late_shared_duplicate_trust() {
 }
 
 #[tokio::test]
-async fn router_remove_trusted_peer_removes_all_duplicate_canonical_matches() {
+async fn shared_trust_remove_clears_all_duplicate_canonical_matches() {
     let _lock = INPROC_REGISTRY_LOCK.lock().await;
     let registry = InprocRegistry::global();
     registry.clear();
@@ -579,10 +581,10 @@ async fn router_remove_trusted_peer_removes_all_duplicate_canonical_matches() {
     ]);
 
     let dest = target_pubkey.to_peer_id();
-    assert!(
-        router.remove_trusted_peer(&dest),
-        "remove should report that duplicate canonical trust entries were removed"
-    );
+    trusted_peers
+        .write()
+        .peers
+        .retain(|peer| peer.pubkey != target_pubkey);
     assert!(
         trusted_peers
             .read()

@@ -345,6 +345,50 @@ pub struct TrustedPeerDescriptor {
     pub pubkey: [u8; 32],
 }
 
+/// Generated authority context for mutating a comms trust projection.
+///
+/// The comms runtime stores the transport-level peer table, but it must not
+/// decide trust semantics itself. Callers that need to add or remove trust
+/// must carry the generated machine/composition handoff that authorized the
+/// mutation.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommsTrustMutationAuthority {
+    MeerkatMachinePeerProjection { epoch: u64 },
+    MeerkatMachineSupervisorPublish { peer_id: String, epoch: u64 },
+    MeerkatMachineSupervisorRevoke { peer_id: String, epoch: u64 },
+}
+
+/// Trust-store projection mutation requested by generated authority.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommsTrustMutation {
+    AddTrustedPeer {
+        peer: TrustedPeerDescriptor,
+        authority: CommsTrustMutationAuthority,
+    },
+    RemoveTrustedPeer {
+        peer_id: String,
+        authority: CommsTrustMutationAuthority,
+    },
+    AddPrivateTrustedPeer {
+        peer: TrustedPeerDescriptor,
+        authority: CommsTrustMutationAuthority,
+    },
+    RemovePrivateTrustedPeer {
+        peer_id: String,
+        authority: CommsTrustMutationAuthority,
+    },
+}
+
+/// Result from applying a generated trust-store projection mutation.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommsTrustMutationResult {
+    Added,
+    Removed { removed: bool },
+}
+
 impl TrustedPeerDescriptor {
     pub fn pubkey_is_zero(pubkey: &[u8; 32]) -> bool {
         *pubkey == [0u8; 32]

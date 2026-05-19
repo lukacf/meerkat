@@ -219,11 +219,9 @@ impl Router {
         self.trusted_peers.read().has_peers()
     }
 
-    pub fn add_trusted_peer(&self, peer: TrustedPeer) -> Result<(), TrustError> {
-        let peer_id = peer_id_from_pubkey(&peer.pubkey);
-        self.add_trusted_peer_with_peer_id(peer_id, peer)
-    }
-
+    /// Apply a generated trust-projection add to the router's mechanical
+    /// trust store. Semantic trust authority lives at the machine seam that
+    /// called into `CommsRuntime::apply_trust_mutation`.
     pub(crate) fn add_trusted_peer_with_peer_id(
         &self,
         peer_id: PeerId,
@@ -235,7 +233,10 @@ impl Router {
         Ok(())
     }
 
-    pub fn remove_trusted_peer(&self, peer_id: &PeerId) -> bool {
+    /// Apply a generated trust-projection removal to the router's mechanical
+    /// trust store. Semantic trust authority lives at the machine seam that
+    /// called into `CommsRuntime::apply_trust_mutation`.
+    pub(crate) fn remove_trusted_peer(&self, peer_id: &PeerId) -> bool {
         let peer_ids = self.trusted_peer_ids.read().clone();
         let removed_pubkeys = {
             let mut trusted = self.trusted_peers.write();

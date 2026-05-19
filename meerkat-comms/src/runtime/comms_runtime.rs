@@ -18,9 +18,10 @@ use futures::Stream;
 use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, EventStream, InputStreamMode, PeerAddress, PeerCapabilitySet, PeerDirectoryEntry,
-    PeerDirectorySource, PeerId, PeerName, PeerReachabilityReason, PeerRoute, PeerSendability,
-    SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
+    CommsCommand, CommsTrustMutation, CommsTrustMutationResult, EventStream, InputStreamMode,
+    PeerAddress, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName,
+    PeerReachabilityReason, PeerRoute, PeerSendability, SendAndStreamError, SendError, SendReceipt,
+    StreamError, StreamScope, TrustedPeerDescriptor,
 };
 use meerkat_core::config::PlainEventSource;
 #[cfg(not(target_arch = "wasm32"))]
@@ -340,20 +341,40 @@ impl CoreCommsRuntime for CommsRuntime {
         Some(self.bridge_bootstrap_token.clone())
     }
 
-    async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        self.register_trusted_peer_descriptor(peer).await
-    }
-
-    async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-        self.unregister_trusted_peer(peer_id).await
-    }
-
-    async fn add_private_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        self.register_private_trusted_peer_descriptor(peer).await
-    }
-
-    async fn remove_private_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-        self.unregister_private_trusted_peer(peer_id).await
+    async fn apply_trust_mutation(
+        &self,
+        mutation: CommsTrustMutation,
+    ) -> Result<CommsTrustMutationResult, SendError> {
+        match mutation {
+            CommsTrustMutation::AddTrustedPeer {
+                peer,
+                authority: _authority,
+            } => {
+                self.apply_trusted_peer_descriptor(peer).await?;
+                Ok(CommsTrustMutationResult::Added)
+            }
+            CommsTrustMutation::RemoveTrustedPeer {
+                peer_id,
+                authority: _authority,
+            } => {
+                let removed = self.apply_trusted_peer_removal(&peer_id).await?;
+                Ok(CommsTrustMutationResult::Removed { removed })
+            }
+            CommsTrustMutation::AddPrivateTrustedPeer {
+                peer,
+                authority: _authority,
+            } => {
+                self.apply_private_trusted_peer_descriptor(peer).await?;
+                Ok(CommsTrustMutationResult::Added)
+            }
+            CommsTrustMutation::RemovePrivateTrustedPeer {
+                peer_id,
+                authority: _authority,
+            } => {
+                let removed = self.apply_private_trusted_peer_removal(&peer_id).await?;
+                Ok(CommsTrustMutationResult::Removed { removed })
+            }
+        }
     }
 
     fn dismiss_received(&self) -> bool {
@@ -2015,22 +2036,17 @@ impl CommsRuntime {
         &self.router
     }
 
-    /// Canonical runtime trust-registration seam.
-    ///
-    /// Trust truth lives in the router's `Arc<RwLock<TrustedPeers>>`, which
-    /// the classified inbox queue and ingress classifier consult directly.
-    /// There is no separate inbox-side mirror to keep in sync.
-    pub async fn register_trusted_peer(&self, mut peer: TrustedPeer) -> Result<(), SendError> {
-        peer.addr = parse_peer_address(&peer.addr)
-            .map_err(SendError::Validation)?
-            .to_string();
-        self.router
-            .add_trusted_peer(peer)
-            .map_err(|err| SendError::Validation(err.to_string()))?;
-        Ok(())
+    /// Compatibility trust-registration helper for callers without generated
+    /// authority. It intentionally fails closed; use the `CoreCommsRuntime`
+    /// `apply_trust_mutation` seam with a generated machine/composition
+    /// authority context.
+    pub async fn register_trusted_peer(&self, _peer: TrustedPeer) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "generated comms trust mutation authority required".to_string(),
+        ))
     }
 
-    async fn register_trusted_peer_descriptor(
+    async fn apply_trusted_peer_descriptor(
         &self,
         descriptor: TrustedPeerDescriptor,
     ) -> Result<(), SendError> {
@@ -2042,9 +2058,17 @@ impl CommsRuntime {
         Ok(())
     }
 
-    /// Canonical runtime trust-removal seam using a canonical [`PeerId`]
-    /// string.
-    pub async fn unregister_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
+    /// Compatibility trust-removal helper for callers without generated
+    /// authority. It intentionally fails closed; use the `CoreCommsRuntime`
+    /// `apply_trust_mutation` seam with a generated machine/composition
+    /// authority context.
+    pub async fn unregister_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
+        Err(SendError::Unsupported(
+            "generated comms trust mutation authority required".to_string(),
+        ))
+    }
+
+    async fn apply_trusted_peer_removal(&self, peer_id: &str) -> Result<bool, SendError> {
         let peer_id = meerkat_core::comms::PeerId::parse(peer_id)
             .map_err(|err| SendError::Validation(err.to_string()))?;
         Ok(self.router.remove_trusted_peer(&peer_id))
@@ -2062,22 +2086,13 @@ impl CommsRuntime {
     /// session-backed mob members, where delivery AND reply-routing must
     /// work but the recipient must not appear as an ordinary sendable
     /// peer on user-facing surfaces.
-    pub async fn register_private_trusted_peer(
-        &self,
-        mut peer: TrustedPeer,
-    ) -> Result<(), SendError> {
-        peer.addr = parse_peer_address(&peer.addr)
-            .map_err(SendError::Validation)?
-            .to_string();
-        let pubkey = peer.pubkey;
-        self.router
-            .add_trusted_peer(peer)
-            .map_err(|err| SendError::Validation(err.to_string()))?;
-        self.router.mark_private(pubkey);
-        Ok(())
+    pub async fn register_private_trusted_peer(&self, _peer: TrustedPeer) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "generated comms private trust mutation authority required".to_string(),
+        ))
     }
 
-    async fn register_private_trusted_peer_descriptor(
+    async fn apply_private_trusted_peer_descriptor(
         &self,
         descriptor: TrustedPeerDescriptor,
     ) -> Result<(), SendError> {
@@ -2091,7 +2106,13 @@ impl CommsRuntime {
     }
 
     /// Remove a previously registered private-trust edge.
-    pub async fn unregister_private_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
+    pub async fn unregister_private_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
+        Err(SendError::Unsupported(
+            "generated comms private trust mutation authority required".to_string(),
+        ))
+    }
+
+    async fn apply_private_trusted_peer_removal(&self, peer_id: &str) -> Result<bool, SendError> {
         let peer_id = meerkat_core::comms::PeerId::parse(peer_id)
             .map_err(|err| SendError::Validation(err.to_string()))?;
         let removed = self.router.remove_trusted_peer(&peer_id);
@@ -2926,7 +2947,8 @@ mod tests {
     use meerkat_core::{
         BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, SendError,
         comms::{
-            InputSource, InputStreamMode, PeerDirectorySource, PeerId, PeerName, PeerReachability,
+            CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, InputSource,
+            InputStreamMode, PeerDirectorySource, PeerId, PeerName, PeerReachability,
             PeerReachabilityReason, PeerRoute, PeerSendability, StreamError, StreamScope,
             TrustedPeerDescriptor,
         },
@@ -2944,6 +2966,62 @@ mod tests {
             address: parse_peer_address(address).expect("valid peer address"),
             pubkey: *pubkey.as_bytes(),
         }
+    }
+
+    #[tokio::test]
+    async fn public_trust_mutators_fail_closed_without_generated_authority() {
+        let runtime = CommsRuntime::inproc_only("trust-mutator-fail-closed").expect("runtime");
+        let peer_key = Keypair::generate().public_key();
+        let descriptor = trusted_descriptor("peer", peer_key, "inproc://peer");
+
+        let add = CoreCommsRuntime::add_trusted_peer(&runtime, descriptor.clone()).await;
+        assert!(
+            matches!(add, Err(SendError::Unsupported(ref message)) if message.contains("generated comms trust mutation authority")),
+            "raw add must fail closed without generated authority: {add:?}"
+        );
+        assert!(
+            runtime.peers().await.is_empty(),
+            "raw add must not mutate peer directory projection"
+        );
+
+        let remove =
+            CoreCommsRuntime::remove_trusted_peer(&runtime, &descriptor.peer_id.as_str()).await;
+        assert!(
+            matches!(remove, Err(SendError::Unsupported(ref message)) if message.contains("generated comms trust mutation authority")),
+            "raw remove must fail closed without generated authority: {remove:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn generated_trust_mutation_updates_projection() {
+        let runtime = CommsRuntime::inproc_only("trust-mutator-generated").expect("runtime");
+        let peer_key = Keypair::generate().public_key();
+        let descriptor = trusted_descriptor("peer", peer_key, "inproc://peer");
+        let peer_id = descriptor.peer_id.to_string();
+
+        let add = CoreCommsRuntime::apply_trust_mutation(
+            &runtime,
+            CommsTrustMutation::AddTrustedPeer {
+                peer: descriptor,
+                authority: CommsTrustMutationAuthority::MeerkatMachinePeerProjection { epoch: 7 },
+            },
+        )
+        .await
+        .expect("generated add should apply");
+        assert_eq!(add, CommsTrustMutationResult::Added);
+        assert_eq!(runtime.peers().await.len(), 1);
+
+        let remove = CoreCommsRuntime::apply_trust_mutation(
+            &runtime,
+            CommsTrustMutation::RemoveTrustedPeer {
+                peer_id,
+                authority: CommsTrustMutationAuthority::MeerkatMachinePeerProjection { epoch: 8 },
+            },
+        )
+        .await
+        .expect("generated remove should apply");
+        assert_eq!(remove, CommsTrustMutationResult::Removed { removed: true });
+        assert!(runtime.peers().await.is_empty());
     }
 
     fn install_test_peer_comms_handle(runtime: &CommsRuntime) {

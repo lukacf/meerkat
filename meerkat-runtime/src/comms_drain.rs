@@ -44,6 +44,23 @@ use crate::identifiers::LogicalRuntimeId;
 use crate::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention, PeerInput,
 };
+
+struct SupervisorTrustEffect {
+    peer_id: String,
+    epoch: u64,
+}
+
+impl comms_trust_authority::GeneratedMeerkatMachineSupervisorTrustHandoff
+    for SupervisorTrustEffect
+{
+    fn peer_id(&self) -> &str {
+        self.peer_id.as_str()
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
 use crate::meerkat_machine::{
     DrainExitReason, MeerkatMachine, SupervisorBinding, SupervisorBindingStageError,
 };
@@ -927,9 +944,12 @@ fn supervisor_publish_authority(
     peer_id: &str,
     epoch: u64,
 ) -> Result<CommsTrustMutationAuthority, String> {
-    comms_trust_authority::MeerkatMachineSupervisorTrustHandoff::from_generated_supervisor_publish(
-        peer_id.to_owned(),
+    let effect = SupervisorTrustEffect {
+        peer_id: peer_id.to_owned(),
         epoch,
+    };
+    comms_trust_authority::MeerkatMachineSupervisorTrustHandoff::from_generated_supervisor_publish(
+        &effect,
     )
     .publish_authority_for(peer_id)
 }
@@ -938,9 +958,12 @@ fn supervisor_revoke_authority(
     peer_id: &str,
     epoch: u64,
 ) -> Result<CommsTrustMutationAuthority, String> {
-    comms_trust_authority::MeerkatMachineSupervisorTrustHandoff::from_generated_supervisor_revoke(
-        peer_id.to_owned(),
+    let effect = SupervisorTrustEffect {
+        peer_id: peer_id.to_owned(),
         epoch,
+    };
+    comms_trust_authority::MeerkatMachineSupervisorTrustHandoff::from_generated_supervisor_revoke(
+        &effect,
     )
     .revoke_authority_for(peer_id)
 }
@@ -2562,6 +2585,48 @@ mod tests {
     const PEER_ID_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000bbbb"; // "supervisor"
     const PEER_ID_OLD_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000dddd"; // "old-supervisor"
 
+    struct TestPeerProjectionTrustEffect {
+        peer_id: String,
+        epoch: u64,
+    }
+
+    impl comms_trust_authority::GeneratedMeerkatMachinePeerProjectionHandoff
+        for TestPeerProjectionTrustEffect
+    {
+        fn peer_id(&self) -> &str {
+            self.peer_id.as_str()
+        }
+
+        fn epoch(&self) -> u64 {
+            self.epoch
+        }
+    }
+
+    async fn add_test_projection_trust(
+        runtime: &dyn CommsRuntime,
+        peer: TrustedPeerDescriptor,
+        context: &str,
+    ) {
+        let peer_id = peer.peer_id.to_string();
+        let authority =
+            comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
+                &TestPeerProjectionTrustEffect {
+                    peer_id: peer_id.clone(),
+                    epoch: 0,
+                },
+            )
+            .authority_for(&peer_id)
+            .expect("test projection handoff covers peer");
+        match runtime
+            .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer { peer, authority })
+            .await
+            .unwrap_or_else(|error| panic!("{context}: {error}"))
+        {
+            CommsTrustMutationResult::Added => {}
+            other => panic!("{context}: unexpected trust mutation result {other:?}"),
+        }
+    }
+
     fn test_pubkey(seed: u8) -> meerkat_comms::PubKey {
         assert_ne!(seed, 0, "test pubkey seed must be non-zero");
         meerkat_comms::PubKey::new([seed; 32])
@@ -3412,10 +3477,7 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(
             meerkat_comms::CommsRuntime::inproc_only("bridge-response-route").expect("runtime"),
         );
-        runtime
-            .add_trusted_peer(peer_spec.clone())
-            .await
-            .expect("trust peer");
+        add_test_projection_trust(runtime.as_ref(), peer_spec.clone(), "trust peer").await;
 
         let route = resolve_peer_route(&runtime, peer_spec.peer_id)
             .await
@@ -3439,18 +3501,14 @@ mod tests {
         let spoofed_key = meerkat_comms::Keypair::generate();
         let spoofed_pubkey = spoofed_key.public_key();
         let spoofed_peer_id = spoofed_pubkey.to_peer_id();
-        runtime
-            .add_trusted_peer(
-                TrustedPeerDescriptor::unsigned_with_pubkey(
-                    "spoofed-target",
-                    spoofed_peer_id.as_str(),
-                    *spoofed_pubkey.as_bytes(),
-                    "inproc://spoofed-target",
-                )
-                .expect("valid spoofed target"),
-            )
-            .await
-            .expect("trust spoofed target");
+        let spoofed_target = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "spoofed-target",
+            spoofed_peer_id.as_str(),
+            *spoofed_pubkey.as_bytes(),
+            "inproc://spoofed-target",
+        )
+        .expect("valid spoofed target");
+        add_test_projection_trust(runtime.as_ref(), spoofed_target, "trust spoofed target").await;
         let sender_key = meerkat_comms::Keypair::generate();
         let sender_pubkey = sender_key.public_key();
         let spoofed_peer_id = spoofed_peer_id.as_str();
@@ -3516,10 +3574,7 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(
             meerkat_comms::CommsRuntime::inproc_only("bridge-response-display").expect("runtime"),
         );
-        runtime
-            .add_trusted_peer(peer_spec.clone())
-            .await
-            .expect("trust peer");
+        add_test_projection_trust(runtime.as_ref(), peer_spec.clone(), "trust peer").await;
 
         let command = BridgeCommand::ObserveMember(BridgeSupervisorPayload {
             supervisor: BridgePeerSpec::from(peer_spec.clone()),
@@ -3571,10 +3626,7 @@ mod tests {
             meerkat_comms::CommsRuntime::inproc_only("bridge-response-typed-sender")
                 .expect("runtime"),
         );
-        runtime
-            .add_trusted_peer(peer_spec.clone())
-            .await
-            .expect("trust peer");
+        add_test_projection_trust(runtime.as_ref(), peer_spec.clone(), "trust peer").await;
 
         let payload_pubkey = meerkat_comms::Keypair::generate().public_key();
         let spoofed_payload_peer_id = PeerId::new();
@@ -3647,10 +3699,12 @@ mod tests {
             format!("inproc://{supervisor_name}"),
         )
         .expect("valid supervisor spec");
-        member_runtime
-            .add_trusted_peer(supervisor_spec.clone())
-            .await
-            .expect("member should trust supervisor");
+        add_test_projection_trust(
+            member_runtime.as_ref(),
+            supervisor_spec.clone(),
+            "member should trust supervisor",
+        )
+        .await;
 
         let member_pubkey = member_runtime.public_key();
         let member_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
@@ -3660,10 +3714,12 @@ mod tests {
             format!("inproc://{member_name}"),
         )
         .expect("valid member spec");
-        supervisor_runtime
-            .add_trusted_peer(member_spec)
-            .await
-            .expect("supervisor should trust member");
+        add_test_projection_trust(
+            supervisor_runtime.as_ref(),
+            member_spec,
+            "supervisor should trust member",
+        )
+        .await;
 
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
@@ -3994,7 +4050,7 @@ mod tests {
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-removed").unwrap());
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-removed").unwrap();
         let peer_spec = trusted_peer_from_runtime("peer-removed", &peer);
-        runtime.add_trusted_peer(peer_spec.clone()).await.unwrap();
+        add_test_projection_trust(runtime.as_ref(), peer_spec.clone(), "trust peer").await;
 
         let unwired = lifecycle_candidate(
             PeerInputClass::PeerLifecycleUnwired,
@@ -4015,7 +4071,7 @@ mod tests {
             "peer lifecycle unwire must not revoke comms trust before topology validation"
         );
 
-        runtime.add_trusted_peer(peer_spec.clone()).await.unwrap();
+        add_test_projection_trust(runtime.as_ref(), peer_spec.clone(), "refresh peer trust").await;
         let retired = lifecycle_candidate(
             PeerInputClass::PeerLifecycleRetired,
             "mob.peer_retired",
@@ -5753,10 +5809,7 @@ mod tests {
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
         let supervisor = trusted_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
-        runtime
-            .add_trusted_peer(supervisor.clone())
-            .await
-            .expect("trust supervisor");
+        add_test_projection_trust(runtime.as_ref(), supervisor.clone(), "trust supervisor").await;
         adapter
             .stage_supervisor_bind(
                 &session_id,

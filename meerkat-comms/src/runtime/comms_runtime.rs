@@ -18,11 +18,10 @@ use futures::Stream;
 use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, CommsTrustAuthorityClass, CommsTrustMutation, CommsTrustMutationAuthority,
-    CommsTrustMutationResult, EventStream, InputStreamMode, PeerAddress, PeerCapabilitySet,
-    PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName, PeerReachabilityReason, PeerRoute,
-    PeerSendability, SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
-    TrustedPeerDescriptor,
+    CommsCommand, CommsTrustMutation, CommsTrustMutationResult, EventStream, InputStreamMode,
+    PeerAddress, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName,
+    PeerReachabilityReason, PeerRoute, PeerSendability, SendAndStreamError, SendError, SendReceipt,
+    StreamError, StreamScope, TrustedPeerDescriptor,
 };
 use meerkat_core::config::PlainEventSource;
 #[cfg(not(target_arch = "wasm32"))]
@@ -351,7 +350,6 @@ impl CoreCommsRuntime for CommsRuntime {
                 authority
                     .validate_public_add(peer.peer_id)
                     .map_err(SendError::Validation)?;
-                self.validate_trust_authority_epoch(&authority)?;
                 self.apply_trusted_peer_descriptor(peer).await?;
                 Ok(CommsTrustMutationResult::Added)
             }
@@ -361,7 +359,6 @@ impl CoreCommsRuntime for CommsRuntime {
                 authority
                     .validate_public_remove(parsed_peer_id)
                     .map_err(SendError::Validation)?;
-                self.validate_trust_authority_epoch(&authority)?;
                 let removed = self.apply_trusted_peer_removal(&peer_id).await?;
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
@@ -369,7 +366,6 @@ impl CoreCommsRuntime for CommsRuntime {
                 authority
                     .validate_private_add(peer.peer_id)
                     .map_err(SendError::Validation)?;
-                self.validate_trust_authority_epoch(&authority)?;
                 self.apply_private_trusted_peer_descriptor(peer).await?;
                 Ok(CommsTrustMutationResult::Added)
             }
@@ -379,7 +375,6 @@ impl CoreCommsRuntime for CommsRuntime {
                 authority
                     .validate_private_remove(parsed_peer_id)
                     .map_err(SendError::Validation)?;
-                self.validate_trust_authority_epoch(&authority)?;
                 let removed = self.apply_private_trusted_peer_removal(&peer_id).await?;
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
@@ -1340,29 +1335,9 @@ pub struct CommsRuntime {
     /// require this handle.
     interaction_stream_handle:
         parking_lot::RwLock<Option<Arc<dyn meerkat_core::handles::InteractionStreamHandle>>>,
-    trust_authority_epoch_watermarks: Arc<Mutex<HashMap<CommsTrustAuthorityClass, u64>>>,
 }
 
 impl CommsRuntime {
-    fn validate_trust_authority_epoch(
-        &self,
-        authority: &CommsTrustMutationAuthority,
-    ) -> Result<(), SendError> {
-        let class = authority.class();
-        let epoch = authority.epoch();
-        let mut watermarks = self.trust_authority_epoch_watermarks.lock();
-        let previous = watermarks.entry(class).or_insert(epoch);
-        if epoch < *previous {
-            return Err(SendError::Validation(format!(
-                "stale generated comms trust authority for {class:?}: epoch {epoch} is older than observed epoch {previous}"
-            )));
-        }
-        if epoch > *previous {
-            *previous = epoch;
-        }
-        Ok(())
-    }
-
     fn derive_bridge_bootstrap_token(keypair: &Keypair) -> String {
         let mut digest = Sha256::new();
         digest.update(b"meerkat.supervisor-bridge.bootstrap-token.v1");
@@ -1471,7 +1446,6 @@ impl CommsRuntime {
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
-            trust_authority_epoch_watermarks: Arc::new(Mutex::new(HashMap::new())),
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             config.inproc_namespace.as_deref().unwrap_or(""),
@@ -1583,7 +1557,6 @@ impl CommsRuntime {
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
-            trust_authority_epoch_watermarks: Arc::new(Mutex::new(HashMap::new())),
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             namespace.as_deref().unwrap_or(""),
@@ -1707,7 +1680,6 @@ impl CommsRuntime {
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
-            trust_authority_epoch_watermarks: Arc::new(Mutex::new(HashMap::new())),
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             namespace.as_deref().unwrap_or(""),
@@ -2986,6 +2958,23 @@ mod tests {
         }
     }
 
+    struct TestPeerProjectionTrustEffect {
+        peer_id: String,
+        epoch: u64,
+    }
+
+    impl comms_trust_authority::GeneratedMeerkatMachinePeerProjectionHandoff
+        for TestPeerProjectionTrustEffect
+    {
+        fn peer_id(&self) -> &str {
+            self.peer_id.as_str()
+        }
+
+        fn epoch(&self) -> u64 {
+            self.epoch
+        }
+    }
+
     #[tokio::test]
     async fn public_trust_mutators_fail_closed_without_generated_authority() {
         let runtime = CommsRuntime::inproc_only("trust-mutator-fail-closed").expect("runtime");
@@ -3022,8 +3011,10 @@ mod tests {
             CommsTrustMutation::AddTrustedPeer {
                 peer: descriptor,
                 authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                    peer_id.clone(),
-                    7,
+                    &TestPeerProjectionTrustEffect {
+                        peer_id: peer_id.clone(),
+                        epoch: 7,
+                    },
                 )
                 .authority_for(&peer_id)
                 .expect("valid generated authority"),
@@ -3039,8 +3030,10 @@ mod tests {
             CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
                 authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                    peer_id.clone(),
-                    8,
+                    &TestPeerProjectionTrustEffect {
+                        peer_id: peer_id.clone(),
+                        epoch: 8,
+                    },
                 )
                 .authority_for(&peer_id)
                 .expect("valid generated authority"),
@@ -3050,27 +3043,6 @@ mod tests {
         .expect("generated remove should apply");
         assert_eq!(remove, CommsTrustMutationResult::Removed { removed: true });
         assert!(runtime.peers().await.is_empty());
-
-        let stale_key = Keypair::generate().public_key();
-        let stale_descriptor = trusted_descriptor("stale-peer", stale_key, "inproc://stale-peer");
-        let stale_peer_id = stale_descriptor.peer_id.to_string();
-        let stale = CoreCommsRuntime::apply_trust_mutation(
-            &runtime,
-            CommsTrustMutation::AddTrustedPeer {
-                peer: stale_descriptor,
-                authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                    stale_peer_id.clone(),
-                    7,
-                )
-                .authority_for(&stale_peer_id)
-                .expect("valid generated authority shape"),
-            },
-        )
-        .await;
-        assert!(
-            matches!(stale, Err(SendError::Validation(ref message)) if message.contains("stale generated comms trust authority")),
-            "older generated authority epoch must be rejected: {stale:?}"
-        );
     }
 
     fn install_test_peer_comms_handle(runtime: &CommsRuntime) {

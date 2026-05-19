@@ -25,6 +25,52 @@ enum ResumeTrustSource {
     },
 }
 
+struct ResumeMemberTrustEffect {
+    edge: crate::machines::mob_machine::WiringEdge,
+    a_peer_id: String,
+    b_peer_id: String,
+    epoch: u64,
+}
+
+impl comms_trust_authority::GeneratedMobMachineMemberTrustHandoff for ResumeMemberTrustEffect {
+    fn edge_a(&self) -> &str {
+        self.edge.a.0.as_str()
+    }
+
+    fn edge_b(&self) -> &str {
+        self.edge.b.0.as_str()
+    }
+
+    fn a_peer_id(&self) -> &str {
+        self.a_peer_id.as_str()
+    }
+
+    fn b_peer_id(&self) -> &str {
+        self.b_peer_id.as_str()
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+struct ResumeExternalPeerTrustEffect {
+    peer_id: String,
+    epoch: u64,
+}
+
+impl comms_trust_authority::GeneratedMobMachineExternalPeerTrustHandoff
+    for ResumeExternalPeerTrustEffect
+{
+    fn peer_id(&self) -> &str {
+        self.peer_id.as_str()
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MobBuilder
 // ---------------------------------------------------------------------------
@@ -185,12 +231,14 @@ fn resume_member_repair_authority_from_effects(
                 } else {
                     edge.b.0.as_str()
                 };
+                let effect = ResumeMemberTrustEffect {
+                    edge: edge.clone(),
+                    a_peer_id: a_peer_id.0.clone(),
+                    b_peer_id: b_peer_id.0.clone(),
+                    epoch: *epoch,
+                };
                 comms_trust_authority::MobMachineMemberTrustHandoff::from_generated_member_repair(
-                    edge.a.0.clone(),
-                    edge.b.0.clone(),
-                    a_peer_id.0.clone(),
-                    b_peer_id.0.clone(),
-                    *epoch,
+                    &effect,
                 )
                 .repair_authority_for_identity(identity, peer_id)
                 .ok()
@@ -221,9 +269,12 @@ fn resume_external_repair_authority_from_effects(
         )
     });
     if repair_requested && !graph_changed {
-        return comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_repair(
-            peer_id.to_string(),
+        let effect = ResumeExternalPeerTrustEffect {
+            peer_id: peer_id.to_string(),
             epoch,
+        };
+        return comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_repair(
+            &effect,
         )
         .authority_for_repair(peer_id)
         .map_err(MobError::WiringError);

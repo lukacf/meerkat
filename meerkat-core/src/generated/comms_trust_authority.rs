@@ -2,6 +2,49 @@
 
 use crate::comms::CommsTrustMutationAuthority;
 
+/// # Safety
+///
+/// Implement only for typed facts emitted from generated machine/composition
+/// transitions. Handwritten sources must not implement this trait to mint trust
+/// authority.
+pub trait GeneratedMeerkatMachinePeerProjectionHandoff {
+    fn peer_id(&self) -> &str;
+    fn epoch(&self) -> u64;
+}
+
+/// # Safety
+///
+/// Implement only for typed facts emitted from generated machine/composition
+/// transitions. Handwritten sources must not implement this trait to mint trust
+/// authority.
+pub trait GeneratedMeerkatMachineSupervisorTrustHandoff {
+    fn peer_id(&self) -> &str;
+    fn epoch(&self) -> u64;
+}
+
+/// # Safety
+///
+/// Implement only for typed facts emitted from generated machine/composition
+/// transitions. Handwritten sources must not implement this trait to mint trust
+/// authority.
+pub trait GeneratedMobMachineMemberTrustHandoff {
+    fn edge_a(&self) -> &str;
+    fn edge_b(&self) -> &str;
+    fn a_peer_id(&self) -> &str;
+    fn b_peer_id(&self) -> &str;
+    fn epoch(&self) -> u64;
+}
+
+/// # Safety
+///
+/// Implement only for typed facts emitted from generated machine/composition
+/// transitions. Handwritten sources must not implement this trait to mint trust
+/// authority.
+pub trait GeneratedMobMachineExternalPeerTrustHandoff {
+    fn peer_id(&self) -> &str;
+    fn epoch(&self) -> u64;
+}
+
 fn validate_expected_peer(
     context: &'static str,
     actual: &str,
@@ -23,10 +66,12 @@ pub struct MeerkatMachinePeerProjectionHandoff {
 }
 
 impl MeerkatMachinePeerProjectionHandoff {
-    pub fn from_generated_projection(peer_id: impl Into<String>, epoch: u64) -> Self {
+    pub fn from_generated_projection(
+        source: &impl GeneratedMeerkatMachinePeerProjectionHandoff,
+    ) -> Self {
         Self {
-            peer_id: peer_id.into(),
-            epoch,
+            peer_id: source.peer_id().to_string(),
+            epoch: source.epoch(),
         }
     }
 
@@ -62,18 +107,22 @@ enum MeerkatMachineSupervisorTrustOperation {
 }
 
 impl MeerkatMachineSupervisorTrustHandoff {
-    pub fn from_generated_supervisor_publish(peer_id: impl Into<String>, epoch: u64) -> Self {
+    pub fn from_generated_supervisor_publish(
+        source: &impl GeneratedMeerkatMachineSupervisorTrustHandoff,
+    ) -> Self {
         Self {
-            peer_id: peer_id.into(),
-            epoch,
+            peer_id: source.peer_id().to_string(),
+            epoch: source.epoch(),
             operation: MeerkatMachineSupervisorTrustOperation::Publish,
         }
     }
 
-    pub fn from_generated_supervisor_revoke(peer_id: impl Into<String>, epoch: u64) -> Self {
+    pub fn from_generated_supervisor_revoke(
+        source: &impl GeneratedMeerkatMachineSupervisorTrustHandoff,
+    ) -> Self {
         Self {
-            peer_id: peer_id.into(),
-            epoch,
+            peer_id: source.peer_id().to_string(),
+            epoch: source.epoch(),
             operation: MeerkatMachineSupervisorTrustOperation::Revoke,
         }
     }
@@ -144,52 +193,40 @@ enum MobMachineMemberTrustOperation {
 
 impl MobMachineMemberTrustHandoff {
     pub fn from_generated_member_wiring(
-        edge_a: impl Into<String>,
-        edge_b: impl Into<String>,
-        a_peer_id: impl Into<String>,
-        b_peer_id: impl Into<String>,
-        epoch: u64,
+        source: &impl GeneratedMobMachineMemberTrustHandoff,
     ) -> Self {
         Self {
-            edge_a: edge_a.into(),
-            edge_b: edge_b.into(),
-            a_peer_id: a_peer_id.into(),
-            b_peer_id: b_peer_id.into(),
-            epoch,
+            edge_a: source.edge_a().to_string(),
+            edge_b: source.edge_b().to_string(),
+            a_peer_id: source.a_peer_id().to_string(),
+            b_peer_id: source.b_peer_id().to_string(),
+            epoch: source.epoch(),
             operation: MobMachineMemberTrustOperation::Wiring,
         }
     }
 
     pub fn from_generated_member_unwiring(
-        edge_a: impl Into<String>,
-        edge_b: impl Into<String>,
-        a_peer_id: impl Into<String>,
-        b_peer_id: impl Into<String>,
-        epoch: u64,
+        source: &impl GeneratedMobMachineMemberTrustHandoff,
     ) -> Self {
         Self {
-            edge_a: edge_a.into(),
-            edge_b: edge_b.into(),
-            a_peer_id: a_peer_id.into(),
-            b_peer_id: b_peer_id.into(),
-            epoch,
+            edge_a: source.edge_a().to_string(),
+            edge_b: source.edge_b().to_string(),
+            a_peer_id: source.a_peer_id().to_string(),
+            b_peer_id: source.b_peer_id().to_string(),
+            epoch: source.epoch(),
             operation: MobMachineMemberTrustOperation::Unwiring,
         }
     }
 
     pub fn from_generated_member_repair(
-        edge_a: impl Into<String>,
-        edge_b: impl Into<String>,
-        a_peer_id: impl Into<String>,
-        b_peer_id: impl Into<String>,
-        epoch: u64,
+        source: &impl GeneratedMobMachineMemberTrustHandoff,
     ) -> Self {
         Self {
-            edge_a: edge_a.into(),
-            edge_b: edge_b.into(),
-            a_peer_id: a_peer_id.into(),
-            b_peer_id: b_peer_id.into(),
-            epoch,
+            edge_a: source.edge_a().to_string(),
+            edge_b: source.edge_b().to_string(),
+            a_peer_id: source.a_peer_id().to_string(),
+            b_peer_id: source.b_peer_id().to_string(),
+            epoch: source.epoch(),
             operation: MobMachineMemberTrustOperation::Repair,
         }
     }
@@ -288,26 +325,32 @@ enum MobMachineExternalPeerTrustOperation {
 }
 
 impl MobMachineExternalPeerTrustHandoff {
-    pub fn from_generated_external_peer_wiring(peer_id: impl Into<String>, epoch: u64) -> Self {
+    pub fn from_generated_external_peer_wiring(
+        source: &impl GeneratedMobMachineExternalPeerTrustHandoff,
+    ) -> Self {
         Self {
-            peer_id: peer_id.into(),
-            epoch,
+            peer_id: source.peer_id().to_string(),
+            epoch: source.epoch(),
             operation: MobMachineExternalPeerTrustOperation::Wiring,
         }
     }
 
-    pub fn from_generated_external_peer_unwiring(peer_id: impl Into<String>, epoch: u64) -> Self {
+    pub fn from_generated_external_peer_unwiring(
+        source: &impl GeneratedMobMachineExternalPeerTrustHandoff,
+    ) -> Self {
         Self {
-            peer_id: peer_id.into(),
-            epoch,
+            peer_id: source.peer_id().to_string(),
+            epoch: source.epoch(),
             operation: MobMachineExternalPeerTrustOperation::Unwiring,
         }
     }
 
-    pub fn from_generated_external_peer_repair(peer_id: impl Into<String>, epoch: u64) -> Self {
+    pub fn from_generated_external_peer_repair(
+        source: &impl GeneratedMobMachineExternalPeerTrustHandoff,
+    ) -> Self {
         Self {
-            peer_id: peer_id.into(),
-            epoch,
+            peer_id: source.peer_id().to_string(),
+            epoch: source.epoch(),
             operation: MobMachineExternalPeerTrustOperation::Repair,
         }
     }

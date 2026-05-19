@@ -369,17 +369,6 @@ pub enum CommsTrustMutationAuthority {
     MobMachinePeerRetire { peer_id: String, epoch: u64 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CommsTrustAuthorityClass {
-    MeerkatMachinePeerProjection,
-    MeerkatMachineSupervisorPublish,
-    MeerkatMachineSupervisorRevoke,
-    MobMachinePeerWiring,
-    MobMachinePeerUnwiring,
-    MobMachinePeerRepair,
-    MobMachinePeerRetire,
-}
-
 impl CommsTrustMutationAuthority {
     pub(crate) fn from_meerkat_machine_peer_projection(
         peer_id: impl Into<String>,
@@ -494,36 +483,6 @@ impl CommsTrustMutationAuthority {
             | Self::MobMachinePeerUnwiring { peer_id, .. }
             | Self::MobMachinePeerRepair { peer_id, .. }
             | Self::MobMachinePeerRetire { peer_id, .. } => Some(peer_id),
-        }
-    }
-
-    pub fn class(&self) -> CommsTrustAuthorityClass {
-        match self {
-            Self::MeerkatMachinePeerProjection { .. } => {
-                CommsTrustAuthorityClass::MeerkatMachinePeerProjection
-            }
-            Self::MeerkatMachineSupervisorPublish { .. } => {
-                CommsTrustAuthorityClass::MeerkatMachineSupervisorPublish
-            }
-            Self::MeerkatMachineSupervisorRevoke { .. } => {
-                CommsTrustAuthorityClass::MeerkatMachineSupervisorRevoke
-            }
-            Self::MobMachinePeerWiring { .. } => CommsTrustAuthorityClass::MobMachinePeerWiring,
-            Self::MobMachinePeerUnwiring { .. } => CommsTrustAuthorityClass::MobMachinePeerUnwiring,
-            Self::MobMachinePeerRepair { .. } => CommsTrustAuthorityClass::MobMachinePeerRepair,
-            Self::MobMachinePeerRetire { .. } => CommsTrustAuthorityClass::MobMachinePeerRetire,
-        }
-    }
-
-    pub fn epoch(&self) -> u64 {
-        match self {
-            Self::MeerkatMachinePeerProjection { epoch, .. }
-            | Self::MeerkatMachineSupervisorPublish { epoch, .. }
-            | Self::MeerkatMachineSupervisorRevoke { epoch, .. }
-            | Self::MobMachinePeerWiring { epoch, .. }
-            | Self::MobMachinePeerUnwiring { epoch, .. }
-            | Self::MobMachinePeerRepair { epoch, .. }
-            | Self::MobMachinePeerRetire { epoch, .. } => *epoch,
         }
     }
 }

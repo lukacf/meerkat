@@ -43,14 +43,33 @@ fn descriptor_for(name: &str, pubkey: &meerkat_comms::identity::PubKey) -> Trust
     }
 }
 
+struct TestPeerProjectionTrustEffect {
+    peer_id: String,
+    epoch: u64,
+}
+
+impl comms_trust_authority::GeneratedMeerkatMachinePeerProjectionHandoff
+    for TestPeerProjectionTrustEffect
+{
+    fn peer_id(&self) -> &str {
+        self.peer_id.as_str()
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
 async fn apply_generated_trust(runtime: &CommsRuntime, peer: TrustedPeerDescriptor) {
     let peer_id = peer.peer_id.to_string();
     meerkat_core::agent::CommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
             authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                peer_id.clone(),
-                0,
+                &TestPeerProjectionTrustEffect {
+                    peer_id: peer_id.clone(),
+                    epoch: 0,
+                },
             )
             .authority_for(&peer_id)
             .expect("valid generated trust authority"),
@@ -66,8 +85,10 @@ async fn revoke_generated_trust(runtime: &CommsRuntime, peer_id: String) -> bool
         runtime,
         CommsTrustMutation::RemoveTrustedPeer {
             authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                peer_id.clone(),
-                0,
+                &TestPeerProjectionTrustEffect {
+                    peer_id: peer_id.clone(),
+                    epoch: 0,
+                },
             )
             .authority_for(&peer_id)
             .expect("valid generated trust authority"),

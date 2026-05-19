@@ -71,6 +71,119 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
+struct TestMemberTrustEffect {
+    edge_a: String,
+    edge_b: String,
+    a_peer_id: String,
+    b_peer_id: String,
+    epoch: u64,
+}
+
+impl meerkat_core::generated::comms_trust_authority::GeneratedMobMachineMemberTrustHandoff
+    for TestMemberTrustEffect
+{
+    fn edge_a(&self) -> &str {
+        self.edge_a.as_str()
+    }
+
+    fn edge_b(&self) -> &str {
+        self.edge_b.as_str()
+    }
+
+    fn a_peer_id(&self) -> &str {
+        self.a_peer_id.as_str()
+    }
+
+    fn b_peer_id(&self) -> &str {
+        self.b_peer_id.as_str()
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+struct TestExternalPeerTrustEffect {
+    peer_id: String,
+    epoch: u64,
+}
+
+impl meerkat_core::generated::comms_trust_authority::GeneratedMobMachineExternalPeerTrustHandoff
+    for TestExternalPeerTrustEffect
+{
+    fn peer_id(&self) -> &str {
+        self.peer_id.as_str()
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+struct TestPeerProjectionTrustEffect {
+    peer_id: String,
+    epoch: u64,
+}
+
+impl meerkat_core::generated::comms_trust_authority::GeneratedMeerkatMachinePeerProjectionHandoff
+    for TestPeerProjectionTrustEffect
+{
+    fn peer_id(&self) -> &str {
+        self.peer_id.as_str()
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+async fn apply_test_peer_projection_trust(
+    runtime: &dyn CoreCommsRuntime,
+    peer: TrustedPeerDescriptor,
+    context: &'static str,
+) {
+    let peer_id = peer.peer_id.to_string();
+    CoreCommsRuntime::apply_trust_mutation(
+        runtime,
+        CommsTrustMutation::AddTrustedPeer {
+            authority: meerkat_core::generated::comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
+                &TestPeerProjectionTrustEffect {
+                    peer_id: peer_id.clone(),
+                    epoch: 0,
+                },
+            )
+            .authority_for(&peer_id)
+            .expect("test peer projection authority covers peer"),
+            peer,
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{context}: {error}"));
+}
+
+async fn remove_test_peer_projection_trust(
+    runtime: &dyn CoreCommsRuntime,
+    peer_id: &str,
+    context: &'static str,
+) {
+    CoreCommsRuntime::apply_trust_mutation(
+        runtime,
+        CommsTrustMutation::RemoveTrustedPeer {
+            authority: meerkat_core::generated::comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
+                &TestPeerProjectionTrustEffect {
+                    peer_id: peer_id.to_string(),
+                    epoch: 0,
+                },
+            )
+            .authority_for(peer_id)
+            .expect("test peer projection authority covers peer"),
+            peer_id: peer_id.to_string(),
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{context}: {error}"));
+}
+
 fn default_supervisor_authority_record() -> SupervisorAuthorityRecord {
     SupervisorAuthorityRecord::generate(
         super::bridge_protocol::supervisor_bridge_default_protocol_version(),
@@ -1121,7 +1234,12 @@ impl MockSessionService {
         if let (Some(from_runtime), Some(to_runtime)) = (from_runtime, to_runtime)
             && let Some(to_key) = to_runtime.peer_id()
         {
-            let _ = from_runtime.remove_trusted_peer(&to_key.to_string()).await;
+            remove_test_peer_projection_trust(
+                from_runtime.as_ref(),
+                &to_key.to_string(),
+                "force remove trusted peer",
+            )
+            .await;
         }
     }
 
@@ -1131,7 +1249,12 @@ impl MockSessionService {
             sessions.get(session_id).cloned()
         };
         if let Some(runtime) = runtime {
-            let _ = runtime.remove_trusted_peer(peer_id).await;
+            remove_test_peer_projection_trust(
+                runtime.as_ref(),
+                peer_id,
+                "force remove trusted peer by peer id",
+            )
+            .await;
         }
     }
 
@@ -1141,10 +1264,8 @@ impl MockSessionService {
             sessions.get(session_id).cloned()
         };
         if let Some(runtime) = runtime {
-            runtime
-                .add_trusted_peer(spec)
-                .await
-                .expect("force add trusted peer");
+            apply_test_peer_projection_trust(runtime.as_ref(), spec, "force add trusted peer")
+                .await;
         }
     }
 }
@@ -3263,20 +3384,24 @@ impl LiveExternalPeerHarness {
     }
 
     async fn remove_trusted_peer(&self, peer_id: &str) {
-        self.runtime
-            .remove_trusted_peer(peer_id)
-            .await
-            .expect("remove trusted peer from harness runtime");
+        remove_test_peer_projection_trust(
+            self.runtime.as_ref(),
+            peer_id,
+            "remove trusted peer from harness runtime",
+        )
+        .await;
     }
 
     async fn remove_trusted_peer_descriptor(
         runtime: &Arc<meerkat_comms::CommsRuntime>,
         peer: &meerkat_core::comms::TrustedPeerDescriptor,
     ) {
-        runtime
-            .remove_trusted_peer(&peer.peer_id.to_string())
-            .await
-            .expect("remove trusted peer from harness runtime");
+        remove_test_peer_projection_trust(
+            runtime.as_ref(),
+            &peer.peer_id.to_string(),
+            "remove trusted peer from harness runtime",
+        )
+        .await;
     }
 
     fn bind_count(&self) -> usize {
@@ -3551,10 +3676,12 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                             payload.supervisor.clone(),
                                                         )
                                                         .expect("valid supervisor spec");
-                                                    responder_runtime
-                                                        .add_trusted_peer(supervisor_spec)
-                                                        .await
-                                                        .expect("bind supervisor");
+                                                    apply_test_peer_projection_trust(
+                                                        responder_runtime.as_ref(),
+                                                        supervisor_spec,
+                                                        "bind supervisor",
+                                                    )
+                                                    .await;
                                                     *state_guard = Some(HarnessSupervisorState {
                                                         supervisor:
                                                             meerkat_core::comms::TrustedPeerDescriptor::try_from(
@@ -3620,10 +3747,12 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                 payload.supervisor.clone(),
                                             )
                                             .expect("valid supervisor spec");
-                                        responder_runtime
-                                            .add_trusted_peer(supervisor_spec)
-                                            .await
-                                            .expect("trust supervisor for rejection");
+                                        apply_test_peer_projection_trust(
+                                            responder_runtime.as_ref(),
+                                            supervisor_spec,
+                                            "trust supervisor for rejection",
+                                        )
+                                        .await;
                                         serde_json::to_value(
                                             super::bridge_protocol::BridgeReply::Rejected {
                                                 cause: super::bridge_protocol::BridgeRejectionCause::Internal,
@@ -3677,10 +3806,12 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                         payload.supervisor.clone(),
                                                     )
                                                     .expect("valid supervisor spec");
-                                                responder_runtime
-                                                    .add_trusted_peer(supervisor_spec)
-                                                    .await
-                                                    .expect("authorize supervisor");
+                                                apply_test_peer_projection_trust(
+                                                    responder_runtime.as_ref(),
+                                                    supervisor_spec,
+                                                    "authorize supervisor",
+                                                )
+                                                .await;
                                                 *guard = Some(HarnessSupervisorState {
                                                     supervisor:
                                                         meerkat_core::comms::TrustedPeerDescriptor::try_from(
@@ -3701,10 +3832,12 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                     payload.supervisor.clone(),
                                                 )
                                                 .expect("valid supervisor spec");
-                                            responder_runtime
-                                                .add_trusted_peer(supervisor_spec)
-                                                .await
-                                                .expect("trust supervisor for initial rejection");
+                                            apply_test_peer_projection_trust(
+                                                responder_runtime.as_ref(),
+                                                supervisor_spec,
+                                                "trust supervisor for initial rejection",
+                                            )
+                                            .await;
                                             serde_json::to_value(
                                                 super::bridge_protocol::BridgeReply::Rejected {
                                                     cause: super::bridge_protocol::BridgeRejectionCause::NotBound,
@@ -3796,10 +3929,12 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                 payload.supervisor,
                                             )
                                             .expect("valid supervisor spec");
-                                        responder_runtime
-                                            .add_trusted_peer(supervisor_spec)
-                                            .await
-                                            .expect("refresh supervisor for delivery");
+                                        apply_test_peer_projection_trust(
+                                            responder_runtime.as_ref(),
+                                            supervisor_spec,
+                                            "refresh supervisor for delivery",
+                                        )
+                                        .await;
                                         responder_delivered_inputs
                                             .write()
                                             .await
@@ -3828,10 +3963,12 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                             payload.peer_spec,
                                         )
                                         .expect("valid peer spec");
-                                    responder_runtime
-                                        .add_trusted_peer(peer_spec)
-                                        .await
-                                        .expect("wire trust");
+                                    apply_test_peer_projection_trust(
+                                        responder_runtime.as_ref(),
+                                        peer_spec,
+                                        "wire trust",
+                                    )
+                                    .await;
                                     serde_json::to_value(super::bridge_protocol::BridgeAck {
                                         ok: true,
                                     })
@@ -3843,9 +3980,12 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                             payload.peer_spec,
                                         )
                                         .expect("valid peer spec");
-                                    let _ = responder_runtime
-                                        .remove_trusted_peer(&peer_spec.peer_id.to_string())
-                                        .await;
+                                    remove_test_peer_projection_trust(
+                                        responder_runtime.as_ref(),
+                                        &peer_spec.peer_id.to_string(),
+                                        "unwire trust",
+                                    )
+                                    .await;
                                     serde_json::to_value(super::bridge_protocol::BridgeAck {
                                         ok: true,
                                     })
@@ -3908,10 +4048,12 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                 .expect("peer_added peer_spec"),
                                         )
                                         .expect("peer_added trusted peer spec");
-                                    responder_runtime
-                                        .add_trusted_peer(peer_spec)
-                                        .await
-                                        .expect("peer_added trust");
+                                    apply_test_peer_projection_trust(
+                                        responder_runtime.as_ref(),
+                                        peer_spec,
+                                        "peer_added trust",
+                                    )
+                                    .await;
                                     serde_json::json!({ "ok": true })
                                 }
                                 "mob.peer_unwired" | "mob.peer_retired" => {
@@ -3923,9 +4065,12 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                 .expect("peer lifecycle peer_spec"),
                                         )
                                         .expect("peer lifecycle trusted peer spec");
-                                    let _ = responder_runtime
-                                        .remove_trusted_peer(&peer_spec.peer_id.to_string())
-                                        .await;
+                                    remove_test_peer_projection_trust(
+                                        responder_runtime.as_ref(),
+                                        &peer_spec.peer_id.to_string(),
+                                        "peer lifecycle remove trust",
+                                    )
+                                    .await;
                                     serde_json::json!({ "ok": true })
                                 }
                                 _ => serde_json::json!({ "ok": true }),
@@ -3946,9 +4091,12 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                         }
                         responder_runtime.mark_interaction_complete(candidate.interaction.id.0);
                         for supervisor_pubkey in remove_supervisors_after_response {
-                            let _ = responder_runtime
-                                .remove_trusted_peer(&supervisor_pubkey.to_peer_id().to_string())
-                                .await;
+                            remove_test_peer_projection_trust(
+                                responder_runtime.as_ref(),
+                                &supervisor_pubkey.to_peer_id().to_string(),
+                                "remove rotated supervisor trust",
+                            )
+                            .await;
                         }
                     }
                     _ => {
@@ -4267,8 +4415,20 @@ async fn trust_candidate_sender_for_reply(
         format!("inproc://{}", display_name.as_str()),
     )
     .expect("typed ingress sender should convert to a reply trusted peer");
-    comms
-        .add_trusted_peer(descriptor)
+    CoreCommsRuntime::apply_trust_mutation(
+        comms,
+        CommsTrustMutation::AddTrustedPeer {
+            authority: meerkat_core::generated::comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
+                &TestPeerProjectionTrustEffect {
+                    peer_id: route.peer_id.to_string(),
+                    epoch: 0,
+                },
+            )
+            .authority_for(&route.peer_id.to_string())
+            .expect("typed ingress sender reply route covers peer"),
+            peer: descriptor,
+        },
+    )
         .await
         .expect("trust typed ingress sender for bridge reply");
     route
@@ -13573,10 +13733,12 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
         .real_comms(&old_sub_sid)
         .await
         .expect("session-backed member comms");
-    old_sub_comms
-        .remove_trusted_peer(&old_ext_peer_id)
-        .await
-        .expect("remove external trust before resume");
+    remove_test_peer_projection_trust(
+        old_sub_comms.as_ref(),
+        &old_ext_peer_id,
+        "remove external trust before resume",
+    )
+    .await;
     if let Some(old_ext_sid) = &old_ext_sid {
         service
             .archive(old_ext_sid)
@@ -26513,13 +26675,16 @@ async fn test_unwire_fails_closed_on_stale_local_trust_when_machine_edge_absent(
     let key_b = comms_b.public_key();
     let peer_id_a = key_a.to_peer_id().to_string();
     let peer_id_b = key_b.to_peer_id().to_string();
+    let stale_effect = TestMemberTrustEffect {
+        edge_a: "l-1".to_string(),
+        edge_b: "w-1".to_string(),
+        a_peer_id: peer_id_a.clone(),
+        b_peer_id: peer_id_b.clone(),
+        epoch: 3,
+    };
     let stale_handoff =
         meerkat_core::generated::comms_trust_authority::MobMachineMemberTrustHandoff::from_generated_member_wiring(
-            "l-1",
-            "w-1",
-            peer_id_a.clone(),
-            peer_id_b.clone(),
-            3,
+            &stale_effect,
         );
     comms_a
         .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
@@ -26616,8 +26781,10 @@ async fn test_unwire_external_fails_closed_on_stale_trust_when_machine_edge_abse
         .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
             peer: spec.clone(),
             authority: meerkat_core::generated::comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_wiring(
-                peer_id.clone(),
-                3,
+                &TestExternalPeerTrustEffect {
+                    peer_id: peer_id.clone(),
+                    epoch: 3,
+                },
             )
             .authority_for_wiring(&peer_id)
             .expect("generated external wiring handoff covers test peer"),

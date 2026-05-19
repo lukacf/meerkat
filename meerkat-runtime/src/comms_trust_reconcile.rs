@@ -47,6 +47,23 @@ use meerkat_core::comms::{
 };
 use meerkat_core::generated::comms_trust_authority;
 
+struct PeerProjectionTrustEffect {
+    peer_id: String,
+    epoch: u64,
+}
+
+impl comms_trust_authority::GeneratedMeerkatMachinePeerProjectionHandoff
+    for PeerProjectionTrustEffect
+{
+    fn peer_id(&self) -> &str {
+        self.peer_id.as_str()
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
 /// Typed error surfaced by the reconciliation handler.
 #[derive(Debug, thiserror::Error)]
 pub enum CommsTrustReconcileError {
@@ -146,10 +163,13 @@ impl CommsTrustReconciler {
         // an older session hasn't completed.
         for endpoint in to_add {
             let descriptor = endpoint_to_descriptor(&endpoint)?;
+            let trust_effect = PeerProjectionTrustEffect {
+                peer_id: endpoint.peer_id.0.clone(),
+                epoch,
+            };
             let authority =
                 comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                    endpoint.peer_id.0.clone(),
-                    epoch,
+                    &trust_effect,
                 )
                 .authority_for(&endpoint.peer_id.0)
                 .map_err(|source| CommsTrustReconcileError::AddTrustFailed {
@@ -170,10 +190,13 @@ impl CommsTrustReconciler {
         }
 
         for endpoint in to_remove {
+            let trust_effect = PeerProjectionTrustEffect {
+                peer_id: endpoint.peer_id.0.clone(),
+                epoch,
+            };
             let authority =
                 comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                    endpoint.peer_id.0.clone(),
-                    epoch,
+                    &trust_effect,
                 )
                 .authority_for(&endpoint.peer_id.0)
                 .map_err(|source| CommsTrustReconcileError::RemoveTrustFailed {

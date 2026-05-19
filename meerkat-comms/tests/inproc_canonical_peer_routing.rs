@@ -58,6 +58,23 @@ fn trusted_descriptor_for(
     }
 }
 
+struct TestPeerProjectionTrustEffect {
+    peer_id: String,
+    epoch: u64,
+}
+
+impl comms_trust_authority::GeneratedMeerkatMachinePeerProjectionHandoff
+    for TestPeerProjectionTrustEffect
+{
+    fn peer_id(&self) -> &str {
+        self.peer_id.as_str()
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
 async fn apply_generated_trust(
     runtime: &CommsRuntime,
     peer: meerkat_core::comms::TrustedPeerDescriptor,
@@ -67,8 +84,10 @@ async fn apply_generated_trust(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
             authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                peer_id.clone(),
-                0,
+                &TestPeerProjectionTrustEffect {
+                    peer_id: peer_id.clone(),
+                    epoch: 0,
+                },
             )
             .authority_for(&peer_id)
             .expect("valid generated trust authority"),

@@ -3373,6 +3373,23 @@ mod tests {
     use tokio::sync::Notify;
     use tokio::time::{Duration, Instant, sleep};
 
+    struct TestExternalPeerTrustEffect {
+        peer_id: String,
+        epoch: u64,
+    }
+
+    impl comms_trust_authority::GeneratedMobMachineExternalPeerTrustHandoff
+        for TestExternalPeerTrustEffect
+    {
+        fn peer_id(&self) -> &str {
+            self.peer_id.as_str()
+        }
+
+        fn epoch(&self) -> u64 {
+            self.epoch
+        }
+    }
+
     const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 
     fn external_peer_target(public_key: &str) -> WireActionPeerTarget {
@@ -3413,8 +3430,10 @@ mod tests {
             .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
                 peer: peer.clone(),
                 authority: comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_wiring(
-                    peer_id.clone(),
-                    1,
+                    &TestExternalPeerTrustEffect {
+                        peer_id: peer_id.clone(),
+                        epoch: 1,
+                    },
                 )
                 .authority_for_wiring(&peer_id)
                 .expect("generated wiring handoff covers peer"),
@@ -3435,8 +3454,10 @@ mod tests {
                 peer_id: peer_id.clone(),
                 authority:
                     comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_unwiring(
-                        peer_id.clone(),
-                        2,
+                        &TestExternalPeerTrustEffect {
+                            peer_id: peer_id.clone(),
+                            epoch: 2,
+                        },
                     )
                     .authority_for_unwiring(&peer_id)
                     .expect("generated unwiring handoff covers peer"),

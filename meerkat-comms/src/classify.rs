@@ -670,14 +670,12 @@ mod tests {
     }
 
     fn make_trusted_peers(name: &str, pubkey: &PubKey) -> TrustedPeers {
-        TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: name.to_string(),
-                pubkey: *pubkey,
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
-        }
+        TrustedPeers::from_peers(vec![TrustedPeer {
+            name: name.to_string(),
+            pubkey: *pubkey,
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: crate::PeerMeta::default(),
+        }])
     }
 
     fn make_envelope(from: &Keypair, kind: MessageKind) -> Envelope {

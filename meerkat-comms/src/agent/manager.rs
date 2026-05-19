@@ -177,14 +177,12 @@ mod tests {
     }
 
     fn make_trusted_peers(name: &str, pubkey: &crate::PubKey) -> TrustedPeers {
-        TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: name.to_string(),
-                pubkey: *pubkey,
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
-        }
+        TrustedPeers::from_peers(vec![TrustedPeer {
+            name: name.to_string(),
+            pubkey: *pubkey,
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: crate::PeerMeta::default(),
+        }])
     }
 
     #[test]
@@ -209,8 +207,8 @@ mod tests {
 
         let manager = CommsManager::new(config).unwrap();
 
-        assert_eq!(manager.trusted_peers().peers.len(), 1);
-        assert_eq!(manager.trusted_peers().peers[0].name, "test-peer");
+        assert_eq!(manager.trusted_peers().peers().len(), 1);
+        assert_eq!(manager.trusted_peers().peers()[0].name, "test-peer");
     }
 
     #[test]

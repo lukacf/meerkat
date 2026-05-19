@@ -39,14 +39,12 @@ fn make_trusted_peers_with_addr(
     pubkey: &meerkat_comms::PubKey,
     addr: &str,
 ) -> TrustedPeers {
-    TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: name.to_string(),
-            pubkey: *pubkey,
-            addr: addr.to_string(),
-            meta: meerkat_comms::PeerMeta::default(),
-        }],
-    }
+    TrustedPeers::from_peers(vec![TrustedPeer {
+        name: name.to_string(),
+        pubkey: *pubkey,
+        addr: addr.to_string(),
+        meta: meerkat_comms::PeerMeta::default(),
+    }])
 }
 
 async fn read_envelope_async(

@@ -12,7 +12,7 @@ use crate::peer_directory_reachability_authority::{
 };
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::{InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers};
+use crate::{InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers, TrustedPeersView};
 use async_trait::async_trait;
 use futures::Stream;
 use futures::task::{Context, Poll};
@@ -1138,7 +1138,6 @@ impl CoreCommsRuntime for CommsRuntime {
         let mut trusted_peers: Vec<TrustedPeerDescriptor> = self
             .trusted_peers
             .read()
-            .peers
             .iter()
             .filter_map(|peer| {
                 if peer.pubkey.is_zero() {
@@ -1252,7 +1251,7 @@ impl From<SessionClaimError> for CommsRuntimeError {
 /// [`CommsRuntime::tool_material()`].
 pub struct CommsToolMaterial {
     router: Arc<Router>,
-    trusted_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
+    trusted_peers: TrustedPeersView,
     self_pubkey: crate::identity::PubKey,
     runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
 }
@@ -1263,11 +1262,11 @@ impl CommsToolMaterial {
         &self.router
     }
     /// Live trust state for peer availability gating.
-    pub fn trusted_peers(&self) -> &Arc<parking_lot::RwLock<TrustedPeers>> {
+    pub fn trusted_peers(&self) -> &TrustedPeersView {
         &self.trusted_peers
     }
-    /// Owned clone of the trust state Arc (for availability closures).
-    pub fn trusted_peers_shared(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
+    /// Owned clone of the read-only trust view (for availability closures).
+    pub fn trusted_peers_shared(&self) -> TrustedPeersView {
         self.trusted_peers.clone()
     }
     /// This runtime's public key.
@@ -1391,8 +1390,8 @@ impl CommsRuntime {
         let trusted_peers = TrustedPeers::load_or_default(&config.trusted_peers_path)
             .map_err(|e| CommsRuntimeError::TrustLoadError(e.to_string()))?;
         let public_key = keypair.public_key();
-        // Single source of truth for trust state — shared by the Router,
-        // IngressClassificationContext, and callers of trusted_peers_shared().
+        // Single source of truth for trust state — shared internally by the
+        // Router and IngressClassificationContext.
         let trusted_peers = Arc::new(parking_lot::RwLock::new(trusted_peers));
 
         // Build classified inbox using the same trusted_peers Arc
@@ -2210,7 +2209,6 @@ impl CommsRuntime {
         {
             let trusted = self.trusted_peers.read();
             let trusted_peer_id_counts: HashMap<PeerId, usize> = trusted
-                .peers
                 .iter()
                 .filter(|peer| peer.has_raw_sendable_identity())
                 .fold(HashMap::new(), |mut counts, peer| {
@@ -2219,7 +2217,7 @@ impl CommsRuntime {
                         .or_default() += 1;
                     counts
                 });
-            for peer in &trusted.peers {
+            for peer in trusted.iter() {
                 if !peer.has_raw_sendable_identity() {
                     tracing::warn!(
                         peer_name = %peer.name,
@@ -2551,8 +2549,8 @@ impl CommsRuntime {
     pub fn router_arc(&self) -> Arc<Router> {
         self.router.clone()
     }
-    pub fn trusted_peers_shared(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
-        self.trusted_peers.clone()
+    pub fn trusted_peers_shared(&self) -> TrustedPeersView {
+        TrustedPeersView::new(self.trusted_peers.clone())
     }
     pub fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
         self.inbox_notify.clone()
@@ -2801,7 +2799,7 @@ impl ListenerHandle {
 async fn spawn_uds_listener(
     path: &Path,
     keypair: Arc<Keypair>,
-    trusted: Arc<parking_lot::RwLock<TrustedPeers>>,
+    _trusted: Arc<parking_lot::RwLock<TrustedPeers>>,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
 ) -> Result<ListenerHandle, std::io::Error> {
@@ -2818,15 +2816,9 @@ async fn spawn_uds_listener(
     let listener = UnixListener::bind(&path)?;
     let handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
-            let (keypair, trusted, inbox_sender) =
-                (keypair.clone(), trusted.clone(), inbox_sender.clone());
+            let (keypair, inbox_sender) = (keypair.clone(), inbox_sender.clone());
             tokio::spawn(async move {
-                // Share the router-owned trust handle directly — no
-                // snapshot clone — so the transport trust gate reads the
-                // same live state the inbox admission gate consults.
-                let _ =
-                    handle_connection(stream, require_peer_auth, &keypair, &trusted, &inbox_sender)
-                        .await;
+                let _ = handle_connection(stream, require_peer_auth, &keypair, &inbox_sender).await;
             });
         }
     });
@@ -2837,22 +2829,16 @@ async fn spawn_uds_listener(
 async fn spawn_tcp_listener(
     addr: &str,
     keypair: Arc<Keypair>,
-    trusted: Arc<parking_lot::RwLock<TrustedPeers>>,
+    _trusted: Arc<parking_lot::RwLock<TrustedPeers>>,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
 ) -> Result<ListenerHandle, std::io::Error> {
     let listener = TcpListener::bind(addr).await?;
     let handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
-            let (keypair, trusted, inbox_sender) =
-                (keypair.clone(), trusted.clone(), inbox_sender.clone());
+            let (keypair, inbox_sender) = (keypair.clone(), inbox_sender.clone());
             tokio::spawn(async move {
-                // Share the router-owned trust handle directly — no
-                // snapshot clone — so the transport trust gate reads the
-                // same live state the inbox admission gate consults.
-                let _ =
-                    handle_connection(stream, require_peer_auth, &keypair, &trusted, &inbox_sender)
-                        .await;
+                let _ = handle_connection(stream, require_peer_auth, &keypair, &inbox_sender).await;
             });
         }
     });
@@ -4867,10 +4853,9 @@ mod tests {
         let zero_pubkey = PubKey::new([0u8; 32]);
 
         runtime
-            .trusted_peers_shared()
+            .trusted_peers
             .write()
-            .peers
-            .push(crate::TrustedPeer {
+            .push_unchecked_for_test(crate::TrustedPeer {
                 name: "zero-peer".to_string(),
                 pubkey: zero_pubkey,
                 addr: "inproc://zero-peer".to_string(),
@@ -4890,10 +4875,7 @@ mod tests {
             "direct-injected zero-pubkey trust must not enter the peer directory"
         );
         assert!(
-            !runtime
-                .trusted_peers_shared()
-                .read()
-                .is_trusted(&zero_pubkey),
+            !runtime.trusted_peers_shared().is_trusted(&zero_pubkey),
             "direct-injected zero-pubkey trust must not pass admission lookup"
         );
     }
@@ -5914,10 +5896,7 @@ mod tests {
             other => panic!("raw zero-pubkey trust registration must fail, got {other:?}"),
         }
         assert!(
-            !runtime
-                .trusted_peers_shared()
-                .read()
-                .is_trusted(&zero_pubkey),
+            !runtime.trusted_peers_shared().is_trusted(&zero_pubkey),
             "raw zero-pubkey peer must not enter the shared trust authority"
         );
         let inbox = runtime.inbox.lock().await;
@@ -6242,7 +6221,6 @@ mod tests {
             runtime
                 .trusted_peers
                 .read()
-                .peers
                 .iter()
                 .all(|peer| peer.name != unknown_name && peer.name != schemeless_name),
             "invalid peers must not be stored"
@@ -6289,7 +6267,6 @@ mod tests {
             runtime
                 .trusted_peers
                 .read()
-                .peers
                 .iter()
                 .all(|peer| peer.name != unknown_name && peer.name != schemeless_name),
             "invalid private peers must not be stored"

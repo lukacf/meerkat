@@ -7,7 +7,6 @@
 //! request/response traffic then projects through the generated comms
 //! contract before it becomes a [`CommsCommand`] domain envelope.
 
-use parking_lot::RwLock;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -15,8 +14,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(test)]
-use crate::{CommsConfig, Keypair};
-use crate::{Router, TrustedPeers};
+use crate::{CommsConfig, Keypair, TrustedPeers};
+use crate::{Router, TrustedPeersView};
 use meerkat_contracts::{
     CommsPeerRequestIntent, CommsPeerRequestParams, CommsPeerResponseResult, CommsPeersResult,
     CommsSendResult,
@@ -189,7 +188,7 @@ pub struct PeersInput {}
 #[derive(Clone)]
 pub struct ToolContext {
     pub router: Arc<Router>,
-    pub trusted_peers: Arc<RwLock<TrustedPeers>>,
+    pub trusted_peers: TrustedPeersView,
     pub runtime: Option<RuntimeCommsCommandHandle>,
 }
 
@@ -622,7 +621,7 @@ fn sent_result(kind: &str, receipt: SendReceipt) -> Value {
 
 /// Validate a canonical [`PeerId`] against the runtime-facing trust set.
 fn ensure_peer_id_is_trusted(ctx: &ToolContext, peer_id: &PeerId) -> Result<(), String> {
-    let peers = ctx.trusted_peers.read();
+    let peers = ctx.trusted_peers.snapshot();
     match peers.find_by_peer_id(peer_id) {
         Some(_) => Ok(()),
         None => Err(format!(
@@ -680,10 +679,9 @@ async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
 
 fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
     let self_pubkey = ctx.router.keypair_arc().public_key();
-    let peers = ctx.trusted_peers.read();
+    let peers = ctx.trusted_peers.snapshot();
     let sendable_kinds = peer_sendability_authorized_by_tools(ctx);
     let peer_id_counts: HashMap<PeerId, usize> = peers
-        .peers
         .iter()
         .filter(|p| !p.pubkey.is_zero() && p.pubkey != self_pubkey)
         .fold(HashMap::new(), |mut counts, peer| {
@@ -691,7 +689,6 @@ fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
             counts
         });
     peers
-        .peers
         .iter()
         .filter(|p| p.pubkey != self_pubkey)
         .filter_map(|p| {
@@ -922,23 +919,21 @@ mod tests {
     ) -> (ToolContext, meerkat_core::comms::PeerId) {
         let sender_keypair = Keypair::generate();
         let peer_id = peer_keypair.public_key().to_peer_id();
-        let trusted_peers = TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "test-peer".to_string(),
-                pubkey: peer_keypair.public_key(),
-                addr: "inproc://test-peer".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
-        };
-        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
+        let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
+            name: "test-peer".to_string(),
+            pubkey: peer_keypair.public_key(),
+            addr: "inproc://test-peer".to_string(),
+            meta: crate::PeerMeta::default(),
+        }]);
         let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
+        let router = Arc::new(Router::new(
             sender_keypair,
-            trusted_peers.clone(),
+            trusted_peers,
             CommsConfig::default(),
             inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
 
         (
             ToolContext {
@@ -1474,22 +1469,21 @@ mod tests {
         );
         let args = extract_projection_send_response_args(&projection);
 
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "operator".to_string(),
-                pubkey: requester.public_key(),
-                addr: "inproc://operator".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
-        }));
+        let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
+            name: "operator".to_string(),
+            pubkey: requester.public_key(),
+            addr: "inproc://operator".to_string(),
+            meta: crate::PeerMeta::default(),
+        }]);
         let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
+        let router = Arc::new(Router::new(
             Keypair::generate(),
-            trusted_peers.clone(),
+            trusted_peers,
             CommsConfig::default(),
             inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
         let runtime = Arc::new(RecordingRuntime::new());
         let ctx = ToolContext {
             router,
@@ -1556,31 +1550,29 @@ mod tests {
     #[tokio::test]
     async fn test_handle_peers() {
         let keypair = Keypair::generate();
-        let trusted_peers = TrustedPeers {
-            peers: vec![
-                TrustedPeer {
-                    name: "test-peer".to_string(),
-                    pubkey: PubKey::new([1u8; 32]),
-                    addr: "tcp://127.0.0.1:4200".to_string(),
-                    meta: crate::PeerMeta::default(),
-                },
-                TrustedPeer {
-                    name: "test-peer".to_string(),
-                    pubkey: PubKey::new([2u8; 32]),
-                    addr: "tcp://127.0.0.1:4201".to_string(),
-                    meta: crate::PeerMeta::default(),
-                },
-            ],
-        };
-        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
+        let trusted_peers = TrustedPeers::from_peers(vec![
+            TrustedPeer {
+                name: "test-peer".to_string(),
+                pubkey: PubKey::new([1u8; 32]),
+                addr: "tcp://127.0.0.1:4200".to_string(),
+                meta: crate::PeerMeta::default(),
+            },
+            TrustedPeer {
+                name: "test-peer".to_string(),
+                pubkey: PubKey::new([2u8; 32]),
+                addr: "tcp://127.0.0.1:4201".to_string(),
+                meta: crate::PeerMeta::default(),
+            },
+        ]);
         let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
+        let router = Arc::new(Router::new(
             keypair,
-            trusted_peers.clone(),
+            trusted_peers,
             CommsConfig::default(),
             inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
 
         let ctx = ToolContext {
             router,
@@ -1670,16 +1662,7 @@ mod tests {
         let peer_keypair = Keypair::generate();
         let peer_pubkey = peer_keypair.public_key();
         let peer_id = peer_pubkey.to_peer_id();
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
-        let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
-            sender_keypair,
-            trusted_peers.clone(),
-            CommsConfig::default(),
-            inbox_sender,
-            true,
-        ));
-        trusted_peers.write().peers.extend([
+        let trusted_peers = TrustedPeers::from_peers(vec![
             TrustedPeer {
                 name: "runtime-less-primary".to_string(),
                 pubkey: peer_pubkey,
@@ -1693,6 +1676,15 @@ mod tests {
                 meta: crate::PeerMeta::default(),
             },
         ]);
+        let (_, inbox_sender) = crate::Inbox::new();
+        let router = Arc::new(Router::new(
+            sender_keypair,
+            trusted_peers,
+            CommsConfig::default(),
+            inbox_sender,
+            true,
+        ));
+        let trusted_peers = router.trusted_peers_view();
         let ctx = ToolContext {
             router,
             trusted_peers,
@@ -1716,15 +1708,15 @@ mod tests {
         let sender_keypair = Keypair::generate();
         let receiver_id = PeerId::new();
 
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
         let (_, router_inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
+        let router = Arc::new(Router::new(
             sender_keypair,
-            trusted_peers.clone(),
+            TrustedPeers::new(),
             CommsConfig::default(),
             router_inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
 
         let ctx = ToolContext {
             router,
@@ -1753,15 +1745,15 @@ mod tests {
     #[tokio::test]
     async fn test_send_message_invalid_handling_mode_fails_at_serde_boundary() {
         let keypair = Keypair::generate();
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
         let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
+        let router = Arc::new(Router::new(
             keypair,
-            trusted_peers.clone(),
+            TrustedPeers::new(),
             CommsConfig::default(),
             inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
         let ctx = ToolContext {
             router,
             trusted_peers,
@@ -1792,15 +1784,15 @@ mod tests {
     #[tokio::test]
     async fn test_unknown_tool_returns_error() {
         let keypair = Keypair::generate();
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
         let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
+        let router = Arc::new(Router::new(
             keypair,
-            trusted_peers.clone(),
+            TrustedPeers::new(),
             CommsConfig::default(),
             inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
         let ctx = ToolContext {
             router,
             trusted_peers,

@@ -25,7 +25,7 @@ use crate::inproc::{InprocRegistry, InprocSendError};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::transport::{PeerAddr, TransportError};
-use crate::trust::{TrustError, TrustedPeer, TrustedPeers};
+use crate::trust::{TrustError, TrustedPeer, TrustedPeers, TrustedPeersView};
 use crate::types::{Envelope, MessageKind};
 use meerkat_core::comms::PeerId;
 
@@ -95,10 +95,10 @@ fn map_inproc_send_error(err: InprocSendError, dest: PeerId) -> SendError {
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct Router {
     keypair: Arc<Keypair>,
-    /// Single source of truth for trusted peers. Shared by the Router,
-    /// CommsRuntime, IngressClassificationContext, and any callers of
-    /// `trusted_peers_shared()`. Uses `parking_lot::RwLock` so ingress
-    /// classification can read synchronously.
+    /// Single source of truth for trusted peers. Shared internally by the
+    /// Router, CommsRuntime, and IngressClassificationContext. Uses
+    /// `parking_lot::RwLock` so ingress classification can read
+    /// synchronously, but the mutable lock is not exposed outside this crate.
     trusted_peers: Arc<RwLock<TrustedPeers>>,
     /// Canonical peer IDs supplied at descriptor registration time, keyed by
     /// signing pubkey. This preserves explicit `PeerId`s for descriptor
@@ -144,7 +144,7 @@ impl Router {
         }
     }
 
-    pub fn with_shared_peers(
+    pub(crate) fn with_shared_peers(
         keypair: Keypair,
         trusted_peers: Arc<RwLock<TrustedPeers>>,
         config: CommsConfig,
@@ -164,11 +164,6 @@ impl Router {
         }
     }
 
-    /// Mark a peer as private (hidden from `resolve_peer_directory`).
-    pub fn mark_private(&self, pubkey: crate::identity::PubKey) {
-        self.mark_private_peer_id(self.peer_id_for_pubkey(&pubkey));
-    }
-
     /// Mark a peer as private by canonical `PeerId`.
     pub(crate) fn mark_private_peer_id(&self, peer_id: PeerId) {
         self.private_peer_ids.write().insert(peer_id);
@@ -176,7 +171,7 @@ impl Router {
 
     /// Remove the private marker for a peer. Returns `true` if the marker
     /// was present and removed.
-    pub fn unmark_private(&self, peer_id: &PeerId) -> bool {
+    pub(crate) fn unmark_private(&self, peer_id: &PeerId) -> bool {
         self.private_peer_ids.write().remove(peer_id)
     }
 
@@ -208,8 +203,13 @@ impl Router {
     pub fn keypair_arc(&self) -> Arc<Keypair> {
         self.keypair.clone()
     }
-    pub fn shared_trusted_peers(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
-        self.trusted_peers.clone()
+
+    pub fn trusted_peers_view(&self) -> TrustedPeersView {
+        TrustedPeersView::new(self.trusted_peers.clone())
+    }
+
+    pub fn trusted_peers_snapshot(&self) -> TrustedPeers {
+        self.trusted_peers.read().clone()
     }
     pub fn inbox_sender(&self) -> &InboxSender {
         &self.inbox_sender
@@ -239,22 +239,9 @@ impl Router {
     pub(crate) fn remove_trusted_peer(&self, peer_id: &PeerId) -> bool {
         let peer_ids = self.trusted_peer_ids.read().clone();
         let removed_pubkeys = {
-            let mut trusted = self.trusted_peers.write();
-            let mut removed_pubkeys = Vec::new();
-            trusted.peers.retain(|peer| {
-                let matches = peer_ids
-                    .get(&peer.pubkey)
-                    .copied()
-                    .unwrap_or_else(|| peer_id_from_pubkey(&peer.pubkey))
-                    == *peer_id;
-                if matches {
-                    removed_pubkeys.push(peer.pubkey);
-                    false
-                } else {
-                    true
-                }
-            });
-            removed_pubkeys
+            self.trusted_peers
+                .write()
+                .remove_all_by_resolved_peer_id(&peer_ids, peer_id)
         };
         if removed_pubkeys.is_empty() {
             return false;
@@ -271,7 +258,7 @@ impl Router {
     fn trusted_peer_by_peer_id(&self, peer_id: &PeerId) -> TrustedPeerLookup {
         let peer_ids = self.trusted_peer_ids.read().clone();
         let trusted = self.trusted_peers.read();
-        let mut matches = trusted.peers.iter().filter(|peer| {
+        let mut matches = trusted.iter().filter(|peer| {
             !peer.pubkey.is_zero()
                 && peer_ids
                     .get(&peer.pubkey)
@@ -287,15 +274,6 @@ impl Router {
         } else {
             TrustedPeerLookup::Resolved(peer.clone())
         }
-    }
-
-    /// Get the trusted peers Arc.
-    ///
-    /// This is the single source of truth for trust state. The same Arc is
-    /// shared with IngressClassificationContext, so any mutation is
-    /// immediately visible to ingress classification.
-    pub fn classification_peers_arc(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
-        self.trusted_peers.clone()
     }
 
     #[cfg(not(target_arch = "wasm32"))]

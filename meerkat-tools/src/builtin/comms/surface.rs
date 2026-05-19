@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use meerkat_comms::{
-    Router, RuntimeCommsCommandHandle, ToolContext, TrustedPeers, comms_tool_defs,
+    Router, RuntimeCommsCommandHandle, ToolContext, TrustedPeersView, comms_tool_defs,
     comms_tool_unavailable_reason, handle_tools_call_with_context,
 };
 use meerkat_core::AgentToolDispatcher;
@@ -10,7 +10,6 @@ use meerkat_core::ToolDispatchContext;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use meerkat_core::{ToolCallability, ToolCatalogCapabilities, ToolCatalogEntry};
-use parking_lot::RwLock;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -22,7 +21,7 @@ pub struct CommsToolSurface {
 
 impl CommsToolSurface {
     /// Create a new comms tool surface
-    pub fn new(router: Arc<Router>, trusted_peers: Arc<RwLock<TrustedPeers>>) -> Self {
+    pub fn new(router: Arc<Router>, trusted_peers: TrustedPeersView) -> Self {
         let tool_context = ToolContext {
             router,
             trusted_peers,
@@ -37,7 +36,7 @@ impl CommsToolSurface {
 
     pub fn new_with_runtime(
         router: Arc<Router>,
-        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        trusted_peers: TrustedPeersView,
         runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
     ) -> Self {
         let tool_context = ToolContext {
@@ -147,26 +146,24 @@ mod tests {
         Keypair::generate()
     }
 
-    fn make_tool_context() -> (Arc<Router>, Arc<RwLock<TrustedPeers>>) {
+    fn make_tool_context() -> (Arc<Router>, TrustedPeersView) {
         let keypair = make_keypair();
         let peer_keypair = make_keypair();
-        let trusted_peers = TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "test-peer".to_string(),
-                pubkey: peer_keypair.public_key(),
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: meerkat_comms::PeerMeta::default(),
-            }],
-        };
-        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
+        let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
+            name: "test-peer".to_string(),
+            pubkey: peer_keypair.public_key(),
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: meerkat_comms::PeerMeta::default(),
+        }]);
         let (_, inbox_sender) = meerkat_comms::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
+        let router = Arc::new(Router::new(
             keypair,
-            trusted_peers.clone(),
+            trusted_peers,
             CommsConfig::default(),
             inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
         (router, trusted_peers)
     }
 
@@ -206,15 +203,21 @@ mod tests {
 
     #[test]
     fn test_comms_callability_true_with_trusted_peers() {
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "trusted".to_string(),
-                pubkey: make_keypair().public_key(),
-                addr: "inproc://trusted".to_string(),
-                meta: meerkat_comms::PeerMeta::default(),
-            }],
-        }));
-        let router = make_tool_context().0;
+        let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
+            name: "trusted".to_string(),
+            pubkey: make_keypair().public_key(),
+            addr: "inproc://trusted".to_string(),
+            meta: meerkat_comms::PeerMeta::default(),
+        }]);
+        let (_, inbox_sender) = meerkat_comms::Inbox::new();
+        let router = Arc::new(Router::new(
+            make_keypair(),
+            trusted_peers,
+            CommsConfig::default(),
+            inbox_sender,
+            true,
+        ));
+        let trusted_peers = router.trusted_peers_view();
         let surface = CommsToolSurface::new(router, trusted_peers);
         let tools = surface.tools();
         let tool_names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
@@ -226,8 +229,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_comms_tools_remain_visible_without_trusted_peers() {
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
-        let router = make_tool_context().0;
+        let (_, inbox_sender) = meerkat_comms::Inbox::new();
+        let router = Arc::new(Router::new(
+            make_keypair(),
+            TrustedPeers::new(),
+            CommsConfig::default(),
+            inbox_sender,
+            true,
+        ));
+        let trusted_peers = router.trusted_peers_view();
         let surface = CommsToolSurface::new(router, trusted_peers);
         let tools = surface.tools();
         let tool_names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
@@ -256,7 +266,7 @@ mod tests {
     async fn send_request_without_runtime_returns_typed_unavailable_reason() {
         let (router, trusted_peers) = make_tool_context();
         let surface = CommsToolSurface::new(router, trusted_peers);
-        let peer_id = surface.tool_context.trusted_peers.read().peers[0]
+        let peer_id = surface.tool_context.trusted_peers.peers()[0]
             .pubkey
             .to_peer_id();
         let args_raw = serde_json::value::RawValue::from_string(

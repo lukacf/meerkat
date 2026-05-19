@@ -690,14 +690,12 @@ impl InboxSender {
         &self,
         envelope: Envelope,
         require_peer_auth: bool,
-        trusted_peers: &Arc<RwLock<TrustedPeers>>,
     ) -> AdmissionOutcome {
         if self.classification_context.is_some() {
             return self.send_classified(InboxItem::External { envelope });
         }
 
         let _ = require_peer_auth;
-        let _ = trusted_peers;
         tracing::warn!(
             peer_id = %envelope.from.to_peer_id(),
             reason = ?DropReason::ClassificationRejected,
@@ -1225,14 +1223,12 @@ mod tests {
     }
 
     fn make_trusted(name: &str, pubkey: &PubKey) -> TrustedPeers {
-        TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: name.to_string(),
-                pubkey: *pubkey,
-                addr: "inproc://test".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
-        }
+        TrustedPeers::from_peers(vec![TrustedPeer {
+            name: name.to_string(),
+            pubkey: *pubkey,
+            addr: "inproc://test".to_string(),
+            meta: crate::PeerMeta::default(),
+        }])
     }
 
     struct RejectingPeerCommsHandle {
@@ -2066,7 +2062,6 @@ mod tests {
         // auth exemption from a local compatibility path.
         let receiver = crate::identity::Keypair::generate();
         let sender = crate::identity::Keypair::generate();
-        let trusted = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
         let (mut inbox, inbox_sender) = Inbox::new();
 
         let mut envelope = Envelope {
@@ -2083,7 +2078,7 @@ mod tests {
         };
         envelope.sign(&sender);
 
-        let outcome = inbox_sender.send_connection_ingress(envelope, true, &trusted);
+        let outcome = inbox_sender.send_connection_ingress(envelope, true);
         assert_eq!(
             outcome,
             AdmissionOutcome::Dropped {

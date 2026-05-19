@@ -1,11 +1,13 @@
 //! Trust management for Meerkat comms.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+use std::sync::Arc;
 
 use meerkat_core::comms::{PeerAddress, PeerId, PeerName};
+use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -284,13 +286,35 @@ impl<'de> Deserialize<'de> for TrustedPeer {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustedPeers {
     /// List of trusted peers.
-    pub peers: Vec<TrustedPeer>,
+    peers: Vec<TrustedPeer>,
 }
 
 impl TrustedPeers {
     /// Create an empty trusted peers list.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a trust-list value for configuration or test fixtures.
+    ///
+    /// This constructs inert data only; live runtime trust mutation still
+    /// goes through the generated comms trust mutation seam.
+    pub fn from_peers(peers: Vec<TrustedPeer>) -> Self {
+        Self { peers }
+    }
+
+    /// Read-only view of configured peers.
+    pub fn peers(&self) -> &[TrustedPeer] {
+        &self.peers
+    }
+
+    /// Clone the configured peers for read-only presentation surfaces.
+    pub fn to_vec(&self) -> Vec<TrustedPeer> {
+        self.peers.clone()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &TrustedPeer> {
+        self.peers.iter()
     }
 
     /// Returns true if there are no trusted peers.
@@ -314,6 +338,11 @@ impl TrustedPeers {
         // make ambiguous trust indistinguishable from missing trust and can
         // enable auth-disabled discovery fallback.
         self.peers.retain(|peer| peer.validate().is_ok());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_unchecked_for_test(&mut self, peer: TrustedPeer) {
+        self.peers.push(peer);
     }
 
     /// Load trusted peers from a JSON file, or return empty if not found.
@@ -370,14 +399,16 @@ impl TrustedPeers {
     /// Legacy helper retained for direct trust-list tests and low-level
     /// callers. Runtime trust removal is keyed by [`PeerId`]; use
     /// [`Self::remove_by_peer_id`] on control-plane paths.
-    pub fn remove(&mut self, pubkey: &PubKey) -> bool {
+    #[cfg(test)]
+    pub(crate) fn remove(&mut self, pubkey: &PubKey) -> bool {
         let len_before = self.peers.len();
         self.peers.retain(|p| &p.pubkey != pubkey);
         self.peers.len() != len_before
     }
 
     /// Remove a peer by canonical [`PeerId`].
-    pub fn remove_by_peer_id(&mut self, peer_id: &PeerId) -> Option<TrustedPeer> {
+    #[cfg(test)]
+    pub(crate) fn remove_by_peer_id(&mut self, peer_id: &PeerId) -> Option<TrustedPeer> {
         let index = self
             .peers
             .iter()
@@ -385,8 +416,30 @@ impl TrustedPeers {
         Some(self.peers.remove(index))
     }
 
+    pub(crate) fn remove_all_by_resolved_peer_id(
+        &mut self,
+        peer_ids: &HashMap<PubKey, PeerId>,
+        peer_id: &PeerId,
+    ) -> Vec<PubKey> {
+        let mut removed_pubkeys = Vec::new();
+        self.peers.retain(|peer| {
+            let matches = peer_ids
+                .get(&peer.pubkey)
+                .copied()
+                .unwrap_or_else(|| crate::router::peer_id_from_pubkey(&peer.pubkey))
+                == *peer_id;
+            if matches {
+                removed_pubkeys.push(peer.pubkey);
+                false
+            } else {
+                true
+            }
+        });
+        removed_pubkeys
+    }
+
     /// Insert or replace a peer, keyed by `pubkey`.
-    pub fn upsert(&mut self, peer: TrustedPeer) -> Result<(), TrustError> {
+    pub(crate) fn upsert(&mut self, peer: TrustedPeer) -> Result<(), TrustError> {
         peer.validate()?;
         if let Some(existing) = self.peers.iter_mut().find(|p| p.pubkey == peer.pubkey) {
             *existing = peer;
@@ -437,6 +490,42 @@ impl TrustedPeers {
         } else {
             Some(peer)
         }
+    }
+}
+
+/// Read-only handle to the router-owned live trust projection.
+///
+/// The lock itself is not exposed publicly because trust changes affect
+/// admission and routing semantics. Mutation is restricted to the generated
+/// `CommsRuntime::apply_trust_mutation` path.
+#[derive(Debug, Clone)]
+pub struct TrustedPeersView {
+    inner: Arc<RwLock<TrustedPeers>>,
+}
+
+impl TrustedPeersView {
+    pub(crate) fn new(inner: Arc<RwLock<TrustedPeers>>) -> Self {
+        Self { inner }
+    }
+
+    pub fn snapshot(&self) -> TrustedPeers {
+        self.inner.read().clone()
+    }
+
+    pub fn peers(&self) -> Vec<TrustedPeer> {
+        self.inner.read().to_vec()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.read().is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.read().len()
+    }
+
+    pub fn is_trusted(&self, pubkey: &PubKey) -> bool {
+        self.inner.read().is_trusted(pubkey)
     }
 }
 

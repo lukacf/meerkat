@@ -141,13 +141,12 @@ async fn main() -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
         let local_addr = listener.local_addr()?;
         let kp = hive_comms_runtime.router_arc().keypair_arc();
-        let tp = hive_comms_runtime.trusted_peers_shared();
         let inbox = hive_comms_runtime.router_arc().inbox_sender().clone();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let (kp, tp, sender) = (kp.clone(), tp.clone(), inbox.clone());
+                let (kp, sender) = (kp.clone(), inbox.clone());
                 tokio::spawn(async move {
-                    let _ = meerkat_comms::handle_connection(stream, true, &kp, &tp, &sender).await;
+                    let _ = meerkat_comms::handle_connection(stream, true, &kp, &sender).await;
                 });
             }
         });

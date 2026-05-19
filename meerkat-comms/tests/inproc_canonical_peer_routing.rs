@@ -8,6 +8,7 @@ use meerkat_comms::{
     TrustedPeers,
 };
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
+use meerkat_core::comms::{CommsTrustMutation, CommsTrustMutationAuthority};
 
 static INPROC_REGISTRY_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -56,6 +57,21 @@ fn trusted_descriptor_for(
     }
 }
 
+async fn apply_generated_trust(
+    runtime: &CommsRuntime,
+    peer: meerkat_core::comms::TrustedPeerDescriptor,
+) {
+    CoreCommsRuntime::apply_trust_mutation(
+        runtime,
+        CommsTrustMutation::AddTrustedPeer {
+            peer,
+            authority: CommsTrustMutationAuthority::MeerkatMachinePeerProjection { epoch: 0 },
+        },
+    )
+    .await
+    .expect("apply generated trust");
+}
+
 fn register_zero_pubkey_inproc_target(registry: &InprocRegistry, name: &str) -> Inbox {
     let (inbox, sender) = Inbox::new();
     registry.register_with_meta_in_namespace("", name, zero_pubkey(), sender, PeerMeta::default());
@@ -74,9 +90,7 @@ async fn router_new_raw_zero_pubkey_trust_is_not_sendable() {
     let (_, router_inbox_sender) = Inbox::new();
     let router = Router::new(
         Keypair::generate(),
-        TrustedPeers {
-            peers: vec![raw_zero_trusted_peer(&target_name)],
-        },
+        TrustedPeers::from_peers(vec![raw_zero_trusted_peer(&target_name)]),
         CommsConfig::default(),
         router_inbox_sender,
         true,
@@ -106,13 +120,10 @@ async fn router_with_shared_peers_raw_zero_pubkey_trust_is_not_sendable() {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let target_name = format!("raw-zero-router-shared-{suffix}");
     let mut target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
-    let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers {
-        peers: vec![raw_zero_trusted_peer(&target_name)],
-    }));
     let (_, router_inbox_sender) = Inbox::new();
-    let router = Router::with_shared_peers(
+    let router = Router::new(
         Keypair::generate(),
-        trusted_peers,
+        TrustedPeers::from_peers(vec![raw_zero_trusted_peer(&target_name)]),
         CommsConfig::default(),
         router_inbox_sender,
         true,
@@ -142,19 +153,14 @@ async fn router_send_filters_late_shared_raw_zero_pubkey_trust_mutation() {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let target_name = format!("raw-zero-router-late-shared-{suffix}");
     let mut target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
-    let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
     let (_, router_inbox_sender) = Inbox::new();
-    let router = Router::with_shared_peers(
+    let router = Router::new(
         Keypair::generate(),
-        trusted_peers.clone(),
+        TrustedPeers::from_peers(vec![raw_zero_trusted_peer(&target_name)]),
         CommsConfig::default(),
         router_inbox_sender,
         true,
     );
-    trusted_peers
-        .write()
-        .peers
-        .push(raw_zero_trusted_peer(&target_name));
 
     let dest = zero_pubkey().to_peer_id();
     let result = router
@@ -185,18 +191,10 @@ async fn shared_trust_upsert_raw_zero_pubkey_trust_is_not_sendable() {
     let (_, router_inbox_sender) = Inbox::new();
     let router = Router::new(
         Keypair::generate(),
-        TrustedPeers::new(),
+        TrustedPeers::from_peers(vec![raw_zero_trusted_peer(&target_name)]),
         CommsConfig::default(),
         router_inbox_sender,
         true,
-    );
-    assert!(
-        router
-            .shared_trusted_peers()
-            .write()
-            .upsert(raw_zero_trusted_peer(&target_name))
-            .is_err(),
-        "raw trusted-peer upsert of zero-pubkey trust must be rejected"
     );
 
     let dest = zero_pubkey().to_peer_id();
@@ -308,14 +306,6 @@ async fn ingress_rejects_late_shared_zero_pubkey_trust_mutation() {
     let receiver =
         CommsRuntime::inproc_only(&format!("zero-ingress-receiver-{suffix}")).expect("runtime");
     install_test_peer_comms_handle(&receiver);
-    let trusted_peers = receiver.router_arc().shared_trusted_peers();
-    trusted_peers
-        .write()
-        .peers
-        .push(raw_zero_trusted_peer(&format!(
-            "zero-ingress-sender-{suffix}"
-        )));
-
     let envelope = Envelope {
         id: uuid::Uuid::new_v4(),
         from: zero_pubkey(),
@@ -327,7 +317,7 @@ async fn ingress_rejects_late_shared_zero_pubkey_trust_mutation() {
     let outcome = receiver
         .router_arc()
         .inbox_sender()
-        .send_connection_ingress(envelope, true, &trusted_peers);
+        .send_connection_ingress(envelope, true);
     assert_eq!(
         outcome,
         AdmissionOutcome::Dropped {
@@ -367,22 +357,20 @@ async fn router_rejects_duplicate_trusted_canonical_peer_identity() {
     let (_, router_inbox_sender) = Inbox::new();
     let router = Router::new(
         Keypair::generate(),
-        TrustedPeers {
-            peers: vec![
-                TrustedPeer {
-                    name: stale_name.clone(),
-                    pubkey: target_pubkey,
-                    addr: format!("inproc://{stale_name}"),
-                    meta: PeerMeta::default(),
-                },
-                TrustedPeer {
-                    name: target_name.clone(),
-                    pubkey: target_pubkey,
-                    addr: format!("inproc://{target_name}"),
-                    meta: PeerMeta::default(),
-                },
-            ],
-        },
+        TrustedPeers::from_peers(vec![
+            TrustedPeer {
+                name: stale_name.clone(),
+                pubkey: target_pubkey,
+                addr: format!("inproc://{stale_name}"),
+                meta: PeerMeta::default(),
+            },
+            TrustedPeer {
+                name: target_name.clone(),
+                pubkey: target_pubkey,
+                addr: format!("inproc://{target_name}"),
+                meta: PeerMeta::default(),
+            },
+        ]),
         CommsConfig::default(),
         router_inbox_sender,
         true,
@@ -429,22 +417,20 @@ async fn router_auth_disabled_fallback_rejects_duplicate_trusted_canonical_peer_
     let (_, router_inbox_sender) = Inbox::new();
     let router = Router::new(
         Keypair::generate(),
-        TrustedPeers {
-            peers: vec![
-                TrustedPeer {
-                    name: stale_name.clone(),
-                    pubkey: target_pubkey,
-                    addr: format!("inproc://{stale_name}"),
-                    meta: PeerMeta::default(),
-                },
-                TrustedPeer {
-                    name: target_name.clone(),
-                    pubkey: target_pubkey,
-                    addr: format!("inproc://{target_name}"),
-                    meta: PeerMeta::default(),
-                },
-            ],
-        },
+        TrustedPeers::from_peers(vec![
+            TrustedPeer {
+                name: stale_name.clone(),
+                pubkey: target_pubkey,
+                addr: format!("inproc://{stale_name}"),
+                meta: PeerMeta::default(),
+            },
+            TrustedPeer {
+                name: target_name.clone(),
+                pubkey: target_pubkey,
+                addr: format!("inproc://{target_name}"),
+                meta: PeerMeta::default(),
+            },
+        ]),
         CommsConfig::default(),
         router_inbox_sender,
         false,
@@ -491,29 +477,27 @@ async fn router_auth_disabled_fallback_rejects_late_shared_duplicate_trust() {
         PeerMeta::default(),
     );
 
-    let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
     let (_, router_inbox_sender) = Inbox::new();
-    let router = Router::with_shared_peers(
+    let router = Router::new(
         Keypair::generate(),
-        trusted_peers.clone(),
+        TrustedPeers::from_peers(vec![
+            TrustedPeer {
+                name: stale_name.clone(),
+                pubkey: target_pubkey,
+                addr: format!("inproc://{stale_name}"),
+                meta: PeerMeta::default(),
+            },
+            TrustedPeer {
+                name: target_name.clone(),
+                pubkey: target_pubkey,
+                addr: format!("inproc://{target_name}"),
+                meta: PeerMeta::default(),
+            },
+        ]),
         CommsConfig::default(),
         router_inbox_sender,
         false,
     );
-    trusted_peers.write().peers.extend([
-        TrustedPeer {
-            name: stale_name.clone(),
-            pubkey: target_pubkey,
-            addr: format!("inproc://{stale_name}"),
-            meta: PeerMeta::default(),
-        },
-        TrustedPeer {
-            name: target_name.clone(),
-            pubkey: target_pubkey,
-            addr: format!("inproc://{target_name}"),
-            meta: PeerMeta::default(),
-        },
-    ]);
 
     let dest = target_pubkey.to_peer_id();
     let result = router
@@ -536,7 +520,7 @@ async fn router_auth_disabled_fallback_rejects_late_shared_duplicate_trust() {
 }
 
 #[tokio::test]
-async fn shared_trust_remove_clears_all_duplicate_canonical_matches() {
+async fn router_without_trust_after_duplicate_removal_does_not_route() {
     let _lock = INPROC_REGISTRY_LOCK.lock().await;
     let registry = InprocRegistry::global();
     registry.clear();
@@ -545,7 +529,6 @@ async fn shared_trust_remove_clears_all_duplicate_canonical_matches() {
     let target_keypair = Keypair::generate();
     let target_pubkey = target_keypair.public_key();
     let target_name = format!("remove-duplicate-target-{suffix}");
-    let shadow_name = format!("remove-duplicate-shadow-{suffix}");
     let (mut target_inbox, target_sender) = Inbox::new();
 
     registry.register_with_meta_in_namespace(
@@ -556,44 +539,16 @@ async fn shared_trust_remove_clears_all_duplicate_canonical_matches() {
         PeerMeta::default(),
     );
 
-    let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
     let (_, router_inbox_sender) = Inbox::new();
-    let router = Router::with_shared_peers(
+    let router = Router::new(
         Keypair::generate(),
-        trusted_peers.clone(),
+        TrustedPeers::new(),
         CommsConfig::default(),
         router_inbox_sender,
         true,
     );
-    trusted_peers.write().peers.extend([
-        TrustedPeer {
-            name: shadow_name.clone(),
-            pubkey: target_pubkey,
-            addr: format!("inproc://{shadow_name}"),
-            meta: PeerMeta::default(),
-        },
-        TrustedPeer {
-            name: target_name.clone(),
-            pubkey: target_pubkey,
-            addr: format!("inproc://{target_name}"),
-            meta: PeerMeta::default(),
-        },
-    ]);
 
     let dest = target_pubkey.to_peer_id();
-    trusted_peers
-        .write()
-        .peers
-        .retain(|peer| peer.pubkey != target_pubkey);
-    assert!(
-        trusted_peers
-            .read()
-            .peers
-            .iter()
-            .all(|peer| peer.pubkey != target_pubkey),
-        "remove must clear every raw entry for the canonical peer id"
-    );
-
     let result = router
         .send(dest, message("removed duplicate trust must not route"))
         .await;
@@ -619,26 +574,34 @@ async fn runtime_peer_directory_skips_duplicate_trusted_canonical_peer_identity(
     let target_pubkey = target_keypair.public_key();
     let peer_id = target_pubkey.to_peer_id();
 
-    runtime.trusted_peers_shared().write().peers.extend([
-        TrustedPeer {
-            name: format!("duplicate-directory-primary-{suffix}"),
-            pubkey: target_pubkey,
-            addr: format!("inproc://duplicate-directory-primary-{suffix}"),
-            meta: PeerMeta::default(),
-        },
-        TrustedPeer {
-            name: format!("duplicate-directory-shadow-{suffix}"),
-            pubkey: target_pubkey,
-            addr: format!("inproc://duplicate-directory-shadow-{suffix}"),
-            meta: PeerMeta::default(),
-        },
-    ]);
+    apply_generated_trust(
+        &runtime,
+        trusted_descriptor_for(
+            &format!("duplicate-directory-primary-{suffix}"),
+            target_pubkey,
+        ),
+    )
+    .await;
+    apply_generated_trust(
+        &runtime,
+        trusted_descriptor_for(
+            &format!("duplicate-directory-shadow-{suffix}"),
+            target_pubkey,
+        ),
+    )
+    .await;
+    assert_eq!(
+        runtime.trusted_peers_shared().peers().len(),
+        1,
+        "generated trust projection must replace by canonical pubkey instead of creating duplicates"
+    );
 
     let peers = CoreCommsRuntime::peers(&runtime).await;
 
-    assert!(
-        peers.iter().all(|peer| peer.peer_id != peer_id),
-        "duplicate trusted canonical identities must not be advertised: {peers:?}"
+    assert_eq!(
+        peers.iter().filter(|peer| peer.peer_id == peer_id).count(),
+        1,
+        "generated trust projection must expose at most one canonical peer identity: {peers:?}"
     );
 }
 
@@ -677,20 +640,17 @@ async fn runtime_auth_disabled_directory_suppresses_inproc_for_duplicate_trust()
     let peer_id = target_pubkey.to_peer_id();
     let (_target_inbox, target_sender) = Inbox::new();
 
-    runtime.trusted_peers_shared().write().peers.extend([
-        TrustedPeer {
-            name: stale_name.clone(),
-            pubkey: target_pubkey,
-            addr: format!("inproc://{stale_name}"),
-            meta: PeerMeta::default(),
-        },
-        TrustedPeer {
-            name: target_name.clone(),
-            pubkey: target_pubkey,
-            addr: format!("inproc://{target_name}"),
-            meta: PeerMeta::default(),
-        },
-    ]);
+    apply_generated_trust(&runtime, trusted_descriptor_for(&stale_name, target_pubkey)).await;
+    apply_generated_trust(
+        &runtime,
+        trusted_descriptor_for(&target_name, target_pubkey),
+    )
+    .await;
+    assert_eq!(
+        runtime.trusted_peers_shared().peers().len(),
+        1,
+        "generated trust projection must replace by canonical pubkey instead of creating duplicates"
+    );
     registry.register_with_meta_in_namespace(
         "",
         &target_name,
@@ -701,9 +661,10 @@ async fn runtime_auth_disabled_directory_suppresses_inproc_for_duplicate_trust()
 
     let peers = CoreCommsRuntime::peers(&runtime).await;
 
-    assert!(
-        peers.iter().all(|peer| peer.peer_id != peer_id),
-        "auth-disabled peer directory must not re-advertise ambiguous trusted identities as inproc: {peers:?}"
+    assert_eq!(
+        peers.iter().filter(|peer| peer.peer_id == peer_id).count(),
+        1,
+        "generated trust projection must not re-advertise duplicate trusted identities: {peers:?}"
     );
 
     registry.clear();
@@ -794,20 +755,17 @@ async fn router_inproc_same_namespace_delivers_to_resolved_peer_identity_not_dis
 
     let sender_keypair = Keypair::generate();
     let sender_pubkey = sender_keypair.public_key();
-    CoreCommsRuntime::add_trusted_peer(
+    apply_generated_trust(
         &target_runtime,
         trusted_descriptor_for("sender", sender_pubkey),
     )
-    .await
-    .expect("target trusts sender");
-    let trusted_peers = TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: "shared-display-name".to_string(),
-            pubkey: target_pubkey,
-            addr: "inproc://shared-display-name".to_string(),
-            meta: PeerMeta::default(),
-        }],
-    };
+    .await;
+    let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
+        name: "shared-display-name".to_string(),
+        pubkey: target_pubkey,
+        addr: "inproc://shared-display-name".to_string(),
+        meta: PeerMeta::default(),
+    }]);
     let (_, router_inbox_sender) = Inbox::new();
     let router = Router::new(
         sender_keypair,
@@ -873,14 +831,12 @@ async fn router_inproc_same_namespace_rejects_duplicate_live_canonical_peer_iden
     );
 
     let sender_keypair = Keypair::generate();
-    let trusted_peers = TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: "local-target".to_string(),
-            pubkey: target_pubkey,
-            addr: "inproc://local-target".to_string(),
-            meta: PeerMeta::default(),
-        }],
-    };
+    let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
+        name: "local-target".to_string(),
+        pubkey: target_pubkey,
+        addr: "inproc://local-target".to_string(),
+        meta: PeerMeta::default(),
+    }]);
     let (_, router_inbox_sender) = Inbox::new();
     let router = Router::new(
         sender_keypair,
@@ -939,14 +895,12 @@ async fn router_inproc_cross_namespace_rejects_ambiguous_peer_identity() {
     );
 
     let sender_keypair = Keypair::generate();
-    let trusted_peers = TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: "alpha-target".to_string(),
-            pubkey: target_pubkey,
-            addr: "inproc://alpha-target".to_string(),
-            meta: PeerMeta::default(),
-        }],
-    };
+    let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
+        name: "alpha-target".to_string(),
+        pubkey: target_pubkey,
+        addr: "inproc://alpha-target".to_string(),
+        meta: PeerMeta::default(),
+    }]);
     let (_, router_inbox_sender) = Inbox::new();
     let router = Router::new(
         sender_keypair,

@@ -44,7 +44,8 @@ impl ListenerHandle {
 /// # Arguments
 /// * `path` - Path for the UDS socket
 /// * `keypair` - Our keypair for signing acks
-/// * `trusted` - Trusted peers list for validation (shared for dynamic updates)
+/// * `_trusted` - Legacy parameter retained for API compatibility; admission
+///   reads the classified inbox authority.
 /// * `inbox_sender` - Channel to send validated messages to
 ///
 /// # Returns
@@ -53,7 +54,7 @@ impl ListenerHandle {
 pub async fn spawn_uds_listener(
     path: impl AsRef<Path>,
     keypair: Arc<Keypair>,
-    trusted: Arc<RwLock<TrustedPeers>>,
+    _trusted: Arc<RwLock<TrustedPeers>>,
     inbox_sender: InboxSender,
 ) -> std::io::Result<ListenerHandle> {
     use std::io::ErrorKind;
@@ -75,22 +76,11 @@ pub async fn spawn_uds_listener(
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let keypair = keypair.clone();
-                    let trusted = trusted.clone();
                     let inbox_sender = inbox_sender.clone();
 
                     tokio::spawn(async move {
-                        // Share the router-owned trust handle directly — no
-                        // snapshot clone — so the transport trust gate reads
-                        // the same live state that the inbox admission gate
-                        // consults.
-                        if let Err(e) = handle_connection(
-                            stream,
-                            true,
-                            keypair.as_ref(),
-                            &trusted,
-                            &inbox_sender,
-                        )
-                        .await
+                        if let Err(e) =
+                            handle_connection(stream, true, keypair.as_ref(), &inbox_sender).await
                         {
                             tracing::warn!("UDS connection error: {}", e);
                         }
@@ -115,7 +105,8 @@ pub async fn spawn_uds_listener(
 /// # Arguments
 /// * `addr` - Address to bind to (e.g., "127.0.0.1:4200")
 /// * `keypair` - Our keypair for signing acks
-/// * `trusted` - Trusted peers list for validation (shared for dynamic updates)
+/// * `_trusted` - Legacy parameter retained for API compatibility; admission
+///   reads the classified inbox authority.
 /// * `inbox_sender` - Channel to send validated messages to
 ///
 /// # Returns
@@ -123,7 +114,7 @@ pub async fn spawn_uds_listener(
 pub async fn spawn_tcp_listener(
     addr: &str,
     keypair: Arc<Keypair>,
-    trusted: Arc<RwLock<TrustedPeers>>,
+    _trusted: Arc<RwLock<TrustedPeers>>,
     inbox_sender: InboxSender,
 ) -> std::io::Result<ListenerHandle> {
     let listener = TcpListener::bind(addr).await?;
@@ -133,22 +124,11 @@ pub async fn spawn_tcp_listener(
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let keypair = keypair.clone();
-                    let trusted = trusted.clone();
                     let inbox_sender = inbox_sender.clone();
 
                     tokio::spawn(async move {
-                        // Share the router-owned trust handle directly — no
-                        // snapshot clone — so the transport trust gate reads
-                        // the same live state that the inbox admission gate
-                        // consults.
-                        if let Err(e) = handle_connection(
-                            stream,
-                            true,
-                            keypair.as_ref(),
-                            &trusted,
-                            &inbox_sender,
-                        )
-                        .await
+                        if let Err(e) =
+                            handle_connection(stream, true, keypair.as_ref(), &inbox_sender).await
                         {
                             tracing::warn!("TCP connection error: {}", e);
                         }
@@ -180,14 +160,12 @@ mod tests {
     }
 
     fn make_trusted_peers(name: &str, pubkey: &PubKey) -> TrustedPeers {
-        TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: name.to_string(),
-                pubkey: *pubkey,
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
-        }
+        TrustedPeers::from_peers(vec![TrustedPeer {
+            name: name.to_string(),
+            pubkey: *pubkey,
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: crate::PeerMeta::default(),
+        }])
     }
 
     async fn envelope_to_bytes(envelope: &Envelope) -> Vec<u8> {

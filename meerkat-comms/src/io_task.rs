@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use parking_lot::RwLock;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::Framed;
 
@@ -19,7 +18,6 @@ use crate::identity::{Keypair, Signature};
 use crate::inbox::{AdmissionOutcome, DropReason, InboxSender};
 use crate::transport::TransportError;
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
-use crate::trust::TrustedPeers;
 use crate::types::{Envelope, MessageKind};
 
 /// Handle an incoming connection.
@@ -31,14 +29,11 @@ use crate::types::{Envelope, MessageKind};
 /// * `stream` - The async read/write stream (e.g., TcpStream or UnixStream)
 /// * `keypair` - Our keypair for signing acks
 /// * `require_peer_auth` - Whether to enforce signature+trusted-peer validation
-/// * `trusted` - Router-owned trust set. `InboxSender` consults this on the
-///   classified machine-authority path so ingress trust has a single semantic owner.
 /// * `inbox_sender` - Channel to send validated messages to the inbox
 pub async fn handle_connection<S>(
     stream: S,
     require_peer_auth: bool,
     keypair: &Keypair,
-    trusted: &Arc<RwLock<TrustedPeers>>,
     inbox_sender: &InboxSender,
 ) -> Result<(), IoTaskError>
 where
@@ -84,7 +79,7 @@ where
     // Admit through the inbox seam first. Typed admission outcome: explicit
     // drops are surfaced as `IoTaskError` so the IO task can react (close
     // connection, log, etc.) rather than silently returning `Ok(())`.
-    match inbox_sender.send_connection_ingress(envelope.clone(), require_peer_auth, trusted) {
+    match inbox_sender.send_connection_ingress(envelope.clone(), require_peer_auth) {
         AdmissionOutcome::Admitted => {
             if should_ack(&envelope.kind) {
                 let ack = create_ack(&envelope, keypair);
@@ -159,9 +154,10 @@ mod tests {
     use crate::classify::test_support;
     use crate::identity::PubKey;
     use crate::inbox::Inbox;
-    use crate::trust::TrustedPeer;
+    use crate::trust::{TrustedPeer, TrustedPeers};
     use crate::types::InboxItem;
     use futures::StreamExt;
+    use parking_lot::RwLock;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::codec::FramedRead;
     use uuid::Uuid;
@@ -171,14 +167,12 @@ mod tests {
     }
 
     fn make_trusted_peers(pubkey: &PubKey) -> Arc<RwLock<TrustedPeers>> {
-        Arc::new(RwLock::new(TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "test-peer".to_string(),
-                pubkey: *pubkey,
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
-        }))
+        Arc::new(RwLock::new(TrustedPeers::from_peers(vec![TrustedPeer {
+            name: "test-peer".to_string(),
+            pubkey: *pubkey,
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: crate::PeerMeta::default(),
+        }])))
     }
 
     fn classified_inbox_for_trust(
@@ -308,8 +302,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        let result =
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
+        let result = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
         assert!(result.is_ok()); // Silent drop, not an error
 
         // No item in inbox
@@ -344,8 +337,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        let result =
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
+        let result = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
         assert!(matches!(
             result,
             Err(IoTaskError::IngressDropped(DropReason::UntrustedSender))
@@ -384,7 +376,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, false, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, false, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 
@@ -429,7 +421,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, false, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, false, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 
@@ -476,7 +468,7 @@ mod tests {
 
         // Handle connection
         let handle = tokio::spawn(async move {
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await
+            handle_connection(server, true, &receiver_keypair, &inbox_sender).await
         });
 
         // Read ack from client side
@@ -522,7 +514,7 @@ mod tests {
             let _ = client_read.read(&mut buf).await;
         });
 
-        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 
@@ -564,7 +556,7 @@ mod tests {
         });
 
         let handle = tokio::spawn(async move {
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await
+            handle_connection(server, true, &receiver_keypair, &inbox_sender).await
         });
 
         // Should receive an ack
@@ -607,7 +599,7 @@ mod tests {
         });
 
         let handle = tokio::spawn(async move {
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await
+            handle_connection(server, true, &receiver_keypair, &inbox_sender).await
         });
 
         let ack = read_one_envelope(&mut client_read).await.unwrap();
@@ -647,7 +639,7 @@ mod tests {
         });
 
         let handle = tokio::spawn(async move {
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await
+            handle_connection(server, true, &receiver_keypair, &inbox_sender).await
         });
 
         // Should receive an ack
@@ -683,7 +675,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 
@@ -719,7 +711,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 
@@ -759,7 +751,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 
@@ -798,8 +790,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        let result =
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
+        let result = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
         assert!(matches!(
             result,
             Err(IoTaskError::IngressDropped(DropReason::UntrustedSender))
@@ -842,8 +833,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        let result =
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
+        let result = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
         assert!(matches!(result, Err(IoTaskError::InboxClosed)));
 
         let read_result = read_one_envelope(&mut client_read).await;
@@ -866,7 +856,7 @@ mod tests {
         // Start with an EMPTY trust set. If the IO task snapshotted at
         // spawn time, the subsequent add below would not be visible and
         // the envelope would be silently dropped.
-        let trusted = Arc::new(RwLock::new(TrustedPeers { peers: vec![] }));
+        let trusted = Arc::new(RwLock::new(TrustedPeers::new()));
         let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
@@ -887,7 +877,7 @@ mod tests {
         // Mutate the trust set AFTER the IO task would normally have
         // snapshotted, but BEFORE the envelope is delivered. The live
         // read must observe this mutation.
-        trusted.write().peers.push(crate::TrustedPeer {
+        trusted.write().push_unchecked_for_test(crate::TrustedPeer {
             name: "sender".to_string(),
             pubkey: sender_keypair.public_key(),
             addr: "tcp://127.0.0.1:0".to_string(),
@@ -901,7 +891,7 @@ mod tests {
             let _ = client_read.read(&mut buf).await;
         });
 
-        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 

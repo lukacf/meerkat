@@ -561,13 +561,12 @@ async fn spawn_comms_listener(comms_runtime: &Arc<CommsRuntime>) -> anyhow::Resu
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
     let local_addr = listener.local_addr()?;
     let keypair = comms_runtime.router_arc().keypair_arc();
-    let trusted = comms_runtime.trusted_peers_shared();
     let inbox_sender = comms_runtime.router_arc().inbox_sender().clone();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
-            let (kp, tp, sender) = (keypair.clone(), trusted.clone(), inbox_sender.clone());
+            let (kp, sender) = (keypair.clone(), inbox_sender.clone());
             tokio::spawn(async move {
-                let _ = meerkat_comms::handle_connection(stream, true, &kp, &tp, &sender).await;
+                let _ = meerkat_comms::handle_connection(stream, true, &kp, &sender).await;
             });
         }
     });
@@ -785,8 +784,7 @@ async fn apply_target_attachment_effects(
                     .context("parse adopted tux pubkey")?;
                 let trusted = comms_runtime.trusted_peers_shared();
                 let stale_keys: Vec<_> = trusted
-                    .read()
-                    .peers
+                    .peers()
                     .iter()
                     .filter(|p| p.name == "tux")
                     .map(|p| p.pubkey)

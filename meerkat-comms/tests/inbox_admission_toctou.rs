@@ -17,7 +17,10 @@ use meerkat_comms::identity::{Keypair, Signature};
 use meerkat_comms::runtime::comms_runtime::CommsRuntime;
 use meerkat_comms::types::{Envelope, InboxItem, MessageKind};
 use meerkat_comms::{AdmissionOutcome, DropReason};
-use meerkat_core::comms::{PeerAddress, PeerName, PeerTransport, TrustedPeerDescriptor};
+use meerkat_core::comms::{
+    CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, PeerAddress,
+    PeerName, PeerTransport, TrustedPeerDescriptor,
+};
 use meerkat_core::{PeerIngressAuthDecision, PeerIngressAuthExemption, SUPERVISOR_BRIDGE_INTENT};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -36,6 +39,34 @@ fn descriptor_for(name: &str, pubkey: &meerkat_comms::identity::PubKey) -> Trust
         name: PeerName::new(name.to_string()).expect("valid peer name"),
         address: PeerAddress::new(PeerTransport::Inproc, name),
         pubkey: *pubkey.as_bytes(),
+    }
+}
+
+async fn apply_generated_trust(runtime: &CommsRuntime, peer: TrustedPeerDescriptor) {
+    meerkat_core::agent::CommsRuntime::apply_trust_mutation(
+        runtime,
+        CommsTrustMutation::AddTrustedPeer {
+            peer,
+            authority: CommsTrustMutationAuthority::MeerkatMachinePeerProjection { epoch: 0 },
+        },
+    )
+    .await
+    .expect("seed trust");
+}
+
+async fn revoke_generated_trust(runtime: &CommsRuntime, peer_id: String) -> bool {
+    match meerkat_core::agent::CommsRuntime::apply_trust_mutation(
+        runtime,
+        CommsTrustMutation::RemoveTrustedPeer {
+            peer_id,
+            authority: CommsTrustMutationAuthority::MeerkatMachinePeerProjection { epoch: 0 },
+        },
+    )
+    .await
+    .expect("revoke trust")
+    {
+        CommsTrustMutationResult::Removed { removed } => removed,
+        other => panic!("expected trust removal result, got {other:?}"),
     }
 }
 
@@ -69,20 +100,17 @@ async fn trusted_sender_is_admitted_through_classified_path() {
     let sender = Keypair::generate();
 
     // Register the sender as trusted on the receiver.
-    meerkat_core::agent::CommsRuntime::add_trusted_peer(
+    apply_generated_trust(
         &receiver,
         descriptor_for("peer-sender", &sender.public_key()),
     )
-    .await
-    .expect("seed trust");
+    .await;
 
-    let trusted_peers = receiver.router().shared_trusted_peers();
     let envelope = make_signed_envelope(&sender, receiver.public_key());
-    let outcome =
-        receiver
-            .router()
-            .inbox_sender()
-            .send_connection_ingress(envelope, true, &trusted_peers);
+    let outcome = receiver
+        .router()
+        .inbox_sender()
+        .send_connection_ingress(envelope, true);
     assert_eq!(outcome, AdmissionOutcome::Admitted);
 }
 
@@ -109,27 +137,20 @@ async fn revoked_sender_is_rejected_at_admission() {
 
     // Seed trust, then revoke — this is the post-revoke state the
     // classify→admit seam must respect.
-    meerkat_core::agent::CommsRuntime::add_trusted_peer(
+    apply_generated_trust(
         &receiver,
         descriptor_for("peer-sender", &sender.public_key()),
     )
-    .await
-    .expect("seed trust");
-    let removed = meerkat_core::agent::CommsRuntime::remove_trusted_peer(
-        &receiver,
-        &sender.public_key().to_peer_id().to_string(),
-    )
-    .await
-    .expect("revoke trust");
+    .await;
+    let removed =
+        revoke_generated_trust(&receiver, sender.public_key().to_peer_id().to_string()).await;
     assert!(removed, "trust revoke must succeed");
 
-    let trusted_peers = receiver.router().shared_trusted_peers();
     let envelope = make_signed_envelope(&sender, receiver.public_key());
-    let outcome =
-        receiver
-            .router()
-            .inbox_sender()
-            .send_connection_ingress(envelope, true, &trusted_peers);
+    let outcome = receiver
+        .router()
+        .inbox_sender()
+        .send_connection_ingress(envelope, true);
     assert_eq!(
         outcome,
         AdmissionOutcome::Dropped {
@@ -157,19 +178,17 @@ async fn concurrent_revokes_and_admissions_never_admit_untrusted() {
     install_test_peer_comms_handle(receiver.as_ref());
     let sender = std::sync::Arc::new(Keypair::generate());
 
-    meerkat_core::agent::CommsRuntime::add_trusted_peer(
+    apply_generated_trust(
         receiver.as_ref(),
         descriptor_for("peer-sender", &sender.public_key()),
     )
-    .await
-    .expect("seed trust");
+    .await;
 
     let total: usize = 64;
 
     let admit_handle = {
         let receiver = receiver.clone();
         let sender = sender.clone();
-        let trusted_peers = receiver.router().shared_trusted_peers();
         let receiver_pk = receiver.public_key();
         tokio::spawn(async move {
             let mut admitted = 0usize;
@@ -177,11 +196,10 @@ async fn concurrent_revokes_and_admissions_never_admit_untrusted() {
             let mut dropped_other = 0usize;
             for _ in 0..total {
                 let envelope = make_signed_envelope(&sender, receiver_pk);
-                let outcome = receiver.router().inbox_sender().send_connection_ingress(
-                    envelope,
-                    true,
-                    &trusted_peers,
-                );
+                let outcome = receiver
+                    .router()
+                    .inbox_sender()
+                    .send_connection_ingress(envelope, true);
                 match outcome {
                     AdmissionOutcome::Admitted => admitted += 1,
                     AdmissionOutcome::Dropped {
@@ -202,13 +220,13 @@ async fn concurrent_revokes_and_admissions_never_admit_untrusted() {
         tokio::spawn(async move {
             for i in 0..total {
                 if i % 2 == 0 {
-                    let _ = meerkat_core::agent::CommsRuntime::remove_trusted_peer(
+                    let _ = revoke_generated_trust(
                         receiver_for_task.as_ref(),
-                        &sender_for_task.public_key().to_peer_id().to_string(),
+                        sender_for_task.public_key().to_peer_id().to_string(),
                     )
                     .await;
                 } else {
-                    let _ = meerkat_core::agent::CommsRuntime::add_trusted_peer(
+                    apply_generated_trust(
                         receiver_for_task.as_ref(),
                         descriptor_for("peer-sender", &sender_for_task.public_key()),
                     )
@@ -252,16 +270,14 @@ async fn classify_at_t0_revoke_at_t1_admit_at_t2_sees_revoked_state() {
     let sender = Keypair::generate();
 
     // Seed trust — classification at T0 will see the sender as trusted.
-    meerkat_core::agent::CommsRuntime::add_trusted_peer(
+    apply_generated_trust(
         &receiver,
         descriptor_for("peer-sender", &sender.public_key()),
     )
-    .await
-    .expect("seed trust");
+    .await;
 
     let envelope = make_signed_envelope(&sender, receiver.public_key());
-    let shared_peers = receiver.router().shared_trusted_peers();
-    let revoke_pubkey = sender.public_key();
+    let revoke_peer_id = sender.public_key().to_peer_id().to_string();
 
     // classify → (revoke trust) → admit. Post-fix, the admission step
     // re-reads the trust set and drops. Pre-fix, it would admit using
@@ -272,7 +288,9 @@ async fn classify_at_t0_revoke_at_t1_admit_at_t2_sees_revoked_state() {
         .classified_admit_with_pause_for_test(InboxItem::External { envelope }, || {
             // This runs between classify and admit. Revoke trust so the
             // admission stage observes a state the classifier did not.
-            shared_peers.write().remove(&revoke_pubkey);
+            let removed =
+                futures::executor::block_on(revoke_generated_trust(&receiver, revoke_peer_id));
+            assert!(removed, "trust revoke must succeed during pause");
         });
 
     assert_eq!(
@@ -297,7 +315,6 @@ async fn auth_exempt_bridge_request_admits_without_trust_edge() {
     let sender = Keypair::generate();
     // No trust edge seeded — sender is not trusted.
 
-    let trusted_peers = receiver.router().shared_trusted_peers();
     let mut envelope = Envelope {
         id: Uuid::new_v4(),
         from: sender.public_key(),
@@ -312,11 +329,10 @@ async fn auth_exempt_bridge_request_admits_without_trust_edge() {
     };
     envelope.sign(&sender);
 
-    let outcome =
-        receiver
-            .router()
-            .inbox_sender()
-            .send_connection_ingress(envelope, true, &trusted_peers);
+    let outcome = receiver
+        .router()
+        .inbox_sender()
+        .send_connection_ingress(envelope, true);
     assert_eq!(
         outcome,
         AdmissionOutcome::Admitted,

@@ -71,6 +71,7 @@ use tempfile::NamedTempFile;
 use uuid::Uuid;
 
 fn test_comms_reconcile_obligation(
+    local_peer_id: PeerId,
     direct_peer_endpoints: BTreeSet<meerkat_runtime::meerkat_machine::dsl::PeerEndpoint>,
 ) -> meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
     let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
@@ -86,6 +87,18 @@ fn test_comms_reconcile_obligation(
         },
     )
     .expect("RegisterSession input");
+    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+            endpoint: meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+                "local",
+                local_peer_id.to_string(),
+                "inproc://local",
+                [0x7f; 32],
+            ),
+        },
+    )
+    .expect("PublishLocalEndpoint input");
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut authority,
         meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
@@ -115,7 +128,12 @@ async fn apply_test_peer_projection_trust(
     context: &'static str,
 ) {
     let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
-    let obligation = test_comms_reconcile_obligation(BTreeSet::from([endpoint.clone()]));
+    let obligation = test_comms_reconcile_obligation(
+        runtime
+            .peer_id()
+            .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable")),
+        BTreeSet::from([endpoint.clone()]),
+    );
     CoreCommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
@@ -142,7 +160,12 @@ async fn remove_test_peer_projection_trust(
         "",
         [0u8; 32],
     );
-    let obligation = test_comms_reconcile_obligation(BTreeSet::new());
+    let obligation = test_comms_reconcile_obligation(
+        runtime
+            .peer_id()
+            .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable")),
+        BTreeSet::new(),
+    );
     CoreCommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::RemoveTrustedPeer {
@@ -287,6 +310,8 @@ struct MockCommsBehavior {
 struct MockCommsRuntime {
     session_id: SessionId,
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    default_name: String,
+    default_address: String,
     default_peer_id: PeerId,
     default_public_key: String,
     default_public_key_bytes: [u8; 32],
@@ -320,6 +345,8 @@ impl MockCommsRuntime {
         Self {
             session_id,
             runtime_adapter,
+            default_name: name.to_string(),
+            default_address: format!("inproc://{name}"),
             default_peer_id: public_key.to_peer_id(),
             default_public_key: public_key.to_pubkey_string(),
             default_public_key_bytes: key_bytes,
@@ -440,36 +467,48 @@ impl CoreCommsRuntime for MockCommsRuntime {
         }
     }
 
+    fn comms_name(&self) -> Option<String> {
+        Some(self.default_name.clone())
+    }
+
+    fn advertised_address(&self) -> Option<String> {
+        Some(self.default_address.clone())
+    }
+
     async fn apply_trust_mutation(
         &self,
         mutation: CommsTrustMutation,
     ) -> Result<CommsTrustMutationResult, SendError> {
         match mutation {
-            CommsTrustMutation::AddTrustedPeer {
-                peer,
-                authority: _authority,
-            } => {
+            CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                authority
+                    .validate_public_add(self.peer_id(), &peer)
+                    .map_err(SendError::Validation)?;
                 self.add_trusted_peer(peer).await?;
                 Ok(CommsTrustMutationResult::Added)
             }
-            CommsTrustMutation::RemoveTrustedPeer {
-                peer_id,
-                authority: _authority,
-            } => {
+            CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                let parsed_peer_id = PeerId::parse(&peer_id)
+                    .map_err(|error| SendError::Validation(error.to_string()))?;
+                authority
+                    .validate_public_remove(self.peer_id(), parsed_peer_id)
+                    .map_err(SendError::Validation)?;
                 let removed = self.remove_trusted_peer(&peer_id).await?;
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
-            CommsTrustMutation::AddPrivateTrustedPeer {
-                peer,
-                authority: _authority,
-            } => {
+            CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                authority
+                    .validate_private_add(self.peer_id(), &peer)
+                    .map_err(SendError::Validation)?;
                 self.add_private_trusted_peer(peer).await?;
                 Ok(CommsTrustMutationResult::Added)
             }
-            CommsTrustMutation::RemovePrivateTrustedPeer {
-                peer_id,
-                authority: _authority,
-            } => {
+            CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                let parsed_peer_id = PeerId::parse(&peer_id)
+                    .map_err(|error| SendError::Validation(error.to_string()))?;
+                authority
+                    .validate_private_remove(self.peer_id(), parsed_peer_id)
+                    .map_err(SendError::Validation)?;
                 let removed = self.remove_private_trusted_peer(&peer_id).await?;
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
@@ -4352,7 +4391,10 @@ async fn trust_candidate_sender_for_reply(
     )
     .expect("typed ingress sender should convert to a reply trusted peer");
     let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&descriptor);
-    let obligation = test_comms_reconcile_obligation(BTreeSet::from([endpoint.clone()]));
+    let obligation = test_comms_reconcile_obligation(
+        CoreCommsRuntime::peer_id(comms).expect("test comms runtime peer_id unavailable"),
+        BTreeSet::from([endpoint.clone()]),
+    );
     CoreCommsRuntime::apply_trust_mutation(
         comms,
         CommsTrustMutation::AddTrustedPeer {
@@ -22179,8 +22221,7 @@ fn test_supervisor_private_trust_realizes_generated_publish_obligation() {
     );
     assert!(
         body.contains("supervisor private trust publication ack rejected")
-            && body
-                .contains("cleanup failed while removing new supervisor trust after rejected ack"),
+            && body.contains("self.cleanup_supervisor_private_trust_publish_attempt"),
         "rejected supervisor_trust_publish ack must clean up any attempted private trust before returning"
     );
 }

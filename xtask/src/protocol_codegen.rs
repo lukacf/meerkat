@@ -967,6 +967,11 @@ fn comms_trust_epoch_expr(protocol: &EffectHandoffProtocol) -> Result<&'static s
 
 fn comms_trust_target_peer_expr(protocol: &EffectHandoffProtocol) -> Result<Option<&'static str>> {
     match protocol.name.as_str() {
+        "comms_trust_reconcile" | "supervisor_trust_publish" | "supervisor_trust_revoke" => {
+            Ok(Some(
+                "self.local_endpoint.as_ref().ok_or_else(|| \"generated MeerkatMachine trust obligation did not carry local trust-store endpoint\".to_string())?.peer_id.0.as_str()",
+            ))
+        }
         "mob_member_trust_wiring" | "mob_member_trust_unwiring" => Ok(Some(
             "if self.a_peer_id.0 == request.peer_id() { self.b_peer_id.0.as_str() } else if self.b_peer_id.0 == request.peer_id() { self.a_peer_id.0.as_str() } else { return Err(format!(\"MobMachine member trust obligation does not carry requested peer {:?}\", request.peer_id())); }",
         )),
@@ -974,9 +979,6 @@ fn comms_trust_target_peer_expr(protocol: &EffectHandoffProtocol) -> Result<Opti
         | "mob_external_peer_trust_unwiring"
         | "mob_external_peer_trust_repair" => Ok(Some("self.local_peer_id.0.as_str()")),
         "mob_external_peer_reciprocal_trust" => Ok(Some("self.edge.endpoint.peer_id.0.as_str()")),
-        "comms_trust_reconcile" | "supervisor_trust_publish" | "supervisor_trust_revoke" => {
-            Ok(None)
-        }
         other => bail!("unsupported comms trust authority protocol `{other}`"),
     }
 }
@@ -1420,6 +1422,23 @@ fn generate_comms_trust_authority_helpers(
                 out,
                 "        trusted_peer_descriptor_for_request(obligation, expected_peer_id)?,"
             )?;
+            writeln!(out, "    )")?;
+            writeln!(out, "}}")?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "pub fn cleanup_authority_for_peer(obligation: &{obligation_type}, expected_peer_id: &str) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {{"
+            )?;
+            writeln!(
+                out,
+                "    validate_expected_peer(\"MeerkatMachineSupervisorPublishCleanup\", &obligation.peer_id, expected_peer_id)?;"
+            )?;
+            writeln!(
+                out,
+                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_private_remove("
+            )?;
+            writeln!(out, "        obligation,")?;
+            writeln!(out, "        obligation.peer_id.clone(),")?;
             writeln!(out, "    )")?;
             writeln!(out, "}}")?;
             writeln!(out)?;

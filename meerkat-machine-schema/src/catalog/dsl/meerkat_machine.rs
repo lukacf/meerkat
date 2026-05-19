@@ -2840,13 +2840,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             CloseSurfaceConnection { surface_id: String },
             RejectSurfaceCall { surface_id: String, cause: Enum<ExternalToolSurfaceFailureCause> },
             PublishSupervisorTrustEdge {
+                local_endpoint: Option<PeerEndpoint>,
                 peer_id: String,
                 name: String,
                 address: String,
                 signing_public_key: Option<String>,
                 epoch: u64,
             },
-            RevokeSupervisorTrustEdge { peer_id: String, epoch: u64 },
+            RevokeSupervisorTrustEdge { local_endpoint: Option<PeerEndpoint>, peer_id: String, epoch: u64 },
             // MCP server lifecycle effects.
             McpServerStateChanged { server_id: McpServerId, new_state: McpServerState },
             McpServerReloadRequested { server_id: McpServerId },
@@ -2875,7 +2876,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             // Track-B (R5) peer-projection effects.
             LocalEndpointChanged { endpoint: Option<PeerEndpoint> },
             PeerProjectionChanged { peer_projection_epoch: u64 },
-            CommsTrustReconcileRequested { peer_projection_epoch: u64, direct_peer_endpoints: Set<PeerEndpoint>, mob_overlay_peer_endpoints: Set<PeerEndpoint> },
+            CommsTrustReconcileRequested { local_endpoint: Option<PeerEndpoint>, peer_projection_epoch: u64, direct_peer_endpoints: Set<PeerEndpoint>, mob_overlay_peer_endpoints: Set<PeerEndpoint> },
         }
 
         // =====================================================================
@@ -11423,6 +11424,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit PublishSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
                 peer_id: self.supervisor_bound_peer_id.get("value"),
                 name: self.supervisor_bound_name.get("value"),
                 address: self.supervisor_bound_address.get("value"),
@@ -11461,6 +11463,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit PublishSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
                 peer_id: self.supervisor_bound_peer_id.get("value"),
                 name: self.supervisor_bound_name.get("value"),
                 address: self.supervisor_bound_address.get("value"),
@@ -11503,6 +11506,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit PublishSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
                 peer_id: self.supervisor_publish_pending_peer_id.get("value"),
                 name: self.supervisor_publish_pending_name.get("value"),
                 address: self.supervisor_publish_pending_address.get("value"),
@@ -11546,7 +11550,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_publish_pending_epoch = None;
             }
             to Idle
-            emit RevokeSupervisorTrustEdge { peer_id: peer_id, epoch: epoch }
+            emit RevokeSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
+                peer_id: peer_id,
+                epoch: epoch
+            }
         }
 
         // Supervisor-trust-edge feedback transitions (C-F2 / wave-d D-d).
@@ -11704,7 +11712,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit PeerProjectionChanged { peer_projection_epoch: self.peer_projection_epoch }
-            emit CommsTrustReconcileRequested { peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
+            emit CommsTrustReconcileRequested { local_endpoint: self.local_endpoint, peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
         }
 
         transition RemoveDirectPeerEndpoint {
@@ -11717,7 +11725,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit PeerProjectionChanged { peer_projection_epoch: self.peer_projection_epoch }
-            emit CommsTrustReconcileRequested { peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
+            emit CommsTrustReconcileRequested { local_endpoint: self.local_endpoint, peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
         }
 
         transition ApplyMobPeerOverlay {
@@ -11731,7 +11739,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit PeerProjectionChanged { peer_projection_epoch: self.peer_projection_epoch }
-            emit CommsTrustReconcileRequested { peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
+            emit CommsTrustReconcileRequested { local_endpoint: self.local_endpoint, peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
         }
     }
 }

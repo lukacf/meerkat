@@ -298,6 +298,11 @@ mod tests {
     const UUID_A: &str = "f805a14c-4089-5328-b4cb-39ede8b4464d";
     const UUID_B: &str = "a576ebe3-ccd6-565d-8f48-5f29c0db055d";
     const UUID_C: &str = "76f30618-7a02-578b-a8bc-6d82ae7ba8cf";
+    const LOCAL_UUID: &str = "00000000-0000-4000-8000-000000000000";
+
+    fn local_peer_id() -> PeerId {
+        PeerId::parse(LOCAL_UUID).expect("valid local test peer id")
+    }
 
     /// Records every `add_trusted_peer` / `remove_trusted_peer` call
     /// for assertion in tests. Uses `std::sync::Mutex` for the
@@ -334,7 +339,10 @@ mod tests {
             mutation: CommsTrustMutation,
         ) -> Result<CommsTrustMutationResult, SendError> {
             match mutation {
-                CommsTrustMutation::AddTrustedPeer { peer, .. } => {
+                CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                    authority
+                        .validate_public_add(Some(local_peer_id()), &peer)
+                        .map_err(SendError::Validation)?;
                     if self.fail_next_add.swap(false, Ordering::SeqCst) {
                         return Err(SendError::Unsupported("synthetic failure".into()));
                     }
@@ -352,7 +360,12 @@ mod tests {
                         .insert(descriptor_to_endpoint(&peer).expect("test descriptor should map"));
                     Ok(CommsTrustMutationResult::Added)
                 }
-                CommsTrustMutation::RemoveTrustedPeer { peer_id, .. } => {
+                CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
+                    authority
+                        .validate_public_remove(Some(local_peer_id()), parsed_peer_id)
+                        .map_err(SendError::Validation)?;
                     if self.fail_next_remove.swap(false, Ordering::SeqCst) {
                         return Err(SendError::Unsupported("synthetic failure".into()));
                     }
@@ -384,8 +397,7 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|err| CommsCapabilityError::Unsupported(err.to_string()))?;
             Ok(PeerIngressRuntimeSnapshot {
-                self_peer_id: PeerId::parse("00000000-0000-4000-8000-000000000000")
-                    .expect("valid test peer id"),
+                self_peer_id: local_peer_id(),
                 auth_required: true,
                 authority_phase: PeerIngressAuthorityPhase::Received,
                 trusted_peers,
@@ -457,6 +469,13 @@ mod tests {
                 },
             )
             .expect("RegisterSession input");
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *guard,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+                    endpoint: endpoint("local", LOCAL_UUID),
+                },
+            )
+            .expect("PublishLocalEndpoint input");
             let mut transition = None;
             for overlay_epoch in 1..=projection_epoch {
                 transition = Some(
@@ -506,6 +525,13 @@ mod tests {
                 },
             )
             .expect("RegisterSession input");
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *guard,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+                    endpoint: endpoint("local", LOCAL_UUID),
+                },
+            )
+            .expect("PublishLocalEndpoint input");
             let first = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                 &mut *guard,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {

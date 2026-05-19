@@ -657,6 +657,56 @@ impl MeerkatMachine {
         }
     }
 
+    fn local_endpoint_for_comms_runtime(
+        comms_runtime: &dyn meerkat_core::agent::CommsRuntime,
+    ) -> Result<crate::meerkat_machine::dsl::PeerEndpoint, String> {
+        let peer_id = comms_runtime
+            .peer_id()
+            .ok_or_else(|| "runtime peer_id unavailable".to_string())?;
+        let name = comms_runtime
+            .comms_name()
+            .ok_or_else(|| "runtime comms_name unavailable".to_string())?;
+        let address = comms_runtime
+            .advertised_address()
+            .ok_or_else(|| "runtime advertised_address unavailable".to_string())?;
+        let pubkey = comms_runtime
+            .public_key_bytes()
+            .ok_or_else(|| "runtime public_key_bytes unavailable".to_string())?;
+        let descriptor = meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+            name,
+            peer_id.to_string(),
+            pubkey,
+            address,
+        )
+        .map_err(|error| format!("runtime local endpoint descriptor invalid: {error}"))?;
+        Ok(crate::meerkat_machine::dsl::PeerEndpoint::from(&descriptor))
+    }
+
+    /// Publish the target runtime's own endpoint into MeerkatMachine before
+    /// generated trust handoffs mint authority scoped to that trust store.
+    pub async fn stage_local_endpoint_for_comms_runtime(
+        &self,
+        session_id: &SessionId,
+        comms_runtime: &dyn meerkat_core::agent::CommsRuntime,
+    ) -> Result<(), SupervisorBindingStageError> {
+        let endpoint = Self::local_endpoint_for_comms_runtime(comms_runtime)
+            .map_err(SupervisorBindingStageError::LocalEndpoint)?;
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint { endpoint },
+        )
+        .map_err(SupervisorBindingStageError::Dsl)?;
+        Ok(())
+    }
+
     /// Stage a DSL `BindSupervisor` input (Wave 3 D Row 21).
     ///
     /// Returns the classified result from the DSL mutator so callers can
@@ -941,6 +991,9 @@ pub enum SupervisorBindingStageError {
     /// distinguish guard rejections from missing-transition failures can
     /// match on it.
     Dsl(crate::meerkat_machine::dsl::MeerkatMachineTransitionError),
+    /// The target runtime did not expose a complete typed local endpoint for
+    /// generated trust-store ownership.
+    LocalEndpoint(String),
 }
 
 impl std::fmt::Display for SupervisorBindingStageError {
@@ -948,6 +1001,9 @@ impl std::fmt::Display for SupervisorBindingStageError {
         match self {
             Self::SessionNotRegistered => write!(f, "session not registered with runtime"),
             Self::Dsl(err) => write!(f, "DSL rejected supervisor binding input: {err}"),
+            Self::LocalEndpoint(err) => {
+                write!(f, "local endpoint unavailable for supervisor trust: {err}")
+            }
         }
     }
 }
@@ -1060,6 +1116,8 @@ impl MeerkatMachine {
         let entry = sessions
             .get_mut(session_id)
             .ok_or(PeerEndpointStageError::SessionNotRegistered)?;
+        let local_endpoint = Self::local_endpoint_for_comms_runtime(comms_runtime.as_ref())
+            .map_err(PeerEndpointStageError::LocalEndpoint)?;
 
         let reconcile_obligation = {
             let freshness_authority =
@@ -1070,6 +1128,13 @@ impl MeerkatMachine {
                 .dsl_authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+                    endpoint: local_endpoint,
+                },
+            )
+            .map_err(PeerEndpointStageError::Dsl)?;
             let transition =
                 crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
                     .map_err(PeerEndpointStageError::Dsl)?;
@@ -1116,6 +1181,9 @@ pub enum PeerEndpointStageError {
     /// peer-projection transitions are specified to emit the effect
     /// unconditionally.
     MissingReconcileEffect,
+    /// The target runtime did not expose a complete typed local endpoint for
+    /// generated trust-store ownership.
+    LocalEndpoint(String),
     /// The reconciler failed to mechanically reconcile the trust
     /// store.
     Reconcile(crate::comms_trust_reconcile::CommsTrustReconcileError),
@@ -1130,6 +1198,12 @@ impl std::fmt::Display for PeerEndpointStageError {
                 f,
                 "peer-projection DSL transition committed without emitting CommsTrustReconcileRequested"
             ),
+            Self::LocalEndpoint(err) => {
+                write!(
+                    f,
+                    "local endpoint unavailable for trust reconciliation: {err}"
+                )
+            }
             Self::Reconcile(err) => write!(f, "trust reconciliation failed: {err}"),
         }
     }

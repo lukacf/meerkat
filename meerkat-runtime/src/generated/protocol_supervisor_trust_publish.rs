@@ -3,10 +3,11 @@
 // Closure policy: AckRequired
 // Liveness: eventual feedback under comms transport liveness — `send_bridge_response` surfaces the typed outcome
 
-use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerId};
+use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};
 
 #[derive(Debug, Clone)]
 pub struct SupervisorTrustPublishObligation {
+    local_endpoint: Option<PeerEndpoint>,
     peer_id: String,
     name: String,
     address: String,
@@ -17,6 +18,10 @@ pub struct SupervisorTrustPublishObligation {
 }
 
 impl SupervisorTrustPublishObligation {
+    pub fn local_endpoint(&self) -> &Option<PeerEndpoint> {
+        &self.local_endpoint
+    }
+
     pub fn peer_id(&self) -> &String {
         &self.peer_id
     }
@@ -76,7 +81,10 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for SupervisorTrust
         request: &meerkat_core::comms::GeneratedCommsTrustAuthorityRequest<'_>,
     ) -> Result<meerkat_core::comms::GeneratedCommsTrustAuthorityGrant, String> {
         use meerkat_core::comms::GeneratedCommsTrustAuthorityOperation as Operation;
-        if !matches!(request.operation(), Operation::PrivateAdd) {
+        if !matches!(
+            request.operation(),
+            Operation::PrivateAdd | Operation::PrivateRemove
+        ) {
             return Err(format!(
                 "generated comms trust source {:?} cannot authorize operation {:?}",
                 self.comms_trust_authority_source_kind(),
@@ -107,9 +115,9 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for SupervisorTrust
         ) {
             let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;
             let grant = meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish, peer_descriptor)?;
-            return Ok(grant);
+            return Ok(grant.with_trust_store_peer_id(self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str()));
         }
-        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish))
+        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish).with_trust_store_peer_id(self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str()))
     }
 }
 
@@ -121,12 +129,14 @@ pub fn extract_obligations(
         .iter()
         .filter_map(|effect| match effect {
             MeerkatMachineEffect::PublishSupervisorTrustEdge {
+                local_endpoint,
                 peer_id,
                 name,
                 address,
                 signing_public_key,
                 epoch,
             } => Some(SupervisorTrustPublishObligation {
+                local_endpoint: local_endpoint.clone(),
                 peer_id: peer_id.clone(),
                 name: name.clone(),
                 address: address.clone(),
@@ -165,5 +175,20 @@ pub fn publish_authority_for_peer(
     meerkat_core::comms::CommsTrustMutationAuthority::from_generated_private_add(
         obligation,
         trusted_peer_descriptor_for_request(obligation, expected_peer_id)?,
+    )
+}
+
+pub fn cleanup_authority_for_peer(
+    obligation: &SupervisorTrustPublishObligation,
+    expected_peer_id: &str,
+) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {
+    validate_expected_peer(
+        "MeerkatMachineSupervisorPublishCleanup",
+        &obligation.peer_id,
+        expected_peer_id,
+    )?;
+    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_private_remove(
+        obligation,
+        obligation.peer_id.clone(),
     )
 }

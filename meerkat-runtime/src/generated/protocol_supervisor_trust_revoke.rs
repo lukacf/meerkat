@@ -3,10 +3,11 @@
 // Closure policy: AckRequired
 // Liveness: eventual feedback under comms transport liveness — `send_bridge_response` surfaces the typed outcome
 
-use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerId};
+use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};
 
 #[derive(Debug, Clone)]
 pub struct SupervisorTrustRevokeObligation {
+    local_endpoint: Option<PeerEndpoint>,
     peer_id: String,
     epoch: u64,
     comms_trust_authority_claims:
@@ -14,6 +15,10 @@ pub struct SupervisorTrustRevokeObligation {
 }
 
 impl SupervisorTrustRevokeObligation {
+    pub fn local_endpoint(&self) -> &Option<PeerEndpoint> {
+        &self.local_endpoint
+    }
+
     pub fn peer_id(&self) -> &String {
         &self.peer_id
     }
@@ -64,7 +69,7 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for SupervisorTrust
                 request.peer_id()
             ));
         }
-        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish))
+        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish).with_trust_store_peer_id(self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str()))
     }
 }
 
@@ -75,13 +80,16 @@ pub fn extract_obligations(
         .effects()
         .iter()
         .filter_map(|effect| match effect {
-            MeerkatMachineEffect::RevokeSupervisorTrustEdge { peer_id, epoch } => {
-                Some(SupervisorTrustRevokeObligation {
-                    peer_id: peer_id.clone(),
-                    epoch: *epoch,
-                    comms_trust_authority_claims: Default::default(),
-                })
-            }
+            MeerkatMachineEffect::RevokeSupervisorTrustEdge {
+                local_endpoint,
+                peer_id,
+                epoch,
+            } => Some(SupervisorTrustRevokeObligation {
+                local_endpoint: local_endpoint.clone(),
+                peer_id: peer_id.clone(),
+                epoch: *epoch,
+                comms_trust_authority_claims: Default::default(),
+            }),
             _ => None,
         })
         .collect()

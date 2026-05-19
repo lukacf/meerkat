@@ -55,6 +55,7 @@ impl PeerProjectionFreshnessAuthority {
 
 #[derive(Debug, Clone)]
 pub struct CommsTrustReconcileObligation {
+    local_endpoint: Option<PeerEndpoint>,
     peer_projection_epoch: u64,
     direct_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
     mob_overlay_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
@@ -64,6 +65,10 @@ pub struct CommsTrustReconcileObligation {
 }
 
 impl CommsTrustReconcileObligation {
+    pub fn local_endpoint(&self) -> &Option<PeerEndpoint> {
+        &self.local_endpoint
+    }
+
     pub fn peer_projection_epoch(&self) -> u64 {
         self.peer_projection_epoch
     }
@@ -184,9 +189,9 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for CommsTrustRecon
         ) {
             let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;
             let grant = meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, self.peer_projection_epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection, peer_descriptor)?;
-            return Ok(grant);
+            return Ok(grant.with_trust_store_peer_id(self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str()));
         }
-        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.peer_projection_epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection))
+        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.peer_projection_epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection).with_trust_store_peer_id(self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str()))
     }
 }
 
@@ -205,10 +210,12 @@ pub fn extract_obligations_with_freshness(
         .iter()
         .filter_map(|effect| match effect {
             MeerkatMachineEffect::CommsTrustReconcileRequested {
+                local_endpoint,
                 peer_projection_epoch,
                 direct_peer_endpoints,
                 mob_overlay_peer_endpoints,
             } => Some(CommsTrustReconcileObligation {
+                local_endpoint: local_endpoint.clone(),
                 peer_projection_epoch: *peer_projection_epoch,
                 direct_peer_endpoints: direct_peer_endpoints.clone(),
                 mob_overlay_peer_endpoints: mob_overlay_peer_endpoints.clone(),

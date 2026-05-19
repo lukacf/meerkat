@@ -44,6 +44,7 @@ use meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligati
 
 const UUID_A: &str = "f805a14c-4089-5328-b4cb-39ede8b4464d";
 const UUID_B: &str = "a576ebe3-ccd6-565d-8f48-5f29c0db055d";
+const LOCAL_UUID: &str = "00000000-0000-4000-8000-000000000000";
 
 fn endpoint(name: &str, peer_id_uuid: &str) -> PeerEndpoint {
     PeerEndpoint {
@@ -52,6 +53,10 @@ fn endpoint(name: &str, peer_id_uuid: &str) -> PeerEndpoint {
         address: PeerAddress(format!("inproc://{name}")),
         signing_key: PeerSigningKey([name.as_bytes()[0]; 32]),
     }
+}
+
+fn local_peer_id() -> meerkat_core::comms::PeerId {
+    meerkat_core::comms::PeerId::parse(LOCAL_UUID).expect("valid local test peer id")
 }
 
 fn obligation(
@@ -69,6 +74,13 @@ fn obligation(
         },
     )
     .expect("RegisterSession input");
+    MeerkatMachineMutator::apply(
+        &mut authority,
+        MeerkatMachineInput::PublishLocalEndpoint {
+            endpoint: endpoint("local", LOCAL_UUID),
+        },
+    )
+    .expect("PublishLocalEndpoint input");
     let projection_epoch = epoch.max(1);
     let mut transition = None;
     for overlay_epoch in 1..=projection_epoch {
@@ -130,7 +142,7 @@ impl CommsRuntime for RecordingCommsRuntime {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
                 authority
-                    .validate_public_add(None, &peer)
+                    .validate_public_add(Some(local_peer_id()), &peer)
                     .map_err(SendError::Validation)?;
                 self.add_count.fetch_add(1, Ordering::SeqCst);
                 self.adds
@@ -147,7 +159,7 @@ impl CommsRuntime for RecordingCommsRuntime {
                 let parsed_peer_id = meerkat_core::comms::PeerId::parse(&peer_id)
                     .map_err(|error| SendError::Validation(error.to_string()))?;
                 authority
-                    .validate_public_remove(None, parsed_peer_id)
+                    .validate_public_remove(Some(local_peer_id()), parsed_peer_id)
                     .map_err(SendError::Validation)?;
                 self.removes
                     .lock()
@@ -173,10 +185,7 @@ impl CommsRuntime for RecordingCommsRuntime {
         &self,
     ) -> Result<PeerIngressRuntimeSnapshot, CommsCapabilityError> {
         Ok(PeerIngressRuntimeSnapshot {
-            self_peer_id: meerkat_core::comms::PeerId::parse(
-                "00000000-0000-4000-8000-000000000000",
-            )
-            .expect("valid test peer id"),
+            self_peer_id: local_peer_id(),
             auth_required: true,
             authority_phase: PeerIngressAuthorityPhase::Received,
             trusted_peers: self

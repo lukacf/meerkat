@@ -1238,6 +1238,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                     CommsTrustAuthorityOperation::PublicRemove,
                 ],
                 obligation_fields: &[
+                    "local_endpoint",
                     "peer_projection_epoch",
                     "direct_peer_endpoints",
                     "mob_overlay_peer_endpoints",
@@ -1435,6 +1436,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                 // cannot be confused across a rotation.
                 correlation_fields: vec![fld_id("peer_id"), fld_id("epoch")],
                 obligation_fields: vec![
+                    fld_id("local_endpoint"),
                     fld_id("peer_id"),
                     fld_id("name"),
                     fld_id("address"),
@@ -1451,14 +1453,17 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                 comms_trust_authority: Some(CommsTrustAuthorityProtocol {
                     source_kind: CommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish,
                     row_owner_kind: None,
-                    allowed_operations: vec![CommsTrustAuthorityOperation::PrivateAdd],
+                    allowed_operations: vec![
+                        CommsTrustAuthorityOperation::PrivateAdd,
+                        CommsTrustAuthorityOperation::PrivateRemove,
+                    ],
                 }),
                 rust: ProtocolRustBinding {
                     module_path:
                         "meerkat-runtime/src/generated/protocol_supervisor_trust_publish.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
-                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerId};".into(),
+                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};".into(),
                     ],
                     authority_type_path: Some(
                         "crate::meerkat_machine::dsl::MeerkatMachineAuthority".into(),
@@ -1493,7 +1498,11 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                 effect_variant: ev_id("RevokeSupervisorTrustEdge"),
                 realizing_actor: act_id("supervisor_bridge_owner"),
                 correlation_fields: vec![fld_id("peer_id"), fld_id("epoch")],
-                obligation_fields: vec![fld_id("peer_id"), fld_id("epoch")],
+                obligation_fields: vec![
+                    fld_id("local_endpoint"),
+                    fld_id("peer_id"),
+                    fld_id("epoch"),
+                ],
                 allowed_feedback_inputs: vec![],
                 closure_policy: ClosurePolicy::AckRequired,
                 liveness_annotation: Some(
@@ -1513,7 +1522,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                         "meerkat-runtime/src/generated/protocol_supervisor_trust_revoke.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
-                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerId};".into(),
+                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};".into(),
                     ],
                     authority_type_path: Some(
                         "crate::meerkat_machine::dsl::MeerkatMachineAuthority".into(),

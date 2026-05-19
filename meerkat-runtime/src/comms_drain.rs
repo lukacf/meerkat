@@ -973,6 +973,10 @@ async fn bind_and_publish_supervisor_trust(
     epoch: u64,
     context: &str,
 ) -> Result<(), String> {
+    adapter
+        .stage_local_endpoint_for_comms_runtime(session_id, comms_runtime.as_ref())
+        .await
+        .map_err(|error| format!("{context}: local endpoint rejected: {error}"))?;
     let transition = adapter
         .stage_supervisor_bind(
             session_id,
@@ -1452,6 +1456,19 @@ async fn try_handle_supervisor_bridge_command(
                 .await;
                 return true;
             };
+            if let Err(error) = adapter
+                .stage_local_endpoint_for_comms_runtime(session_id, comms_runtime.as_ref())
+                .await
+            {
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::Internal,
+                    format!("bind member failed: local endpoint rejected: {error}"),
+                )
+                .await;
+                return true;
+            }
             // DSL owns the authorization discriminant + identity + epoch.
             // `validate_bind_request_against_state` already confirmed the
             // binding is `Unbound`, so this stage should never be
@@ -1461,7 +1478,7 @@ async fn try_handle_supervisor_bridge_command(
                     session_id,
                     supervisor_spec.name.as_str().to_owned(),
                     supervisor_spec.peer_id.as_str(),
-                    advertised_address.clone(),
+                    supervisor_spec.address.to_string(),
                     encode_supervisor_signing_public_key(supervisor_spec.pubkey),
                     payload.epoch,
                 )
@@ -1690,6 +1707,19 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
+            if let Err(error) = adapter
+                .stage_local_endpoint_for_comms_runtime(session_id, comms_runtime.as_ref())
+                .await
+            {
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::Internal,
+                    format!("authorize supervisor failed: local endpoint rejected: {error}"),
+                )
+                .await;
+                return true;
+            }
             let new_peer_id = supervisor_spec.peer_id.as_str();
             if previous_binding.peer_id == new_peer_id {
                 let authorize_transition = match adapter
@@ -1980,6 +2010,19 @@ async fn try_handle_supervisor_bridge_command(
                         return true;
                     }
                 };
+            if let Err(error) = adapter
+                .stage_local_endpoint_for_comms_runtime(session_id, comms_runtime.as_ref())
+                .await
+            {
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::Internal,
+                    format!("revoke supervisor failed: local endpoint rejected: {error}"),
+                )
+                .await;
+                return true;
+            }
             let supervisor_peer_id = authorized_supervisor.peer_id.as_str();
             let revoke_transition = match adapter
                 .stage_supervisor_revoke(session_id, supervisor_peer_id.clone(), payload.epoch)
@@ -2555,17 +2598,41 @@ mod tests {
     // `PeerId::parse` rejected. These stable UUID-string constants
     // substitute for the aliases so sender-vs-receiver comparisons still
     // match (same string across sites) while the string is a valid UUID.
-    // Chosen pattern: zero-padded hex `-` UUIDs with an alias hint in the
-    // last hex group so commit diffs stay readable.
-    const PEER_ID_RECEIVER: &str = "00000000-0000-0000-0000-00000000aaaa"; // "receiver"
-    const PEER_ID_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000bbbb"; // "supervisor"
-    const PEER_ID_OLD_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000dddd"; // "old-supervisor"
+    // These stable UUID strings are derived from the matching test pubkey
+    // seed, so local endpoint staging can validate peer_id/pubkey coherence.
+    const PEER_ID_RECEIVER: &str = "0b86269a-ed69-5e31-a1ce-9552506eebe3"; // seed 0xaa
+    const PEER_ID_SUPERVISOR: &str = "0adb7b34-edb5-5898-bab4-3f7cb10ba4da"; // seed 0xbb
+    const PEER_ID_OLD_SUPERVISOR: &str = "d15ad17e-57de-58da-a91a-466c87a3e0c4"; // seed 0xdd
+
+    fn test_pubkey_bytes_for_peer_id(peer_id: &str) -> Option<[u8; 32]> {
+        match peer_id {
+            PEER_ID_RECEIVER => Some([0xaa; 32]),
+            PEER_ID_SUPERVISOR => Some([0xbb; 32]),
+            PEER_ID_OLD_SUPERVISOR => Some([0xdd; 32]),
+            _ => None,
+        }
+    }
+
+    fn test_public_key_for_peer_id(peer_id: &str) -> Option<String> {
+        test_pubkey_bytes_for_peer_id(peer_id)
+            .map(|bytes| meerkat_comms::PubKey::new(bytes).to_pubkey_string())
+    }
+
+    fn test_comms_name_from_address(address: &str) -> String {
+        address
+            .strip_prefix("inproc://")
+            .unwrap_or(address)
+            .to_string()
+    }
 
     async fn add_test_projection_trust(
         runtime: &dyn CommsRuntime,
         peer: TrustedPeerDescriptor,
         context: &str,
     ) {
+        let local_peer_id = runtime
+            .peer_id()
+            .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable"));
         let endpoint = crate::meerkat_machine::dsl::PeerEndpoint::from(&peer);
         let mut authority = crate::meerkat_machine::dsl::MeerkatMachineAuthority::new();
         authority
@@ -2580,6 +2647,18 @@ mod tests {
             },
         )
         .expect("RegisterSession input");
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+                endpoint: crate::meerkat_machine::dsl::PeerEndpoint::new(
+                    "local",
+                    local_peer_id.to_string(),
+                    "inproc://local",
+                    [0x7f; 32],
+                ),
+            },
+        )
+        .expect("PublishLocalEndpoint input");
         let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
             &mut authority,
             crate::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
@@ -3810,8 +3889,20 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CommsRuntime for BootstrapRuntime {
+        fn peer_id(&self) -> Option<PeerId> {
+            PeerId::parse(&self.peer_id).ok()
+        }
+
         fn public_key(&self) -> Option<String> {
-            Some(self.peer_id.clone())
+            test_public_key_for_peer_id(&self.peer_id)
+        }
+
+        fn public_key_bytes(&self) -> Option<[u8; 32]> {
+            test_pubkey_bytes_for_peer_id(&self.peer_id)
+        }
+
+        fn comms_name(&self) -> Option<String> {
+            Some(test_comms_name_from_address(&self.address))
         }
 
         fn advertised_address(&self) -> Option<String> {
@@ -3845,6 +3936,41 @@ mod tests {
         fn mark_interaction_complete(&self, _id: &InteractionId) {
             self.completed_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        async fn apply_trust_mutation(
+            &self,
+            mutation: CommsTrustMutation,
+        ) -> Result<CommsTrustMutationResult, SendError> {
+            match mutation {
+                CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                    authority
+                        .validate_private_add(self.peer_id(), &peer)
+                        .map_err(SendError::Validation)?;
+                    let peer_id_str = peer.peer_id.as_str();
+                    if let Some(message) = self.add_trusted_peer_errors.get(&peer_id_str) {
+                        return Err(SendError::Internal(message.clone()));
+                    }
+                    self.trusted_peer_ids.lock().await.insert(peer_id_str);
+                    Ok(CommsTrustMutationResult::Added)
+                }
+                CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|error| SendError::Validation(error.to_string()))?;
+                    authority
+                        .validate_private_remove(self.peer_id(), parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    match self.remove_trusted_peer_errors.get(&peer_id) {
+                        Some(message) => Err(SendError::Internal(message.clone())),
+                        None => Ok(CommsTrustMutationResult::Removed {
+                            removed: self.trusted_peer_ids.lock().await.remove(&peer_id),
+                        }),
+                    }
+                }
+                _ => Err(SendError::Unsupported(
+                    "test runtime only supports generated private trust".into(),
+                )),
+            }
         }
 
         async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
@@ -4831,8 +4957,22 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CommsRuntime for CapturingRuntime {
+        fn peer_id(&self) -> Option<PeerId> {
+            PeerId::parse(&self.peer_id).ok()
+        }
+
         fn public_key(&self) -> Option<String> {
-            Some(self.peer_id.clone())
+            test_public_key_for_peer_id(&self.peer_id)
+        }
+
+        fn public_key_bytes(&self) -> Option<[u8; 32]> {
+            test_pubkey_bytes_for_peer_id(&self.peer_id)
+        }
+
+        fn comms_name(&self) -> Option<String> {
+            self.advertised_address
+                .as_deref()
+                .map(test_comms_name_from_address)
         }
 
         fn advertised_address(&self) -> Option<String> {
@@ -4863,6 +5003,31 @@ mod tests {
 
         async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
             Ok(true)
+        }
+
+        async fn apply_trust_mutation(
+            &self,
+            mutation: CommsTrustMutation,
+        ) -> Result<CommsTrustMutationResult, SendError> {
+            match mutation {
+                CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                    authority
+                        .validate_private_add(self.peer_id(), &peer)
+                        .map_err(SendError::Validation)?;
+                    Ok(CommsTrustMutationResult::Added)
+                }
+                CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|error| SendError::Validation(error.to_string()))?;
+                    authority
+                        .validate_private_remove(self.peer_id(), parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    Ok(CommsTrustMutationResult::Removed { removed: true })
+                }
+                _ => Err(SendError::Unsupported(
+                    "test runtime only supports generated private trust".into(),
+                )),
+            }
         }
 
         async fn send(

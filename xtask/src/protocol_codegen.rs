@@ -318,6 +318,7 @@ fn generate_obligation_struct(
 ) -> Result<String> {
     let obligation_type = format!("{}Obligation", to_pascal_case(protocol.name.as_str()));
     let protected = protected_obligation_protocol(protocol.name.as_str());
+    let trust_authority = protocol.comms_trust_authority.as_ref();
     let producer_effect = producer_machine
         .effects
         .variant_named(protocol.effect_variant.as_str())
@@ -342,6 +343,12 @@ fn generate_obligation_struct(
                 rust_type(&effect_field.ty)
             )?;
         }
+    }
+    if trust_authority.is_some() {
+        writeln!(
+            out,
+            "    comms_trust_authority_claims: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,"
+        )?;
     }
     writeln!(out, "}}")?;
     writeln!(out)?;
@@ -369,19 +376,20 @@ fn generate_obligation_struct(
         writeln!(out, "}}")?;
         writeln!(out)?;
     }
-    emit_comms_trust_authority_source_impl(out, protocol.name.as_str(), &obligation_type)?;
+    emit_comms_trust_authority_source_impl(out, protocol, &obligation_type)?;
 
     Ok(obligation_type)
 }
 
 fn emit_comms_trust_authority_source_impl(
     out: &mut String,
-    protocol_name: &str,
+    protocol: &EffectHandoffProtocol,
     obligation_type: &str,
 ) -> Result<()> {
-    let Some(source_kind) = comms_trust_authority_source_kind(protocol_name) else {
+    let Some(trust_authority) = protocol.comms_trust_authority.as_ref() else {
         return Ok(());
     };
+    let source_kind = trust_authority.source_kind.core_variant();
 
     writeln!(
         out,
@@ -400,24 +408,165 @@ fn emit_comms_trust_authority_source_impl(
         "        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{source_kind}"
     )?;
     writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(out, "    fn authorize_comms_trust_authority(")?;
+    writeln!(out, "        &self,")?;
+    writeln!(
+        out,
+        "        request: &meerkat_core::comms::GeneratedCommsTrustAuthorityRequest<'_>,"
+    )?;
+    writeln!(
+        out,
+        "    ) -> Result<meerkat_core::comms::GeneratedCommsTrustAuthorityGrant, String> {{"
+    )?;
+    emit_comms_trust_allowed_operation_check(out, protocol)?;
+    emit_comms_trust_payload_authorization(out, protocol)?;
+    writeln!(
+        out,
+        "        let claim_key = format!(\"{{:?}}:{{}}\", request.operation(), request.peer_id());"
+    )?;
+    writeln!(
+        out,
+        "        let mut claims = self.comms_trust_authority_claims.lock().map_err(|_| \"generated comms trust authority source claims were poisoned\".to_string())?;"
+    )?;
+    writeln!(out, "        if !claims.insert(claim_key) {{")?;
+    writeln!(
+        out,
+        "            return Err(format!(\"generated comms trust authority source already minted {{:?}} for peer {{:?}}\", request.operation(), request.peer_id()));"
+    )?;
+    writeln!(out, "        }}")?;
+    writeln!(
+        out,
+        "        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, {}))",
+        comms_trust_epoch_expr(protocol)?
+    )?;
+    writeln!(out, "    }}")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
 
     Ok(())
 }
 
-fn comms_trust_authority_source_kind(protocol_name: &str) -> Option<&'static str> {
-    match protocol_name {
-        "comms_trust_reconcile" => Some("MeerkatMachinePeerProjection"),
-        "supervisor_trust_publish" => Some("MeerkatMachineSupervisorPublish"),
-        "supervisor_trust_revoke" => Some("MeerkatMachineSupervisorRevoke"),
-        "mob_member_trust_wiring" => Some("MobMachineMemberTrustWiring"),
-        "mob_member_trust_unwiring" => Some("MobMachineMemberTrustUnwiring"),
-        "mob_external_peer_trust_wiring" => Some("MobMachineExternalPeerTrustWiring"),
-        "mob_external_peer_trust_unwiring" => Some("MobMachineExternalPeerTrustUnwiring"),
-        "mob_external_peer_trust_repair" => Some("MobMachineExternalPeerTrustRepair"),
-        "mob_external_peer_reciprocal_trust" => Some("MobMachineExternalPeerReciprocalTrust"),
-        _ => None,
+fn emit_comms_trust_allowed_operation_check(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+) -> Result<()> {
+    let trust_authority = protocol
+        .comms_trust_authority
+        .as_ref()
+        .context("comms trust authority metadata missing")?;
+    if trust_authority.allowed_operations.is_empty() {
+        bail!(
+            "comms trust authority protocol `{}` must declare at least one operation",
+            protocol.name
+        );
+    }
+    writeln!(
+        out,
+        "        use meerkat_core::comms::GeneratedCommsTrustAuthorityOperation as Operation;"
+    )?;
+    let allowed = trust_authority
+        .allowed_operations
+        .iter()
+        .map(|operation| format!("Operation::{}", operation.core_variant()))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    writeln!(
+        out,
+        "        if !matches!(request.operation(), {allowed}) {{"
+    )?;
+    writeln!(
+        out,
+        "            return Err(format!(\"generated comms trust source {{:?}} cannot authorize operation {{:?}}\", self.comms_trust_authority_source_kind(), request.operation()));"
+    )?;
+    writeln!(out, "        }}")?;
+    Ok(())
+}
+
+fn emit_comms_trust_payload_authorization(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+) -> Result<()> {
+    match protocol.name.as_str() {
+        "comms_trust_reconcile" => {
+            writeln!(out, "        match request.operation() {{")?;
+            writeln!(out, "            Operation::PublicAdd => {{")?;
+            writeln!(
+                out,
+                "                let requested = self.direct_peer_endpoints.iter().chain(self.mob_overlay_peer_endpoints.iter()).any(|endpoint| endpoint.peer_id.0 == request.peer_id());"
+            )?;
+            writeln!(out, "                if !requested {{")?;
+            writeln!(
+                out,
+                "                    return Err(format!(\"MeerkatMachine peer projection did not request trust for peer {{:?}}\", request.peer_id()));"
+            )?;
+            writeln!(out, "                }}")?;
+            writeln!(out, "            }}")?;
+            writeln!(out, "            Operation::PublicRemove => {{")?;
+            writeln!(
+                out,
+                "                let still_requested = self.direct_peer_endpoints.iter().chain(self.mob_overlay_peer_endpoints.iter()).any(|endpoint| endpoint.peer_id.0 == request.peer_id());"
+            )?;
+            writeln!(out, "                if still_requested {{")?;
+            writeln!(
+                out,
+                "                    return Err(format!(\"MeerkatMachine peer projection still requests trust for peer {{:?}}\", request.peer_id()));"
+            )?;
+            writeln!(out, "                }}")?;
+            writeln!(out, "            }}")?;
+            writeln!(
+                out,
+                "            _ => unreachable!(\"operation checked above\"),"
+            )?;
+            writeln!(out, "        }}")?;
+        }
+        "supervisor_trust_publish" | "supervisor_trust_revoke" => {
+            writeln!(out, "        if self.peer_id != request.peer_id() {{")?;
+            writeln!(
+                out,
+                "            return Err(format!(\"MeerkatMachine supervisor trust obligation peer_id {{:?}} does not match requested peer {{:?}}\", self.peer_id, request.peer_id()));"
+            )?;
+            writeln!(out, "        }}")?;
+        }
+        "mob_member_trust_wiring" | "mob_member_trust_unwiring" => {
+            writeln!(
+                out,
+                "        if self.a_peer_id.0 != request.peer_id() && self.b_peer_id.0 != request.peer_id() {{"
+            )?;
+            writeln!(
+                out,
+                "            return Err(format!(\"MobMachine member trust obligation does not carry requested peer {{:?}}\", request.peer_id()));"
+            )?;
+            writeln!(out, "        }}")?;
+        }
+        "mob_external_peer_trust_wiring"
+        | "mob_external_peer_trust_unwiring"
+        | "mob_external_peer_trust_repair"
+        | "mob_external_peer_reciprocal_trust" => {
+            writeln!(out, "        if self.peer_id.0 != request.peer_id() {{")?;
+            writeln!(
+                out,
+                "            return Err(format!(\"MobMachine external trust obligation peer_id {{:?}} does not match requested peer {{:?}}\", self.peer_id.0, request.peer_id()));"
+            )?;
+            writeln!(out, "        }}")?;
+        }
+        other => bail!("unsupported comms trust authority protocol `{other}`"),
+    }
+    Ok(())
+}
+
+fn comms_trust_epoch_expr(protocol: &EffectHandoffProtocol) -> Result<&'static str> {
+    match protocol.name.as_str() {
+        "comms_trust_reconcile" => Ok("self.peer_projection_epoch"),
+        "supervisor_trust_publish"
+        | "supervisor_trust_revoke"
+        | "mob_member_trust_wiring"
+        | "mob_member_trust_unwiring"
+        | "mob_external_peer_trust_wiring"
+        | "mob_external_peer_trust_unwiring"
+        | "mob_external_peer_trust_repair"
+        | "mob_external_peer_reciprocal_trust" => Ok("self.epoch"),
+        other => bail!("unsupported comms trust authority protocol `{other}`"),
     }
 }
 
@@ -444,9 +593,9 @@ fn generate_comms_trust_authority_sources(compositions: &[CompositionSchema]) ->
     let mut entries = Vec::new();
     for composition in compositions {
         for protocol in &composition.handoff_protocols {
-            if let Some(kind) = comms_trust_authority_source_kind(protocol.name.as_str()) {
+            if let Some(trust_authority) = protocol.comms_trust_authority.as_ref() {
                 entries.push((
-                    kind,
+                    trust_authority.source_kind.core_variant(),
                     protocol_type_name(protocol).with_context(|| {
                         format!("derive Rust type name for protocol {}", protocol.name)
                     })?,
@@ -758,11 +907,10 @@ fn generate_comms_trust_authority_helpers(
             writeln!(out, "    }}")?;
             writeln!(
                 out,
-                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection("
+                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_public_add("
             )?;
             writeln!(out, "        obligation,")?;
             writeln!(out, "        endpoint.peer_id.0.clone(),")?;
-            writeln!(out, "        obligation.peer_projection_epoch,")?;
             writeln!(out, "    )")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
@@ -781,11 +929,10 @@ fn generate_comms_trust_authority_helpers(
             writeln!(out, "    }}")?;
             writeln!(
                 out,
-                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection("
+                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_public_remove("
             )?;
             writeln!(out, "        obligation,")?;
             writeln!(out, "        peer_id.to_string(),")?;
-            writeln!(out, "        obligation.peer_projection_epoch,")?;
             writeln!(out, "    )")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
@@ -802,11 +949,10 @@ fn generate_comms_trust_authority_helpers(
             )?;
             writeln!(
                 out,
-                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_publish("
+                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_private_add("
             )?;
             writeln!(out, "        obligation,")?;
             writeln!(out, "        obligation.peer_id.clone(),")?;
-            writeln!(out, "        obligation.epoch,")?;
             writeln!(out, "    )")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
@@ -823,11 +969,10 @@ fn generate_comms_trust_authority_helpers(
             )?;
             writeln!(
                 out,
-                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke("
+                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_private_remove("
             )?;
             writeln!(out, "        obligation,")?;
             writeln!(out, "        obligation.peer_id.clone(),")?;
-            writeln!(out, "        obligation.epoch,")?;
             writeln!(out, "    )")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
@@ -844,7 +989,7 @@ fn generate_comms_trust_authority_helpers(
                 obligation_type,
                 "wiring_authority_for_peer",
                 "MobMachineExternalPeerWiring",
-                "from_generated_mob_machine_peer_wiring",
+                "from_generated_public_add",
             )?;
         }
         "mob_external_peer_trust_unwiring" => {
@@ -853,7 +998,7 @@ fn generate_comms_trust_authority_helpers(
                 obligation_type,
                 "unwiring_authority_for_peer",
                 "MobMachineExternalPeerUnwiring",
-                "from_generated_mob_machine_peer_unwiring",
+                "from_generated_public_remove",
             )?;
         }
         "mob_external_peer_trust_repair" => {
@@ -862,7 +1007,7 @@ fn generate_comms_trust_authority_helpers(
                 obligation_type,
                 "repair_authority_for_peer",
                 "MobMachineExternalPeerRepair",
-                "from_generated_mob_machine_peer_repair",
+                "from_generated_public_add",
             )?;
         }
         "mob_external_peer_reciprocal_trust" => {
@@ -871,7 +1016,7 @@ fn generate_comms_trust_authority_helpers(
                 obligation_type,
                 "reciprocal_wiring_authority_for_peer",
                 "MobMachineExternalPeerReciprocalWiring",
-                "from_generated_mob_machine_peer_wiring",
+                "from_generated_public_add",
             )?;
         }
         _ => {}
@@ -943,20 +1088,20 @@ fn emit_member_trust_helpers(
             out,
             obligation_type,
             "wiring_authority_for_identity",
-            "from_generated_mob_machine_peer_wiring",
+            "from_generated_public_add",
         )?;
         emit_member_authority_fn(
             out,
             obligation_type,
             "repair_authority_for_identity",
-            "from_generated_mob_machine_peer_repair",
+            "from_generated_public_add",
         )?;
     } else {
         emit_member_authority_fn(
             out,
             obligation_type,
             "unwiring_authority_for_identity",
-            "from_generated_mob_machine_peer_unwiring",
+            "from_generated_public_remove",
         )?;
     }
     Ok(())
@@ -982,7 +1127,6 @@ fn emit_member_authority_fn(
     )?;
     writeln!(out, "        obligation,")?;
     writeln!(out, "        peer_id.to_owned(),")?;
-    writeln!(out, "        obligation.epoch,")?;
     writeln!(out, "    )")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
@@ -1011,7 +1155,6 @@ fn emit_external_peer_trust_helper(
     )?;
     writeln!(out, "        obligation,")?;
     writeln!(out, "        obligation.peer_id.0.clone(),")?;
-    writeln!(out, "        obligation.epoch,")?;
     writeln!(out, "    )")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
@@ -1187,6 +1330,12 @@ fn emit_accept_helper(
             let rust_field = to_snake_case(field.as_str());
             writeln!(out, "        {rust_field}: source.{rust_field},")?;
         }
+    }
+    if protocol.comms_trust_authority.is_some() {
+        writeln!(
+            out,
+            "        comms_trust_authority_claims: Default::default(),"
+        )?;
     }
     writeln!(out, "    }}")?;
     writeln!(out, "}}")?;
@@ -1578,10 +1727,17 @@ fn obligation_ctor_expr(
     producer_effect: &meerkat_machine_schema::VariantSchema,
 ) -> Result<String> {
     if protocol.obligation_fields.is_empty() {
-        return Ok(format!("{obligation_type} {{ _private: () }}"));
+        let trust_claims = if protocol.comms_trust_authority.is_some() {
+            ", comms_trust_authority_claims: Default::default()"
+        } else {
+            ""
+        };
+        return Ok(format!(
+            "{obligation_type} {{ _private: (){trust_claims} }}"
+        ));
     }
 
-    let fields = protocol
+    let mut fields = protocol
         .obligation_fields
         .iter()
         .map(|field| -> Result<String> {
@@ -1596,8 +1752,11 @@ fn obligation_ctor_expr(
                 clone_expr_for_type(&effect_field.ty, &rust_name)
             ))
         })
-        .collect::<Result<Vec<_>>>()?
-        .join(", ");
+        .collect::<Result<Vec<_>>>()?;
+    if protocol.comms_trust_authority.is_some() {
+        fields.push("comms_trust_authority_claims: Default::default()".to_string());
+    }
+    let fields = fields.join(", ");
     Ok(format!("{obligation_type} {{ {fields} }}"))
 }
 

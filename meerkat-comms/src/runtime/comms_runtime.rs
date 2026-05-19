@@ -2884,7 +2884,7 @@ mod tests {
         }
     }
 
-    fn test_projection_authority(
+    fn test_projection_add_authority(
         peer: &TrustedPeerDescriptor,
         _epoch: u64,
     ) -> meerkat_core::comms::CommsTrustMutationAuthority {
@@ -2919,6 +2919,48 @@ mod tests {
         .expect("generated peer projection add authority")
     }
 
+    fn test_projection_remove_authority(
+        peer: &TrustedPeerDescriptor,
+        _epoch: u64,
+    ) -> meerkat_core::comms::CommsTrustMutationAuthority {
+        let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
+        let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+        authority
+            .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
+            .expect("Initialize signal");
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                    "meerkat-comms-runtime-test-projection",
+                ),
+            },
+        )
+        .expect("RegisterSession input");
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
+                endpoint: endpoint.clone(),
+            },
+        )
+        .expect("AddDirectPeerEndpoint input");
+        let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RemoveDirectPeerEndpoint {
+                endpoint: endpoint.clone(),
+            },
+        )
+        .expect("RemoveDirectPeerEndpoint input");
+        let mut obligations =
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition);
+        let obligation = obligations.pop().expect("generated reconcile obligation");
+        meerkat_runtime::protocol_comms_trust_reconcile::removal_authority_for_peer_id(
+            &obligation,
+            &endpoint.peer_id.0,
+        )
+        .expect("generated peer projection remove authority")
+    }
+
     async fn add_trusted_peer_with_generated_authority(
         runtime: &CommsRuntime,
         peer: TrustedPeerDescriptor,
@@ -2926,7 +2968,7 @@ mod tests {
         CoreCommsRuntime::apply_trust_mutation(
             runtime,
             CommsTrustMutation::AddTrustedPeer {
-                authority: test_projection_authority(&peer, 0),
+                authority: test_projection_add_authority(&peer, 0),
                 peer,
             },
         )
@@ -2965,7 +3007,7 @@ mod tests {
         let descriptor = trusted_descriptor("peer", peer_key, "inproc://peer");
         let peer_id = descriptor.peer_id.to_string();
 
-        let add_authority = test_projection_authority(&descriptor, 7);
+        let add_authority = test_projection_add_authority(&descriptor, 7);
         let add_authority_replay = add_authority.clone();
         let add = CoreCommsRuntime::apply_trust_mutation(
             &runtime,
@@ -2991,12 +3033,30 @@ mod tests {
             matches!(replay, SendError::Validation(ref message) if message.contains("already consumed")),
             "unexpected replay rejection: {replay:?}"
         );
+        let wrong_operation = CoreCommsRuntime::apply_trust_mutation(
+            &runtime,
+            CommsTrustMutation::RemoveTrustedPeer {
+                peer_id: peer_id.clone(),
+                authority: test_projection_add_authority(&descriptor, 9),
+            },
+        )
+        .await
+        .expect_err("generated add authority must not remove trust");
+        assert!(
+            matches!(wrong_operation, SendError::Validation(ref message) if message.contains("PublicAdd") && message.contains("remove a public trusted peer")),
+            "unexpected wrong-operation rejection: {wrong_operation:?}"
+        );
+        assert_eq!(
+            runtime.peers().await.len(),
+            1,
+            "wrong-operation authority must not mutate trust projection",
+        );
 
         let remove = CoreCommsRuntime::apply_trust_mutation(
             &runtime,
             CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
-                authority: test_projection_authority(&descriptor, 8),
+                authority: test_projection_remove_authority(&descriptor, 8),
             },
         )
         .await

@@ -42,7 +42,7 @@ fn descriptor_for(name: &str, pubkey: &meerkat_comms::identity::PubKey) -> Trust
     }
 }
 
-fn test_projection_authority(
+fn test_projection_add_authority(
     peer: &TrustedPeerDescriptor,
     _epoch: u64,
 ) -> meerkat_core::comms::CommsTrustMutationAuthority {
@@ -74,11 +74,53 @@ fn test_projection_authority(
         .expect("generated peer projection add authority")
 }
 
+fn test_projection_remove_authority(
+    peer: &TrustedPeerDescriptor,
+    _epoch: u64,
+) -> meerkat_core::comms::CommsTrustMutationAuthority {
+    let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
+    let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+    authority
+        .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
+        .expect("Initialize signal");
+    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+            session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                "inbox-admission-toctou-test-projection",
+            ),
+        },
+    )
+    .expect("RegisterSession input");
+    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
+            endpoint: endpoint.clone(),
+        },
+    )
+    .expect("AddDirectPeerEndpoint input");
+    let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RemoveDirectPeerEndpoint {
+            endpoint: endpoint.clone(),
+        },
+    )
+    .expect("RemoveDirectPeerEndpoint input");
+    let mut obligations =
+        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition);
+    let obligation = obligations.pop().expect("generated reconcile obligation");
+    meerkat_runtime::protocol_comms_trust_reconcile::removal_authority_for_peer_id(
+        &obligation,
+        &endpoint.peer_id.0,
+    )
+    .expect("generated peer projection remove authority")
+}
+
 async fn apply_generated_trust(runtime: &CommsRuntime, peer: TrustedPeerDescriptor) {
     meerkat_core::agent::CommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
-            authority: test_projection_authority(&peer, 0),
+            authority: test_projection_add_authority(&peer, 0),
             peer,
         },
     )
@@ -91,7 +133,7 @@ async fn revoke_generated_trust(runtime: &CommsRuntime, peer: TrustedPeerDescrip
     match meerkat_core::agent::CommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::RemoveTrustedPeer {
-            authority: test_projection_authority(&peer, 0),
+            authority: test_projection_remove_authority(&peer, 0),
             peer_id: peer_id.clone(),
         },
     )

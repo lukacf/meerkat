@@ -447,6 +447,35 @@ mod tests {
             .expect("generated reconcile obligation")
     }
 
+    #[test]
+    fn generated_reconcile_obligation_mints_each_peer_operation_once() {
+        let endpoint_a = endpoint("A", UUID_A);
+        let obligation = obligation(1, BTreeSet::from([endpoint_a.clone()]));
+
+        crate::protocol_comms_trust_reconcile::authority_for_endpoint(&obligation, &endpoint_a)
+            .expect("first add authority mint succeeds");
+        let duplicate_add =
+            crate::protocol_comms_trust_reconcile::authority_for_endpoint(&obligation, &endpoint_a)
+                .expect_err("same obligation must not mint the same add authority twice");
+        assert!(
+            duplicate_add.contains("already minted"),
+            "unexpected duplicate add rejection: {duplicate_add}",
+        );
+
+        crate::protocol_comms_trust_reconcile::removal_authority_for_peer_id(&obligation, UUID_B)
+            .expect("first remove authority for a non-effective peer succeeds");
+        let duplicate_remove =
+            crate::protocol_comms_trust_reconcile::removal_authority_for_peer_id(
+                &obligation,
+                UUID_B,
+            )
+            .expect_err("same obligation must not mint the same remove authority twice");
+        assert!(
+            duplicate_remove.contains("already minted"),
+            "unexpected duplicate remove rejection: {duplicate_remove}",
+        );
+    }
+
     #[tokio::test]
     async fn first_reconcile_registers_all_effective_peers() {
         let comms = Arc::new(RecordingCommsRuntime::default());

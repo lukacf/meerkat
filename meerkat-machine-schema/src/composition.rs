@@ -169,8 +169,65 @@ pub struct EffectHandoffProtocol {
     pub closure_policy: ClosurePolicy,
     /// Optional fairness annotation for TLA+ liveness claims.
     pub liveness_annotation: Option<String>,
+    /// Generated machine-fact authority metadata for comms trust projection
+    /// mutation handoffs.
+    pub comms_trust_authority: Option<CommsTrustAuthorityProtocol>,
     /// Explicit Rust code generation metadata for the checked-in helper module.
     pub rust: ProtocolRustBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommsTrustAuthorityProtocol {
+    pub source_kind: CommsTrustAuthoritySourceKind,
+    pub allowed_operations: Vec<CommsTrustAuthorityOperation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CommsTrustAuthorityOperation {
+    PublicAdd,
+    PublicRemove,
+    PrivateAdd,
+    PrivateRemove,
+}
+
+impl CommsTrustAuthorityOperation {
+    pub fn core_variant(self) -> &'static str {
+        match self {
+            Self::PublicAdd => "PublicAdd",
+            Self::PublicRemove => "PublicRemove",
+            Self::PrivateAdd => "PrivateAdd",
+            Self::PrivateRemove => "PrivateRemove",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CommsTrustAuthoritySourceKind {
+    MeerkatMachinePeerProjection,
+    MeerkatMachineSupervisorPublish,
+    MeerkatMachineSupervisorRevoke,
+    MobMachineMemberTrustWiring,
+    MobMachineMemberTrustUnwiring,
+    MobMachineExternalPeerTrustWiring,
+    MobMachineExternalPeerTrustUnwiring,
+    MobMachineExternalPeerTrustRepair,
+    MobMachineExternalPeerReciprocalTrust,
+}
+
+impl CommsTrustAuthoritySourceKind {
+    pub fn core_variant(self) -> &'static str {
+        match self {
+            Self::MeerkatMachinePeerProjection => "MeerkatMachinePeerProjection",
+            Self::MeerkatMachineSupervisorPublish => "MeerkatMachineSupervisorPublish",
+            Self::MeerkatMachineSupervisorRevoke => "MeerkatMachineSupervisorRevoke",
+            Self::MobMachineMemberTrustWiring => "MobMachineMemberTrustWiring",
+            Self::MobMachineMemberTrustUnwiring => "MobMachineMemberTrustUnwiring",
+            Self::MobMachineExternalPeerTrustWiring => "MobMachineExternalPeerTrustWiring",
+            Self::MobMachineExternalPeerTrustUnwiring => "MobMachineExternalPeerTrustUnwiring",
+            Self::MobMachineExternalPeerTrustRepair => "MobMachineExternalPeerTrustRepair",
+            Self::MobMachineExternalPeerReciprocalTrust => "MobMachineExternalPeerReciprocalTrust",
+        }
+    }
 }
 
 /// Determines the shape of generated protocol helper code.

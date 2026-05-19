@@ -12,6 +12,8 @@ pub struct MobExternalPeerTrustWiringObligation {
     edge: ExternalPeerEdge,
     peer_id: PeerId,
     epoch: u64,
+    comms_trust_authority_claims:
+        std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
 }
 
 impl MobExternalPeerTrustWiringObligation {
@@ -40,6 +42,41 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource
     ) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
         meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring
     }
+
+    fn authorize_comms_trust_authority(
+        &self,
+        request: &meerkat_core::comms::GeneratedCommsTrustAuthorityRequest<'_>,
+    ) -> Result<meerkat_core::comms::GeneratedCommsTrustAuthorityGrant, String> {
+        use meerkat_core::comms::GeneratedCommsTrustAuthorityOperation as Operation;
+        if !matches!(request.operation(), Operation::PublicAdd) {
+            return Err(format!(
+                "generated comms trust source {:?} cannot authorize operation {:?}",
+                self.comms_trust_authority_source_kind(),
+                request.operation()
+            ));
+        }
+        if self.peer_id.0 != request.peer_id() {
+            return Err(format!(
+                "MobMachine external trust obligation peer_id {:?} does not match requested peer {:?}",
+                self.peer_id.0,
+                request.peer_id()
+            ));
+        }
+        let claim_key = format!("{:?}:{}", request.operation(), request.peer_id());
+        let mut claims = self.comms_trust_authority_claims.lock().map_err(|_| {
+            "generated comms trust authority source claims were poisoned".to_string()
+        })?;
+        if !claims.insert(claim_key) {
+            return Err(format!(
+                "generated comms trust authority source already minted {:?} for peer {:?}",
+                request.operation(),
+                request.peer_id()
+            ));
+        }
+        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(
+            request, self.epoch,
+        ))
+    }
 }
 
 pub fn extract_obligations(
@@ -57,6 +94,7 @@ pub fn extract_obligations(
                 edge: edge.clone(),
                 peer_id: peer_id.clone(),
                 epoch: *epoch,
+                comms_trust_authority_claims: Default::default(),
             }),
             _ => None,
         })
@@ -86,9 +124,8 @@ pub fn wiring_authority_for_peer(
         obligation.peer_id.0.as_str(),
         expected_peer_id,
     )?;
-    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_mob_machine_peer_wiring(
+    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_public_add(
         obligation,
         obligation.peer_id.0.clone(),
-        obligation.epoch,
     )
 }

@@ -1024,6 +1024,21 @@ pub trait CommsRuntime: Send + Sync {
         ))
     }
 
+    /// Snapshot the public trust projection owned by one generated source.
+    ///
+    /// This is the behavior-authority read used by generated trust
+    /// reconciliation. Compatibility/public snapshots may still union public
+    /// rows for display, but generated removals must diff only against rows
+    /// previously installed by the same generated owner.
+    async fn trusted_peer_projection_snapshot_for_source(
+        &self,
+        _source_kind: crate::comms::GeneratedCommsTrustAuthoritySourceKind,
+    ) -> Result<Vec<crate::comms::TrustedPeerDescriptor>, CommsCapabilityError> {
+        Err(CommsCapabilityError::Unsupported(
+            "trusted_peer_projection_snapshot_for_source".to_string(),
+        ))
+    }
+
     /// Get a notification that fires only for actionable peer input.
     ///
     /// Default returns `Unsupported`. Comms-enabled runtimes must override.

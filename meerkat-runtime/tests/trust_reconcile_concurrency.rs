@@ -17,20 +17,20 @@
 //! * §6 #1 — Concurrent reconciles read from the canonical trust store;
 //!   there is no helper-local applied view for overlapping calls to
 //!   corrupt.
-//! * §6 #2 — A lower-epoch generated reconcile handoff fails closed at
-//!   the trust mutation seam instead of mutating current canonical trust.
+//! * §6 #2 — A lower-epoch overlay fails closed in generated MeerkatMachine
+//!   authority instead of mutating current canonical trust.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
 use meerkat_core::comms::{
-    CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult,
-    GeneratedCommsTrustAuthoritySourceKind, SendError, TrustedPeerDescriptor,
+    CommsTrustMutation, CommsTrustMutationResult, GeneratedCommsTrustAuthoritySourceKind,
+    SendError, TrustedPeerDescriptor,
 };
 use meerkat_core::{
     PeerIngressAuthorityPhase, PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot,
@@ -99,9 +99,7 @@ struct RecordingCommsRuntime {
     adds: std::sync::Mutex<Vec<TrustedPeerDescriptor>>,
     removes: std::sync::Mutex<Vec<String>>,
     trusted: std::sync::Mutex<Vec<TrustedPeerDescriptor>>,
-    epoch_watermarks: std::sync::Mutex<HashMap<GeneratedCommsTrustAuthoritySourceKind, u64>>,
     add_count: AtomicUsize,
-    remove_count: AtomicUsize,
 }
 
 impl std::fmt::Debug for RecordingCommsRuntime {
@@ -129,7 +127,6 @@ impl CommsRuntime for RecordingCommsRuntime {
                 authority
                     .validate_public_add(&peer)
                     .map_err(SendError::Validation)?;
-                self.validate_authority_epoch(&authority)?;
                 self.add_count.fetch_add(1, Ordering::SeqCst);
                 self.adds
                     .lock()
@@ -147,8 +144,6 @@ impl CommsRuntime for RecordingCommsRuntime {
                 authority
                     .validate_public_remove(parsed_peer_id)
                     .map_err(SendError::Validation)?;
-                self.validate_authority_epoch(&authority)?;
-                self.remove_count.fetch_add(1, Ordering::SeqCst);
                 self.removes
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -198,38 +193,24 @@ impl CommsRuntime for RecordingCommsRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone())
     }
+
+    async fn trusted_peer_projection_snapshot_for_source(
+        &self,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> Result<Vec<TrustedPeerDescriptor>, CommsCapabilityError> {
+        if source_kind == GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection {
+            Ok(self
+                .trusted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone())
+        } else {
+            Ok(Vec::new())
+        }
+    }
 }
 
 impl RecordingCommsRuntime {
-    fn validate_authority_epoch(
-        &self,
-        authority: &CommsTrustMutationAuthority,
-    ) -> Result<(), SendError> {
-        let source_kind = authority.source_kind();
-        let epoch = authority.epoch();
-        let mut watermarks = self
-            .epoch_watermarks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let previous = watermarks.entry(source_kind).or_insert(epoch);
-        if epoch < *previous {
-            return Err(SendError::Validation(format!(
-                "stale generated comms trust authority for {source_kind:?}: epoch {epoch} is older than observed epoch {previous}"
-            )));
-        }
-        if epoch > *previous {
-            *previous = epoch;
-        }
-        Ok(())
-    }
-
-    fn add_calls(&self) -> Vec<TrustedPeerDescriptor> {
-        self.adds
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
     fn trusted_peer_ids(&self) -> BTreeSet<String> {
         self.trusted
             .lock()
@@ -284,60 +265,47 @@ async fn concurrent_reconciles_complete_against_canonical_store() {
     );
 }
 
-/// §6 #2 — lower-epoch reconciles fail closed against canonical trust.
+/// §6 #2 — lower-epoch overlays fail closed in generated machine authority.
 #[tokio::test]
-async fn lower_epoch_reconcile_is_rejected_as_stale() {
-    let comms = Arc::new(RecordingCommsRuntime::default());
-    let reconciler = CommsTrustReconciler::new(comms.clone());
+async fn lower_epoch_overlay_is_rejected_by_generated_machine() {
+    let mut authority = MeerkatMachineAuthority::new();
+    authority
+        .apply_signal(MeerkatMachineSignal::Initialize)
+        .expect("Initialize signal");
+    MeerkatMachineMutator::apply(
+        &mut authority,
+        MeerkatMachineInput::RegisterSession {
+            session_id: SessionId::from("trust-reconcile-lower-epoch-test"),
+        },
+    )
+    .expect("RegisterSession input");
 
-    // Newer commits first at epoch=5 with peer set {A}.
-    let newer = reconciler
-        .reconcile(&obligation(5, BTreeSet::from([endpoint("A", UUID_A)])))
-        .await
-        .expect("newer reconcile");
-    assert_eq!(newer.applied_epoch, 5);
-    assert_eq!(comms.add_count.load(Ordering::SeqCst), 1);
-    assert_eq!(comms.remove_count.load(Ordering::SeqCst), 0);
+    let current = MeerkatMachineMutator::apply(
+        &mut authority,
+        MeerkatMachineInput::ApplyMobPeerOverlay {
+            epoch: 5,
+            endpoints: BTreeSet::from([endpoint("A", UUID_A)]),
+        },
+    )
+    .expect("current overlay applies");
+    let current_obligation =
+        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&current)
+            .into_iter()
+            .next()
+            .expect("generated reconcile obligation");
+    assert_eq!(current_obligation.peer_projection_epoch(), 1);
 
-    // Lower epoch arrives with a different set {B}. Expected: the generated
-    // authority replay guard rejects it before stale trust can mutate.
-    let lower = reconciler
-        .reconcile(&obligation(3, BTreeSet::from([endpoint("B", UUID_B)])))
-        .await
-        .expect_err("lower-epoch reconcile must fail closed");
+    let stale = MeerkatMachineMutator::apply(
+        &mut authority,
+        MeerkatMachineInput::ApplyMobPeerOverlay {
+            epoch: 3,
+            endpoints: BTreeSet::from([endpoint("B", UUID_B)]),
+        },
+    )
+    .expect_err("lower overlay epoch must fail closed in generated authority");
+    let stale_debug = format!("{stale:?}");
     assert!(
-        matches!(
-            lower,
-            meerkat_runtime::comms_trust_reconcile::CommsTrustReconcileError::AddTrustFailed {
-                source: SendError::Validation(ref message),
-                ..
-            } if message.contains("stale generated comms trust authority")
-        ),
-        "unexpected stale reconcile rejection: {lower:?}",
-    );
-
-    assert_eq!(
-        comms.add_count.load(Ordering::SeqCst),
-        1,
-        "stale lower-epoch reconcile must not add peer B",
-    );
-    assert_eq!(
-        comms.remove_count.load(Ordering::SeqCst),
-        0,
-        "stale lower-epoch reconcile must not remove peer A",
-    );
-    let added_peer_ids: BTreeSet<String> = comms
-        .add_calls()
-        .into_iter()
-        .map(|d| d.peer_id.to_string())
-        .collect();
-    assert_eq!(
-        added_peer_ids,
-        BTreeSet::from([UUID_A.to_string()]),
-        "only the current generated add should be recorded",
-    );
-    assert_eq!(
-        comms.trusted_peer_ids(),
-        BTreeSet::from([UUID_A.to_string()])
+        stale_debug.contains("GuardRejected") && stale_debug.contains("ApplyMobPeerOverlay"),
+        "unexpected stale overlay rejection: {stale_debug}",
     );
 }

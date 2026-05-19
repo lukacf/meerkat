@@ -179,6 +179,12 @@ pub struct EffectHandoffProtocol {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommsTrustAuthorityProtocol {
     pub source_kind: CommsTrustAuthoritySourceKind,
+    /// Generated owner of the trust row this protocol mutates.
+    ///
+    /// Revoke/unwire protocols have their own source kind for admission and
+    /// allowlisting, but they remove rows installed by their paired
+    /// publish/wire protocol. `None` means the row owner is `source_kind`.
+    pub row_owner_kind: Option<CommsTrustAuthoritySourceKind>,
     pub allowed_operations: Vec<CommsTrustAuthorityOperation>,
 }
 

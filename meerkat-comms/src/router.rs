@@ -27,7 +27,7 @@ use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::transport::{PeerAddr, TransportError};
 use crate::trust::{TrustError, TrustedPeer, TrustedPeers, TrustedPeersView};
 use crate::types::{Envelope, MessageKind};
-use meerkat_core::comms::PeerId;
+use meerkat_core::comms::{GeneratedCommsTrustAuthoritySourceKind, PeerId};
 
 /// Derive the canonical [`PeerId`] for a signing [`crate::identity::PubKey`].
 ///
@@ -111,6 +111,25 @@ pub struct Router {
     /// filters it out of the `comms.peers` REST/RPC/MCP surface. Used e.g.
     /// for the supervisor bridge in session-backed mob members.
     private_peer_ids: Arc<RwLock<std::collections::HashSet<PeerId>>>,
+    /// Mechanical projection of which generated source currently owns each
+    /// trust row. Admission uses the union; generated removals are scoped to
+    /// the source that authorized them.
+    trusted_peer_sources: Arc<
+        RwLock<
+            std::collections::HashMap<
+                PeerId,
+                std::collections::BTreeSet<GeneratedCommsTrustAuthoritySourceKind>,
+            >,
+        >,
+    >,
+    private_peer_sources: Arc<
+        RwLock<
+            std::collections::HashMap<
+                PeerId,
+                std::collections::BTreeSet<GeneratedCommsTrustAuthoritySourceKind>,
+            >,
+        >,
+    >,
     config: CommsConfig,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
@@ -137,6 +156,8 @@ impl Router {
             trusted_peers: Arc::new(RwLock::new(trusted_peers)),
             trusted_peer_ids: Arc::new(RwLock::new(std::collections::HashMap::new())),
             private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            trusted_peer_sources: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            private_peer_sources: Arc::new(RwLock::new(std::collections::HashMap::new())),
             config,
             require_peer_auth,
             inbox_sender,
@@ -157,22 +178,13 @@ impl Router {
             trusted_peers,
             trusted_peer_ids: Arc::new(RwLock::new(std::collections::HashMap::new())),
             private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            trusted_peer_sources: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            private_peer_sources: Arc::new(RwLock::new(std::collections::HashMap::new())),
             config,
             require_peer_auth,
             inbox_sender,
             inproc_namespace: None,
         }
-    }
-
-    /// Mark a peer as private by canonical `PeerId`.
-    pub(crate) fn mark_private_peer_id(&self, peer_id: PeerId) {
-        self.private_peer_ids.write().insert(peer_id);
-    }
-
-    /// Remove the private marker for a peer. Returns `true` if the marker
-    /// was present and removed.
-    pub(crate) fn unmark_private(&self, peer_id: &PeerId) -> bool {
-        self.private_peer_ids.write().remove(peer_id)
     }
 
     /// Returns `true` if the peer is currently marked private.
@@ -184,6 +196,17 @@ impl Router {
 
     pub(crate) fn private_peer_ids(&self) -> std::collections::HashSet<PeerId> {
         self.private_peer_ids.read().clone()
+    }
+
+    pub(crate) fn has_trust_source(
+        &self,
+        peer_id: &PeerId,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> bool {
+        self.trusted_peer_sources
+            .read()
+            .get(peer_id)
+            .is_some_and(|sources| sources.contains(&source_kind))
     }
 
     pub(crate) fn peer_id_for_pubkey(&self, pubkey: &crate::identity::PubKey) -> PeerId {
@@ -226,17 +249,65 @@ impl Router {
         &self,
         peer_id: PeerId,
         peer: TrustedPeer,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+        private: bool,
     ) -> Result<(), TrustError> {
         let pubkey = peer.pubkey;
         self.trusted_peers.write().upsert(peer)?;
         self.trusted_peer_ids.write().insert(pubkey, peer_id);
+        self.trusted_peer_sources
+            .write()
+            .entry(peer_id)
+            .or_default()
+            .insert(source_kind);
+        if private {
+            self.private_peer_sources
+                .write()
+                .entry(peer_id)
+                .or_default()
+                .insert(source_kind);
+            self.private_peer_ids.write().insert(peer_id);
+        }
         Ok(())
     }
 
     /// Apply a generated trust-projection removal to the router's mechanical
     /// trust store. Semantic trust authority lives at the machine seam that
     /// called into `CommsRuntime::apply_trust_mutation`.
-    pub(crate) fn remove_trusted_peer(&self, peer_id: &PeerId) -> bool {
+    pub(crate) fn remove_trusted_peer_for_source(
+        &self,
+        peer_id: &PeerId,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> bool {
+        let source_removed = {
+            let mut sources = self.trusted_peer_sources.write();
+            let Some(peer_sources) = sources.get_mut(peer_id) else {
+                return false;
+            };
+            if !peer_sources.remove(&source_kind) {
+                return false;
+            }
+            if peer_sources.is_empty() {
+                sources.remove(peer_id);
+            }
+            true
+        };
+        if !source_removed {
+            return false;
+        }
+        {
+            let mut private_sources = self.private_peer_sources.write();
+            if let Some(peer_sources) = private_sources.get_mut(peer_id) {
+                peer_sources.remove(&source_kind);
+                if peer_sources.is_empty() {
+                    private_sources.remove(peer_id);
+                    self.private_peer_ids.write().remove(peer_id);
+                }
+            }
+        }
+        if self.trusted_peer_sources.read().contains_key(peer_id) {
+            return true;
+        }
         let peer_ids = self.trusted_peer_ids.read().clone();
         let removed_pubkeys = {
             self.trusted_peers
@@ -252,6 +323,7 @@ impl Router {
         }
         drop(trusted_peer_ids);
         self.private_peer_ids.write().remove(peer_id);
+        self.private_peer_sources.write().remove(peer_id);
         true
     }
 

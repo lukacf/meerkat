@@ -38,8 +38,9 @@ use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
 use meerkat_core::comms::{
-    CommsCommand, CommsTrustMutation, CommsTrustMutationResult, PeerId, PeerName, SendError,
-    SendReceipt, TrustedPeerDescriptor,
+    CommsCommand, CommsTrustMutation, CommsTrustMutationResult,
+    GeneratedCommsTrustAuthoritySourceKind, PeerId, PeerName, SendError, SendReceipt,
+    TrustedPeerDescriptor,
 };
 use meerkat_core::error::ToolError;
 use meerkat_core::interaction::{InteractionId, PeerInputCandidate};
@@ -62,7 +63,7 @@ use meerkat_mob::{
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1730,7 +1731,7 @@ struct LocalCommsRuntime {
     public_key_bytes: [u8; 32],
     address: String,
     key: String,
-    trusted: RwLock<HashSet<String>>,
+    trusted: RwLock<HashMap<String, BTreeSet<GeneratedCommsTrustAuthoritySourceKind>>>,
     notify: Arc<tokio::sync::Notify>,
 }
 
@@ -1781,10 +1782,27 @@ impl LocalCommsRuntime {
             public_key_bytes,
             address: format!("inproc://{name}"),
             key: encode_ed25519_public_key(&public_key_bytes),
-            trusted: RwLock::new(HashSet::new()),
+            trusted: RwLock::new(HashMap::new()),
             notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
+}
+
+fn remove_trust_source(
+    trusted: &mut HashMap<String, BTreeSet<GeneratedCommsTrustAuthoritySourceKind>>,
+    peer_id: &str,
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
+) -> bool {
+    let Some(sources) = trusted.get_mut(peer_id) else {
+        return false;
+    };
+    if !sources.remove(&source_kind) {
+        return false;
+    }
+    if sources.is_empty() {
+        trusted.remove(peer_id);
+    }
+    true
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -1820,7 +1838,9 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                 self.trusted
                     .write()
                     .await
-                    .insert(peer.peer_id.as_str().to_string());
+                    .entry(peer.peer_id.as_str().to_string())
+                    .or_default()
+                    .insert(authority.trust_row_owner_kind());
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
@@ -1829,7 +1849,9 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                 authority
                     .validate_public_remove(parsed_peer_id)
                     .map_err(SendError::Validation)?;
-                let removed = self.trusted.write().await.remove(&peer_id);
+                let mut trusted = self.trusted.write().await;
+                let removed =
+                    remove_trust_source(&mut trusted, &peer_id, authority.trust_row_owner_kind());
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
             CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
@@ -3443,7 +3465,7 @@ mod tests {
             .await
             .expect("authorized add succeeds");
         assert_eq!(added, CommsTrustMutationResult::Added);
-        assert!(runtime.trusted.read().await.contains(&peer_id));
+        assert!(runtime.trusted.read().await.contains_key(&peer_id));
 
         let raw_remove = runtime
             .remove_trusted_peer(&peer_id)
@@ -3478,7 +3500,7 @@ mod tests {
             .await
             .expect("authorized remove succeeds");
         assert_eq!(removed, CommsTrustMutationResult::Removed { removed: true });
-        assert!(!runtime.trusted.read().await.contains(&peer_id));
+        assert!(!runtime.trusted.read().await.contains_key(&peer_id));
     }
 
     #[test]

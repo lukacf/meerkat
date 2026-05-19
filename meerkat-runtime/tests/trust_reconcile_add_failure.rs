@@ -27,7 +27,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
 use meerkat_core::comms::{
-    CommsTrustMutation, CommsTrustMutationResult, SendError, TrustedPeerDescriptor,
+    CommsTrustMutation, CommsTrustMutationResult, GeneratedCommsTrustAuthoritySourceKind,
+    SendError, TrustedPeerDescriptor,
 };
 use meerkat_core::{
     PeerIngressAuthorityPhase, PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot,
@@ -160,6 +161,17 @@ impl CommsRuntime for AddFailingCommsRuntime {
         &self,
     ) -> Result<Vec<TrustedPeerDescriptor>, CommsCapabilityError> {
         Ok(self.successful_add_calls())
+    }
+
+    async fn trusted_peer_projection_snapshot_for_source(
+        &self,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> Result<Vec<TrustedPeerDescriptor>, CommsCapabilityError> {
+        if source_kind == GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection {
+            Ok(self.successful_add_calls())
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 

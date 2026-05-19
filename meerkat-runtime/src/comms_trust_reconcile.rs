@@ -43,8 +43,8 @@ use crate::meerkat_machine::dsl::PeerEndpoint;
 use crate::protocol_comms_trust_reconcile::CommsTrustReconcileObligation;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
 use meerkat_core::comms::{
-    CommsTrustMutation, CommsTrustMutationResult, PeerAddress, PeerId, PeerName, SendError,
-    TrustedPeerDescriptor,
+    CommsTrustMutation, CommsTrustMutationResult, GeneratedCommsTrustAuthoritySourceKind,
+    PeerAddress, PeerId, PeerName, SendError, TrustedPeerDescriptor,
 };
 
 /// Typed error surfaced by the reconciliation handler.
@@ -86,7 +86,7 @@ pub struct ReconcileReport {
     pub added: Vec<PeerEndpoint>,
     /// Peers that were unregistered on this pass.
     pub removed: Vec<PeerEndpoint>,
-    /// Epoch watermark the reconciler applied.
+    /// Generated peer-projection epoch carried by the consumed obligation.
     pub applied_epoch: u64,
 }
 
@@ -212,7 +212,9 @@ impl CommsTrustReconciler {
         &self,
     ) -> Result<BTreeSet<PeerEndpoint>, CommsTrustReconcileError> {
         self.comms
-            .public_trusted_peer_projection_snapshot()
+            .trusted_peer_projection_snapshot_for_source(
+                GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+            )
             .await?
             .iter()
             .map(descriptor_to_endpoint)
@@ -402,6 +404,16 @@ mod tests {
                 .map(endpoint_to_descriptor)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|err| CommsCapabilityError::Unsupported(err.to_string()))
+        }
+
+        async fn trusted_peer_projection_snapshot_for_source(
+            &self,
+            source_kind: GeneratedCommsTrustAuthoritySourceKind,
+        ) -> Result<Vec<TrustedPeerDescriptor>, CommsCapabilityError> {
+            if source_kind != GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection {
+                return Ok(Vec::new());
+            }
+            self.public_trusted_peer_projection_snapshot().await
         }
     }
 

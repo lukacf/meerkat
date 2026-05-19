@@ -102,15 +102,9 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource
             Operation::PublicAdd | Operation::PrivateAdd
         ) {
             let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;
-            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(
-                request,
-                self.epoch,
-                peer_descriptor,
-            );
+            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring, peer_descriptor);
         }
-        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(
-            request, self.epoch,
-        ))
+        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring))
     }
 }
 

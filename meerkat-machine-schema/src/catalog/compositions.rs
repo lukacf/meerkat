@@ -728,6 +728,7 @@ struct TrustHandoffProtocolSpec<'a> {
     effect_variant: &'a str,
     realizing_actor: &'a str,
     source_kind: CommsTrustAuthoritySourceKind,
+    row_owner_kind: Option<CommsTrustAuthoritySourceKind>,
     allowed_operations: &'a [CommsTrustAuthorityOperation],
     obligation_fields: &'a [&'a str],
     module_path: &'a str,
@@ -760,6 +761,7 @@ fn trust_handoff_protocol(spec: TrustHandoffProtocolSpec<'_>) -> EffectHandoffPr
         ),
         comms_trust_authority: Some(CommsTrustAuthorityProtocol {
             source_kind: spec.source_kind,
+            row_owner_kind: spec.row_owner_kind,
             allowed_operations: spec.allowed_operations.to_vec(),
         }),
         rust: effect_extractor_rust_binding(
@@ -1230,6 +1232,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 effect_variant: "CommsTrustReconcileRequested",
                 realizing_actor: "comms_trust_reconcile_owner",
                 source_kind: CommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+                row_owner_kind: None,
                 allowed_operations: &[
                     CommsTrustAuthorityOperation::PublicAdd,
                     CommsTrustAuthorityOperation::PublicRemove,
@@ -1252,6 +1255,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 effect_variant: "MemberTrustWiringRequested",
                 realizing_actor: "mob_comms_trust_owner",
                 source_kind: CommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring,
+                row_owner_kind: None,
                 allowed_operations: &[CommsTrustAuthorityOperation::PublicAdd],
                 obligation_fields: &[
                     "edge",
@@ -1272,6 +1276,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 effect_variant: "MemberTrustUnwiringRequested",
                 realizing_actor: "mob_comms_trust_owner",
                 source_kind: CommsTrustAuthoritySourceKind::MobMachineMemberTrustUnwiring,
+                row_owner_kind: Some(CommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring),
                 allowed_operations: &[CommsTrustAuthorityOperation::PublicRemove],
                 obligation_fields: &["edge", "a_peer_id", "b_peer_id", "epoch"],
                 module_path: "meerkat-mob/src/generated/protocol_mob_member_trust_unwiring.rs",
@@ -1285,6 +1290,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 effect_variant: "ExternalPeerTrustWiringRequested",
                 realizing_actor: "mob_comms_trust_owner",
                 source_kind: CommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+                row_owner_kind: None,
                 allowed_operations: &[CommsTrustAuthorityOperation::PublicAdd],
                 obligation_fields: &["edge", "peer_id", "epoch"],
                 module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_wiring.rs",
@@ -1298,6 +1304,9 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 effect_variant: "ExternalPeerTrustUnwiringRequested",
                 realizing_actor: "mob_comms_trust_owner",
                 source_kind: CommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustUnwiring,
+                row_owner_kind: Some(
+                    CommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+                ),
                 allowed_operations: &[CommsTrustAuthorityOperation::PublicRemove],
                 obligation_fields: &["edge", "peer_id", "epoch"],
                 module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_unwiring.rs",
@@ -1311,6 +1320,9 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 effect_variant: "ExternalPeerTrustRepairRequested",
                 realizing_actor: "mob_comms_trust_owner",
                 source_kind: CommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustRepair,
+                row_owner_kind: Some(
+                    CommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+                ),
                 allowed_operations: &[CommsTrustAuthorityOperation::PublicAdd],
                 obligation_fields: &["edge", "peer_id", "epoch"],
                 module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_repair.rs",
@@ -1324,6 +1336,9 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 effect_variant: "ExternalPeerReciprocalTrustRequested",
                 realizing_actor: "mob_comms_trust_owner",
                 source_kind: CommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust,
+                row_owner_kind: Some(
+                    CommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+                ),
                 allowed_operations: &[CommsTrustAuthorityOperation::PublicAdd],
                 obligation_fields: &["key", "edge", "peer_id", "peer_endpoint", "epoch"],
                 module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_reciprocal_trust.rs",
@@ -1435,6 +1450,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                 ),
                 comms_trust_authority: Some(CommsTrustAuthorityProtocol {
                     source_kind: CommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish,
+                    row_owner_kind: None,
                     allowed_operations: vec![CommsTrustAuthorityOperation::PrivateAdd],
                 }),
                 rust: ProtocolRustBinding {
@@ -1487,6 +1503,9 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                 ),
                 comms_trust_authority: Some(CommsTrustAuthorityProtocol {
                     source_kind: CommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke,
+                    row_owner_kind: Some(
+                        CommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish,
+                    ),
                     allowed_operations: vec![CommsTrustAuthorityOperation::PrivateRemove],
                 }),
                 rust: ProtocolRustBinding {

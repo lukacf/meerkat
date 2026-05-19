@@ -73,9 +73,7 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource
                 request.peer_id()
             ));
         }
-        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(
-            request, self.epoch,
-        ))
+        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring))
     }
 }
 

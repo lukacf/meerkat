@@ -341,8 +341,8 @@ impl CoreCommsRuntime for CommsRuntime {
                 authority
                     .validate_public_add(&peer)
                     .map_err(SendError::Validation)?;
-                self.validate_trust_authority_epoch(&authority)?;
-                self.apply_trusted_peer_descriptor(peer).await?;
+                self.apply_trusted_peer_descriptor(peer, authority.trust_row_owner_kind())
+                    .await?;
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
@@ -351,16 +351,17 @@ impl CoreCommsRuntime for CommsRuntime {
                 authority
                     .validate_public_remove(parsed_peer_id)
                     .map_err(SendError::Validation)?;
-                self.validate_trust_authority_epoch(&authority)?;
-                let removed = self.apply_trusted_peer_removal(&peer_id).await?;
+                let removed = self
+                    .apply_trusted_peer_removal(&peer_id, authority.trust_row_owner_kind())
+                    .await?;
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
             CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
                 authority
                     .validate_private_add(&peer)
                     .map_err(SendError::Validation)?;
-                self.validate_trust_authority_epoch(&authority)?;
-                self.apply_private_trusted_peer_descriptor(peer).await?;
+                self.apply_private_trusted_peer_descriptor(peer, authority.trust_row_owner_kind())
+                    .await?;
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
@@ -369,8 +370,9 @@ impl CoreCommsRuntime for CommsRuntime {
                 authority
                     .validate_private_remove(parsed_peer_id)
                     .map_err(SendError::Validation)?;
-                self.validate_trust_authority_epoch(&authority)?;
-                let removed = self.apply_private_trusted_peer_removal(&peer_id).await?;
+                let removed = self
+                    .apply_private_trusted_peer_removal(&peer_id, authority.trust_row_owner_kind())
+                    .await?;
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
         }
@@ -1152,6 +1154,13 @@ impl CoreCommsRuntime for CommsRuntime {
         Ok(self.trusted_peer_descriptors(false))
     }
 
+    async fn trusted_peer_projection_snapshot_for_source(
+        &self,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> Result<Vec<TrustedPeerDescriptor>, meerkat_core::CommsCapabilityError> {
+        Ok(self.trusted_peer_descriptors_for_source(false, source_kind))
+    }
+
     fn actionable_input_notify(
         &self,
     ) -> Result<Arc<tokio::sync::Notify>, meerkat_core::CommsCapabilityError> {
@@ -1285,30 +1294,9 @@ pub struct CommsRuntime {
     /// require this handle.
     interaction_stream_handle:
         parking_lot::RwLock<Option<Arc<dyn meerkat_core::handles::InteractionStreamHandle>>>,
-    trust_authority_epoch_watermarks:
-        Arc<Mutex<HashMap<GeneratedCommsTrustAuthoritySourceKind, u64>>>,
 }
 
 impl CommsRuntime {
-    fn validate_trust_authority_epoch(
-        &self,
-        authority: &meerkat_core::comms::CommsTrustMutationAuthority,
-    ) -> Result<(), SendError> {
-        let source_kind = authority.source_kind();
-        let epoch = authority.epoch();
-        let mut watermarks = self.trust_authority_epoch_watermarks.lock();
-        let previous = watermarks.entry(source_kind).or_insert(epoch);
-        if epoch < *previous {
-            return Err(SendError::Validation(format!(
-                "stale generated comms trust authority for {source_kind:?}: epoch {epoch} is older than observed epoch {previous}"
-            )));
-        }
-        if epoch > *previous {
-            *previous = epoch;
-        }
-        Ok(())
-    }
-
     fn derive_bridge_bootstrap_token(keypair: &Keypair) -> String {
         let mut digest = Sha256::new();
         digest.update(b"meerkat.supervisor-bridge.bootstrap-token.v1");
@@ -1429,7 +1417,6 @@ impl CommsRuntime {
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
-            trust_authority_epoch_watermarks: Arc::new(Mutex::new(HashMap::new())),
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             config.inproc_namespace.as_deref().unwrap_or(""),
@@ -1538,7 +1525,6 @@ impl CommsRuntime {
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
-            trust_authority_epoch_watermarks: Arc::new(Mutex::new(HashMap::new())),
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             namespace.as_deref().unwrap_or(""),
@@ -1659,7 +1645,6 @@ impl CommsRuntime {
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
-            trust_authority_epoch_watermarks: Arc::new(Mutex::new(HashMap::new())),
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             namespace.as_deref().unwrap_or(""),
@@ -2020,6 +2005,22 @@ impl CommsRuntime {
     }
 
     fn trusted_peer_descriptors(&self, include_private: bool) -> Vec<TrustedPeerDescriptor> {
+        self.trusted_peer_descriptors_filtered(include_private, None)
+    }
+
+    fn trusted_peer_descriptors_for_source(
+        &self,
+        include_private: bool,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> Vec<TrustedPeerDescriptor> {
+        self.trusted_peer_descriptors_filtered(include_private, Some(source_kind))
+    }
+
+    fn trusted_peer_descriptors_filtered(
+        &self,
+        include_private: bool,
+        source_kind: Option<GeneratedCommsTrustAuthoritySourceKind>,
+    ) -> Vec<TrustedPeerDescriptor> {
         let mut trusted_peers: Vec<TrustedPeerDescriptor> = self
             .trusted_peers
             .read()
@@ -2034,6 +2035,11 @@ impl CommsRuntime {
                 }
                 let peer_id = self.router.peer_id_for_pubkey(&peer.pubkey);
                 if !include_private && self.router.is_private_peer_id(&peer_id) {
+                    return None;
+                }
+                if let Some(source_kind) = source_kind
+                    && !self.router.has_trust_source(&peer_id, source_kind)
+                {
                     return None;
                 }
                 let name = match PeerName::new(peer.name.clone()) {
@@ -2091,11 +2097,12 @@ impl CommsRuntime {
     async fn apply_trusted_peer_descriptor(
         &self,
         descriptor: TrustedPeerDescriptor,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
     ) -> Result<(), SendError> {
         let peer_id = descriptor.peer_id;
         let peer = descriptor_to_trusted_peer(descriptor)?;
         self.router
-            .add_trusted_peer_with_peer_id(peer_id, peer)
+            .add_trusted_peer_with_peer_id(peer_id, peer, source_kind, false)
             .map_err(|err| SendError::Validation(err.to_string()))?;
         Ok(())
     }
@@ -2110,15 +2117,23 @@ impl CommsRuntime {
         ))
     }
 
-    async fn apply_trusted_peer_removal(&self, peer_id: &str) -> Result<bool, SendError> {
+    async fn apply_trusted_peer_removal(
+        &self,
+        peer_id: &str,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> Result<bool, SendError> {
         let peer_id = meerkat_core::comms::PeerId::parse(peer_id)
             .map_err(|err| SendError::Validation(err.to_string()))?;
-        if self.router.is_private_peer_id(&peer_id) {
+        if self.router.is_private_peer_id(&peer_id)
+            && !self.router.has_trust_source(&peer_id, source_kind)
+        {
             return Err(SendError::Validation(format!(
                 "public trust authority cannot remove private trusted peer {peer_id}"
             )));
         }
-        Ok(self.router.remove_trusted_peer(&peer_id))
+        Ok(self
+            .router
+            .remove_trusted_peer_for_source(&peer_id, source_kind))
     }
 
     /// Register a trust edge whose peer entry is marked private.
@@ -2142,13 +2157,13 @@ impl CommsRuntime {
     async fn apply_private_trusted_peer_descriptor(
         &self,
         descriptor: TrustedPeerDescriptor,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
     ) -> Result<(), SendError> {
         let peer_id = descriptor.peer_id;
         let peer = descriptor_to_trusted_peer(descriptor)?;
         self.router
-            .add_trusted_peer_with_peer_id(peer_id, peer)
+            .add_trusted_peer_with_peer_id(peer_id, peer, source_kind, true)
             .map_err(|err| SendError::Validation(err.to_string()))?;
-        self.router.mark_private_peer_id(peer_id);
         Ok(())
     }
 
@@ -2159,12 +2174,16 @@ impl CommsRuntime {
         ))
     }
 
-    async fn apply_private_trusted_peer_removal(&self, peer_id: &str) -> Result<bool, SendError> {
+    async fn apply_private_trusted_peer_removal(
+        &self,
+        peer_id: &str,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> Result<bool, SendError> {
         let peer_id = meerkat_core::comms::PeerId::parse(peer_id)
             .map_err(|err| SendError::Validation(err.to_string()))?;
-        let removed = self.router.remove_trusted_peer(&peer_id);
-        self.router.unmark_private(&peer_id);
-        Ok(removed)
+        Ok(self
+            .router
+            .remove_trusted_peer_for_source(&peer_id, source_kind))
     }
 
     /// Explicit compatibility helper for callers that still hold a public key.
@@ -3165,41 +3184,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_generated_trust_authority_is_rejected() {
-        let runtime = CommsRuntime::inproc_only("trust-mutator-stale-epoch").expect("runtime");
-        let current_key = Keypair::generate().public_key();
-        let current = trusted_descriptor("current-peer", current_key, "inproc://current-peer");
-        let stale_key = Keypair::generate().public_key();
-        let stale = trusted_descriptor("stale-peer", stale_key, "inproc://stale-peer");
+    async fn generated_remove_does_not_remove_trust_owned_by_other_source() {
+        let runtime =
+            CommsRuntime::inproc_only("trust-mutator-source-scoped-remove").expect("runtime");
+        let peer_key = Keypair::generate().public_key();
+        let descriptor = trusted_descriptor("mob-owned-peer", peer_key, "inproc://mob-owned-peer");
+        let peer_id = descriptor.peer_id.to_string();
+        let peer = descriptor_to_trusted_peer(descriptor.clone()).expect("valid descriptor");
 
-        CoreCommsRuntime::apply_trust_mutation(
+        runtime
+            .router
+            .add_trusted_peer_with_peer_id(
+                descriptor.peer_id,
+                peer,
+                GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring,
+                false,
+            )
+            .expect("test setup installs mob-owned public trust");
+
+        let meerkat_projection = CoreCommsRuntime::trusted_peer_projection_snapshot_for_source(
             &runtime,
-            CommsTrustMutation::AddTrustedPeer {
-                peer: current.clone(),
-                authority: test_projection_add_authority(&current, 5),
-            },
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
         )
         .await
-        .expect("current generated trust authority should apply");
-
-        let stale_authority = test_projection_add_authority(&stale, 3);
-        let stale_result = CoreCommsRuntime::apply_trust_mutation(
-            &runtime,
-            CommsTrustMutation::AddTrustedPeer {
-                peer: stale,
-                authority: stale_authority,
-            },
-        )
-        .await
-        .expect_err("older generated trust authority must fail closed");
-
+        .expect("source-scoped snapshot");
         assert!(
-            matches!(stale_result, SendError::Validation(ref message) if message.contains("stale generated comms trust authority")),
-            "unexpected stale authority rejection: {stale_result:?}"
+            meerkat_projection.is_empty(),
+            "MeerkatMachine peer projection must not see MobMachine-owned trust as its canonical rows",
         );
-        let peers = runtime.peers().await;
-        assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].peer_id, current.peer_id);
+
+        let remove = CoreCommsRuntime::apply_trust_mutation(
+            &runtime,
+            CommsTrustMutation::RemoveTrustedPeer {
+                peer_id,
+                authority: test_projection_remove_authority(&descriptor, 8),
+            },
+        )
+        .await
+        .expect("generated remove for an unowned source should apply as no-op");
+        assert_eq!(remove, CommsTrustMutationResult::Removed { removed: false });
+
+        let public_snapshot = CoreCommsRuntime::public_trusted_peer_projection_snapshot(&runtime)
+            .await
+            .expect("public trust snapshot");
+        assert_eq!(
+            public_snapshot.len(),
+            1,
+            "MobMachine-owned trust must remain after a MeerkatMachine removal no-op",
+        );
+        assert_eq!(public_snapshot[0].peer_id, descriptor.peer_id);
     }
 
     #[tokio::test]
@@ -3237,7 +3270,10 @@ mod tests {
         let peer_id = descriptor.peer_id.to_string();
 
         runtime
-            .apply_private_trusted_peer_descriptor(descriptor.clone())
+            .apply_private_trusted_peer_descriptor(
+                descriptor.clone(),
+                GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish,
+            )
             .await
             .expect("test setup installs private trust");
         let public_snapshot = CoreCommsRuntime::public_trusted_peer_projection_snapshot(&runtime)

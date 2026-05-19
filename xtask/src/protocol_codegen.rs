@@ -456,6 +456,12 @@ fn emit_comms_trust_grant_return(out: &mut String, protocol: &EffectHandoffProto
         .comms_trust_authority
         .as_ref()
         .context("comms trust authority metadata missing")?;
+    let row_owner_kind = trust_authority
+        .row_owner_kind
+        .unwrap_or(trust_authority.source_kind)
+        .core_variant();
+    let row_owner_kind_expr =
+        format!("meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{row_owner_kind}");
     let has_add = trust_authority.allowed_operations.iter().any(|operation| {
         matches!(
             operation,
@@ -473,15 +479,17 @@ fn emit_comms_trust_grant_return(out: &mut String, protocol: &EffectHandoffProto
         )?;
         writeln!(
             out,
-            "            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, {}, peer_descriptor);",
-            comms_trust_epoch_expr(protocol)?
+            "            return meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, {}, {}, peer_descriptor);",
+            comms_trust_epoch_expr(protocol)?,
+            row_owner_kind_expr,
         )?;
         writeln!(out, "        }}")?;
     }
     writeln!(
         out,
-        "        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, {}))",
-        comms_trust_epoch_expr(protocol)?
+        "        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, {}, {}))",
+        comms_trust_epoch_expr(protocol)?,
+        row_owner_kind_expr,
     )?;
     Ok(())
 }

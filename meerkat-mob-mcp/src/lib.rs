@@ -3447,8 +3447,9 @@ mod tests {
         )
         .expect("wire external peer");
         let wiring_obligation =
-            meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::extract_obligations(
+            meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::extract_obligations_with_freshness(
                 &wiring_transition,
+                meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::MobTopologyFreshnessAuthority::from_authority(&mob_authority),
             )
             .pop()
             .expect("generated wiring obligation");
@@ -3481,8 +3482,9 @@ mod tests {
         )
         .expect("unwire external peer");
         let unwiring_obligation =
-            meerkat_mob::generated::protocol_mob_external_peer_trust_unwiring::extract_obligations(
+            meerkat_mob::generated::protocol_mob_external_peer_trust_unwiring::extract_obligations_with_freshness(
                 &unwiring_transition,
+                meerkat_mob::generated::protocol_mob_external_peer_trust_unwiring::MobTopologyFreshnessAuthority::from_authority(&mob_authority),
             )
             .pop()
             .expect("generated unwiring obligation");

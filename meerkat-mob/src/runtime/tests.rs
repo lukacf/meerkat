@@ -26539,7 +26539,7 @@ async fn test_unwire_updates_peers_and_sends_retired_notifications() {
 }
 
 #[tokio::test]
-async fn test_unwire_fails_closed_on_stale_local_trust_when_machine_edge_absent() {
+async fn test_stale_member_trust_obligation_cannot_readd_local_trust_when_machine_edge_absent() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
 
@@ -26574,9 +26574,7 @@ async fn test_unwire_fails_closed_on_stale_local_trust_when_machine_edge_absent(
     let comms_b = service.real_comms(&sid_b).await.expect("comms for w-1");
     let name_a = test_comms_name("lead", "l-1");
     let name_b = test_comms_name("worker", "w-1");
-    let key_a = comms_a.public_key();
     let key_b = comms_b.public_key();
-    let peer_id_a = key_a.to_peer_id().to_string();
     let peer_id_b = key_b.to_peer_id().to_string();
     let stale_edge = crate::machines::mob_machine::WiringEdge::new(
         crate::machines::mob_machine::AgentIdentity("l-1".to_string()),
@@ -26594,73 +26592,63 @@ async fn test_unwire_fails_closed_on_stale_local_trust_when_machine_edge_absent(
         },
     )
     .expect("authorize stale member trust wiring");
-    let stale_obligation =
+    let raw_stale_obligation =
         crate::generated::protocol_mob_member_trust_wiring::extract_obligations(&stale_transition)
             .pop()
-            .expect("generated member wiring obligation");
-    comms_a
-        .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
-            peer: TrustedPeerDescriptor::unsigned_with_pubkey(
-                &name_b,
-                peer_id_b.clone(),
-                *key_b.as_bytes(),
-                format!("inproc://{name_b}"),
-            )
-            .expect("valid worker trusted spec"),
-            authority:
-                crate::generated::protocol_mob_member_trust_wiring::wiring_authority_for_identity(
-                    &stale_obligation,
-                    "w-1",
-                    &peer_id_b,
-                )
-                .expect("generated member wiring obligation covers worker"),
-        })
-        .await
-        .expect("re-add stale trust on lead");
-    comms_b
-        .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
-            peer: TrustedPeerDescriptor::unsigned_with_pubkey(
-                &name_a,
-                peer_id_a.clone(),
-                *key_a.as_bytes(),
-                format!("inproc://{name_a}"),
-            )
-            .expect("valid lead trusted spec"),
-            authority:
-                crate::generated::protocol_mob_member_trust_wiring::wiring_authority_for_identity(
-                    &stale_obligation,
-                    "l-1",
-                    &peer_id_a,
-                )
-                .expect("generated member wiring obligation covers lead"),
-        })
-        .await
-        .expect("re-add stale trust on worker");
+            .expect("generated member wiring obligation without freshness");
+    let raw_error =
+        crate::generated::protocol_mob_member_trust_wiring::wiring_authority_for_identity(
+            &raw_stale_obligation,
+            "w-1",
+            &peer_id_b,
+        )
+        .expect_err("raw stale member wiring obligation must fail closed");
+    assert!(
+        raw_error.contains("topology freshness authority is absent"),
+        "unexpected raw stale member wiring error: {raw_error}"
+    );
 
-    let result = handle
-        .unwire(AgentIdentity::from("l-1"), MeerkatId::from("w-1"))
-        .await;
-    match result {
-        Err(MobError::WiringError(reason)) => {
-            assert!(reason.contains("requires MobMachine wiring authority"));
-        }
-        other => panic!("expected MobMachine authority error, got {other:?}"),
-    }
+    let current_machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query current machine state after unwire");
+    let current_authority = crate::machines::mob_machine::MobMachineAuthority::recover_from_state(
+        current_machine_state,
+    )
+    .expect("recover current unwired machine state");
+    let stale_obligation =
+        crate::generated::protocol_mob_member_trust_wiring::extract_obligations_with_freshness(
+            &stale_transition,
+            crate::generated::protocol_mob_member_trust_wiring::MobTopologyFreshnessAuthority::from_authority(&current_authority),
+        )
+        .pop()
+        .expect("generated stale member wiring obligation");
+    let stale_error =
+        crate::generated::protocol_mob_member_trust_wiring::wiring_authority_for_identity(
+            &stale_obligation,
+            "w-1",
+            &peer_id_b,
+        )
+        .expect_err("stale member wiring obligation must fail closed");
+    assert!(
+        stale_error.contains("stale generated MobMachine trust obligation"),
+        "unexpected stale member wiring error: {stale_error}"
+    );
 
     let peers_a = CoreCommsRuntime::peers(&*comms_a).await;
     let peers_b = CoreCommsRuntime::peers(&*comms_b).await;
     assert!(
-        peers_a.iter().any(|entry| entry.name.as_str() == name_b),
-        "idempotent unwire must not prune stale trust without machine authority"
+        !peers_a.iter().any(|entry| entry.name.as_str() == name_b),
+        "stale member obligation must not re-add worker trust on lead"
     );
     assert!(
-        peers_b.iter().any(|entry| entry.name.as_str() == name_a),
-        "idempotent unwire must not prune stale trust without machine authority"
+        !peers_b.iter().any(|entry| entry.name.as_str() == name_a),
+        "stale member obligation must not re-add lead trust on worker"
     );
 }
 
 #[tokio::test]
-async fn test_unwire_external_fails_closed_on_stale_trust_when_machine_edge_absent() {
+async fn test_stale_external_peer_trust_obligation_cannot_readd_trust_when_machine_edge_absent() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
 
@@ -26714,44 +26702,55 @@ async fn test_unwire_external_fails_closed_on_stale_trust_when_machine_edge_abse
         },
     )
     .expect("wire stale external peer");
-    let stale_obligation =
+    let raw_stale_obligation =
         crate::generated::protocol_mob_external_peer_trust_wiring::extract_obligations(
             &stale_transition,
         )
         .pop()
-        .expect("generated external wiring obligation");
-    comms
-        .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
-            peer: spec.clone(),
-            authority:
-                crate::generated::protocol_mob_external_peer_trust_wiring::wiring_authority_for_peer(
-                    &stale_obligation,
-                    &peer_id,
-                )
-                .expect("generated external wiring obligation covers test peer"),
-        })
-        .await
-        .expect("re-add stale external trust");
-
-    let result = handle
-        .unwire(
-            AgentIdentity::from("l-1"),
-            PeerTarget::External(spec.clone()),
+        .expect("generated external wiring obligation without freshness");
+    let raw_error =
+        crate::generated::protocol_mob_external_peer_trust_wiring::wiring_authority_for_peer(
+            &raw_stale_obligation,
+            &peer_id,
         )
-        .await;
-    match result {
-        Err(MobError::WiringError(reason)) => {
-            assert!(reason.contains("requires MobMachine external peer authority"));
-        }
-        other => panic!("expected MobMachine authority error, got {other:?}"),
-    }
+        .expect_err("raw stale external wiring obligation must fail closed");
+    assert!(
+        raw_error.contains("topology freshness authority is absent"),
+        "unexpected raw stale external wiring error: {raw_error}"
+    );
+
+    let current_machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query current machine state after external unwire");
+    let current_authority = crate::machines::mob_machine::MobMachineAuthority::recover_from_state(
+        current_machine_state,
+    )
+    .expect("recover current external-unwired machine state");
+    let stale_obligation =
+        crate::generated::protocol_mob_external_peer_trust_wiring::extract_obligations_with_freshness(
+            &stale_transition,
+            crate::generated::protocol_mob_external_peer_trust_wiring::MobTopologyFreshnessAuthority::from_authority(&current_authority),
+        )
+        .pop()
+        .expect("generated stale external wiring obligation");
+    let stale_error =
+        crate::generated::protocol_mob_external_peer_trust_wiring::wiring_authority_for_peer(
+            &stale_obligation,
+            &peer_id,
+        )
+        .expect_err("stale external wiring obligation must fail closed");
+    assert!(
+        stale_error.contains("stale generated MobMachine trust obligation"),
+        "unexpected stale external wiring error: {stale_error}"
+    );
 
     let peers = CoreCommsRuntime::peers(&*comms).await;
     assert!(
-        peers
+        !peers
             .iter()
             .any(|entry| entry.name.as_str() == spec.name.as_str()),
-        "idempotent external unwire must not prune stale trust without machine authority"
+        "stale external obligation must not re-add external trust"
     );
 }
 

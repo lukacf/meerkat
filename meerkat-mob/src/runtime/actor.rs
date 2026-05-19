@@ -2065,20 +2065,23 @@ impl MobActor {
     }
 
     fn member_trust_wiring_handoff_from_transition(
+        &self,
         transition: &mob_dsl::MobMachineTransition,
         edge: &mob_dsl::WiringEdge,
         context: &str,
         operation: MemberTrustOperation,
     ) -> Result<MemberTrustHandoff, MobError> {
-        let obligation =
-            crate::generated::protocol_mob_member_trust_wiring::extract_obligations(transition)
-                .into_iter()
-                .find(|obligation| obligation.edge() == edge)
-                .ok_or_else(|| {
-                    MobError::WiringError(format!(
-                        "{context} produced no generated member wiring trust obligation"
-                    ))
-                })?;
+        let obligation = crate::generated::protocol_mob_member_trust_wiring::extract_obligations_with_freshness(
+            transition,
+            crate::generated::protocol_mob_member_trust_wiring::MobTopologyFreshnessAuthority::from_authority(&self.dsl_authority),
+        )
+        .into_iter()
+        .find(|obligation| obligation.edge() == edge)
+        .ok_or_else(|| {
+            MobError::WiringError(format!(
+                "{context} produced no generated member wiring trust obligation"
+            ))
+        })?;
         let authority = match operation {
             MemberTrustOperation::Wiring => MemberTrustAuthority::Wiring(obligation),
             MemberTrustOperation::Repair => MemberTrustAuthority::Repair(obligation),
@@ -2104,14 +2107,16 @@ impl MobActor {
         let effects = transition.effects();
         let graph_changed = Self::effects_include_wiring_graph_change(effects);
         let wiring_obligation =
-            crate::generated::protocol_mob_external_peer_trust_wiring::extract_obligations(
+            crate::generated::protocol_mob_external_peer_trust_wiring::extract_obligations_with_freshness(
                 transition,
+                crate::generated::protocol_mob_external_peer_trust_wiring::MobTopologyFreshnessAuthority::from_authority(&self.dsl_authority),
             )
             .into_iter()
             .find(|obligation| obligation.edge() == edge);
         let repair_obligation =
-            crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations(
+            crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations_with_freshness(
                 transition,
+                crate::generated::protocol_mob_external_peer_trust_repair::MobTopologyFreshnessAuthority::from_authority(&self.dsl_authority),
             )
             .into_iter()
             .find(|obligation| obligation.edge() == edge);
@@ -2157,19 +2162,22 @@ impl MobActor {
     }
 
     fn unwire_members_authority_from_transition(
+        &self,
         transition: &mob_dsl::MobMachineTransition,
         edge: &mob_dsl::WiringEdge,
         context: &str,
     ) -> Result<MemberTrustHandoff, MobError> {
-        let obligation =
-            crate::generated::protocol_mob_member_trust_unwiring::extract_obligations(transition)
-                .into_iter()
-                .find(|obligation| obligation.edge() == edge)
-                .ok_or_else(|| {
-                    MobError::WiringError(format!(
-                        "{context} produced no generated member unwiring trust obligation"
-                    ))
-                })?;
+        let obligation = crate::generated::protocol_mob_member_trust_unwiring::extract_obligations_with_freshness(
+            transition,
+            crate::generated::protocol_mob_member_trust_unwiring::MobTopologyFreshnessAuthority::from_authority(&self.dsl_authority),
+        )
+        .into_iter()
+        .find(|obligation| obligation.edge() == edge)
+        .ok_or_else(|| {
+            MobError::WiringError(format!(
+                "{context} produced no generated member unwiring trust obligation"
+            ))
+        })?;
         Ok(MemberTrustHandoff {
             edge: edge.clone(),
             authority: MemberTrustAuthority::Unwiring(obligation),
@@ -2191,7 +2199,7 @@ impl MobActor {
             },
             context,
         )?;
-        Self::member_trust_wiring_handoff_from_transition(&transition, edge, context, operation)
+        self.member_trust_wiring_handoff_from_transition(&transition, edge, context, operation)
     }
 
     fn authorize_member_trust_unwiring(
@@ -2207,7 +2215,7 @@ impl MobActor {
             },
             context,
         )?;
-        Self::unwire_members_authority_from_transition(&transition, edge, context)
+        self.unwire_members_authority_from_transition(&transition, edge, context)
     }
 
     fn authorize_member_trust_cleanup(
@@ -2223,7 +2231,7 @@ impl MobActor {
             },
             context,
         )?;
-        Self::unwire_members_authority_from_transition(&transition, edge, context)
+        self.unwire_members_authority_from_transition(&transition, edge, context)
     }
 
     fn preview_dsl_input(
@@ -8346,8 +8354,9 @@ impl MobActor {
             "authorize_external_peer_reciprocal_trust",
         )?;
         let Some(obligation) =
-            crate::generated::protocol_mob_external_peer_reciprocal_trust::extract_obligations(
+            crate::generated::protocol_mob_external_peer_reciprocal_trust::extract_obligations_with_freshness(
                 &transition,
+                crate::generated::protocol_mob_external_peer_reciprocal_trust::MobTopologyFreshnessAuthority::from_authority(&self.dsl_authority),
             )
             .into_iter()
             .find(|obligation| obligation.key() == &key)
@@ -8381,8 +8390,9 @@ impl MobActor {
             return Ok(None);
         }
         let obligation =
-            crate::generated::protocol_mob_external_peer_trust_unwiring::extract_obligations(
+            crate::generated::protocol_mob_external_peer_trust_unwiring::extract_obligations_with_freshness(
                 &transition,
+                crate::generated::protocol_mob_external_peer_trust_unwiring::MobTopologyFreshnessAuthority::from_authority(&self.dsl_authority),
             )
             .into_iter()
             .find(|obligation| obligation.edge() == edge)

@@ -327,6 +327,9 @@ fn generate_obligation_struct(
     if protocol.name.as_str() == "comms_trust_reconcile" {
         emit_peer_projection_freshness_authority(out)?;
     }
+    if is_mob_topology_trust_protocol(protocol.name.as_str()) {
+        emit_mob_topology_freshness_authority(out)?;
+    }
 
     writeln!(out, "#[derive(Debug, Clone)]")?;
     writeln!(out, "pub struct {obligation_type} {{")?;
@@ -358,6 +361,12 @@ fn generate_obligation_struct(
         writeln!(
             out,
             "    peer_projection_freshness_authority: PeerProjectionFreshnessAuthority,"
+        )?;
+    }
+    if is_mob_topology_trust_protocol(protocol.name.as_str()) {
+        writeln!(
+            out,
+            "    mob_topology_freshness_authority: MobTopologyFreshnessAuthority,"
         )?;
     }
     writeln!(out, "}}")?;
@@ -459,6 +468,54 @@ fn emit_peer_projection_freshness_authority(out: &mut String) -> Result<()> {
     Ok(())
 }
 
+fn emit_mob_topology_freshness_authority(out: &mut String) -> Result<()> {
+    writeln!(out, "#[derive(Debug, Clone)]")?;
+    writeln!(out, "pub struct MobTopologyFreshnessAuthority {{")?;
+    writeln!(out, "    topology_epoch: Option<u64>,")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(out, "impl MobTopologyFreshnessAuthority {{")?;
+    writeln!(
+        out,
+        "    pub fn from_authority(authority: &crate::machines::mob_machine::MobMachineAuthority) -> Self {{"
+    )?;
+    writeln!(
+        out,
+        "        Self {{ topology_epoch: Some(authority.state().topology_epoch) }}"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(out, "    fn missing() -> Self {{")?;
+    writeln!(out, "        Self {{ topology_epoch: None }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "    fn validate_topology_epoch(&self, expected_epoch: u64) -> Result<(), String> {{"
+    )?;
+    writeln!(
+        out,
+        "        let Some(current_epoch) = self.topology_epoch else {{"
+    )?;
+    writeln!(
+        out,
+        "            return Err(\"generated MobMachine topology freshness authority is absent\".to_string());"
+    )?;
+    writeln!(out, "        }};")?;
+    writeln!(out, "        if current_epoch == expected_epoch {{")?;
+    writeln!(out, "            Ok(())")?;
+    writeln!(out, "        }} else {{")?;
+    writeln!(
+        out,
+        "            Err(format!(\"stale generated MobMachine trust obligation at epoch {{expected_epoch}} (current {{current_epoch}})\"))"
+    )?;
+    writeln!(out, "        }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
 fn emit_comms_trust_authority_source_impl(
     out: &mut String,
     protocol: &EffectHandoffProtocol,
@@ -510,6 +567,12 @@ fn emit_comms_trust_authority_source_impl(
         writeln!(
             out,
             "        self.peer_projection_freshness_authority.validate_peer_projection_epoch(self.peer_projection_epoch)?;"
+        )?;
+    }
+    if is_mob_topology_trust_protocol(protocol.name.as_str()) {
+        writeln!(
+            out,
+            "        self.mob_topology_freshness_authority.validate_topology_epoch(self.epoch)?;"
         )?;
     }
     emit_comms_trust_payload_authorization(out, protocol)?;
@@ -974,6 +1037,18 @@ fn protected_obligation_protocol(name: &str) -> bool {
     )
 }
 
+fn is_mob_topology_trust_protocol(name: &str) -> bool {
+    matches!(
+        name,
+        "mob_member_trust_wiring"
+            | "mob_member_trust_unwiring"
+            | "mob_external_peer_trust_wiring"
+            | "mob_external_peer_trust_unwiring"
+            | "mob_external_peer_trust_repair"
+            | "mob_external_peer_reciprocal_trust"
+    )
+}
+
 fn getter_returns_copy(ty: &TypeRef) -> bool {
     matches!(
         ty,
@@ -1142,6 +1217,25 @@ fn generate_effect_extractor_helpers(
         writeln!(
             out,
             "pub fn extract_obligations_with_freshness(transition: &{transition_type}, peer_projection_freshness_authority: PeerProjectionFreshnessAuthority) -> Vec<{obligation_type}> {{"
+        )?;
+        writeln!(out, "    transition.effects()")?;
+    } else if is_mob_topology_trust_protocol(protocol.name.as_str()) {
+        let transition_type = transition_type
+            .as_ref()
+            .context("MobMachine trust protocol requires transition extractor")?;
+        writeln!(
+            out,
+            "pub fn extract_obligations(transition: &{transition_type}) -> Vec<{obligation_type}> {{"
+        )?;
+        writeln!(
+            out,
+            "    extract_obligations_with_freshness(transition, MobTopologyFreshnessAuthority::missing())"
+        )?;
+        writeln!(out, "}}")?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "pub fn extract_obligations_with_freshness(transition: &{transition_type}, mob_topology_freshness_authority: MobTopologyFreshnessAuthority) -> Vec<{obligation_type}> {{"
         )?;
         writeln!(out, "    transition.effects()")?;
     } else if let Some(transition_type) = transition_type {
@@ -2090,6 +2184,10 @@ fn obligation_ctor_expr(
                 "peer_projection_freshness_authority: peer_projection_freshness_authority.clone()",
             );
         }
+        if is_mob_topology_trust_protocol(protocol.name.as_str()) {
+            extra_fields
+                .push("mob_topology_freshness_authority: mob_topology_freshness_authority.clone()");
+        }
         let trust_claims = if extra_fields.is_empty() {
             String::new()
         } else {
@@ -2122,6 +2220,12 @@ fn obligation_ctor_expr(
     if protocol.name.as_str() == "comms_trust_reconcile" {
         fields.push(
             "peer_projection_freshness_authority: peer_projection_freshness_authority.clone()"
+                .to_string(),
+        );
+    }
+    if is_mob_topology_trust_protocol(protocol.name.as_str()) {
+        fields.push(
+            "mob_topology_freshness_authority: mob_topology_freshness_authority.clone()"
                 .to_string(),
         );
     }

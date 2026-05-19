@@ -171,7 +171,10 @@ fn resume_member_repair_authority_from_transition(
         },
         context,
     )?;
-    crate::generated::protocol_mob_member_trust_wiring::extract_obligations(&handoff_transition)
+    crate::generated::protocol_mob_member_trust_wiring::extract_obligations_with_freshness(
+        &handoff_transition,
+        crate::generated::protocol_mob_member_trust_wiring::MobTopologyFreshnessAuthority::from_authority(authority),
+    )
         .into_iter()
         .find_map(|obligation| {
             if obligation.edge() != edge
@@ -199,6 +202,7 @@ fn resume_member_repair_authority_from_transition(
 }
 
 fn resume_external_repair_authority_from_transition(
+    authority: &crate::machines::mob_machine::MobMachineAuthority,
     transition: &crate::machines::mob_machine::MobMachineTransition,
     edge: &crate::machines::mob_machine::ExternalPeerEdge,
     peer_id: &str,
@@ -207,9 +211,12 @@ fn resume_external_repair_authority_from_transition(
     let effects = transition.effects();
     let graph_changed = seeded_effects_include_wiring_graph_change(effects);
     let repair_obligation =
-        crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations(transition)
-            .into_iter()
-            .find(|obligation| obligation.edge() == edge);
+        crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations_with_freshness(
+            transition,
+            crate::generated::protocol_mob_external_peer_trust_repair::MobTopologyFreshnessAuthority::from_authority(authority),
+        )
+        .into_iter()
+        .find(|obligation| obligation.edge() == edge);
     if let Some(obligation) = repair_obligation
         && !graph_changed
     {
@@ -1888,6 +1895,7 @@ impl MobBuilder {
                             "resume_external_trust_repair",
                         )?;
                         resume_external_repair_authority_from_transition(
+                            dsl_authority,
                             &transition,
                             edge,
                             &spec_peer_id,

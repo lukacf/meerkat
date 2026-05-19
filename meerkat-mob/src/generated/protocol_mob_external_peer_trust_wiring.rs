@@ -8,12 +8,45 @@ use crate::machines::mob_machine::{
 };
 
 #[derive(Debug, Clone)]
+pub struct MobTopologyFreshnessAuthority {
+    topology_epoch: Option<u64>,
+}
+
+impl MobTopologyFreshnessAuthority {
+    pub fn from_authority(authority: &crate::machines::mob_machine::MobMachineAuthority) -> Self {
+        Self {
+            topology_epoch: Some(authority.state().topology_epoch),
+        }
+    }
+
+    fn missing() -> Self {
+        Self {
+            topology_epoch: None,
+        }
+    }
+
+    fn validate_topology_epoch(&self, expected_epoch: u64) -> Result<(), String> {
+        let Some(current_epoch) = self.topology_epoch else {
+            return Err("generated MobMachine topology freshness authority is absent".to_string());
+        };
+        if current_epoch == expected_epoch {
+            Ok(())
+        } else {
+            Err(format!(
+                "stale generated MobMachine trust obligation at epoch {expected_epoch} (current {current_epoch})"
+            ))
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct MobExternalPeerTrustWiringObligation {
     edge: ExternalPeerEdge,
     peer_id: PeerId,
     epoch: u64,
     comms_trust_authority_claims:
         std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+    mob_topology_freshness_authority: MobTopologyFreshnessAuthority,
 }
 
 impl MobExternalPeerTrustWiringObligation {
@@ -79,6 +112,8 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource
                 request.operation()
             ));
         }
+        self.mob_topology_freshness_authority
+            .validate_topology_epoch(self.epoch)?;
         if self.peer_id.0 != request.peer_id() {
             return Err(format!(
                 "MobMachine external trust obligation peer_id {:?} does not match requested peer {:?}",
@@ -111,6 +146,13 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource
 pub fn extract_obligations(
     transition: &MobMachineTransition,
 ) -> Vec<MobExternalPeerTrustWiringObligation> {
+    extract_obligations_with_freshness(transition, MobTopologyFreshnessAuthority::missing())
+}
+
+pub fn extract_obligations_with_freshness(
+    transition: &MobMachineTransition,
+    mob_topology_freshness_authority: MobTopologyFreshnessAuthority,
+) -> Vec<MobExternalPeerTrustWiringObligation> {
     transition
         .effects()
         .iter()
@@ -124,6 +166,7 @@ pub fn extract_obligations(
                 peer_id: peer_id.clone(),
                 epoch: *epoch,
                 comms_trust_authority_claims: Default::default(),
+                mob_topology_freshness_authority: mob_topology_freshness_authority.clone(),
             }),
             _ => None,
         })

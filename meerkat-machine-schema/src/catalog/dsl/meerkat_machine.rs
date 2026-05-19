@@ -2969,7 +2969,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InteractionStreamCleanup => external,
         disposition LocalEndpointChanged => external,
         disposition PeerProjectionChanged => external,
-        disposition CommsTrustReconcileRequested => external,
+        disposition CommsTrustReconcileRequested => external handoff comms_trust_reconcile,
 
         // =====================================================================
         // Helpers

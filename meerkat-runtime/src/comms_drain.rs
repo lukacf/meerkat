@@ -926,15 +926,19 @@ async fn apply_generated_trust_remove(
 fn supervisor_publish_authority(
     obligation: &crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation,
 ) -> Result<CommsTrustMutationAuthority, String> {
-    crate::generated::comms_trust_authority::supervisor_publish_handoff(obligation)
-        .publish_authority_for(&obligation.peer_id)
+    crate::protocol_supervisor_trust_publish::publish_authority_for_peer(
+        obligation,
+        &obligation.peer_id,
+    )
 }
 
 fn supervisor_revoke_authority(
     obligation: &crate::protocol_supervisor_trust_revoke::SupervisorTrustRevokeObligation,
 ) -> Result<CommsTrustMutationAuthority, String> {
-    crate::generated::comms_trust_authority::supervisor_revoke_handoff(obligation)
-        .revoke_authority_for(&obligation.peer_id)
+    crate::protocol_supervisor_trust_revoke::revoke_authority_for_peer(
+        obligation,
+        &obligation.peer_id,
+    )
 }
 
 async fn publish_supervisor_trust_from_generated_obligation(
@@ -2524,7 +2528,6 @@ mod tests {
     };
     use meerkat_core::InteractionId;
     use meerkat_core::SendError;
-    use meerkat_core::generated::comms_trust_authority;
     use meerkat_core::interaction::InboxInteraction;
     use meerkat_core::interaction::{PeerIngressConvention, PeerIngressIdentity};
     use meerkat_core::types::HandlingMode;
@@ -2546,38 +2549,17 @@ mod tests {
     const PEER_ID_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000bbbb"; // "supervisor"
     const PEER_ID_OLD_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000dddd"; // "old-supervisor"
 
-    struct TestPeerProjectionTrustEffect {
-        peer_id: String,
-        epoch: u64,
-    }
-
-    impl comms_trust_authority::GeneratedMeerkatMachinePeerProjectionHandoff
-        for TestPeerProjectionTrustEffect
-    {
-        fn peer_id(&self) -> &str {
-            self.peer_id.as_str()
-        }
-
-        fn epoch(&self) -> u64 {
-            self.epoch
-        }
-    }
-
     async fn add_test_projection_trust(
         runtime: &dyn CommsRuntime,
         peer: TrustedPeerDescriptor,
         context: &str,
     ) {
-        let peer_id = peer.peer_id.to_string();
+        let endpoint = crate::meerkat_machine::dsl::PeerEndpoint::from(&peer);
+        let obligation = crate::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
+            peer_projection_epoch: 0,
+        };
         let authority =
-            comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                &TestPeerProjectionTrustEffect {
-                    peer_id: peer_id.clone(),
-                    epoch: 0,
-                },
-            )
-            .authority_for(&peer_id)
-            .expect("test projection handoff covers peer");
+            crate::protocol_comms_trust_reconcile::authority_for_endpoint(&obligation, &endpoint);
         match runtime
             .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer { peer, authority })
             .await

@@ -21,7 +21,6 @@ use meerkat_core::comms::{
     CommsTrustMutation, CommsTrustMutationResult, PeerAddress, PeerName, PeerTransport,
     TrustedPeerDescriptor,
 };
-use meerkat_core::generated::comms_trust_authority;
 use meerkat_core::{PeerIngressAuthDecision, PeerIngressAuthExemption, SUPERVISOR_BRIDGE_INTENT};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -43,36 +42,23 @@ fn descriptor_for(name: &str, pubkey: &meerkat_comms::identity::PubKey) -> Trust
     }
 }
 
-struct TestPeerProjectionTrustEffect {
-    peer_id: String,
+fn test_projection_authority(
+    peer: &TrustedPeerDescriptor,
     epoch: u64,
-}
-
-impl comms_trust_authority::GeneratedMeerkatMachinePeerProjectionHandoff
-    for TestPeerProjectionTrustEffect
-{
-    fn peer_id(&self) -> &str {
-        self.peer_id.as_str()
-    }
-
-    fn epoch(&self) -> u64 {
-        self.epoch
-    }
+) -> meerkat_core::comms::CommsTrustMutationAuthority {
+    let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
+    let obligation =
+        meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
+            peer_projection_epoch: epoch,
+        };
+    meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(&obligation, &endpoint)
 }
 
 async fn apply_generated_trust(runtime: &CommsRuntime, peer: TrustedPeerDescriptor) {
-    let peer_id = peer.peer_id.to_string();
     meerkat_core::agent::CommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
-            authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                &TestPeerProjectionTrustEffect {
-                    peer_id: peer_id.clone(),
-                    epoch: 0,
-                },
-            )
-            .authority_for(&peer_id)
-            .expect("valid generated trust authority"),
+            authority: test_projection_authority(&peer, 0),
             peer,
         },
     )
@@ -80,19 +66,13 @@ async fn apply_generated_trust(runtime: &CommsRuntime, peer: TrustedPeerDescript
     .expect("seed trust");
 }
 
-async fn revoke_generated_trust(runtime: &CommsRuntime, peer_id: String) -> bool {
+async fn revoke_generated_trust(runtime: &CommsRuntime, peer: TrustedPeerDescriptor) -> bool {
+    let peer_id = peer.peer_id.to_string();
     match meerkat_core::agent::CommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::RemoveTrustedPeer {
-            authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                &TestPeerProjectionTrustEffect {
-                    peer_id: peer_id.clone(),
-                    epoch: 0,
-                },
-            )
-            .authority_for(&peer_id)
-            .expect("valid generated trust authority"),
-            peer_id,
+            authority: test_projection_authority(&peer, 0),
+            peer_id: peer_id.clone(),
         },
     )
     .await
@@ -170,13 +150,9 @@ async fn revoked_sender_is_rejected_at_admission() {
 
     // Seed trust, then revoke — this is the post-revoke state the
     // classify→admit seam must respect.
-    apply_generated_trust(
-        &receiver,
-        descriptor_for("peer-sender", &sender.public_key()),
-    )
-    .await;
-    let removed =
-        revoke_generated_trust(&receiver, sender.public_key().to_peer_id().to_string()).await;
+    let sender_descriptor = descriptor_for("peer-sender", &sender.public_key());
+    apply_generated_trust(&receiver, sender_descriptor.clone()).await;
+    let removed = revoke_generated_trust(&receiver, sender_descriptor).await;
     assert!(removed, "trust revoke must succeed");
 
     let envelope = make_signed_envelope(&sender, receiver.public_key());
@@ -255,7 +231,7 @@ async fn concurrent_revokes_and_admissions_never_admit_untrusted() {
                 if i % 2 == 0 {
                     let _ = revoke_generated_trust(
                         receiver_for_task.as_ref(),
-                        sender_for_task.public_key().to_peer_id().to_string(),
+                        descriptor_for("peer-sender", &sender_for_task.public_key()),
                     )
                     .await;
                 } else {
@@ -303,14 +279,10 @@ async fn classify_at_t0_revoke_at_t1_admit_at_t2_sees_revoked_state() {
     let sender = Keypair::generate();
 
     // Seed trust — classification at T0 will see the sender as trusted.
-    apply_generated_trust(
-        &receiver,
-        descriptor_for("peer-sender", &sender.public_key()),
-    )
-    .await;
+    let sender_descriptor = descriptor_for("peer-sender", &sender.public_key());
+    apply_generated_trust(&receiver, sender_descriptor.clone()).await;
 
     let envelope = make_signed_envelope(&sender, receiver.public_key());
-    let revoke_peer_id = sender.public_key().to_peer_id().to_string();
 
     // classify → (revoke trust) → admit. Post-fix, the admission step
     // re-reads the trust set and drops. Pre-fix, it would admit using
@@ -321,8 +293,10 @@ async fn classify_at_t0_revoke_at_t1_admit_at_t2_sees_revoked_state() {
         .classified_admit_with_pause_for_test(InboxItem::External { envelope }, || {
             // This runs between classify and admit. Revoke trust so the
             // admission stage observes a state the classifier did not.
-            let removed =
-                futures::executor::block_on(revoke_generated_trust(&receiver, revoke_peer_id));
+            let removed = futures::executor::block_on(revoke_generated_trust(
+                &receiver,
+                sender_descriptor.clone(),
+            ));
             assert!(removed, "trust revoke must succeed during pause");
         });
 

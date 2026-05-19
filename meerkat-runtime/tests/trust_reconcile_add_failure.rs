@@ -7,7 +7,7 @@
 //! reconciler lives in `meerkat-runtime`, and `meerkat-comms` cannot
 //! dev-dep on it without introducing a circular crate dependency.
 //!
-//! Invariant pinned (§6 #3): when the trust store's `add_trusted_peer`
+//! Invariant pinned (§6 #3): when the generated trust mutation seam
 //! returns an error, the reconciler must
 //!
 //!   (a) surface the failure as
@@ -26,7 +26,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
-use meerkat_core::comms::{SendError, TrustedPeerDescriptor};
+use meerkat_core::comms::{
+    CommsTrustMutation, CommsTrustMutationResult, SendError, TrustedPeerDescriptor,
+};
 use meerkat_core::{
     PeerIngressAuthorityPhase, PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot,
 };
@@ -34,6 +36,7 @@ use meerkat_runtime::comms_trust_reconcile::{CommsTrustReconcileError, CommsTrus
 use meerkat_runtime::meerkat_machine::dsl::{
     PeerAddress, PeerEndpoint, PeerId, PeerName, PeerSigningKey,
 };
+use meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation;
 
 const UUID_A: &str = "aaaaaaaa-0000-4000-8000-000000000001";
 
@@ -46,7 +49,13 @@ fn endpoint(name: &str, peer_id_uuid: &str) -> PeerEndpoint {
     }
 }
 
-/// `CommsRuntime` mock whose next `add_trusted_peer` call returns
+fn obligation(epoch: u64) -> CommsTrustReconcileObligation {
+    CommsTrustReconcileObligation {
+        peer_projection_epoch: epoch,
+    }
+}
+
+/// `CommsRuntime` mock whose next generated trust add mutation returns
 /// `SendError::Unsupported`. Once fired, the flag resets so a
 /// subsequent retry succeeds — this lets us assert the retry path
 /// sees the peer as still absent from the applied view.
@@ -72,15 +81,28 @@ impl CommsRuntime for AddFailingCommsRuntime {
         Arc::new(tokio::sync::Notify::new())
     }
 
-    async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        if self.fail_next_add.swap(false, Ordering::SeqCst) {
-            return Err(SendError::Unsupported("synthetic add failure".into()));
+    async fn apply_trust_mutation(
+        &self,
+        mutation: CommsTrustMutation,
+    ) -> Result<CommsTrustMutationResult, SendError> {
+        match mutation {
+            CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                authority
+                    .validate_public_add(peer.peer_id)
+                    .map_err(SendError::Validation)?;
+                if self.fail_next_add.swap(false, Ordering::SeqCst) {
+                    return Err(SendError::Unsupported("synthetic add failure".into()));
+                }
+                self.successful_adds
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(peer);
+                Ok(CommsTrustMutationResult::Added)
+            }
+            _ => Err(SendError::Unsupported(
+                "test runtime only supports generated public trust adds".into(),
+            )),
         }
-        self.successful_adds
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(peer);
-        Ok(())
     }
 
     async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
@@ -124,7 +146,7 @@ async fn add_failure_surfaces_typed_error_and_preserves_canonical_store() {
 
     // First reconcile: add fails.
     let err = reconciler
-        .reconcile(1, BTreeSet::from([endpoint("A", UUID_A)]))
+        .reconcile(&obligation(1), BTreeSet::from([endpoint("A", UUID_A)]))
         .await
         .expect_err("add_trust failure must surface");
     match err {
@@ -148,7 +170,7 @@ async fn add_failure_surfaces_typed_error_and_preserves_canonical_store() {
     // flag is cleared; the retry succeeds because the reconciler
     // re-reads the canonical store and still sees the peer absent.
     let retry = reconciler
-        .reconcile(1, BTreeSet::from([endpoint("A", UUID_A)]))
+        .reconcile(&obligation(1), BTreeSet::from([endpoint("A", UUID_A)]))
         .await
         .expect("retry succeeds with flag cleared");
     assert_eq!(retry.applied_epoch, 1);

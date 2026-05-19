@@ -370,7 +370,8 @@ pub enum CommsTrustMutationAuthority {
 }
 
 impl CommsTrustMutationAuthority {
-    pub(crate) fn from_meerkat_machine_peer_projection(
+    #[doc(hidden)]
+    pub fn from_generated_meerkat_machine_peer_projection(
         peer_id: impl Into<String>,
         epoch: u64,
     ) -> Self {
@@ -380,7 +381,8 @@ impl CommsTrustMutationAuthority {
         }
     }
 
-    pub(crate) fn from_meerkat_machine_supervisor_publish(
+    #[doc(hidden)]
+    pub fn from_generated_meerkat_machine_supervisor_publish(
         peer_id: impl Into<String>,
         epoch: u64,
     ) -> Self {
@@ -390,7 +392,8 @@ impl CommsTrustMutationAuthority {
         }
     }
 
-    pub(crate) fn from_meerkat_machine_supervisor_revoke(
+    #[doc(hidden)]
+    pub fn from_generated_meerkat_machine_supervisor_revoke(
         peer_id: impl Into<String>,
         epoch: u64,
     ) -> Self {
@@ -400,21 +403,27 @@ impl CommsTrustMutationAuthority {
         }
     }
 
-    pub(crate) fn from_mob_machine_peer_wiring(peer_id: impl Into<String>, epoch: u64) -> Self {
+    #[doc(hidden)]
+    pub fn from_generated_mob_machine_peer_wiring(peer_id: impl Into<String>, epoch: u64) -> Self {
         Self::MobMachinePeerWiring {
             peer_id: peer_id.into(),
             epoch,
         }
     }
 
-    pub(crate) fn from_mob_machine_peer_unwiring(peer_id: impl Into<String>, epoch: u64) -> Self {
+    #[doc(hidden)]
+    pub fn from_generated_mob_machine_peer_unwiring(
+        peer_id: impl Into<String>,
+        epoch: u64,
+    ) -> Self {
         Self::MobMachinePeerUnwiring {
             peer_id: peer_id.into(),
             epoch,
         }
     }
 
-    pub(crate) fn from_mob_machine_peer_repair(peer_id: impl Into<String>, epoch: u64) -> Self {
+    #[doc(hidden)]
+    pub fn from_generated_mob_machine_peer_repair(peer_id: impl Into<String>, epoch: u64) -> Self {
         Self::MobMachinePeerRepair {
             peer_id: peer_id.into(),
             epoch,

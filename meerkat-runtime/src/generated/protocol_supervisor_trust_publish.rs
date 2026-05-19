@@ -37,3 +37,32 @@ pub fn extract_obligations(
         })
         .collect()
 }
+
+fn validate_expected_peer(
+    context: &'static str,
+    actual: &str,
+    expected: &str,
+) -> Result<(), String> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "{context} peer id {actual:?} does not match expected mutation peer id {expected:?}"
+        ))
+    }
+}
+
+pub fn publish_authority_for_peer(
+    obligation: &SupervisorTrustPublishObligation,
+    expected_peer_id: &str,
+) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {
+    validate_expected_peer(
+        "MeerkatMachineSupervisorPublish",
+        &obligation.peer_id,
+        expected_peer_id,
+    )?;
+    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_publish(
+        obligation.peer_id.clone(),
+        obligation.epoch,
+    ))
+}

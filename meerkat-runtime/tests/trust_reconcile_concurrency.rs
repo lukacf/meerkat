@@ -29,7 +29,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
-use meerkat_core::comms::{SendError, TrustedPeerDescriptor};
+use meerkat_core::comms::{
+    CommsTrustMutation, CommsTrustMutationResult, SendError, TrustedPeerDescriptor,
+};
 use meerkat_core::{
     PeerIngressAuthorityPhase, PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot,
 };
@@ -37,6 +39,7 @@ use meerkat_runtime::comms_trust_reconcile::{CommsTrustReconciler, ReconcileRepo
 use meerkat_runtime::meerkat_machine::dsl::{
     PeerAddress, PeerEndpoint, PeerId, PeerName, PeerSigningKey,
 };
+use meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation;
 
 const UUID_A: &str = "aaaaaaaa-0000-4000-8000-000000000001";
 const UUID_B: &str = "bbbbbbbb-0000-4000-8000-000000000002";
@@ -47,6 +50,12 @@ fn endpoint(name: &str, peer_id_uuid: &str) -> PeerEndpoint {
         peer_id: PeerId(peer_id_uuid.to_string()),
         address: PeerAddress(format!("inproc://{name}")),
         signing_key: PeerSigningKey([name.as_bytes()[0]; 32]),
+    }
+}
+
+fn obligation(epoch: u64) -> CommsTrustReconcileObligation {
+    CommsTrustReconcileObligation {
+        peer_projection_epoch: epoch,
     }
 }
 
@@ -79,32 +88,51 @@ impl CommsRuntime for RecordingCommsRuntime {
         Arc::new(tokio::sync::Notify::new())
     }
 
-    async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        self.add_count.fetch_add(1, Ordering::SeqCst);
-        self.adds
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(peer.clone());
-        self.trusted
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(peer);
-        Ok(())
-    }
-
-    async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-        self.remove_count.fetch_add(1, Ordering::SeqCst);
-        self.removes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(peer_id.to_string());
-        let mut trusted = self
-            .trusted
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let before = trusted.len();
-        trusted.retain(|peer| peer.peer_id.to_string() != peer_id);
-        Ok(before != trusted.len())
+    async fn apply_trust_mutation(
+        &self,
+        mutation: CommsTrustMutation,
+    ) -> Result<CommsTrustMutationResult, SendError> {
+        match mutation {
+            CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                authority
+                    .validate_public_add(peer.peer_id)
+                    .map_err(SendError::Validation)?;
+                self.add_count.fetch_add(1, Ordering::SeqCst);
+                self.adds
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(peer.clone());
+                self.trusted
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(peer);
+                Ok(CommsTrustMutationResult::Added)
+            }
+            CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                let parsed_peer_id = meerkat_core::comms::PeerId::parse(&peer_id)
+                    .map_err(|error| SendError::Validation(error.to_string()))?;
+                authority
+                    .validate_public_remove(parsed_peer_id)
+                    .map_err(SendError::Validation)?;
+                self.remove_count.fetch_add(1, Ordering::SeqCst);
+                self.removes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(peer_id.clone());
+                let mut trusted = self
+                    .trusted
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let before = trusted.len();
+                trusted.retain(|peer| peer.peer_id.to_string() != peer_id);
+                Ok(CommsTrustMutationResult::Removed {
+                    removed: before != trusted.len(),
+                })
+            }
+            _ => Err(SendError::Unsupported(
+                "test runtime only supports generated public trust mutations".into(),
+            )),
+        }
     }
 
     async fn peer_ingress_runtime_snapshot(
@@ -160,12 +188,12 @@ async fn concurrent_reconciles_complete_against_canonical_store() {
     let reconciler_newer = reconciler.clone();
     let older_task = tokio::spawn(async move {
         reconciler_older
-            .reconcile(1, BTreeSet::from([endpoint("A", UUID_A)]))
+            .reconcile(&obligation(1), BTreeSet::from([endpoint("A", UUID_A)]))
             .await
     });
     let newer_task = tokio::spawn(async move {
         reconciler_newer
-            .reconcile(2, BTreeSet::from([endpoint("B", UUID_B)]))
+            .reconcile(&obligation(2), BTreeSet::from([endpoint("B", UUID_B)]))
             .await
     });
     let older_res: ReconcileReport = older_task
@@ -198,7 +226,7 @@ async fn lower_epoch_reconcile_reads_canonical_store() {
 
     // Newer commits first at epoch=5 with peer set {A}.
     let newer = reconciler
-        .reconcile(5, BTreeSet::from([endpoint("A", UUID_A)]))
+        .reconcile(&obligation(5), BTreeSet::from([endpoint("A", UUID_A)]))
         .await
         .expect("newer reconcile");
     assert_eq!(newer.applied_epoch, 5);
@@ -208,7 +236,7 @@ async fn lower_epoch_reconcile_reads_canonical_store() {
     // Lower epoch arrives with a different set {B}. Expected: canonical diff
     // removes A and adds B; no helper-local watermark short-circuits it.
     let lower = reconciler
-        .reconcile(3, BTreeSet::from([endpoint("B", UUID_B)]))
+        .reconcile(&obligation(3), BTreeSet::from([endpoint("B", UUID_B)]))
         .await
         .expect("lower-epoch reconcile");
     assert_eq!(lower.applied_epoch, 3);

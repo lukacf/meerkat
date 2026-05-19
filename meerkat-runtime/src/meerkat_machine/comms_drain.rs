@@ -1052,7 +1052,7 @@ impl MeerkatMachine {
     ) -> Result<
         (
             Arc<crate::comms_trust_reconcile::CommsTrustReconciler>,
-            u64,
+            crate::protocol_comms_trust_reconcile::CommsTrustReconcileObligation,
             BTreeSet<crate::meerkat_machine::dsl::PeerEndpoint>,
         ),
         PeerEndpointStageError,
@@ -1062,7 +1062,7 @@ impl MeerkatMachine {
             .get_mut(session_id)
             .ok_or(PeerEndpointStageError::SessionNotRegistered)?;
 
-        let (reconcile_epoch, effective_peers) = {
+        let (reconcile_obligation, effective_peers) = {
             let mut authority = entry
                 .dsl_authority
                 .lock()
@@ -1070,16 +1070,11 @@ impl MeerkatMachine {
             let transition =
                 crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
                     .map_err(PeerEndpointStageError::Dsl)?;
-            let epoch = transition
-                .effects
-                .iter()
-                .find_map(|e| match e {
-                    crate::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
-                        peer_projection_epoch,
-                    } => Some(*peer_projection_epoch),
-                    _ => None,
-                })
-                .ok_or(PeerEndpointStageError::MissingReconcileEffect)?;
+            let obligation =
+                crate::protocol_comms_trust_reconcile::extract_obligations(&transition.effects)
+                    .into_iter()
+                    .next()
+                    .ok_or(PeerEndpointStageError::MissingReconcileEffect)?;
             // Effective peer set is the union of direct + overlay
             // sampled inside the same DSL-lock critical section that
             // just committed the transition. No interleaved mutation
@@ -1091,24 +1086,24 @@ impl MeerkatMachine {
                 .chain(authority.state().mob_overlay_peer_endpoints.iter())
                 .cloned()
                 .collect();
-            (epoch, effective)
+            (obligation, effective)
         };
 
         let reconciler = Arc::new(crate::comms_trust_reconcile::CommsTrustReconciler::new(
             comms_runtime,
         ));
 
-        Ok((reconciler, reconcile_epoch, effective_peers))
+        Ok((reconciler, reconcile_obligation, effective_peers))
     }
 }
 
 async fn drive_reconciler(
     reconciler: &crate::comms_trust_reconcile::CommsTrustReconciler,
-    reconcile_epoch: u64,
+    reconcile_obligation: crate::protocol_comms_trust_reconcile::CommsTrustReconcileObligation,
     effective_peers: BTreeSet<crate::meerkat_machine::dsl::PeerEndpoint>,
 ) -> Result<(), PeerEndpointStageError> {
     reconciler
-        .reconcile(reconcile_epoch, effective_peers)
+        .reconcile(&reconcile_obligation, effective_peers)
         .await
         .map(|_report| ())
         .map_err(PeerEndpointStageError::Reconcile)

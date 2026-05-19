@@ -500,6 +500,8 @@ fn generate_effect_extractor_helpers(
     writeln!(out, "}}")?;
     writeln!(out)?;
 
+    generate_comms_trust_authority_helpers(out, protocol, obligation_type)?;
+
     // Only emit `submit_*` (authority.apply) helpers when the binding
     // declares an authority. Without one, feedback flows through a
     // stacked `HandleBridge` submitter (see composition validator).
@@ -525,6 +527,251 @@ fn generate_effect_extractor_helpers(
         )?;
     }
 
+    Ok(())
+}
+
+fn generate_comms_trust_authority_helpers(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+    obligation_type: &str,
+) -> Result<()> {
+    match protocol.name.as_str() {
+        "comms_trust_reconcile" => {
+            writeln!(
+                out,
+                "pub fn authority_for_endpoint(obligation: &{obligation_type}, endpoint: &crate::meerkat_machine::dsl::PeerEndpoint) -> meerkat_core::comms::CommsTrustMutationAuthority {{"
+            )?;
+            writeln!(
+                out,
+                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection("
+            )?;
+            writeln!(out, "        endpoint.peer_id.0.clone(),")?;
+            writeln!(out, "        obligation.peer_projection_epoch,")?;
+            writeln!(out, "    )")?;
+            writeln!(out, "}}")?;
+            writeln!(out)?;
+        }
+        "supervisor_trust_publish" => {
+            emit_expected_peer_validator(out)?;
+            writeln!(
+                out,
+                "pub fn publish_authority_for_peer(obligation: &{obligation_type}, expected_peer_id: &str) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {{"
+            )?;
+            writeln!(
+                out,
+                "    validate_expected_peer(\"MeerkatMachineSupervisorPublish\", &obligation.peer_id, expected_peer_id)?;"
+            )?;
+            writeln!(
+                out,
+                "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_publish("
+            )?;
+            writeln!(out, "        obligation.peer_id.clone(),")?;
+            writeln!(out, "        obligation.epoch,")?;
+            writeln!(out, "    ))")?;
+            writeln!(out, "}}")?;
+            writeln!(out)?;
+        }
+        "supervisor_trust_revoke" => {
+            emit_expected_peer_validator(out)?;
+            writeln!(
+                out,
+                "pub fn revoke_authority_for_peer(obligation: &{obligation_type}, expected_peer_id: &str) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {{"
+            )?;
+            writeln!(
+                out,
+                "    validate_expected_peer(\"MeerkatMachineSupervisorRevoke\", &obligation.peer_id, expected_peer_id)?;"
+            )?;
+            writeln!(
+                out,
+                "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke("
+            )?;
+            writeln!(out, "        obligation.peer_id.clone(),")?;
+            writeln!(out, "        obligation.epoch,")?;
+            writeln!(out, "    ))")?;
+            writeln!(out, "}}")?;
+            writeln!(out)?;
+        }
+        "mob_member_trust_wiring" => {
+            emit_member_trust_helpers(out, obligation_type, true)?;
+        }
+        "mob_member_trust_unwiring" => {
+            emit_member_trust_helpers(out, obligation_type, false)?;
+        }
+        "mob_external_peer_trust_wiring" => {
+            emit_external_peer_trust_helper(
+                out,
+                obligation_type,
+                "wiring_authority_for_peer",
+                "MobMachineExternalPeerWiring",
+                "from_generated_mob_machine_peer_wiring",
+            )?;
+        }
+        "mob_external_peer_trust_unwiring" => {
+            emit_external_peer_trust_helper(
+                out,
+                obligation_type,
+                "unwiring_authority_for_peer",
+                "MobMachineExternalPeerUnwiring",
+                "from_generated_mob_machine_peer_unwiring",
+            )?;
+        }
+        "mob_external_peer_trust_repair" => {
+            emit_external_peer_trust_helper(
+                out,
+                obligation_type,
+                "repair_authority_for_peer",
+                "MobMachineExternalPeerRepair",
+                "from_generated_mob_machine_peer_repair",
+            )?;
+        }
+        "mob_external_peer_reciprocal_trust" => {
+            emit_external_peer_trust_helper(
+                out,
+                obligation_type,
+                "reciprocal_wiring_authority_for_peer",
+                "MobMachineExternalPeerReciprocalWiring",
+                "from_generated_mob_machine_peer_wiring",
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn emit_expected_peer_validator(out: &mut String) -> Result<()> {
+    writeln!(
+        out,
+        "fn validate_expected_peer(context: &'static str, actual: &str, expected: &str) -> Result<(), String> {{"
+    )?;
+    writeln!(out, "    if actual == expected {{")?;
+    writeln!(out, "        Ok(())")?;
+    writeln!(out, "    }} else {{")?;
+    writeln!(
+        out,
+        "        Err(format!(\"{{context}} peer id {{actual:?}} does not match expected mutation peer id {{expected:?}}\"))"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_member_trust_helpers(
+    out: &mut String,
+    obligation_type: &str,
+    include_wiring_helpers: bool,
+) -> Result<()> {
+    emit_expected_peer_validator(out)?;
+    writeln!(
+        out,
+        "fn peer_id_for_identity<'a>(obligation: &'a {obligation_type}, identity: &str) -> Option<&'a str> {{"
+    )?;
+    writeln!(out, "    if obligation.edge.a.0 == identity {{")?;
+    writeln!(out, "        Some(obligation.a_peer_id.0.as_str())")?;
+    writeln!(out, "    }} else if obligation.edge.b.0 == identity {{")?;
+    writeln!(out, "        Some(obligation.b_peer_id.0.as_str())")?;
+    writeln!(out, "    }} else {{")?;
+    writeln!(out, "        None")?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    writeln!(
+        out,
+        "fn required_peer_id_for_identity<'a>(obligation: &'a {obligation_type}, identity: &str, expected_peer_id: &str) -> Result<&'a str, String> {{"
+    )?;
+    writeln!(
+        out,
+        "    let Some(actual) = peer_id_for_identity(obligation, identity) else {{"
+    )?;
+    writeln!(
+        out,
+        "        return Err(format!(\"MobMachine member trust obligation does not cover identity {{identity:?}}\"));"
+    )?;
+    writeln!(out, "    }};")?;
+    writeln!(
+        out,
+        "    validate_expected_peer(\"MobMachineMemberTrust\", actual, expected_peer_id)?;"
+    )?;
+    writeln!(out, "    Ok(actual)")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    if include_wiring_helpers {
+        emit_member_authority_fn(
+            out,
+            obligation_type,
+            "wiring_authority_for_identity",
+            "from_generated_mob_machine_peer_wiring",
+        )?;
+        emit_member_authority_fn(
+            out,
+            obligation_type,
+            "repair_authority_for_identity",
+            "from_generated_mob_machine_peer_repair",
+        )?;
+    } else {
+        emit_member_authority_fn(
+            out,
+            obligation_type,
+            "unwiring_authority_for_identity",
+            "from_generated_mob_machine_peer_unwiring",
+        )?;
+    }
+    Ok(())
+}
+
+fn emit_member_authority_fn(
+    out: &mut String,
+    obligation_type: &str,
+    fn_name: &str,
+    constructor_name: &str,
+) -> Result<()> {
+    writeln!(
+        out,
+        "pub fn {fn_name}(obligation: &{obligation_type}, identity: &str, expected_peer_id: &str) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {{"
+    )?;
+    writeln!(
+        out,
+        "    let peer_id = required_peer_id_for_identity(obligation, identity, expected_peer_id)?;"
+    )?;
+    writeln!(
+        out,
+        "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
+    )?;
+    writeln!(out, "        peer_id.to_owned(),")?;
+    writeln!(out, "        obligation.epoch,")?;
+    writeln!(out, "    ))")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_external_peer_trust_helper(
+    out: &mut String,
+    obligation_type: &str,
+    fn_name: &str,
+    context: &str,
+    constructor_name: &str,
+) -> Result<()> {
+    emit_expected_peer_validator(out)?;
+    writeln!(
+        out,
+        "pub fn {fn_name}(obligation: &{obligation_type}, expected_peer_id: &str) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {{"
+    )?;
+    writeln!(
+        out,
+        "    validate_expected_peer(\"{context}\", obligation.peer_id.0.as_str(), expected_peer_id)?;"
+    )?;
+    writeln!(
+        out,
+        "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
+    )?;
+    writeln!(out, "        obligation.peer_id.0.clone(),")?;
+    writeln!(out, "        obligation.epoch,")?;
+    writeln!(out, "    ))")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
     Ok(())
 }
 

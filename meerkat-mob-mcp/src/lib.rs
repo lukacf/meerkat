@@ -3355,7 +3355,6 @@ mod tests {
     use meerkat_core::event_injector::{
         EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
     };
-    use meerkat_core::generated::comms_trust_authority;
     use meerkat_core::interaction::PeerInputCandidate;
     use meerkat_core::service::InitialTurnPolicy;
     use meerkat_core::service::SessionService;
@@ -3372,23 +3371,6 @@ mod tests {
     use std::time::SystemTime;
     use tokio::sync::Notify;
     use tokio::time::{Duration, Instant, sleep};
-
-    struct TestExternalPeerTrustEffect {
-        peer_id: String,
-        epoch: u64,
-    }
-
-    impl comms_trust_authority::GeneratedMobMachineExternalPeerTrustHandoff
-        for TestExternalPeerTrustEffect
-    {
-        fn peer_id(&self) -> &str {
-            self.peer_id.as_str()
-        }
-
-        fn epoch(&self) -> u64 {
-            self.epoch
-        }
-    }
 
     const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 
@@ -3425,18 +3407,23 @@ mod tests {
             .await
             .expect_err("raw add must fail closed");
         assert!(matches!(raw_add, SendError::Unsupported(_)));
+        let external_edge = meerkat_mob::machines::mob_machine::ExternalPeerEdge::new(
+            meerkat_mob::machines::mob_machine::AgentIdentity("local".to_string()),
+            meerkat_mob::machines::mob_machine::ExternalPeerEndpoint::from(&peer),
+        );
 
         let added = runtime
             .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
                 peer: peer.clone(),
-                authority: comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_wiring(
-                    &TestExternalPeerTrustEffect {
-                        peer_id: peer_id.clone(),
+                authority: meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::wiring_authority_for_peer(
+                    &meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::MobExternalPeerTrustWiringObligation {
+                        edge: external_edge.clone(),
+                        peer_id: meerkat_mob::machines::mob_machine::PeerId(peer_id.clone()),
                         epoch: 1,
                     },
+                    &peer_id,
                 )
-                .authority_for_wiring(&peer_id)
-                .expect("generated wiring handoff covers peer"),
+                .expect("generated wiring obligation covers peer"),
             })
             .await
             .expect("authorized add succeeds");
@@ -3453,14 +3440,15 @@ mod tests {
             .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
                 authority:
-                    comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_unwiring(
-                        &TestExternalPeerTrustEffect {
-                            peer_id: peer_id.clone(),
+                    meerkat_mob::generated::protocol_mob_external_peer_trust_unwiring::unwiring_authority_for_peer(
+                        &meerkat_mob::generated::protocol_mob_external_peer_trust_unwiring::MobExternalPeerTrustUnwiringObligation {
+                            edge: external_edge,
+                            peer_id: meerkat_mob::machines::mob_machine::PeerId(peer_id.clone()),
                             epoch: 2,
                         },
+                        &peer_id,
                     )
-                    .authority_for_unwiring(&peer_id)
-                    .expect("generated unwiring handoff covers peer"),
+                    .expect("generated unwiring obligation covers peer"),
             })
             .await
             .expect("authorized remove succeeds");

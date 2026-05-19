@@ -40,6 +40,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::meerkat_machine::dsl::PeerEndpoint;
+use crate::protocol_comms_trust_reconcile::CommsTrustReconcileObligation;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
 use meerkat_core::comms::{
     CommsTrustMutation, CommsTrustMutationResult, PeerAddress, PeerId, PeerName, SendError,
@@ -121,7 +122,7 @@ impl CommsTrustReconciler {
     /// canonical trust store and retries whatever delta remains.
     pub async fn reconcile(
         &self,
-        epoch: u64,
+        obligation: &CommsTrustReconcileObligation,
         effective_peers: BTreeSet<PeerEndpoint>,
     ) -> Result<ReconcileReport, CommsTrustReconcileError> {
         let previous_peers = self.canonical_trusted_peer_snapshot().await?;
@@ -145,13 +146,9 @@ impl CommsTrustReconciler {
         // an older session hasn't completed.
         for endpoint in to_add {
             let descriptor = endpoint_to_descriptor(&endpoint)?;
-            let authority =
-                crate::generated::comms_trust_authority::peer_projection_handoff(&endpoint, epoch)
-                    .authority_for(&endpoint.peer_id.0)
-                    .map_err(|source| CommsTrustReconcileError::AddTrustFailed {
-                        peer_id: endpoint.peer_id.0.clone(),
-                        source: SendError::Validation(source),
-                    })?;
+            let authority = crate::protocol_comms_trust_reconcile::authority_for_endpoint(
+                obligation, &endpoint,
+            );
             self.comms
                 .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
                     authority,
@@ -166,13 +163,9 @@ impl CommsTrustReconciler {
         }
 
         for endpoint in to_remove {
-            let authority =
-                crate::generated::comms_trust_authority::peer_projection_handoff(&endpoint, epoch)
-                    .authority_for(&endpoint.peer_id.0)
-                    .map_err(|source| CommsTrustReconcileError::RemoveTrustFailed {
-                        peer_id: endpoint.peer_id.0.clone(),
-                        source: SendError::Validation(source),
-                    })?;
+            let authority = crate::protocol_comms_trust_reconcile::authority_for_endpoint(
+                obligation, &endpoint,
+            );
             let result = self
                 .comms
                 .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
@@ -198,7 +191,7 @@ impl CommsTrustReconciler {
         Ok(ReconcileReport {
             added,
             removed,
-            applied_epoch: epoch,
+            applied_epoch: obligation.peer_projection_epoch,
         })
     }
 
@@ -399,6 +392,12 @@ mod tests {
         }
     }
 
+    fn obligation(epoch: u64) -> CommsTrustReconcileObligation {
+        CommsTrustReconcileObligation {
+            peer_projection_epoch: epoch,
+        }
+    }
+
     #[tokio::test]
     async fn first_reconcile_registers_all_effective_peers() {
         let comms = Arc::new(RecordingCommsRuntime::default());
@@ -406,7 +405,7 @@ mod tests {
         let peers = BTreeSet::from([endpoint("A", UUID_A), endpoint("B", UUID_B)]);
 
         let report = reconciler
-            .reconcile(1, peers.clone())
+            .reconcile(&obligation(1), peers.clone())
             .await
             .expect("first reconcile succeeds");
 
@@ -443,13 +442,13 @@ mod tests {
 
         let peers_v1 = BTreeSet::from([endpoint("A", UUID_A), endpoint("B", UUID_B)]);
         reconciler
-            .reconcile(1, peers_v1)
+            .reconcile(&obligation(1), peers_v1)
             .await
             .expect("v1 reconcile");
 
         let peers_v2 = BTreeSet::from([endpoint("A", UUID_A), endpoint("C", UUID_C)]);
         let report = reconciler
-            .reconcile(2, peers_v2)
+            .reconcile(&obligation(2), peers_v2)
             .await
             .expect("v2 reconcile");
 
@@ -471,7 +470,7 @@ mod tests {
         let reconciler = CommsTrustReconciler::new(comms.clone());
 
         reconciler
-            .reconcile(5, BTreeSet::from([endpoint("A", UUID_A)]))
+            .reconcile(&obligation(5), BTreeSet::from([endpoint("A", UUID_A)]))
             .await
             .expect("first reconcile");
 
@@ -491,7 +490,7 @@ mod tests {
             .insert(endpoint("B", UUID_B));
 
         let report = reconciler
-            .reconcile(4, BTreeSet::from([endpoint("A", UUID_A)]))
+            .reconcile(&obligation(4), BTreeSet::from([endpoint("A", UUID_A)]))
             .await
             .expect("reconcile should read canonical trust store");
         assert_eq!(report.added, vec![endpoint("A", UUID_A)]);
@@ -509,14 +508,14 @@ mod tests {
 
         reconciler
             .reconcile(
-                1,
+                &obligation(1),
                 BTreeSet::from([endpoint("A", UUID_A), endpoint("B", UUID_B)]),
             )
             .await
             .expect("seed");
 
         let report = reconciler
-            .reconcile(2, BTreeSet::new())
+            .reconcile(&obligation(2), BTreeSet::new())
             .await
             .expect("clear all");
         assert_eq!(report.removed.len(), 2);
@@ -540,7 +539,7 @@ mod tests {
             signing_key: crate::meerkat_machine::dsl::PeerSigningKey([9u8; 32]),
         };
         let err = reconciler
-            .reconcile(1, BTreeSet::from([bad]))
+            .reconcile(&obligation(1), BTreeSet::from([bad]))
             .await
             .expect_err("invalid endpoint must surface a typed error");
         assert!(
@@ -558,7 +557,7 @@ mod tests {
         bad.address = crate::meerkat_machine::dsl::PeerAddress("http://127.0.0.1:4200".into());
 
         let err = reconciler
-            .reconcile(1, BTreeSet::from([bad]))
+            .reconcile(&obligation(1), BTreeSet::from([bad]))
             .await
             .expect_err("unknown address scheme must surface a typed error");
         match err {

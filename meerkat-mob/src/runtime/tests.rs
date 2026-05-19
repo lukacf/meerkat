@@ -71,89 +71,23 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
-struct TestMemberTrustEffect {
-    edge_a: String,
-    edge_b: String,
-    a_peer_id: String,
-    b_peer_id: String,
-    epoch: u64,
-}
-
-impl meerkat_core::generated::comms_trust_authority::GeneratedMobMachineMemberTrustHandoff
-    for TestMemberTrustEffect
-{
-    fn edge_a(&self) -> &str {
-        self.edge_a.as_str()
-    }
-
-    fn edge_b(&self) -> &str {
-        self.edge_b.as_str()
-    }
-
-    fn a_peer_id(&self) -> &str {
-        self.a_peer_id.as_str()
-    }
-
-    fn b_peer_id(&self) -> &str {
-        self.b_peer_id.as_str()
-    }
-
-    fn epoch(&self) -> u64 {
-        self.epoch
-    }
-}
-
-struct TestExternalPeerTrustEffect {
-    peer_id: String,
-    epoch: u64,
-}
-
-impl meerkat_core::generated::comms_trust_authority::GeneratedMobMachineExternalPeerTrustHandoff
-    for TestExternalPeerTrustEffect
-{
-    fn peer_id(&self) -> &str {
-        self.peer_id.as_str()
-    }
-
-    fn epoch(&self) -> u64 {
-        self.epoch
-    }
-}
-
-struct TestPeerProjectionTrustEffect {
-    peer_id: String,
-    epoch: u64,
-}
-
-impl meerkat_core::generated::comms_trust_authority::GeneratedMeerkatMachinePeerProjectionHandoff
-    for TestPeerProjectionTrustEffect
-{
-    fn peer_id(&self) -> &str {
-        self.peer_id.as_str()
-    }
-
-    fn epoch(&self) -> u64 {
-        self.epoch
-    }
-}
-
 async fn apply_test_peer_projection_trust(
     runtime: &dyn CoreCommsRuntime,
     peer: TrustedPeerDescriptor,
     context: &'static str,
 ) {
-    let peer_id = peer.peer_id.to_string();
+    let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
+    let obligation =
+        meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
+            peer_projection_epoch: 0,
+        };
     CoreCommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
-            authority: meerkat_core::generated::comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                &TestPeerProjectionTrustEffect {
-                    peer_id: peer_id.clone(),
-                    epoch: 0,
-                },
-            )
-            .authority_for(&peer_id)
-            .expect("test peer projection authority covers peer"),
+            authority: meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+                &obligation,
+                &endpoint,
+            ),
             peer,
         },
     )
@@ -166,17 +100,23 @@ async fn remove_test_peer_projection_trust(
     peer_id: &str,
     context: &'static str,
 ) {
+    let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+        "",
+        peer_id.to_string(),
+        "",
+        [0u8; 32],
+    );
+    let obligation =
+        meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
+            peer_projection_epoch: 0,
+        };
     CoreCommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::RemoveTrustedPeer {
-            authority: meerkat_core::generated::comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                &TestPeerProjectionTrustEffect {
-                    peer_id: peer_id.to_string(),
-                    epoch: 0,
-                },
-            )
-            .authority_for(peer_id)
-            .expect("test peer projection authority covers peer"),
+            authority: meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+                &obligation,
+                &endpoint,
+            ),
             peer_id: peer_id.to_string(),
         },
     )
@@ -4415,22 +4355,23 @@ async fn trust_candidate_sender_for_reply(
         format!("inproc://{}", display_name.as_str()),
     )
     .expect("typed ingress sender should convert to a reply trusted peer");
+    let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&descriptor);
+    let obligation =
+        meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
+            peer_projection_epoch: 0,
+        };
     CoreCommsRuntime::apply_trust_mutation(
         comms,
         CommsTrustMutation::AddTrustedPeer {
-            authority: meerkat_core::generated::comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                &TestPeerProjectionTrustEffect {
-                    peer_id: route.peer_id.to_string(),
-                    epoch: 0,
-                },
-            )
-            .authority_for(&route.peer_id.to_string())
-            .expect("typed ingress sender reply route covers peer"),
+            authority: meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+                &obligation,
+                &endpoint,
+            ),
             peer: descriptor,
         },
     )
-        .await
-        .expect("trust typed ingress sender for bridge reply");
+    .await
+    .expect("trust typed ingress sender for bridge reply");
     route
 }
 
@@ -26675,17 +26616,17 @@ async fn test_unwire_fails_closed_on_stale_local_trust_when_machine_edge_absent(
     let key_b = comms_b.public_key();
     let peer_id_a = key_a.to_peer_id().to_string();
     let peer_id_b = key_b.to_peer_id().to_string();
-    let stale_effect = TestMemberTrustEffect {
-        edge_a: "l-1".to_string(),
-        edge_b: "w-1".to_string(),
-        a_peer_id: peer_id_a.clone(),
-        b_peer_id: peer_id_b.clone(),
-        epoch: 3,
-    };
-    let stale_handoff =
-        meerkat_core::generated::comms_trust_authority::MobMachineMemberTrustHandoff::from_generated_member_wiring(
-            &stale_effect,
-        );
+    let stale_edge = crate::machines::mob_machine::WiringEdge::new(
+        crate::machines::mob_machine::AgentIdentity("l-1".to_string()),
+        crate::machines::mob_machine::AgentIdentity("w-1".to_string()),
+    );
+    let stale_obligation =
+        crate::generated::protocol_mob_member_trust_wiring::MobMemberTrustWiringObligation {
+            edge: stale_edge,
+            a_peer_id: crate::machines::mob_machine::PeerId(peer_id_a.clone()),
+            b_peer_id: crate::machines::mob_machine::PeerId(peer_id_b.clone()),
+            epoch: 3,
+        };
     comms_a
         .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
             peer: TrustedPeerDescriptor::unsigned_with_pubkey(
@@ -26695,9 +26636,13 @@ async fn test_unwire_fails_closed_on_stale_local_trust_when_machine_edge_absent(
                 format!("inproc://{name_b}"),
             )
             .expect("valid worker trusted spec"),
-            authority: stale_handoff
-                .wiring_authority_for_identity("w-1", &peer_id_b)
-                .expect("generated member wiring handoff covers worker"),
+            authority:
+                crate::generated::protocol_mob_member_trust_wiring::wiring_authority_for_identity(
+                    &stale_obligation,
+                    "w-1",
+                    &peer_id_b,
+                )
+                .expect("generated member wiring obligation covers worker"),
         })
         .await
         .expect("re-add stale trust on lead");
@@ -26710,9 +26655,13 @@ async fn test_unwire_fails_closed_on_stale_local_trust_when_machine_edge_absent(
                 format!("inproc://{name_a}"),
             )
             .expect("valid lead trusted spec"),
-            authority: stale_handoff
-                .wiring_authority_for_identity("l-1", &peer_id_a)
-                .expect("generated member wiring handoff covers lead"),
+            authority:
+                crate::generated::protocol_mob_member_trust_wiring::wiring_authority_for_identity(
+                    &stale_obligation,
+                    "l-1",
+                    &peer_id_a,
+                )
+                .expect("generated member wiring obligation covers lead"),
         })
         .await
         .expect("re-add stale trust on worker");
@@ -26777,17 +26726,23 @@ async fn test_unwire_external_fails_closed_on_stale_trust_when_machine_edge_abse
 
     let comms = service.real_comms(&sid).await.expect("comms for l-1");
     let peer_id = spec.peer_id.to_string();
+    let stale_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
+        crate::machines::mob_machine::AgentIdentity("l-1".to_string()),
+        crate::machines::mob_machine::ExternalPeerEndpoint::from(&spec),
+    );
     comms
         .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
             peer: spec.clone(),
-            authority: meerkat_core::generated::comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_wiring(
-                &TestExternalPeerTrustEffect {
-                    peer_id: peer_id.clone(),
-                    epoch: 3,
-                },
-            )
-            .authority_for_wiring(&peer_id)
-            .expect("generated external wiring handoff covers test peer"),
+            authority:
+                crate::generated::protocol_mob_external_peer_trust_wiring::wiring_authority_for_peer(
+                    &crate::generated::protocol_mob_external_peer_trust_wiring::MobExternalPeerTrustWiringObligation {
+                        edge: stale_edge,
+                        peer_id: crate::machines::mob_machine::PeerId(peer_id.clone()),
+                        epoch: 3,
+                    },
+                    &peer_id,
+                )
+                .expect("generated external wiring obligation covers test peer"),
         })
         .await
         .expect("re-add stale external trust");

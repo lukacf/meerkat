@@ -179,19 +179,22 @@ impl MobSupervisorBridge {
                     "supervisor bridge DSL rejected recipient trust projection: {error}"
                 ))
             })?;
-        let reconcile_epoch = effects
-            .iter()
-            .find_map(|effect| match effect {
-                mm_dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
-                    peer_projection_epoch,
-                } => Some(*peer_projection_epoch),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                MobError::Internal(
+        let obligations =
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&effects);
+        let obligation = match obligations.as_slice() {
+            [obligation] => obligation.clone(),
+            [] => {
+                return Err(MobError::Internal(
                     "supervisor bridge trust projection emitted no reconcile request".to_string(),
-                )
-            })?;
+                ));
+            }
+            _ => {
+                return Err(MobError::Internal(
+                    "supervisor bridge trust projection emitted multiple reconcile requests"
+                        .to_string(),
+                ));
+            }
+        };
         let state = dsl.snapshot_state();
         let effective_peers = state
             .direct_peer_endpoints
@@ -203,7 +206,7 @@ impl MobSupervisorBridge {
         let reconciler =
             meerkat_runtime::comms_trust_reconcile::CommsTrustReconciler::new(comms_runtime);
         reconciler
-            .reconcile(reconcile_epoch, effective_peers)
+            .reconcile(&obligation, effective_peers)
             .await
             .map(|_report| ())
             .map_err(|error| {

@@ -9,7 +9,6 @@ use meerkat_comms::{
 };
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::CommsTrustMutation;
-use meerkat_core::generated::comms_trust_authority;
 
 static INPROC_REGISTRY_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -58,39 +57,26 @@ fn trusted_descriptor_for(
     }
 }
 
-struct TestPeerProjectionTrustEffect {
-    peer_id: String,
+fn test_projection_authority(
+    peer: &meerkat_core::comms::TrustedPeerDescriptor,
     epoch: u64,
-}
-
-impl comms_trust_authority::GeneratedMeerkatMachinePeerProjectionHandoff
-    for TestPeerProjectionTrustEffect
-{
-    fn peer_id(&self) -> &str {
-        self.peer_id.as_str()
-    }
-
-    fn epoch(&self) -> u64 {
-        self.epoch
-    }
+) -> meerkat_core::comms::CommsTrustMutationAuthority {
+    let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
+    let obligation =
+        meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
+            peer_projection_epoch: epoch,
+        };
+    meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(&obligation, &endpoint)
 }
 
 async fn apply_generated_trust(
     runtime: &CommsRuntime,
     peer: meerkat_core::comms::TrustedPeerDescriptor,
 ) {
-    let peer_id = peer.peer_id.to_string();
     CoreCommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
-            authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                &TestPeerProjectionTrustEffect {
-                    peer_id: peer_id.clone(),
-                    epoch: 0,
-                },
-            )
-            .authority_for(&peer_id)
-            .expect("valid generated trust authority"),
+            authority: test_projection_authority(&peer, 0),
             peer,
         },
     )

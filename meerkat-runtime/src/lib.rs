@@ -68,6 +68,9 @@ pub mod peer_handling_mode;
 pub mod policy;
 pub mod policy_table;
 #[allow(unused_imports)]
+#[path = "generated/protocol_comms_trust_reconcile.rs"]
+pub mod protocol_comms_trust_reconcile;
+#[allow(unused_imports)]
 #[path = "generated/protocol_supervisor_trust_publish.rs"]
 pub mod protocol_supervisor_trust_publish;
 #[allow(unused_imports)]

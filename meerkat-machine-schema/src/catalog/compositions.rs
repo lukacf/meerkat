@@ -420,6 +420,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
     let mut handoff_protocols = Vec::new();
     handoff_protocols.extend(mob_bundle_composition().handoff_protocols);
     handoff_protocols.extend(external_tool_bundle_composition().handoff_protocols);
+    handoff_protocols.extend(comms_trust_bundle_composition().handoff_protocols);
     handoff_protocols.extend(supervisor_trust_bundle_composition().handoff_protocols);
     handoff_protocols.extend(mob_destroy_session_ingress_bundle_composition().handoff_protocols);
 
@@ -442,6 +443,8 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
             machine_actor("mob_kernel"),
             owner_actor("ops_lifecycle_owner"),
             owner_actor("surface_host_owner"),
+            owner_actor("comms_trust_reconcile_owner"),
+            owner_actor("mob_comms_trust_owner"),
             owner_actor("supervisor_bridge_owner"),
             owner_actor("mob_destroy_session_ingress_owner"),
         ],
@@ -685,6 +688,75 @@ fn bind(to_field: &str, from_field: &str) -> RouteFieldBinding {
             from_field: fld_id(from_field),
             allow_named_alias: false,
         },
+    }
+}
+
+fn effect_extractor_rust_binding(
+    module_path: &str,
+    required_imports: &[&str],
+    effect_enum_path: &str,
+) -> ProtocolRustBinding {
+    ProtocolRustBinding {
+        module_path: module_path.into(),
+        generation_mode: ProtocolGenerationMode::EffectExtractor,
+        required_imports: required_imports
+            .iter()
+            .map(|import| (*import).into())
+            .collect(),
+        authority_type_path: None,
+        mutator_trait_path: None,
+        input_enum_path: None,
+        effect_enum_path: Some(effect_enum_path.into()),
+        transition_type_path: None,
+        error_type_path: None,
+        executor_trigger_input_variant: None,
+        bridge_source_type_path: None,
+        helper_return_shape: ProtocolHelperReturnShape::Obligations,
+        handle_trait_path: None,
+        handle_feedback_bindings: vec![],
+        input_payload_module_path: None,
+        additional_modes: vec![],
+    }
+}
+
+struct TrustHandoffProtocolSpec<'a> {
+    name: &'a str,
+    producer_instance: &'a str,
+    effect_variant: &'a str,
+    realizing_actor: &'a str,
+    obligation_fields: &'a [&'a str],
+    module_path: &'a str,
+    required_imports: &'a [&'a str],
+    effect_enum_path: &'a str,
+}
+
+fn trust_handoff_protocol(spec: TrustHandoffProtocolSpec<'_>) -> EffectHandoffProtocol {
+    EffectHandoffProtocol {
+        name: protocol_id(spec.name),
+        producer_instance: mi_id(spec.producer_instance),
+        effect_variant: ev_id(spec.effect_variant),
+        realizing_actor: act_id(spec.realizing_actor),
+        correlation_fields: spec
+            .obligation_fields
+            .iter()
+            .map(|field| fld_id(field))
+            .collect(),
+        obligation_fields: spec
+            .obligation_fields
+            .iter()
+            .map(|field| fld_id(field))
+            .collect(),
+        allowed_feedback_inputs: vec![],
+        closure_policy: ClosurePolicy::AckRequired,
+        liveness_annotation: Some(
+            "projection mutation is applied by the owning runtime after consuming this typed obligation"
+                .into(),
+        ),
+        rust: effect_extractor_rust_binding(
+            spec.module_path,
+            spec.required_imports,
+            spec.effect_enum_path,
+        ),
     }
 }
 
@@ -1098,6 +1170,129 @@ fn owner_actor(name: &str) -> ActorSchema {
     ActorSchema {
         name: act_id(name),
         kind: ActorKind::Owner,
+    }
+}
+
+/// Host composition for comms trust projection mutation obligations.
+///
+/// The MeerkatMachine and MobMachine own the semantic peer/trust facts. These
+/// protocols turn their emitted effects into typed obligations consumed by the
+/// runtime/mob comms owners; the owners may only mutate the comms projection by
+/// carrying one of these obligations through generated protocol helpers.
+fn comms_trust_bundle_composition() -> CompositionSchema {
+    let member_imports =
+        ["use crate::machines::mob_machine::{MobMachineEffect, PeerId, WiringEdge};"];
+    let external_imports =
+        ["use crate::machines::mob_machine::{ExternalPeerEdge, MobMachineEffect, PeerId};"];
+    let reciprocal_imports = [
+        "use crate::machines::mob_machine::{ExternalPeerEdge, ExternalPeerKey, MobMachineEffect, PeerId};",
+    ];
+    CompositionSchema {
+        name: comp_id("comms_trust_bundle"),
+        machines: vec![
+            MachineInstance {
+                instance_id: mi_id("meerkat"),
+                machine_name: mach_id("MeerkatMachine"),
+                actor: act_id("meerkat_kernel"),
+            },
+            MachineInstance {
+                instance_id: mi_id("mob"),
+                machine_name: mach_id("MobMachine"),
+                actor: act_id("mob_kernel"),
+            },
+        ],
+        actors: vec![
+            machine_actor("meerkat_kernel"),
+            machine_actor("mob_kernel"),
+            owner_actor("comms_trust_reconcile_owner"),
+            owner_actor("mob_comms_trust_owner"),
+        ],
+        handoff_protocols: vec![
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "comms_trust_reconcile",
+                producer_instance: "meerkat",
+                effect_variant: "CommsTrustReconcileRequested",
+                realizing_actor: "comms_trust_reconcile_owner",
+                obligation_fields: &["peer_projection_epoch"],
+                module_path: "meerkat-runtime/src/generated/protocol_comms_trust_reconcile.rs",
+                required_imports: &["use crate::meerkat_machine::dsl::MeerkatMachineEffect;"],
+                effect_enum_path: "crate::meerkat_machine::dsl::MeerkatMachineEffect",
+            }),
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "mob_member_trust_wiring",
+                producer_instance: "mob",
+                effect_variant: "MemberTrustWiringRequested",
+                realizing_actor: "mob_comms_trust_owner",
+                obligation_fields: &["edge", "a_peer_id", "b_peer_id", "epoch"],
+                module_path: "meerkat-mob/src/generated/protocol_mob_member_trust_wiring.rs",
+                required_imports: &member_imports,
+                effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+            }),
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "mob_member_trust_unwiring",
+                producer_instance: "mob",
+                effect_variant: "MemberTrustUnwiringRequested",
+                realizing_actor: "mob_comms_trust_owner",
+                obligation_fields: &["edge", "a_peer_id", "b_peer_id", "epoch"],
+                module_path: "meerkat-mob/src/generated/protocol_mob_member_trust_unwiring.rs",
+                required_imports: &member_imports,
+                effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+            }),
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "mob_external_peer_trust_wiring",
+                producer_instance: "mob",
+                effect_variant: "ExternalPeerTrustWiringRequested",
+                realizing_actor: "mob_comms_trust_owner",
+                obligation_fields: &["edge", "peer_id", "epoch"],
+                module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_wiring.rs",
+                required_imports: &external_imports,
+                effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+            }),
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "mob_external_peer_trust_unwiring",
+                producer_instance: "mob",
+                effect_variant: "ExternalPeerTrustUnwiringRequested",
+                realizing_actor: "mob_comms_trust_owner",
+                obligation_fields: &["edge", "peer_id", "epoch"],
+                module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_unwiring.rs",
+                required_imports: &external_imports,
+                effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+            }),
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "mob_external_peer_trust_repair",
+                producer_instance: "mob",
+                effect_variant: "ExternalPeerTrustRepairRequested",
+                realizing_actor: "mob_comms_trust_owner",
+                obligation_fields: &["edge", "peer_id", "epoch"],
+                module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_repair.rs",
+                required_imports: &external_imports,
+                effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+            }),
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "mob_external_peer_reciprocal_trust",
+                producer_instance: "mob",
+                effect_variant: "ExternalPeerReciprocalTrustRequested",
+                realizing_actor: "mob_comms_trust_owner",
+                obligation_fields: &["key", "edge", "peer_id", "epoch"],
+                module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_reciprocal_trust.rs",
+                required_imports: &reciprocal_imports,
+                effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+            }),
+        ],
+        entry_inputs: vec![],
+        routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![],
+        witnesses: vec![witness("comms_trust_projection_round_trip", &[])],
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: std::collections::BTreeMap::new(),
+        witness_domain_cardinality: 2,
+        ci_limits: Some(default_ci_limits()),
+        closed_world: true,
     }
 }
 

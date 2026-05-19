@@ -2898,8 +2898,22 @@ pub mod effects {
         pub edge: WiringEdge,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExternalPeerTrustWiringRequested {
+        pub edge: ExternalPeerEdge,
+        pub peer_id: PeerId,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExternalPeerTrustUnwiringRequested {
+        pub edge: ExternalPeerEdge,
+        pub peer_id: PeerId,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ExternalPeerTrustRepairRequested {
         pub edge: ExternalPeerEdge,
+        pub peer_id: PeerId,
+        pub epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MemberPeerRegistered {
@@ -2911,6 +2925,7 @@ pub mod effects {
         pub key: ExternalPeerKey,
         pub edge: ExternalPeerEdge,
         pub peer_id: PeerId,
+        pub epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EmitWiringLifecycleNotice {
@@ -2952,6 +2967,8 @@ pub enum Effect {
     MemberTrustWiringRequested(effects::MemberTrustWiringRequested),
     MemberTrustUnwiringRequested(effects::MemberTrustUnwiringRequested),
     WiringTrustRepairRequested(effects::WiringTrustRepairRequested),
+    ExternalPeerTrustWiringRequested(effects::ExternalPeerTrustWiringRequested),
+    ExternalPeerTrustUnwiringRequested(effects::ExternalPeerTrustUnwiringRequested),
     ExternalPeerTrustRepairRequested(effects::ExternalPeerTrustRepairRequested),
     MemberPeerRegistered(effects::MemberPeerRegistered),
     ExternalPeerReciprocalTrustRequested(effects::ExternalPeerReciprocalTrustRequested),
@@ -2986,6 +3003,8 @@ pub enum EffectKind {
     MemberTrustWiringRequested,
     MemberTrustUnwiringRequested,
     WiringTrustRepairRequested,
+    ExternalPeerTrustWiringRequested,
+    ExternalPeerTrustUnwiringRequested,
     ExternalPeerTrustRepairRequested,
     MemberPeerRegistered,
     ExternalPeerReciprocalTrustRequested,

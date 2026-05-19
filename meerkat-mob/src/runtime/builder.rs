@@ -170,30 +170,25 @@ fn resume_member_repair_authority_from_effects(
         },
         context,
     )?;
-    handoff_effects
-        .iter()
-        .find_map(|effect| match effect {
-            crate::machines::mob_machine::MobMachineEffect::MemberTrustWiringRequested {
-                edge: effect_edge,
-                a_peer_id,
-                b_peer_id,
-                ..
-            } if effect_edge == edge && (a_peer_id.0 == peer_id || b_peer_id.0 == peer_id) => {
-                let identity = if a_peer_id.0 == peer_id {
-                    edge.a.0.as_str()
-                } else {
-                    edge.b.0.as_str()
-                };
-                crate::generated::comms_trust_authority::member_repair_handoff_from_effect(
-                    effect, edge,
-                )
-                .and_then(|handoff| {
-                    handoff
-                        .repair_authority_for_identity(identity, peer_id)
-                        .ok()
-                })
+    crate::generated::protocol_mob_member_trust_wiring::extract_obligations(&handoff_effects)
+        .into_iter()
+        .find_map(|obligation| {
+            if &obligation.edge != edge
+                || (obligation.a_peer_id.0 != peer_id && obligation.b_peer_id.0 != peer_id)
+            {
+                return None;
             }
-            _ => None,
+            let identity = if obligation.a_peer_id.0 == peer_id {
+                edge.a.0.as_str()
+            } else {
+                edge.b.0.as_str()
+            };
+            crate::generated::protocol_mob_member_trust_wiring::repair_authority_for_identity(
+                &obligation,
+                identity,
+                peer_id,
+            )
+            .ok()
         })
         .ok_or_else(|| {
             MobError::WiringError(format!(
@@ -206,22 +201,21 @@ fn resume_external_repair_authority_from_effects(
     effects: &[crate::machines::mob_machine::MobMachineEffect],
     edge: &crate::machines::mob_machine::ExternalPeerEdge,
     peer_id: &str,
-    epoch: u64,
     context: &'static str,
 ) -> Result<CommsTrustMutationAuthority, MobError> {
     let graph_changed = seeded_effects_include_wiring_graph_change(effects);
-    let repair_requested = effects.iter().any(|effect| {
-        matches!(
-            effect,
-            crate::machines::mob_machine::MobMachineEffect::ExternalPeerTrustRepairRequested {
-                edge: effect_edge
-            } if effect_edge == edge
+    let repair_obligation =
+        crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations(effects)
+            .into_iter()
+            .find(|obligation| &obligation.edge == edge);
+    if let Some(obligation) = repair_obligation
+        && !graph_changed
+    {
+        return crate::generated::protocol_mob_external_peer_trust_repair::repair_authority_for_peer(
+            &obligation,
+            peer_id,
         )
-    });
-    if repair_requested && !graph_changed {
-        return crate::generated::comms_trust_authority::external_repair_handoff(edge, epoch)
-            .authority_for_repair(peer_id)
-            .map_err(MobError::WiringError);
+        .map_err(MobError::WiringError);
     }
     Err(MobError::WiringError(format!(
         "{context} produced no generated external trust repair authority"
@@ -1887,7 +1881,6 @@ impl MobBuilder {
                             &effects,
                             edge,
                             &spec_peer_id,
-                            dsl_authority.state().topology_epoch,
                             "resume_external_trust_repair",
                         )?
                     }

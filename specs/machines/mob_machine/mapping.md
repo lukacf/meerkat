@@ -752,6 +752,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `WiringTrustRepairRequested`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ExternalPeerTrustWiringRequested`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ExternalPeerTrustUnwiringRequested`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ExternalPeerTrustRepairRequested`
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`

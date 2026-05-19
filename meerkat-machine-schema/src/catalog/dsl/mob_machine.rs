@@ -490,9 +490,11 @@ macro_rules! mob_catalog_machine_dsl {
             MemberTrustWiringRequested { edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64 },
             MemberTrustUnwiringRequested { edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64 },
             WiringTrustRepairRequested { edge: WiringEdge },
-            ExternalPeerTrustRepairRequested { edge: ExternalPeerEdge },
+            ExternalPeerTrustWiringRequested { edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
+            ExternalPeerTrustUnwiringRequested { edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
+            ExternalPeerTrustRepairRequested { edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
             MemberPeerRegistered { agent_identity: AgentIdentity, peer_id: PeerId },
-            ExternalPeerReciprocalTrustRequested { key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId },
+            ExternalPeerReciprocalTrustRequested { key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
             // D-wiring-observability (#27): pair-valued notice emitted from
             // `WireMembers`/`UnwireMembers` alongside `WiringGraphChanged`.
             // Unlike `WiringGraphChanged` (opaque epoch bump), this carries
@@ -530,12 +532,14 @@ macro_rules! mob_catalog_machine_dsl {
         disposition EmitKickoffLifecycleNotice => external,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
-        disposition MemberTrustWiringRequested => local,
-        disposition MemberTrustUnwiringRequested => local,
+        disposition MemberTrustWiringRequested => external handoff mob_member_trust_wiring,
+        disposition MemberTrustUnwiringRequested => external handoff mob_member_trust_unwiring,
         disposition WiringTrustRepairRequested => local,
-        disposition ExternalPeerTrustRepairRequested => local,
+        disposition ExternalPeerTrustWiringRequested => external handoff mob_external_peer_trust_wiring,
+        disposition ExternalPeerTrustUnwiringRequested => external handoff mob_external_peer_trust_unwiring,
+        disposition ExternalPeerTrustRepairRequested => external handoff mob_external_peer_trust_repair,
         disposition MemberPeerRegistered => local,
-        disposition ExternalPeerReciprocalTrustRequested => local,
+        disposition ExternalPeerReciprocalTrustRequested => external handoff mob_external_peer_reciprocal_trust,
         disposition EmitWiringLifecycleNotice => external,
         disposition EmitExternalPeerWiringLifecycleNotice => external,
 
@@ -1621,6 +1625,11 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit ExternalPeerTrustWiringRequested {
+                edge: edge,
+                peer_id: mob_machine_external_peer_edge_peer_id(edge),
+                epoch: self.topology_epoch
+            }
             emit EmitExternalPeerWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
         }
 
@@ -1632,7 +1641,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "external_peer_edge_already_wired" { self.external_peer_edges.contains(edge) == true }
             update {}
             to Running
-            emit ExternalPeerTrustRepairRequested { edge: edge }
+            emit ExternalPeerTrustRepairRequested {
+                edge: edge,
+                peer_id: mob_machine_external_peer_edge_peer_id(edge),
+                epoch: self.topology_epoch
+            }
         }
 
         transition RegisterMemberPeerRunning {
@@ -1707,7 +1720,8 @@ macro_rules! mob_catalog_machine_dsl {
             emit ExternalPeerReciprocalTrustRequested {
                 key: key,
                 edge: self.external_peer_edges_by_key.get_cloned(key).get("value"),
-                peer_id: self.member_peer_ids.get_cloned(agent_identity).get("value")
+                peer_id: self.member_peer_ids.get_cloned(agent_identity).get("value"),
+                epoch: self.topology_epoch
             }
         }
 
@@ -1768,6 +1782,11 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit ExternalPeerTrustUnwiringRequested {
+                edge: edge,
+                peer_id: mob_machine_external_peer_edge_peer_id(edge),
+                epoch: self.topology_epoch
+            }
             emit EmitExternalPeerWiringLifecycleNotice { kind: WiringLifecycleKind::Unwired, edge: edge }
         }
 
@@ -3632,6 +3651,10 @@ macro_rules! mob_catalog_machine_dsl {
             agent_identity: &AgentIdentity,
         ) -> bool {
             key.local == *agent_identity
+        }
+
+        fn mob_machine_external_peer_edge_peer_id(edge: &ExternalPeerEdge) -> PeerId {
+            edge.endpoint.peer_id.clone()
         }
 
         fn mob_machine_wiring_edge_matches_members(

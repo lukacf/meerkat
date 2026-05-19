@@ -249,9 +249,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MemberTrustWiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64)
 - `MemberTrustUnwiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64)
 - `WiringTrustRepairRequested`(edge: WiringEdge)
-- `ExternalPeerTrustRepairRequested`(edge: ExternalPeerEdge)
+- `ExternalPeerTrustWiringRequested`(edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64)
+- `ExternalPeerTrustUnwiringRequested`(edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64)
+- `ExternalPeerTrustRepairRequested`(edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64)
 - `MemberPeerRegistered`(agent_identity: AgentIdentity, peer_id: PeerId)
-- `ExternalPeerReciprocalTrustRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId)
+- `ExternalPeerReciprocalTrustRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64)
 - `EmitWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: WiringEdge)
 - `EmitExternalPeerWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: ExternalPeerEdge)
 
@@ -933,7 +935,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `external_peer_key_matches_edge`
   - `external_peer_key_not_already_wired`
   - `external_peer_edge_not_already_wired`
-- Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
+- Emits: `WiringGraphChanged`, `ExternalPeerTrustWiringRequested`, `EmitExternalPeerWiringLifecycleNotice`
 - To: `Running`
 
 ### `WireExternalPeerAlreadyWired`
@@ -1035,7 +1037,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `external_peer_key_matches_edge`
   - `external_peer_key_currently_wired`
   - `external_peer_edge_currently_wired`
-- Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
+- Emits: `WiringGraphChanged`, `ExternalPeerTrustUnwiringRequested`, `EmitExternalPeerWiringLifecycleNotice`
 - To: `Running`
 
 ### `UnwireExternalPeerAlreadyAbsent`

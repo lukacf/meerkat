@@ -2941,7 +2941,6 @@ mod tests {
             PeerDirectorySource, PeerId, PeerName, PeerReachability, PeerReachabilityReason,
             PeerRoute, PeerSendability, StreamError, StreamScope, TrustedPeerDescriptor,
         },
-        generated::comms_trust_authority,
         interaction::InteractionId,
         types::{ContentBlock, ImageData, SessionId},
     };
@@ -2958,21 +2957,19 @@ mod tests {
         }
     }
 
-    struct TestPeerProjectionTrustEffect {
-        peer_id: String,
+    fn test_projection_authority(
+        peer: &TrustedPeerDescriptor,
         epoch: u64,
-    }
-
-    impl comms_trust_authority::GeneratedMeerkatMachinePeerProjectionHandoff
-        for TestPeerProjectionTrustEffect
-    {
-        fn peer_id(&self) -> &str {
-            self.peer_id.as_str()
-        }
-
-        fn epoch(&self) -> u64 {
-            self.epoch
-        }
+    ) -> meerkat_core::comms::CommsTrustMutationAuthority {
+        let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
+        let obligation =
+            meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
+                peer_projection_epoch: epoch,
+            };
+        meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+            &obligation,
+            &endpoint,
+        )
     }
 
     #[tokio::test]
@@ -3009,15 +3006,8 @@ mod tests {
         let add = CoreCommsRuntime::apply_trust_mutation(
             &runtime,
             CommsTrustMutation::AddTrustedPeer {
-                peer: descriptor,
-                authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                    &TestPeerProjectionTrustEffect {
-                        peer_id: peer_id.clone(),
-                        epoch: 7,
-                    },
-                )
-                .authority_for(&peer_id)
-                .expect("valid generated authority"),
+                peer: descriptor.clone(),
+                authority: test_projection_authority(&descriptor, 7),
             },
         )
         .await
@@ -3029,14 +3019,7 @@ mod tests {
             &runtime,
             CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
-                authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
-                    &TestPeerProjectionTrustEffect {
-                        peer_id: peer_id.clone(),
-                        epoch: 8,
-                    },
-                )
-                .authority_for(&peer_id)
-                .expect("valid generated authority"),
+                authority: test_projection_authority(&descriptor, 8),
             },
         )
         .await

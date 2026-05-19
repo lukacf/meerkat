@@ -210,6 +210,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdmitDestroyCleanup`
   - anchors: `mob_actor_authority`
   - scenarios: `orchestrator-coordinator-cleanup`
+- `AdmitDestroyStorageFinalizing`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
 - `MarkCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -701,6 +704,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RequestSessionIngressDetachForMobDestroy`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
+- `AppendLifecycleJournal`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `EmitMemberLifecycleNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`

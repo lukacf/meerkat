@@ -448,8 +448,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitExternalToolDelta`(surface_id: String, operation: ExternalToolSurfaceDeltaOperation, phase: ExternalToolSurfaceDeltaPhase, cause: Option<ExternalToolSurfaceFailureCause>)
 - `CloseSurfaceConnection`(surface_id: String)
 - `RejectSurfaceCall`(surface_id: String, cause: ExternalToolSurfaceFailureCause)
-- `PublishSupervisorTrustEdge`(peer_id: String, name: String, address: String, signing_public_key: Option<String>, epoch: u64)
-- `RevokeSupervisorTrustEdge`(peer_id: String, epoch: u64)
+- `PublishSupervisorTrustEdge`(local_endpoint: Option<PeerEndpoint>, peer_id: String, name: String, address: String, signing_public_key: Option<String>, epoch: u64)
+- `RevokeSupervisorTrustEdge`(local_endpoint: Option<PeerEndpoint>, peer_id: String, epoch: u64)
 - `McpServerStateChanged`(server_id: McpServerId, new_state: McpServerState)
 - `McpServerReloadRequested`(server_id: McpServerId)
 - `PeerInteractionStateChanged`(corr_id: PeerCorrelationId, new_state: OutboundPeerRequestState)
@@ -460,7 +460,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InteractionStreamCleanup`(corr_id: PeerCorrelationId)
 - `LocalEndpointChanged`(endpoint: Option<PeerEndpoint>)
 - `PeerProjectionChanged`(peer_projection_epoch: u64)
-- `CommsTrustReconcileRequested`(peer_projection_epoch: u64, direct_peer_endpoints: Set<PeerEndpoint>, mob_overlay_peer_endpoints: Set<PeerEndpoint>)
+- `CommsTrustReconcileRequested`(local_endpoint: Option<PeerEndpoint>, peer_projection_epoch: u64, direct_peer_endpoints: Set<PeerEndpoint>, mob_overlay_peer_endpoints: Set<PeerEndpoint>)
 
 ## Helpers
 - `deferred_authority_has_identity`(witness: ToolVisibilityWitness) -> `Bool`

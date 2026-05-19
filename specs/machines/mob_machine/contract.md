@@ -122,7 +122,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, bridge_session_id: SessionId, replacing: Option<SessionId>)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
-- `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, releasing: Option<SessionId>, session_id: SessionId)
+- `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: SessionId)
 - `RequestPendingSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `Respawn`(agent_runtime_id: AgentRuntimeId)
 - `RetireAll`
@@ -202,6 +202,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverExternalPeerUnwire`(key: ExternalPeerKey)
 - `RecoverMemberRestoreFailure`(agent_identity: AgentIdentity, reason: String)
 - `AdmitDestroyCleanup`
+- `AdmitDestroyStorageFinalizing`
 - `MarkCompleted`
 - `StartRun`
 - `FinishRun`
@@ -232,6 +233,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RequestRuntimeRetire`(session_id: SessionId)
 - `RequestRuntimeDestroy`(session_id: SessionId)
 - `RequestSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
+- `AppendLifecycleJournal`(kind: MobLifecycleJournalKind, agent_identity: Option<AgentIdentity>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, session_id: Option<SessionId>)
 - `EmitMemberLifecycleNotice`(kind: MemberLifecycleKind)
 - `EmitRunLifecycleNotice`
 - `EmitFlowRunNotice`
@@ -251,9 +253,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MemberTrustWiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, a_endpoint: MemberPeerEndpoint, b_endpoint: MemberPeerEndpoint, epoch: u64)
 - `MemberTrustUnwiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64)
 - `WiringTrustRepairRequested`(edge: WiringEdge)
-- `ExternalPeerTrustWiringRequested`(edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64)
-- `ExternalPeerTrustUnwiringRequested`(edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64)
-- `ExternalPeerTrustRepairRequested`(edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64)
+- `ExternalPeerTrustWiringRequested`(edge: ExternalPeerEdge, local_peer_id: PeerId, peer_id: PeerId, epoch: u64)
+- `ExternalPeerTrustUnwiringRequested`(edge: ExternalPeerEdge, local_peer_id: PeerId, peer_id: PeerId, epoch: u64)
+- `ExternalPeerTrustRepairRequested`(edge: ExternalPeerEdge, local_peer_id: PeerId, peer_id: PeerId, epoch: u64)
 - `MemberPeerRegistered`(agent_identity: AgentIdentity, peer_id: PeerId)
 - `ExternalPeerReciprocalTrustRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint, epoch: u64)
 - `EmitWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: WiringEdge)
@@ -271,7 +273,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `coordinator_bound`
   - `no_prior_session_binding`
   - `replacing_absent`
-- Emits: `RequestRuntimeBinding`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
+- Emits: `RequestRuntimeBinding`, `AppendLifecycleJournal`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
 ### `SpawnRunningReplacing`
@@ -282,7 +284,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `prior_session_binding_present`
   - `replacing_present`
   - `replacing_matches_current`
-- Emits: `RequestRuntimeBinding`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
+- Emits: `RequestRuntimeBinding`, `AppendLifecycleJournal`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
 ### `EnsureMemberRunningExisting`
@@ -778,7 +780,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `AdmitDestroyCleanup`
 - From: `Running`, `Stopped`, `Completed`
 - On: `AdmitDestroyCleanup`()
+- Emits: `AppendLifecycleJournal`
 - To: `Running`
+
+### `AdmitDestroyStorageFinalizing`
+- From: `Destroyed`
+- On: `AdmitDestroyStorageFinalizing`()
+- Guards:
+  - `destroy_admitted`
+- Emits: `AppendLifecycleJournal`
+- To: `Destroyed`
 
 ### `MarkCompleted`
 - From: `Running`, `Stopped`
@@ -862,13 +873,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `CompleteRunning`
 - From: `Running`
 - On: `Complete`()
-- Emits: `EmitRunLifecycleNotice`
+- Emits: `AppendLifecycleJournal`, `EmitRunLifecycleNotice`
 - To: `Completed`
 
 ### `ResetToRunning`
 - From: `Running`, `Stopped`, `Completed`
 - On: `Reset`()
-- Emits: `EmitRunLifecycleNotice`
+- Emits: `AppendLifecycleJournal`, `EmitRunLifecycleNotice`
 - To: `Running`
 
 ### `WireMembersRunning`
@@ -937,6 +948,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `external_peer_key_matches_edge`
   - `external_peer_key_not_already_wired`
   - `external_peer_edge_not_already_wired`
+  - `local_member_peer_registered`
 - Emits: `WiringGraphChanged`, `ExternalPeerTrustWiringRequested`, `EmitExternalPeerWiringLifecycleNotice`
 - To: `Running`
 
@@ -947,6 +959,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `external_peer_key_matches_edge`
   - `external_peer_key_already_wired`
   - `external_peer_edge_already_wired`
+  - `local_member_peer_registered`
 - Emits: `ExternalPeerTrustRepairRequested`
 - To: `Running`
 
@@ -1042,6 +1055,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `external_peer_key_matches_edge`
   - `external_peer_key_currently_wired`
   - `external_peer_edge_currently_wired`
+  - `local_member_peer_registered`
 - Emits: `WiringGraphChanged`, `ExternalPeerTrustUnwiringRequested`, `EmitExternalPeerWiringLifecycleNotice`
 - To: `Running`
 
@@ -2008,48 +2022,48 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RetireRunningReleasing`
 - From: `Running`
-- On: `Retire`(mob_id, agent_runtime_id, agent_identity, releasing, session_id)
+- On: `Retire`(mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
   - `prior_session_binding_present`
   - `releasing_present`
   - `releasing_matches_current`
-- Emits: `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`
 - To: `Running`
 
 ### `RetireRunningPreservingBinding`
 - From: `Running`
-- On: `Retire`(mob_id, agent_runtime_id, agent_identity, releasing, session_id)
+- On: `Retire`(mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
   - `prior_session_binding_present`
   - `releasing_absent`
-- Emits: `RequestRuntimeRetire`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`
 - To: `Running`
 
 ### `RetireRunningNoBinding`
 - From: `Running`
-- On: `Retire`(mob_id, agent_runtime_id, agent_identity, releasing, session_id)
+- On: `Retire`(mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
   - `no_prior_session_binding`
   - `releasing_absent`
-- Emits: `RequestRuntimeRetire`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`
 - To: `Running`
 
 ### `RetireStoppedReleasing`
 - From: `Stopped`
-- On: `Retire`(mob_id, agent_runtime_id, agent_identity, releasing, session_id)
+- On: `Retire`(mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
   - `prior_session_binding_present`
   - `releasing_present`
   - `releasing_matches_current`
-- Emits: `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`
 - To: `Stopped`
 
 ### `RequestPendingSessionIngressDetachForMobDestroyRunning`
@@ -2098,24 +2112,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RetireStoppedPreservingBinding`
 - From: `Stopped`
-- On: `Retire`(mob_id, agent_runtime_id, agent_identity, releasing, session_id)
+- On: `Retire`(mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
   - `prior_session_binding_present`
   - `releasing_absent`
-- Emits: `RequestRuntimeRetire`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`
 - To: `Stopped`
 
 ### `RetireStoppedNoBinding`
 - From: `Stopped`
-- On: `Retire`(mob_id, agent_runtime_id, agent_identity, releasing, session_id)
+- On: `Retire`(mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
   - `no_prior_session_binding`
   - `releasing_absent`
-- Emits: `RequestRuntimeRetire`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`
 - To: `Stopped`
 
 ### `RetireAllRunning`

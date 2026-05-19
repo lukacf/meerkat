@@ -6352,6 +6352,45 @@ async fn test_destroy_marker_append_failure_precedes_cleanup_side_effects() {
 }
 
 #[tokio::test]
+async fn test_destroy_storage_finalizing_append_failure_precedes_storage_scrub() {
+    let definition = with_unique_mob_id(sample_definition(), "destroy-finalizing-marker-first");
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let (handle, _service) = create_test_mob_with_events(definition, events.clone()).await;
+    events.fail_appends_for("MobDestroyStorageFinalizing").await;
+
+    let err = handle
+        .destroy()
+        .await
+        .expect_err("destroy storage-finalizing append failure should fail closed");
+    let report = match err {
+        crate::runtime::handle::MobDestroyError::Incomplete { report } => report,
+        other => panic!("expected incomplete destroy, got {other:?}"),
+    };
+    assert!(
+        report.namespace_cleaned,
+        "namespace cleanup precedes storage-finalizing marker"
+    );
+    assert!(
+        !report.metadata_scrubbed && !report.events_cleared,
+        "failed storage-finalizing marker must stop before metadata scrub/event clear: {report:?}"
+    );
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("record destroy storage finalizing event failed")),
+        "report should identify storage-finalizing marker append failure: {report:?}"
+    );
+    let replayed = events.replay_all().await.expect("replay events");
+    assert!(
+        replayed
+            .iter()
+            .all(|event| !matches!(event.kind, MobEventKind::MobDestroyStorageFinalizing)),
+        "failed storage-finalizing append must not persist the marker"
+    );
+}
+
+#[tokio::test]
 async fn test_destroy_retire_admission_failure_after_marker_retains_retry_anchor_and_closes_authority()
  {
     let definition = with_unique_mob_id(sample_definition(), "destroy-retire-admission-fail");
@@ -27119,14 +27158,9 @@ async fn test_reset_clears_roster_events_and_returns_to_running() {
     );
 
     let events = handle.events().replay_all().await.expect("replay");
-    // Append-only: old epoch events remain, new epoch ends with
-    // MobCreated + MobReset.
+    // Append-only: old epoch events remain, new epoch ends with MobReset.
     let len = events.len();
-    assert!(len >= 2, "should have at least MobCreated + MobReset");
-    assert!(
-        matches!(events[len - 2].kind, MobEventKind::MobCreated { .. }),
-        "penultimate event should be MobCreated (required for resume)"
-    );
+    assert!(len >= 1, "should have at least MobReset");
     assert!(
         matches!(events[len - 1].kind, MobEventKind::MobReset),
         "last event should be MobReset"
@@ -27568,8 +27602,7 @@ async fn test_reset_append_failure_transitions_to_stopped() {
         .expect("spawn w-1");
     assert_eq!(handle.status().await.unwrap(), MobState::Running);
 
-    // Fail the MobReset append — MobCreated append succeeds but reset
-    // should still report failure. After destructive steps (retire/stop),
+    // Fail the MobReset append. After destructive steps (retire/stop),
     // fail-closed to Stopped.
     events.fail_appends_for("MobReset").await;
 
@@ -27584,13 +27617,13 @@ async fn test_reset_append_failure_transitions_to_stopped() {
         "failed reset after destructive steps must transition to Stopped"
     );
 
-    // The event log should still contain a MobCreated event so resume works.
+    // The original creation event should still remain available for resume.
     let all_events = events.replay_all().await.expect("replay");
     assert!(
         all_events
             .iter()
             .any(|e| matches!(e.kind, MobEventKind::MobCreated { .. })),
-        "MobCreated must survive a failed reset"
+        "original MobCreated must survive a failed reset"
     );
 }
 
@@ -27602,8 +27635,8 @@ async fn test_reset_failure_from_stopped_stays_stopped() {
     handle.stop().await.expect("stop");
     assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
 
-    // Fail the MobCreated append to trigger reset failure from Stopped.
-    events.fail_appends_for("MobCreated").await;
+    // Fail the MobReset append to trigger reset failure from Stopped.
+    events.fail_appends_for("MobReset").await;
     let result = handle.reset().await;
     assert!(result.is_err(), "reset should fail");
 

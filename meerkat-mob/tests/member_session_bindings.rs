@@ -73,6 +73,7 @@ fn retire_input(
         mob_id: MobId("test-mob".to_string()),
         agent_runtime_id: runtime_id(identity_name, generation),
         agent_identity: identity(identity_name),
+        generation: Generation(generation),
         releasing,
         session_id: session_id_for_route,
     }

@@ -8454,6 +8454,7 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PublishSupervisorTrustEdge {
+        pub local_endpoint: Option<PeerEndpoint>,
         pub peer_id: String,
         pub name: String,
         pub address: String,
@@ -8462,6 +8463,7 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RevokeSupervisorTrustEdge {
+        pub local_endpoint: Option<PeerEndpoint>,
         pub peer_id: String,
         pub epoch: u64,
     }
@@ -8511,6 +8513,7 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommsTrustReconcileRequested {
+        pub local_endpoint: Option<PeerEndpoint>,
         pub peer_projection_epoch: u64,
         pub direct_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
         pub mob_overlay_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,

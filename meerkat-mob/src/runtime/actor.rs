@@ -125,6 +125,11 @@ struct PreparedDslInput {
     phase_changed: bool,
 }
 
+struct PreparedDslTransition {
+    authority: mob_dsl::MobMachineAuthority,
+    transition: mob_dsl::MobMachineTransition,
+}
+
 #[derive(Debug, Clone)]
 enum WireTrustAuthority {
     GraphAdded(MemberTrustHandoff),
@@ -2039,6 +2044,58 @@ impl MobActor {
         self.prepare_dsl_inputs(std::slice::from_ref(&input), context)
     }
 
+    fn prepare_dsl_input_transition(
+        &self,
+        input: mob_dsl::MobMachineInput,
+        context: &str,
+    ) -> Result<PreparedDslTransition, MobError> {
+        self.ensure_destroy_mutation_allowed(context)?;
+        let input_debug = format!("{input:?}");
+        let mut authority =
+            mob_dsl::MobMachineAuthority::recover_from_state(self.dsl_authority.state().clone())
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "DSL authority preparation ({context}) could not recover state: {error}"
+                    ))
+                })?;
+        let transition = mob_dsl::MobMachineMutator::apply(&mut authority, input).map_err(|e| {
+            MobError::Internal(format!(
+                "DSL authority prepare ({context}) rejected {input_debug}: {e}"
+            ))
+        })?;
+        Ok(PreparedDslTransition {
+            authority,
+            transition,
+        })
+    }
+
+    fn prepare_dsl_signal_transition(
+        &self,
+        signal: mob_dsl::MobMachineSignal,
+        context: &str,
+    ) -> Result<PreparedDslTransition, MobError> {
+        self.ensure_destroy_mutation_allowed(context)?;
+        let signal_debug = format!("{signal:?}");
+        let mut authority =
+            mob_dsl::MobMachineAuthority::recover_from_state(self.dsl_authority.state().clone())
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "DSL authority preparation ({context}) could not recover state: {error}"
+                    ))
+                })?;
+        let transition = authority.apply_signal(signal).map_err(|e| {
+            MobError::Internal(format!(
+                "DSL authority prepare ({context}): {e}; signal={signal_debug}; live_runtime_ids={:?}; runtime_fence_tokens={:?}",
+                self.dsl_authority.state().live_runtime_ids,
+                self.dsl_authority.state().runtime_fence_tokens,
+            ))
+        })?;
+        Ok(PreparedDslTransition {
+            authority,
+            transition,
+        })
+    }
+
     fn prepare_dsl_inputs(
         &self,
         inputs: &[mob_dsl::MobMachineInput],
@@ -2083,6 +2140,85 @@ impl MobActor {
             let _ = self.phase_watch_tx.send(self.state());
         }
         self.publish_machine_state_projection();
+    }
+
+    fn commit_prepared_dsl_transition(&mut self, prepared: PreparedDslTransition) {
+        let phase_changed = prepared.transition.from_phase != prepared.transition.to_phase;
+        let effects = prepared.transition.effects().to_vec();
+        self.dsl_authority = prepared.authority;
+        self.queue_routed_effects_from(&effects);
+        if phase_changed {
+            let _ = self.phase_watch_tx.send(self.state());
+        }
+        self.publish_machine_state_projection();
+    }
+
+    fn require_lifecycle_journal_effect(
+        transition: &mob_dsl::MobMachineTransition,
+        kind: mob_dsl::MobLifecycleJournalKind,
+        context: &str,
+    ) -> Result<(), MobError> {
+        if transition.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                mob_dsl::MobMachineEffect::AppendLifecycleJournal {
+                    kind: effect_kind,
+                    agent_identity: None,
+                    agent_runtime_id: None,
+                    fence_token: None,
+                    generation: None,
+                    session_id: None,
+                }
+                    if *effect_kind == kind
+            )
+        }) {
+            Ok(())
+        } else {
+            Err(MobError::Internal(format!(
+                "MobMachine {context} produced no generated {kind:?} lifecycle journal authority"
+            )))
+        }
+    }
+
+    fn require_member_lifecycle_journal_effect(
+        transition: &mob_dsl::MobMachineTransition,
+        kind: mob_dsl::MobLifecycleJournalKind,
+        agent_identity: &AgentIdentity,
+        agent_runtime_id: &crate::ids::AgentRuntimeId,
+        fence_token: Option<crate::ids::FenceToken>,
+        generation: crate::ids::Generation,
+        session_id: Option<mob_dsl::SessionId>,
+        context: &str,
+    ) -> Result<(), MobError> {
+        let expected_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let expected_runtime_id = mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id);
+        let expected_fence = fence_token.map(mob_dsl::FenceToken::from_domain);
+        let expected_generation = mob_dsl::Generation::from_domain(generation);
+        let expected_session = session_id;
+        if transition.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                mob_dsl::MobMachineEffect::AppendLifecycleJournal {
+                    kind: effect_kind,
+                    agent_identity: Some(effect_identity),
+                    agent_runtime_id: Some(effect_runtime_id),
+                    fence_token: effect_fence,
+                    generation: Some(effect_generation),
+                    session_id: effect_session,
+                } if *effect_kind == kind
+                    && effect_identity == &expected_identity
+                    && effect_runtime_id == &expected_runtime_id
+                    && effect_fence == &expected_fence
+                    && effect_generation == &expected_generation
+                    && effect_session == &expected_session
+            )
+        }) {
+            Ok(())
+        } else {
+            Err(MobError::Internal(format!(
+                "MobMachine {context} produced no generated {kind:?} lifecycle journal authority for member '{agent_identity}'"
+            )))
+        }
     }
 
     fn prepare_command_admission(
@@ -6096,16 +6232,26 @@ impl MobActor {
             .member_session_bindings
             .get(&dsl_identity)
             .cloned();
-        self.apply_dsl_input(
+        let prepared_spawn = self.prepare_dsl_input_transition(
             mob_dsl::MobMachineInput::Spawn {
                 agent_identity: dsl_identity.clone(),
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
                 fence_token: mob_dsl::FenceToken::from_domain(fence_token),
                 generation: mob_dsl::Generation::from_domain(generation),
                 external_addressable,
-                bridge_session_id,
+                bridge_session_id: bridge_session_id.clone(),
                 replacing,
             },
+            "finalize_spawn_from_pending_dsl_spawn",
+        )?;
+        Self::require_member_lifecycle_journal_effect(
+            &prepared_spawn.transition,
+            mob_dsl::MobLifecycleJournalKind::MemberSpawned,
+            &identity,
+            &agent_runtime_id,
+            Some(fence_token),
+            generation,
+            Some(bridge_session_id.clone()),
             "finalize_spawn_from_pending_dsl_spawn",
         )?;
 
@@ -6119,32 +6265,6 @@ impl MobActor {
             {
                 Ok(install) => Some((session_id, comms, install)),
                 Err(error) => {
-                    let _ = self.apply_dsl_input(
-                        mob_dsl::MobMachineInput::Retire {
-                            mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
-                            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
-                                &agent_runtime_id,
-                            ),
-                            agent_identity: dsl_identity.clone(),
-                            releasing: self
-                                .dsl_authority
-                                .state()
-                                .member_session_bindings
-                                .get(&dsl_identity)
-                                .cloned(),
-                            session_id: self
-                                .dsl_authority
-                                .state()
-                                .member_session_bindings
-                                .get(&dsl_identity)
-                                .cloned()
-                                .unwrap_or_else(mob_dsl::SessionId::default),
-                        },
-                        "finalize_spawn_supervisor_trust_failed_retire_dsl",
-                    );
-                    if let Some(session_id) = provision.member_ref().bridge_session_id() {
-                        self.discard_pending_routed_effects_for_session(session_id);
-                    }
                     if let Err(rollback_error) = provision.rollback().await {
                         return Err(MobError::Internal(format!(
                             "spawn supervisor private trust failed for '{agent_identity}': {error}; archive compensation failed: {rollback_error}"
@@ -6168,30 +6288,6 @@ impl MobActor {
                 {
                     self.cleanup_supervisor_private_trust_for_session(session_id, comms, install)
                         .await;
-                }
-                let _ = self.apply_dsl_input(
-                    mob_dsl::MobMachineInput::Retire {
-                        mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
-                        agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
-                        agent_identity: dsl_identity.clone(),
-                        releasing: self
-                            .dsl_authority
-                            .state()
-                            .member_session_bindings
-                            .get(&dsl_identity)
-                            .cloned(),
-                        session_id: self
-                            .dsl_authority
-                            .state()
-                            .member_session_bindings
-                            .get(&dsl_identity)
-                            .cloned()
-                            .unwrap_or_else(mob_dsl::SessionId::default),
-                    },
-                    "finalize_spawn_overlay_failed_retire_dsl",
-                );
-                if let Some(session_id) = provision.member_ref().bridge_session_id() {
-                    self.discard_pending_routed_effects_for_session(session_id);
                 }
                 if let Err(rollback_error) = provision.rollback().await {
                     return Err(MobError::Internal(format!(
@@ -6233,30 +6329,6 @@ impl MobActor {
                 self.cleanup_supervisor_private_trust_for_session(session_id, comms, install)
                     .await;
             }
-            let _ = self.apply_dsl_input(
-                mob_dsl::MobMachineInput::Retire {
-                    mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
-                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
-                    agent_identity: dsl_identity.clone(),
-                    releasing: self
-                        .dsl_authority
-                        .state()
-                        .member_session_bindings
-                        .get(&dsl_identity)
-                        .cloned(),
-                    session_id: self
-                        .dsl_authority
-                        .state()
-                        .member_session_bindings
-                        .get(&dsl_identity)
-                        .cloned()
-                        .unwrap_or_else(mob_dsl::SessionId::default),
-                },
-                "finalize_spawn_append_failed_retire_dsl",
-            );
-            if let Some(session_id) = provision.member_ref().bridge_session_id() {
-                self.discard_pending_routed_effects_for_session(session_id);
-            }
             if let Err(rollback_error) = provision.rollback().await {
                 return Err(MobError::Internal(format!(
                     "spawn append failed for '{agent_identity}': {append_error}; archive compensation failed: {rollback_error}"
@@ -6264,6 +6336,7 @@ impl MobActor {
             }
             return Err(MobError::from(append_error));
         }
+        self.commit_prepared_dsl_transition(prepared_spawn);
 
         // Commit the provision: the member is now owned by the roster.
         // From this point, rollback_failed_spawn handles cleanup via the
@@ -9248,21 +9321,39 @@ impl MobActor {
         let session_id_for_route = releasing
             .clone()
             .unwrap_or_else(mob_dsl::SessionId::default);
-        let transition = self.apply_dsl_input_collect_transition(
+        let prepared_retire = self.prepare_dsl_input_transition(
             mob_dsl::MobMachineInput::Retire {
                 mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
                 agent_identity: dsl_identity,
+                generation: mob_dsl::Generation::from_domain(entry.generation),
                 releasing: releasing.clone(),
-                session_id: session_id_for_route,
+                session_id: session_id_for_route.clone(),
             },
             "destroy_mark_member_retiring",
         )?;
+        Self::require_member_lifecycle_journal_effect(
+            &prepared_retire.transition,
+            mob_dsl::MobLifecycleJournalKind::MemberRetired,
+            &entry.agent_identity,
+            &entry.agent_runtime_id,
+            None,
+            entry.generation,
+            Some(session_id_for_route),
+            "destroy_mark_member_retiring",
+        )?;
+        if !self
+            .retire_event_exists(&entry.agent_identity, &entry.member_ref)
+            .await?
+        {
+            self.append_retire_event_for_entry(entry).await?;
+        }
 
         let mut detach_obligations =
             crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(
-                &transition,
+                &prepared_retire.transition,
             );
+        self.commit_prepared_dsl_transition(prepared_retire);
         if let Some(obligation) = detach_obligations.pop() {
             if let Some(detach_session_id) =
                 Self::destroy_ingress_detach_session_id(entry, releasing.as_ref())?
@@ -9333,15 +9424,13 @@ impl MobActor {
                     .cloned()
             })
             .unwrap_or_else(mob_dsl::SessionId::default);
-        let release_session_for_failed_projection = releasing
-            .as_ref()
-            .and_then(|session_id| SessionId::parse(&session_id.0).ok());
         let retire_input = mob_dsl::MobMachineInput::Retire {
             mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
             agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
             agent_identity: dsl_identity,
+            generation: mob_dsl::Generation::from_domain(entry.generation),
             releasing,
-            session_id: session_id_for_route,
+            session_id: session_id_for_route.clone(),
         };
 
         let retire_event_already_present = self
@@ -9351,28 +9440,32 @@ impl MobActor {
             .member_retire_trust_unwire_authorities(agent_identity, &entry)
             .await?;
 
-        let transition = self.apply_dsl_input_collect_transition(
-            retire_input,
+        let prepared_retire =
+            self.prepare_dsl_input_transition(retire_input, "handle_retire_inner_mark_retiring")?;
+        Self::require_member_lifecycle_journal_effect(
+            &prepared_retire.transition,
+            mob_dsl::MobLifecycleJournalKind::MemberRetired,
+            &entry.agent_identity,
+            &entry.agent_runtime_id,
+            None,
+            entry.generation,
+            Some(session_id_for_route),
             "handle_retire_inner_mark_retiring",
         )?;
+        if !retire_event_already_present
+            && let Err(error) = self.append_retire_event_for_entry(&entry).await
+        {
+            return Err(error);
+        }
         let mut detach_obligations =
             crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(
-                &transition,
+                &prepared_retire.transition,
             );
+        self.commit_prepared_dsl_transition(prepared_retire);
         if let (Some(obligation), Some(session_id)) = (detach_obligations.pop(), detach_session_id)
         {
             self.detach_session_ingress_for_mob_destroy(&session_id, obligation)
                 .await?;
-        }
-        if !retire_event_already_present
-            && let Err(error) = self
-                .append_retire_event(agent_identity, &entry.role, &entry.member_ref)
-                .await
-        {
-            if let Some(session_id) = release_session_for_failed_projection.as_ref() {
-                self.discard_pending_routed_effects_for_session(session_id);
-            }
-            return Err(error);
         }
 
         // Flush routed effects *before* the disposal pipeline tears down
@@ -10209,11 +10302,22 @@ impl MobActor {
             .await;
         self.retire_all_members("complete").await?;
 
-        // MobMachine owns the lifecycle transition; the event log records the
-        // accepted transition for durable recovery after authority has moved.
-        self.apply_command_admission(
-            mob_dsl::MobMachineInput::Complete,
-            MobState::Completed,
+        // MobMachine owns both completion admission and the durable journal
+        // request. Prepare the generated transition first, append the recovery
+        // event from that local effect, then commit the live authority.
+        let prepared = self
+            .prepare_dsl_input_transition(mob_dsl::MobMachineInput::Complete, "complete_input")
+            .map_err(|error| {
+                tracing::debug!(
+                    context = "complete_input",
+                    error = %error,
+                    "MobMachine command admission rejected input"
+                );
+                self.invalid_transition_to(MobState::Completed)
+            })?;
+        Self::require_lifecycle_journal_effect(
+            &prepared.transition,
+            mob_dsl::MobLifecycleJournalKind::Completed,
             "complete_input",
         )?;
         self.events
@@ -10223,6 +10327,7 @@ impl MobActor {
                 kind: MobEventKind::MobCompleted,
             })
             .await?;
+        self.commit_prepared_dsl_transition(prepared);
         self.ensure_pending_spawn_alignment("handle_complete completion")?;
         self.ensure_flow_tracker_alignment("handle_complete completion")
             .await?;
@@ -10334,20 +10439,32 @@ impl MobActor {
             .retire_event_exists(&entry.agent_identity, &entry.member_ref)
             .await?;
         if !retire_event_already_present {
-            self.append_retire_event(&entry.agent_identity, &entry.role, &entry.member_ref)
-                .await?;
+            return Err(MobError::Internal(format!(
+                "destroy cleanup for '{}' reached disposal without a generated durable retire journal event",
+                entry.agent_identity
+            )));
         }
         Ok(())
     }
 
     async fn record_destroying_event(&mut self) -> Result<(), MobError> {
-        if !self.destroy_admitted() {
-            self.apply_dsl_signal(
+        let destroying_event_exists = self.destroying_event_exists().await?;
+        if !destroying_event_exists {
+            if self.destroy_admitted() {
+                return Err(MobError::Internal(
+                    "destroy cleanup was admitted without a durable MobDestroying journal event"
+                        .to_string(),
+                ));
+            }
+            let prepared = self.prepare_dsl_signal_transition(
                 mob_dsl::MobMachineSignal::AdmitDestroyCleanup,
                 "record_destroying_event",
             )?;
-        }
-        if !self.destroying_event_exists().await? {
+            Self::require_lifecycle_journal_effect(
+                &prepared.transition,
+                mob_dsl::MobLifecycleJournalKind::Destroying,
+                "record_destroying_event",
+            )?;
             self.events
                 .append(NewMobEvent {
                     mob_id: self.definition.id.clone(),
@@ -10355,6 +10472,18 @@ impl MobActor {
                     kind: MobEventKind::MobDestroying,
                 })
                 .await?;
+            self.commit_prepared_dsl_transition(prepared);
+        } else if !self.destroy_admitted() {
+            let prepared = self.prepare_dsl_signal_transition(
+                mob_dsl::MobMachineSignal::AdmitDestroyCleanup,
+                "record_destroying_event",
+            )?;
+            Self::require_lifecycle_journal_effect(
+                &prepared.transition,
+                mob_dsl::MobLifecycleJournalKind::Destroying,
+                "record_destroying_event",
+            )?;
+            self.commit_prepared_dsl_transition(prepared);
         }
         let _ = self.phase_watch_tx.send(self.state());
         Ok(())
@@ -10382,10 +10511,19 @@ impl MobActor {
             .any(|event| matches!(event.kind, MobEventKind::MobDestroyStorageFinalizing)))
     }
 
-    async fn record_destroy_storage_finalizing_event(&self) -> Result<(), MobError> {
+    async fn record_destroy_storage_finalizing_event(&mut self) -> Result<(), MobError> {
         if self.destroy_storage_finalizing_event_exists().await? {
             return Ok(());
         }
+        let prepared = self.prepare_dsl_signal_transition(
+            mob_dsl::MobMachineSignal::AdmitDestroyStorageFinalizing,
+            "record_destroy_storage_finalizing_event",
+        )?;
+        Self::require_lifecycle_journal_effect(
+            &prepared.transition,
+            mob_dsl::MobLifecycleJournalKind::DestroyStorageFinalizing,
+            "record_destroy_storage_finalizing_event",
+        )?;
         self.events
             .append(NewMobEvent {
                 mob_id: self.definition.id.clone(),
@@ -10393,6 +10531,7 @@ impl MobActor {
                 kind: MobEventKind::MobDestroyStorageFinalizing,
             })
             .await?;
+        self.commit_prepared_dsl_transition(prepared);
         Ok(())
     }
 
@@ -11979,13 +12118,31 @@ impl MobActor {
             }
             return Err(error);
         }
-        // Commit ResetToRunning on the live authority before projecting the
-        // new durable epoch. ResetToRunning owns active/pending run counters
-        // and coordinator binding, so reset does not need shell Stop/Resume or
-        // orchestrator stop/resume choreography.
-        if let Err(error) = self.apply_command_admission(
-            mob_dsl::MobMachineInput::Reset,
-            MobState::Running,
+        // ResetToRunning owns active/pending run counters and coordinator
+        // binding. Prepare that generated transition first so the durable
+        // epoch markers are written only from the machine's local journal
+        // authority, then commit the live authority after the batch append.
+        let prepared = match self
+            .prepare_dsl_input_transition(mob_dsl::MobMachineInput::Reset, "reset_to_running")
+            .map_err(|error| {
+                tracing::debug!(
+                    context = "reset_to_running",
+                    error = %error,
+                    "MobMachine command admission rejected input"
+                );
+                self.invalid_transition_to(MobState::Running)
+            }) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if was_stopped {
+                    self.provisioner.cancel_all_checkpointers().await;
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = Self::require_lifecycle_journal_effect(
+            &prepared.transition,
+            mob_dsl::MobLifecycleJournalKind::Reset,
             "reset_to_running",
         ) {
             if was_stopped {
@@ -11994,33 +12151,23 @@ impl MobActor {
             return Err(error);
         }
 
-        // --- Event rewrite phase: append new epoch markers. ---
-        // Append-only epoch model: MobCreated (for resume) + MobReset (epoch
-        // marker). Projections clear on MobReset; resume uses the last
-        // MobCreated. No clear() needed -- crash-safe.
-        // Batch append ensures both events land atomically.
-        let mob_id = self.definition.id.clone();
+        // --- Event rewrite phase: append the new epoch marker. ---
+        // Append-only epoch model: projections clear on MobReset; the original
+        // MobCreated definition remains the durable resume authority for this
+        // mob. No clear() needed -- crash-safe.
         if let Err(error) = self
             .events
-            .append_batch(vec![
-                NewMobEvent {
-                    mob_id: mob_id.clone(),
-                    timestamp: None,
-                    kind: MobEventKind::MobCreated {
-                        definition: Box::new(self.definition.as_ref().clone()),
-                    },
-                },
-                NewMobEvent {
-                    mob_id,
-                    timestamp: None,
-                    kind: MobEventKind::MobReset,
-                },
-            ])
+            .append(NewMobEvent {
+                mob_id: self.definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobReset,
+            })
             .await
         {
             self.fail_reset_to_stopped().await;
             return Err(MobError::from(error));
         }
+        self.commit_prepared_dsl_transition(prepared);
 
         // Clear in-memory projections.
         self.edge_locks.clear().await;
@@ -13515,6 +13662,11 @@ impl MobActor {
         };
         let retire_event_already_present =
             self.retire_event_exists(agent_identity, member_ref).await?;
+        if spawned_entry.is_none() && !retire_event_already_present {
+            return Err(MobError::WiringError(format!(
+                "spawn rollback requires roster entry for '{agent_identity}' before retiring durable member state"
+            )));
+        }
         let mut wired_peers = successful_wiring_targets.to_vec();
         wired_peers.sort();
         wired_peers.dedup();
@@ -13570,39 +13722,51 @@ impl MobActor {
                 .bridge_session_id()
                 .map(mob_dsl::SessionId::from_domain);
             let session_id_for_route = releasing.clone().unwrap_or_default();
-            if let Err(error) = self.apply_dsl_input(
+            let prepared_retire = match self.prepare_dsl_input_transition(
                 mob_dsl::MobMachineInput::Retire {
                     mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
                     agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
-                    agent_identity: dsl_identity,
+                    agent_identity: dsl_identity.clone(),
+                    generation: mob_dsl::Generation::from_domain(entry.generation),
                     releasing,
-                    session_id: session_id_for_route,
+                    session_id: session_id_for_route.clone(),
                 },
                 "rollback_failed_spawn_mark_retiring",
             ) {
+                Ok(prepared_retire) => prepared_retire,
+                Err(error) => {
+                    tracing::warn!(
+                        agent_identity = %agent_identity,
+                        %error,
+                        "spawn rollback could not mark runtime retired in DSL"
+                    );
+                    return Err(error);
+                }
+            };
+            Self::require_member_lifecycle_journal_effect(
+                &prepared_retire.transition,
+                mob_dsl::MobLifecycleJournalKind::MemberRetired,
+                &entry.agent_identity,
+                &entry.agent_runtime_id,
+                None,
+                entry.generation,
+                Some(session_id_for_route),
+                "rollback_failed_spawn_mark_retiring",
+            )?;
+            if !retire_event_already_present
+                && let Err(error) = self.append_retire_event_for_entry(entry).await
+            {
                 tracing::warn!(
                     agent_identity = %agent_identity,
                     %error,
-                    "spawn rollback could not mark runtime retired in DSL"
+                    "spawn rollback could not append durable retired event"
                 );
-                if let Some(session_id) = member_ref.bridge_session_id() {
-                    self.discard_pending_routed_effects_for_session(session_id);
-                }
                 return Err(error);
             }
+            self.commit_prepared_dsl_transition(prepared_retire);
             if let Some(session_id) = member_ref.bridge_session_id() {
                 self.discard_pending_routed_effects_for_session(session_id);
             }
-        }
-        if !retire_event_already_present
-            && let Err(error) = self
-                .append_retire_event(agent_identity, profile_name, member_ref)
-                .await
-        {
-            if let Some(session_id) = member_ref.bridge_session_id() {
-                self.discard_pending_routed_effects_for_session(session_id);
-            }
-            return Err(error);
         }
 
         let spawned_comms = self.provisioner_comms(member_ref).await;
@@ -13842,35 +14006,19 @@ impl MobActor {
         Ok(index.contains(&key))
     }
 
-    async fn append_retire_event(
-        &self,
-        agent_identity: &MeerkatId,
-        profile_name: &ProfileName,
-        member_ref: &MemberRef,
-    ) -> Result<(), MobError> {
-        // Look up identity-native fields from the roster for the 0.6 event model.
-        let (resolved_identity, generation) = {
-            let roster = self.roster.read().await;
-            match roster.get(agent_identity) {
-                Some(entry) => (entry.agent_identity.clone(), entry.generation),
-                None => (
-                    AgentIdentity::from(agent_identity.as_str()),
-                    Generation::INITIAL,
-                ),
-            }
-        };
+    async fn append_retire_event_for_entry(&self, entry: &RosterEntry) -> Result<(), MobError> {
         self.events
             .append(NewMobEvent {
                 mob_id: self.definition.id.clone(),
                 timestamp: None,
                 kind: MobEventKind::MemberRetired {
-                    agent_identity: resolved_identity,
-                    generation,
-                    role: profile_name.clone(),
+                    agent_identity: entry.agent_identity.clone(),
+                    generation: entry.generation,
+                    role: entry.role.clone(),
                 },
             })
             .await?;
-        let key = Self::retire_event_key(agent_identity, member_ref);
+        let key = Self::retire_event_key(&entry.agent_identity, &entry.member_ref);
         self.retired_event_index.write().await.insert(key);
         Ok(())
     }

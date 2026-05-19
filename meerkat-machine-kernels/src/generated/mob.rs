@@ -1329,6 +1329,72 @@ impl std::fmt::Display for MobId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MobLifecycleJournalKind {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Destroying")]
+    Destroying,
+    #[serde(rename = "DestroyStorageFinalizing")]
+    DestroyStorageFinalizing,
+    #[serde(rename = "MemberSpawned")]
+    MemberSpawned,
+    #[serde(rename = "MemberRetired")]
+    MemberRetired,
+    #[serde(rename = "Reset")]
+    Reset,
+}
+impl MobLifecycleJournalKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::Destroying => "Destroying",
+            Self::DestroyStorageFinalizing => "DestroyStorageFinalizing",
+            Self::MemberSpawned => "MemberSpawned",
+            Self::MemberRetired => "MemberRetired",
+            Self::Reset => "Reset",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobLifecycleJournalKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "Destroying" => Ok(Self::Destroying),
+            "DestroyStorageFinalizing" => Ok(Self::DestroyStorageFinalizing),
+            "MemberSpawned" => Ok(Self::MemberSpawned),
+            "MemberRetired" => Ok(Self::MemberRetired),
+            "Reset" => Ok(Self::Reset),
+            other => Err(format!("invalid MobLifecycleJournalKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobLifecycleJournalKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobLifecycleJournalKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MobMemberState {
     #[default]
     #[serde(rename = "Active")]
@@ -2121,6 +2187,7 @@ pub mod inputs {
         pub mob_id: MobId,
         pub agent_runtime_id: AgentRuntimeId,
         pub agent_identity: AgentIdentity,
+        pub generation: Generation,
         pub releasing: Option<SessionId>,
         pub session_id: SessionId,
     }
@@ -2618,6 +2685,8 @@ pub mod signals {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitDestroyCleanup {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitDestroyStorageFinalizing {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MarkCompleted {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StartRun {}
@@ -2686,6 +2755,7 @@ pub enum Signal {
     RecoverExternalPeerUnwire(signals::RecoverExternalPeerUnwire),
     RecoverMemberRestoreFailure(signals::RecoverMemberRestoreFailure),
     AdmitDestroyCleanup(signals::AdmitDestroyCleanup),
+    AdmitDestroyStorageFinalizing(signals::AdmitDestroyStorageFinalizing),
     MarkCompleted(signals::MarkCompleted),
     StartRun(signals::StartRun),
     FinishRun(signals::FinishRun),
@@ -2729,6 +2799,7 @@ impl Signal {
             Self::RecoverExternalPeerUnwire(_) => SignalKind::RecoverExternalPeerUnwire,
             Self::RecoverMemberRestoreFailure(_) => SignalKind::RecoverMemberRestoreFailure,
             Self::AdmitDestroyCleanup(_) => SignalKind::AdmitDestroyCleanup,
+            Self::AdmitDestroyStorageFinalizing(_) => SignalKind::AdmitDestroyStorageFinalizing,
             Self::MarkCompleted(_) => SignalKind::MarkCompleted,
             Self::StartRun(_) => SignalKind::StartRun,
             Self::FinishRun(_) => SignalKind::FinishRun,
@@ -2773,6 +2844,7 @@ pub enum SignalKind {
     RecoverExternalPeerUnwire,
     RecoverMemberRestoreFailure,
     AdmitDestroyCleanup,
+    AdmitDestroyStorageFinalizing,
     MarkCompleted,
     StartRun,
     FinishRun,
@@ -2841,6 +2913,15 @@ pub mod effects {
     pub struct RequestSessionIngressDetachForMobDestroy {
         pub mob_id: MobId,
         pub agent_runtime_id: AgentRuntimeId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AppendLifecycleJournal {
+        pub kind: MobLifecycleJournalKind,
+        pub agent_identity: Option<AgentIdentity>,
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub generation: Option<Generation>,
+        pub session_id: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EmitMemberLifecycleNotice {
@@ -2916,18 +2997,21 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ExternalPeerTrustWiringRequested {
         pub edge: ExternalPeerEdge,
+        pub local_peer_id: PeerId,
         pub peer_id: PeerId,
         pub epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ExternalPeerTrustUnwiringRequested {
         pub edge: ExternalPeerEdge,
+        pub local_peer_id: PeerId,
         pub peer_id: PeerId,
         pub epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ExternalPeerTrustRepairRequested {
         pub edge: ExternalPeerEdge,
+        pub local_peer_id: PeerId,
         pub peer_id: PeerId,
         pub epoch: u64,
     }
@@ -2965,6 +3049,7 @@ pub enum Effect {
     RequestRuntimeRetire(effects::RequestRuntimeRetire),
     RequestRuntimeDestroy(effects::RequestRuntimeDestroy),
     RequestSessionIngressDetachForMobDestroy(effects::RequestSessionIngressDetachForMobDestroy),
+    AppendLifecycleJournal(effects::AppendLifecycleJournal),
     EmitMemberLifecycleNotice(effects::EmitMemberLifecycleNotice),
     EmitRunLifecycleNotice(effects::EmitRunLifecycleNotice),
     EmitFlowRunNotice(effects::EmitFlowRunNotice),
@@ -3001,6 +3086,7 @@ pub enum EffectKind {
     RequestRuntimeRetire,
     RequestRuntimeDestroy,
     RequestSessionIngressDetachForMobDestroy,
+    AppendLifecycleJournal,
     EmitMemberLifecycleNotice,
     EmitRunLifecycleNotice,
     EmitFlowRunNotice,
@@ -3095,6 +3181,7 @@ pub enum TransitionId {
     RespawnMember,
     RecoverMemberRestoreFailureRunning,
     AdmitDestroyCleanup,
+    AdmitDestroyStorageFinalizing,
     MarkCompleted,
     DestroyMob,
     ObserveRuntimeDestroyed,

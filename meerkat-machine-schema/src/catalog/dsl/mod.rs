@@ -1218,6 +1218,17 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string("MobId"),
+            NamedTypeBinding::string_enum(
+                "MobLifecycleJournalKind",
+                &[
+                    "Completed",
+                    "Destroying",
+                    "DestroyStorageFinalizing",
+                    "MemberSpawned",
+                    "MemberRetired",
+                    "Reset",
+                ],
+            ),
             NamedTypeBinding::string_enum("MobMemberState", &["Active", "Retiring"]),
             NamedTypeBinding::string_enum(
                 "MobPhase",

@@ -339,7 +339,7 @@ macro_rules! mob_catalog_machine_dsl {
             Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, bridge_session_id: SessionId, replacing: Option<SessionId> },
             EnsureMember { agent_identity: AgentIdentity },
             Reconcile { desired: Set<AgentIdentity>, retire_stale: bool },
-            Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, releasing: Option<SessionId>, session_id: SessionId },
+            Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: SessionId },
             RequestPendingSessionIngressDetachForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
             Respawn { agent_runtime_id: AgentRuntimeId },
             RetireAll,
@@ -429,6 +429,7 @@ macro_rules! mob_catalog_machine_dsl {
             RecoverExternalPeerUnwire { key: ExternalPeerKey },
             RecoverMemberRestoreFailure { agent_identity: AgentIdentity, reason: String },
             AdmitDestroyCleanup,
+            AdmitDestroyStorageFinalizing,
             MarkCompleted,
             StartRun,
             FinishRun,
@@ -460,6 +461,7 @@ macro_rules! mob_catalog_machine_dsl {
             RequestRuntimeRetire { session_id: SessionId },
             RequestRuntimeDestroy { session_id: SessionId },
             RequestSessionIngressDetachForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
+            AppendLifecycleJournal { kind: Enum<MobLifecycleJournalKind>, agent_identity: Option<AgentIdentity>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, session_id: Option<SessionId> },
             EmitMemberLifecycleNotice { kind: Enum<MemberLifecycleKind> },
             EmitRunLifecycleNotice,
             EmitFlowRunNotice,
@@ -519,6 +521,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition RequestRuntimeRetire => routed [MeerkatMachine],
         disposition RequestRuntimeDestroy => routed [MeerkatMachine],
         disposition RequestSessionIngressDetachForMobDestroy => external handoff mob_destroying_session_ingress,
+        disposition AppendLifecycleJournal => local,
         disposition EmitMemberLifecycleNotice => external,
         disposition EmitRunLifecycleNotice => external,
         disposition EmitFlowRunNotice => external,
@@ -615,6 +618,14 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation, session_id: bridge_session_id }
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberSpawned,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: Some(fence_token),
+                generation: Some(generation),
+                session_id: Some(bridge_session_id)
+            }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: None, new_session_id: Some(bridge_session_id) }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
         }
@@ -644,6 +655,14 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation, session_id: bridge_session_id }
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberSpawned,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: Some(fence_token),
+                generation: Some(generation),
+                session_id: Some(bridge_session_id)
+            }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(replacing.get("value")), new_session_id: Some(bridge_session_id) }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
         }
@@ -1347,6 +1366,30 @@ macro_rules! mob_catalog_machine_dsl {
                 self.destroy_admitted = true;
             }
             to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::Destroying,
+                agent_identity: None,
+                agent_runtime_id: None,
+                fence_token: None,
+                generation: None,
+                session_id: None
+            }
+        }
+
+        transition AdmitDestroyStorageFinalizing {
+            on signal AdmitDestroyStorageFinalizing
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            update {}
+            to Destroyed
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::DestroyStorageFinalizing,
+                agent_identity: None,
+                agent_runtime_id: None,
+                fence_token: None,
+                generation: None,
+                session_id: None
+            }
         }
 
         transition MarkCompleted {
@@ -1504,6 +1547,14 @@ macro_rules! mob_catalog_machine_dsl {
                 self.active_run_count = 0;
             }
             to Completed
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::Completed,
+                agent_identity: None,
+                agent_runtime_id: None,
+                fence_token: None,
+                generation: None,
+                session_id: None
+            }
             emit EmitRunLifecycleNotice
         }
 
@@ -1521,6 +1572,14 @@ macro_rules! mob_catalog_machine_dsl {
                 self.coordinator_bound = true;
             }
             to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::Reset,
+                agent_identity: None,
+                agent_runtime_id: None,
+                fence_token: None,
+                generation: None,
+                session_id: None
+            }
             emit EmitRunLifecycleNotice
         }
 
@@ -3306,7 +3365,7 @@ macro_rules! mob_catalog_machine_dsl {
         // =====================================================================
 
         transition RetireRunningReleasing {
-            on input Retire { mob_id, agent_runtime_id, agent_identity, releasing, session_id }
+            on input Retire { mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
@@ -3323,13 +3382,21 @@ macro_rules! mob_catalog_machine_dsl {
                 self.topology_epoch += 1;
             }
             to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: Some(session_id)
+            }
             emit RequestRuntimeRetire { session_id: session_id }
             emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(releasing.get("value")), new_session_id: None }
         }
 
         transition RetireRunningPreservingBinding {
-            on input Retire { mob_id, agent_runtime_id, agent_identity, releasing, session_id }
+            on input Retire { mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
@@ -3342,11 +3409,19 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_restore_failures.remove(agent_identity);
             }
             to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: Some(session_id)
+            }
             emit RequestRuntimeRetire { session_id: session_id }
         }
 
         transition RetireRunningNoBinding {
-            on input Retire { mob_id, agent_runtime_id, agent_identity, releasing, session_id }
+            on input Retire { mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
@@ -3359,11 +3434,19 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_restore_failures.remove(agent_identity);
             }
             to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: Some(session_id)
+            }
             emit RequestRuntimeRetire { session_id: session_id }
         }
 
         transition RetireStoppedReleasing {
-            on input Retire { mob_id, agent_runtime_id, agent_identity, releasing, session_id }
+            on input Retire { mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
@@ -3380,6 +3463,14 @@ macro_rules! mob_catalog_machine_dsl {
                 self.topology_epoch += 1;
             }
             to Stopped
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: Some(session_id)
+            }
             emit RequestRuntimeRetire { session_id: session_id }
             emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(releasing.get("value")), new_session_id: None }
@@ -3443,7 +3534,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition RetireStoppedPreservingBinding {
-            on input Retire { mob_id, agent_runtime_id, agent_identity, releasing, session_id }
+            on input Retire { mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
@@ -3456,11 +3547,19 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_restore_failures.remove(agent_identity);
             }
             to Stopped
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: Some(session_id)
+            }
             emit RequestRuntimeRetire { session_id: session_id }
         }
 
         transition RetireStoppedNoBinding {
-            on input Retire { mob_id, agent_runtime_id, agent_identity, releasing, session_id }
+            on input Retire { mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
@@ -3473,6 +3572,14 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_restore_failures.remove(agent_identity);
             }
             to Stopped
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: Some(session_id)
+            }
             emit RequestRuntimeRetire { session_id: session_id }
         }
 
@@ -4454,6 +4561,19 @@ pub enum MemberLifecycleKind {
     Respawned,
     Completed,
     Destroyed,
+}
+
+/// Typed durable mob lifecycle journal request. The runtime may append the
+/// matching event only after a generated transition emits this local effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobLifecycleJournalKind {
+    #[default]
+    Completed,
+    Destroying,
+    DestroyStorageFinalizing,
+    MemberSpawned,
+    MemberRetired,
+    Reset,
 }
 
 impl MemberLifecycleKind {

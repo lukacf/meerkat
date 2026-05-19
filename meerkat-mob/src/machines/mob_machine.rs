@@ -8,6 +8,7 @@
 use meerkat_machine_schema::catalog::dsl::OptionValueExt;
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     FlowFrameReducerCommandKind, FlowRunReducerCommandKind, LoopIterationReducerCommandKind,
+    MobLifecycleJournalKind,
 };
 
 // ---------------------------------------------------------------------------

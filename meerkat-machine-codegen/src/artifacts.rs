@@ -6376,6 +6376,14 @@ impl<'a> MachineTlaCompiler<'a> {
         let prefix = |name: &str| self.scoped_helper_name(name);
         writeln!(
             out,
+            "{}(key, edge) ==",
+            prefix("mob_machine_external_peer_key_matches_edge")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ key.local = edge.local");
+        pushln!(out, "    /\\ key.name = edge.endpoint.name");
+        writeln!(
+            out,
             "{}(status) == status \\in {{\"Completed\", \"Failed\", \"Skipped\", \"Canceled\"}}",
             prefix("mob_machine_node_terminal")
         )

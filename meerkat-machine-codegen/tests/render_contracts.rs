@@ -108,6 +108,7 @@ fn renders_kernel_seam_composition_with_namespaced_mob_native_helpers() {
     let rendered = render_composition_semantic_model(&meerkat_mob_seam_composition());
 
     for helper in [
+        "mob__mob_machine_external_peer_key_matches_edge(key, edge) ==",
         "mob__mob_machine_node_terminal(status) ==",
         "mob__mob_machine_step_status_from_frame_node_status(status) ==",
         "mob__mob_machine_frame_node_status_after_admit(",

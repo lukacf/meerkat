@@ -1125,6 +1125,57 @@ mod tests {
         .expect("CreateFrameSeed should be accepted before child loop seed");
     }
 
+    fn external_peer_edge_for_test(local: &str, name: &str) -> ExternalPeerEdge {
+        ExternalPeerEdge::new(
+            AgentIdentity::from(local),
+            ExternalPeerEndpoint {
+                name: PeerName::from(name),
+                peer_id: PeerId::from(format!("{name}-peer")),
+                address: PeerAddress::from(format!("https://{name}.example.test")),
+                signing_key: PeerSigningKey::from([7; 32]),
+            },
+        )
+    }
+
+    #[test]
+    fn external_peer_key_must_match_edge_payload() {
+        let edge = external_peer_edge_for_test("local-a", "peer-a");
+        let mismatched_local =
+            ExternalPeerKey::new(AgentIdentity::from("local-b"), edge.endpoint.name.clone());
+        let mut authority = MobMachineAuthority::new();
+
+        let rejected = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::WireExternalPeer {
+                key: mismatched_local,
+                edge: edge.clone(),
+            },
+        );
+        assert!(
+            rejected.is_err(),
+            "generated MobMachine authority must reject key.local mismatches"
+        );
+        assert!(authority.state().external_peer_edges.is_empty());
+        assert!(authority.state().external_peer_edges_by_key.is_empty());
+
+        let mismatched_name =
+            ExternalPeerKey::new(edge.local.clone(), PeerName::from("different-peer"));
+        let mut authority = MobMachineAuthority::new();
+        let rejected = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::WireExternalPeer {
+                key: mismatched_name,
+                edge,
+            },
+        );
+        assert!(
+            rejected.is_err(),
+            "generated MobMachine authority must reject key.name mismatches"
+        );
+        assert!(authority.state().external_peer_edges.is_empty());
+        assert!(authority.state().external_peer_edges_by_key.is_empty());
+    }
+
     fn seed_body_frame(
         authority: &mut MobMachineAuthority,
         run_id: &RunId,

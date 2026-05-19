@@ -1069,17 +1069,31 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("AgentIdentity"),
             NamedTypeBinding::string("AgentRuntimeId"),
             NamedTypeBinding::string("BranchId"),
-            NamedTypeBinding::type_path(
+            NamedTypeBinding::type_path_struct(
                 "ExternalPeerEdge",
                 "crate::catalog::dsl::mob_machine::ExternalPeerEdge",
+                vec![
+                    TypePathStructField::named("local", "AgentIdentity"),
+                    TypePathStructField::named("endpoint", "ExternalPeerEndpoint"),
+                ],
             ),
-            NamedTypeBinding::type_path(
+            NamedTypeBinding::type_path_struct(
                 "ExternalPeerEndpoint",
                 "crate::catalog::dsl::mob_machine::ExternalPeerEndpoint",
+                vec![
+                    TypePathStructField::named("name", "PeerName"),
+                    TypePathStructField::named("peer_id", "PeerId"),
+                    TypePathStructField::named("address", "PeerAddress"),
+                    TypePathStructField::named("signing_key", "PeerSigningKey"),
+                ],
             ),
-            NamedTypeBinding::type_path(
+            NamedTypeBinding::type_path_struct(
                 "ExternalPeerKey",
                 "crate::catalog::dsl::mob_machine::ExternalPeerKey",
+                vec![
+                    TypePathStructField::named("local", "AgentIdentity"),
+                    TypePathStructField::named("name", "PeerName"),
+                ],
             ),
             NamedTypeBinding::string("FlowNodeId"),
             NamedTypeBinding::string_enum("FlowNodeKind", &["Step", "Loop"]),

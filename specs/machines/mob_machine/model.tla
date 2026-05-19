@@ -5,6 +5,14 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 CONSTANTS AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, BranchIdValues, CollectionPolicyKindValues, DependencyModeValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, FenceTokenValues, FlowFrameReducerCommandKindValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FrameIdValues, FrameNodeKeyValues, FrameScopeValues, FrameStatusValues, GenerationValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, MobIdValues, MobMemberStateValues, NatValues, NodeRunStatusValues, RunIdValues, RunStepKeyValues, SessionIdValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfExternalPeerEdgeValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfLoopInstanceIdValues, SetOfStepIdValues, SetOfStringValues, SetOfWiringEdgeValues, StepIdValues, StepRunStatusValues, StringValues, WiringEdgeValues, WorkIdValues, WorkOriginValues
 
+ExternalPeerEdgeValuesCi == {}
+ExternalPeerKeyValuesCi == {}
+SetOfExternalPeerEdgeValuesCi == {{}}
+
+ExternalPeerEdgeValuesDeep == {[local |-> "agentidentity_1", endpoint |-> [name |-> "peername_1", peer_id |-> "peerid_1", address |-> "peeraddress_1", signing_key |-> "peersigningkey_1"]], [local |-> "agentidentity_2", endpoint |-> [name |-> "peername_2", peer_id |-> "peerid_2", address |-> "peeraddress_2", signing_key |-> "peersigningkey_2"]]}
+ExternalPeerKeyValuesDeep == {[local |-> "agentidentity_1", name |-> "peername_1"], [local |-> "agentidentity_2", name |-> "peername_2"]}
+SetOfExternalPeerEdgeValuesDeep == {{}, {[local |-> "agentidentity_1", endpoint |-> [name |-> "peername_1", peer_id |-> "peerid_1", address |-> "peeraddress_1", signing_key |-> "peersigningkey_1"]]}, {[local |-> "agentidentity_1", endpoint |-> [name |-> "peername_1", peer_id |-> "peerid_1", address |-> "peeraddress_1", signing_key |-> "peersigningkey_1"]], [local |-> "agentidentity_2", endpoint |-> [name |-> "peername_2", peer_id |-> "peerid_2", address |-> "peeraddress_2", signing_key |-> "peersigningkey_2"]]}}
+
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
@@ -121,6 +129,9 @@ VARIABLES phase, model_step_count, destroy_admitted, live_runtime_ids, externall
 
 vars == << phase, model_step_count, destroy_admitted, live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, run_status, run_ordered_steps, run_tracked_steps, run_step_status, run_step_status_flat, run_output_recorded, run_step_condition_results_flat, run_step_condition_results, run_step_has_conditions, run_step_dependencies, run_step_dependency_modes, run_step_branches, run_step_collection_policies, run_step_quorum_thresholds, run_step_target_counts, run_step_target_success_counts, run_step_target_terminal_failure_counts, run_output_recorded_flat, run_step_target_counts_flat, run_step_target_success_counts_flat, run_step_target_terminal_failure_counts_flat, run_target_retry_counts, run_target_retry_counts_flat, run_failure_count, run_consecutive_failure_count, run_escalation_threshold, run_max_step_retries, run_ready_frames, run_ready_frame_membership, run_ready_frame_membership_flat, run_pending_body_frame_loops, run_pending_body_frame_loop_membership, run_pending_body_frame_loop_membership_flat, run_active_node_count, run_active_frame_count, run_last_granted_frame, run_last_granted_loop, run_max_active_nodes, run_max_active_frames, run_max_frame_depth, frame_scope, frame_phase, frame_run, frame_parent_loop, frame_iteration, frame_tracked_nodes, frame_ordered_nodes, frame_node_kind, frame_node_dependencies, frame_node_dependency_modes, frame_node_step_ids, frame_node_loop_ids, frame_node_status, frame_ready_queue, frame_output_recorded, frame_output_recorded_flat, frame_last_admitted_node, frame_node_condition_results, frame_node_branches, loop_phase, loop_parent_frame, loop_parent_node, loop_definition, loop_depth, loop_stage, loop_current_iteration, loop_last_completed_iteration, loop_max_iterations, loop_active_body_frame, pending_spawn_count, pending_spawn_sessions, coordinator_bound, member_startup_binding_requested, member_startup_runtime_ready, member_startup_ready, member_kickoff_pending, member_kickoff_starting, member_kickoff_callback_pending, member_kickoff_started, member_kickoff_failed, member_kickoff_cancelled, member_kickoff_error, member_restore_failures, member_state_markers, wiring_edges, external_peer_edges, external_peer_edges_by_key, identity_to_runtime, member_session_bindings, pending_session_ingress_detach_runtime_ids, topology_epoch >>
 
+mob_machine_external_peer_key_matches_edge(key, edge) ==
+    /\ key.local = edge.local
+    /\ key.name = edge.endpoint.name
 mob_machine_node_terminal(status) == status \in {"Completed", "Failed", "Skipped", "Canceled"}
 mob_machine_step_status_from_frame_node_status(status) ==
     IF status = "Completed" THEN "Completed"
@@ -1319,6 +1330,7 @@ UnwireMembersAlreadyAbsent(edge) ==
 
 WireExternalPeerRunning(key, edge) ==
     /\ phase = "Running"
+    /\ mob_machine_external_peer_key_matches_edge(key, edge)
     /\ ((key \in DOMAIN external_peer_edges_by_key) = FALSE)
     /\ ((edge \in external_peer_edges) = FALSE)
     /\ phase' = "Running"
@@ -1331,6 +1343,7 @@ WireExternalPeerRunning(key, edge) ==
 
 WireExternalPeerAlreadyWired(key, edge) ==
     /\ phase = "Running"
+    /\ mob_machine_external_peer_key_matches_edge(key, edge)
     /\ ((IF (key \in DOMAIN external_peer_edges_by_key) THEN Some((IF key \in DOMAIN external_peer_edges_by_key THEN external_peer_edges_by_key[key] ELSE "None")) ELSE None) = Some(edge))
     /\ ((edge \in external_peer_edges) = TRUE)
     /\ phase' = "Running"
@@ -1340,6 +1353,7 @@ WireExternalPeerAlreadyWired(key, edge) ==
 
 RecoverExternalPeerWiringRunning(key, edge) ==
     /\ phase = "Running"
+    /\ mob_machine_external_peer_key_matches_edge(key, edge)
     /\ ((key \in DOMAIN external_peer_edges_by_key) = FALSE)
     /\ ((edge \in external_peer_edges) = FALSE)
     /\ phase' = "Running"
@@ -1352,6 +1366,7 @@ RecoverExternalPeerWiringRunning(key, edge) ==
 
 RecoverExternalPeerWiringAlreadyRecovered(key, edge) ==
     /\ phase = "Running"
+    /\ mob_machine_external_peer_key_matches_edge(key, edge)
     /\ ((IF (key \in DOMAIN external_peer_edges_by_key) THEN Some((IF key \in DOMAIN external_peer_edges_by_key THEN external_peer_edges_by_key[key] ELSE "None")) ELSE None) = Some(edge))
     /\ ((edge \in external_peer_edges) = TRUE)
     /\ phase' = "Running"
@@ -1380,6 +1395,7 @@ RecoverExternalPeerUnwireAlreadyAbsent(key) ==
 
 UnwireExternalPeerRunning(key, edge) ==
     /\ phase = "Running"
+    /\ mob_machine_external_peer_key_matches_edge(key, edge)
     /\ ((IF (key \in DOMAIN external_peer_edges_by_key) THEN Some((IF key \in DOMAIN external_peer_edges_by_key THEN external_peer_edges_by_key[key] ELSE "None")) ELSE None) = Some(edge))
     /\ ((edge \in external_peer_edges) = TRUE)
     /\ phase' = "Running"
@@ -1392,6 +1408,7 @@ UnwireExternalPeerRunning(key, edge) ==
 
 UnwireExternalPeerAlreadyAbsent(key, edge) ==
     /\ phase = "Running"
+    /\ mob_machine_external_peer_key_matches_edge(key, edge)
     /\ ((key \in DOMAIN external_peer_edges_by_key) = FALSE)
     /\ ((edge \in external_peer_edges) = FALSE)
     /\ phase' = "Running"

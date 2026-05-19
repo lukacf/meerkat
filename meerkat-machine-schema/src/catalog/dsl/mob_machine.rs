@@ -1585,6 +1585,7 @@ macro_rules! mob_catalog_machine_dsl {
         transition WireExternalPeerRunning {
             on input WireExternalPeer { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
             guard "external_peer_key_not_already_wired" { self.external_peer_edges_by_key.contains_key(key) == false }
             guard "external_peer_edge_not_already_wired" { self.external_peer_edges.contains(edge) == false }
             update {
@@ -1600,6 +1601,7 @@ macro_rules! mob_catalog_machine_dsl {
         transition WireExternalPeerAlreadyWired {
             on input WireExternalPeer { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
             guard "external_peer_key_already_wired" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
             guard "external_peer_edge_already_wired" { self.external_peer_edges.contains(edge) == true }
             update {}
@@ -1610,6 +1612,7 @@ macro_rules! mob_catalog_machine_dsl {
         transition RecoverExternalPeerWiringRunning {
             on signal RecoverExternalPeerWiring { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
             guard "external_peer_key_not_already_recovered" { self.external_peer_edges_by_key.contains_key(key) == false }
             guard "external_peer_edge_not_already_recovered" { self.external_peer_edges.contains(edge) == false }
             update {
@@ -1623,6 +1626,7 @@ macro_rules! mob_catalog_machine_dsl {
         transition RecoverExternalPeerWiringAlreadyRecovered {
             on signal RecoverExternalPeerWiring { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
             guard "external_peer_key_already_recovered" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
             guard "external_peer_edge_already_recovered" { self.external_peer_edges.contains(edge) == true }
             update {}
@@ -1652,6 +1656,7 @@ macro_rules! mob_catalog_machine_dsl {
         transition UnwireExternalPeerRunning {
             on input UnwireExternalPeer { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
             guard "external_peer_key_currently_wired" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
             guard "external_peer_edge_currently_wired" { self.external_peer_edges.contains(edge) == true }
             update {
@@ -1667,6 +1672,7 @@ macro_rules! mob_catalog_machine_dsl {
         transition UnwireExternalPeerAlreadyAbsent {
             on input UnwireExternalPeer { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
             guard "external_peer_key_already_absent" { self.external_peer_edges_by_key.contains_key(key) == false }
             guard "external_peer_edge_already_absent" { self.external_peer_edges.contains(edge) == false }
             update {}
@@ -3495,6 +3501,13 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         impl MobMachineAuthority {
+        fn mob_machine_external_peer_key_matches_edge(
+            key: &ExternalPeerKey,
+            edge: &ExternalPeerEdge,
+        ) -> bool {
+            key.local == edge.local && key.name == edge.endpoint.name
+        }
+
         fn mob_machine_frame_node_status_after_admit(
             all_statuses: &std::collections::BTreeMap<FrameId, std::collections::BTreeMap<FlowNodeId, NodeRunStatus>>,
             frame_branches: &std::collections::BTreeMap<FrameId, std::collections::BTreeMap<FlowNodeId, Option<BranchId>>>,

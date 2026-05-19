@@ -919,6 +919,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `WireExternalPeer`(key, edge)
 - Guards:
+  - `external_peer_key_matches_edge`
   - `external_peer_key_not_already_wired`
   - `external_peer_edge_not_already_wired`
 - Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
@@ -928,6 +929,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `WireExternalPeer`(key, edge)
 - Guards:
+  - `external_peer_key_matches_edge`
   - `external_peer_key_already_wired`
   - `external_peer_edge_already_wired`
 - Emits: `ExternalPeerTrustRepairRequested`
@@ -937,6 +939,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `RecoverExternalPeerWiring`(key, edge)
 - Guards:
+  - `external_peer_key_matches_edge`
   - `external_peer_key_not_already_recovered`
   - `external_peer_edge_not_already_recovered`
 - To: `Running`
@@ -945,6 +948,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `RecoverExternalPeerWiring`(key, edge)
 - Guards:
+  - `external_peer_key_matches_edge`
   - `external_peer_key_already_recovered`
   - `external_peer_edge_already_recovered`
 - To: `Running`
@@ -967,6 +971,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `UnwireExternalPeer`(key, edge)
 - Guards:
+  - `external_peer_key_matches_edge`
   - `external_peer_key_currently_wired`
   - `external_peer_edge_currently_wired`
 - Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
@@ -976,6 +981,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `UnwireExternalPeer`(key, edge)
 - Guards:
+  - `external_peer_key_matches_edge`
   - `external_peer_key_already_absent`
   - `external_peer_edge_already_absent`
 - To: `Running`

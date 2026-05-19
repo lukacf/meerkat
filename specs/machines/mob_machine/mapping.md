@@ -745,6 +745,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `bindings_require_known_identity`
   - anchors: `mob_handle_surface`
   - scenarios: `wiring-and-session-binding`
+- `external_peer_edges_are_keyed_coherently`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 
 
 <!-- GENERATED_COVERAGE_END -->

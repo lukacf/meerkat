@@ -1176,6 +1176,42 @@ mod tests {
         assert!(authority.state().external_peer_edges_by_key.is_empty());
     }
 
+    #[test]
+    fn recover_rejects_incoherent_external_peer_edges() {
+        let edge = external_peer_edge_for_test("local-a", "peer-a");
+        let matching_key = ExternalPeerKey::new(edge.local.clone(), edge.endpoint.name.clone());
+        let mismatched_key =
+            ExternalPeerKey::new(AgentIdentity::from("local-b"), edge.endpoint.name.clone());
+
+        let mut mismatched_key_state = MobMachineState::default();
+        mismatched_key_state
+            .external_peer_edges
+            .insert(edge.clone());
+        mismatched_key_state
+            .external_peer_edges_by_key
+            .insert(mismatched_key, edge.clone());
+        assert!(
+            MobMachineAuthority::recover_from_state(mismatched_key_state).is_err(),
+            "generated recovery invariant must reject key/payload mismatch"
+        );
+
+        let mut missing_set_state = MobMachineState::default();
+        missing_set_state
+            .external_peer_edges_by_key
+            .insert(matching_key.clone(), edge.clone());
+        assert!(
+            MobMachineAuthority::recover_from_state(missing_set_state).is_err(),
+            "generated recovery invariant must reject keyed edges missing from edge set"
+        );
+
+        let mut missing_key_state = MobMachineState::default();
+        missing_key_state.external_peer_edges.insert(edge);
+        assert!(
+            MobMachineAuthority::recover_from_state(missing_key_state).is_err(),
+            "generated recovery invariant must reject edge set entries missing keyed ownership"
+        );
+    }
+
     fn seed_body_frame(
         authority: &mut MobMachineAuthority,
         run_id: &RunId,

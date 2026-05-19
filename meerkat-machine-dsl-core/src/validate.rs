@@ -5,6 +5,7 @@ use syn::Error;
 use crate::ast::*;
 
 const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
+    "mob_machine_external_peer_edge_has_matching_key",
     "mob_machine_external_peer_key_matches_edge",
     "mob_machine_frame_node_status_after_admit",
     "mob_machine_frame_ready_queue_after_admit",

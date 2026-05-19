@@ -538,6 +538,14 @@ macro_rules! mob_catalog_machine_dsl {
             for_all(id in self.member_session_bindings.keys(), self.identity_to_runtime.contains_key(id))
         }
 
+        invariant external_peer_edges_are_keyed_coherently {
+            for_all(key in self.external_peer_edges_by_key.keys(),
+                mob_machine_external_peer_key_matches_edge(key, self.external_peer_edges_by_key.get_cloned(key).get("value"))
+                && self.external_peer_edges.contains(self.external_peer_edges_by_key.get_cloned(key).get("value")))
+            && for_all(edge in self.external_peer_edges,
+                mob_machine_external_peer_edge_has_matching_key(self.external_peer_edges_by_key, edge))
+        }
+
         // =====================================================================
         // Direct transitions
         // =====================================================================
@@ -3501,6 +3509,14 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         impl MobMachineAuthority {
+        fn mob_machine_external_peer_edge_has_matching_key(
+            edges_by_key: &std::collections::BTreeMap<ExternalPeerKey, ExternalPeerEdge>,
+            edge: &ExternalPeerEdge,
+        ) -> bool {
+            let key = ExternalPeerKey::new(edge.local.clone(), edge.endpoint.name.clone());
+            edges_by_key.get(&key) == Some(edge)
+        }
+
         fn mob_machine_external_peer_key_matches_edge(
             key: &ExternalPeerKey,
             edge: &ExternalPeerEdge,

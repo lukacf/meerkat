@@ -247,6 +247,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Invariants
 - `bindings_require_known_identity`
+- `external_peer_edges_are_keyed_coherently`
 
 ## Transitions
 ### `SpawnRunningFresh`

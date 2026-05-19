@@ -4926,6 +4926,10 @@ impl<'a> CompositionTlaCompiler<'a> {
                 compiler.render_helper(out, derived);
                 pushln!(out);
             }
+            if machine.machine.as_str() == "MobMachine" {
+                compiler.render_mob_machine_native_helpers(out);
+                pushln!(out);
+            }
 
             let branches = machine
                 .transitions
@@ -6374,6 +6378,18 @@ impl<'a> MachineTlaCompiler<'a> {
 
     fn render_mob_machine_native_helpers(&self, out: &mut String) {
         let prefix = |name: &str| self.scoped_helper_name(name);
+        writeln!(
+            out,
+            "{}(edges_by_key, edge) ==",
+            prefix("mob_machine_external_peer_edge_has_matching_key")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET key == [local |-> edge.local, name |-> edge.endpoint.name]"
+        );
+        pushln!(out, "    IN /\\ key \\in DOMAIN edges_by_key");
+        pushln!(out, "       /\\ edges_by_key[key] = edge");
         writeln!(
             out,
             "{}(key, edge) ==",

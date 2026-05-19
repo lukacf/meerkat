@@ -28,6 +28,20 @@ impl MobExternalPeerTrustRepairObligation {
     }
 }
 
+impl meerkat_core::comms::generated_comms_trust_authority::Sealed
+    for MobExternalPeerTrustRepairObligation
+{
+}
+impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource
+    for MobExternalPeerTrustRepairObligation
+{
+    fn comms_trust_authority_source_kind(
+        &self,
+    ) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
+        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustRepair
+    }
+}
+
 pub fn extract_obligations(
     transition: &MobMachineTransition,
 ) -> Vec<MobExternalPeerTrustRepairObligation> {
@@ -72,10 +86,9 @@ pub fn repair_authority_for_peer(
         obligation.peer_id.0.as_str(),
         expected_peer_id,
     )?;
-    Ok(
-        meerkat_core::comms::CommsTrustMutationAuthority::from_generated_mob_machine_peer_repair(
-            obligation.peer_id.0.clone(),
-            obligation.epoch,
-        ),
+    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_mob_machine_peer_repair(
+        obligation,
+        obligation.peer_id.0.clone(),
+        obligation.epoch,
     )
 }

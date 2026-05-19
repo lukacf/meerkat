@@ -368,16 +368,43 @@ enum CommsTrustMutationAuthorityKind {
     MobMachinePeerRepair,
 }
 
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneratedCommsTrustAuthoritySourceKind {
+    MeerkatMachinePeerProjection,
+    MeerkatMachineSupervisorPublish,
+    MeerkatMachineSupervisorRevoke,
+    MobMachineMemberTrustWiring,
+    MobMachineMemberTrustUnwiring,
+    MobMachineExternalPeerTrustWiring,
+    MobMachineExternalPeerTrustUnwiring,
+    MobMachineExternalPeerTrustRepair,
+    MobMachineExternalPeerReciprocalTrust,
+}
+
+#[doc(hidden)]
+pub mod generated_comms_trust_authority {
+    #[doc(hidden)]
+    pub trait Sealed {}
+}
+
+#[doc(hidden)]
+pub trait GeneratedCommsTrustAuthoritySource: generated_comms_trust_authority::Sealed {
+    fn comms_trust_authority_source_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind;
+}
+
 impl CommsTrustMutationAuthority {
     #[doc(hidden)]
     ///
-    /// Call only from generated protocol helpers after extracting an
-    /// obligation from an unforgeable generated machine transition.
+    /// Call only from generated protocol helpers that carry a typed obligation
+    /// extracted from an unforgeable generated machine transition.
     pub fn from_generated_meerkat_machine_peer_projection(
+        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
         peer_id: impl Into<String>,
         epoch: u64,
-    ) -> Self {
+    ) -> Result<Self, String> {
         Self::from_generated(
+            source,
             CommsTrustMutationAuthorityKind::MeerkatMachinePeerProjection,
             peer_id,
             epoch,
@@ -386,13 +413,15 @@ impl CommsTrustMutationAuthority {
 
     #[doc(hidden)]
     ///
-    /// Call only from generated protocol helpers after extracting an
-    /// obligation from an unforgeable generated machine transition.
+    /// Call only from generated protocol helpers that carry a typed obligation
+    /// extracted from an unforgeable generated machine transition.
     pub fn from_generated_meerkat_machine_supervisor_publish(
+        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
         peer_id: impl Into<String>,
         epoch: u64,
-    ) -> Self {
+    ) -> Result<Self, String> {
         Self::from_generated(
+            source,
             CommsTrustMutationAuthorityKind::MeerkatMachineSupervisorPublish,
             peer_id,
             epoch,
@@ -401,13 +430,15 @@ impl CommsTrustMutationAuthority {
 
     #[doc(hidden)]
     ///
-    /// Call only from generated protocol helpers after extracting an
-    /// obligation from an unforgeable generated machine transition.
+    /// Call only from generated protocol helpers that carry a typed obligation
+    /// extracted from an unforgeable generated machine transition.
     pub fn from_generated_meerkat_machine_supervisor_revoke(
+        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
         peer_id: impl Into<String>,
         epoch: u64,
-    ) -> Self {
+    ) -> Result<Self, String> {
         Self::from_generated(
+            source,
             CommsTrustMutationAuthorityKind::MeerkatMachineSupervisorRevoke,
             peer_id,
             epoch,
@@ -416,10 +447,15 @@ impl CommsTrustMutationAuthority {
 
     #[doc(hidden)]
     ///
-    /// Call only from generated protocol helpers after extracting an
-    /// obligation from an unforgeable generated machine transition.
-    pub fn from_generated_mob_machine_peer_wiring(peer_id: impl Into<String>, epoch: u64) -> Self {
+    /// Call only from generated protocol helpers that carry a typed obligation
+    /// extracted from an unforgeable generated machine transition.
+    pub fn from_generated_mob_machine_peer_wiring(
+        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
+        peer_id: impl Into<String>,
+        epoch: u64,
+    ) -> Result<Self, String> {
         Self::from_generated(
+            source,
             CommsTrustMutationAuthorityKind::MobMachinePeerWiring,
             peer_id,
             epoch,
@@ -428,13 +464,15 @@ impl CommsTrustMutationAuthority {
 
     #[doc(hidden)]
     ///
-    /// Call only from generated protocol helpers after extracting an
-    /// obligation from an unforgeable generated machine transition.
+    /// Call only from generated protocol helpers that carry a typed obligation
+    /// extracted from an unforgeable generated machine transition.
     pub fn from_generated_mob_machine_peer_unwiring(
+        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
         peer_id: impl Into<String>,
         epoch: u64,
-    ) -> Self {
+    ) -> Result<Self, String> {
         Self::from_generated(
+            source,
             CommsTrustMutationAuthorityKind::MobMachinePeerUnwiring,
             peer_id,
             epoch,
@@ -443,10 +481,15 @@ impl CommsTrustMutationAuthority {
 
     #[doc(hidden)]
     ///
-    /// Call only from generated protocol helpers after extracting an
-    /// obligation from an unforgeable generated machine transition.
-    pub fn from_generated_mob_machine_peer_repair(peer_id: impl Into<String>, epoch: u64) -> Self {
+    /// Call only from generated protocol helpers that carry a typed obligation
+    /// extracted from an unforgeable generated machine transition.
+    pub fn from_generated_mob_machine_peer_repair(
+        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
+        peer_id: impl Into<String>,
+        epoch: u64,
+    ) -> Result<Self, String> {
         Self::from_generated(
+            source,
             CommsTrustMutationAuthorityKind::MobMachinePeerRepair,
             peer_id,
             epoch,
@@ -454,15 +497,57 @@ impl CommsTrustMutationAuthority {
     }
 
     fn from_generated(
+        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
         kind: CommsTrustMutationAuthorityKind,
         peer_id: impl Into<String>,
         epoch: u64,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let source_kind = source.comms_trust_authority_source_kind();
+        if !Self::source_kind_allows_authority_kind(source_kind, kind) {
+            return Err(format!(
+                "generated comms trust source {source_kind:?} cannot mint authority {kind:?}",
+            ));
+        }
+        Ok(Self {
             kind,
             peer_id: peer_id.into(),
             epoch,
-        }
+        })
+    }
+
+    fn source_kind_allows_authority_kind(
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+        authority_kind: CommsTrustMutationAuthorityKind,
+    ) -> bool {
+        use CommsTrustMutationAuthorityKind as Authority;
+        use GeneratedCommsTrustAuthoritySourceKind as Source;
+
+        matches!(
+            (source_kind, authority_kind),
+            (
+                Source::MeerkatMachinePeerProjection,
+                Authority::MeerkatMachinePeerProjection
+            ) | (
+                Source::MeerkatMachineSupervisorPublish,
+                Authority::MeerkatMachineSupervisorPublish,
+            ) | (
+                Source::MeerkatMachineSupervisorRevoke,
+                Authority::MeerkatMachineSupervisorRevoke,
+            ) | (
+                Source::MobMachineMemberTrustWiring,
+                Authority::MobMachinePeerWiring | Authority::MobMachinePeerRepair,
+            ) | (
+                Source::MobMachineMemberTrustUnwiring | Source::MobMachineExternalPeerTrustUnwiring,
+                Authority::MobMachinePeerUnwiring,
+            ) | (
+                Source::MobMachineExternalPeerTrustWiring
+                    | Source::MobMachineExternalPeerReciprocalTrust,
+                Authority::MobMachinePeerWiring,
+            ) | (
+                Source::MobMachineExternalPeerTrustRepair,
+                Authority::MobMachinePeerRepair,
+            )
+        )
     }
 
     pub fn validate_public_add(&self, peer_id: PeerId) -> Result<(), String> {

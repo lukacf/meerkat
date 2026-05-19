@@ -26,6 +26,18 @@ impl CommsTrustReconcileObligation {
     }
 }
 
+impl meerkat_core::comms::generated_comms_trust_authority::Sealed
+    for CommsTrustReconcileObligation
+{
+}
+impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for CommsTrustReconcileObligation {
+    fn comms_trust_authority_source_kind(
+        &self,
+    ) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
+        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection
+    }
+}
+
 pub fn extract_obligations(
     transition: &MeerkatMachineTransition,
 ) -> Vec<CommsTrustReconcileObligation> {
@@ -72,10 +84,11 @@ pub fn authority_for_endpoint(
             endpoint.peer_id.0
         ));
     }
-    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection(
+    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection(
+        obligation,
         endpoint.peer_id.0.clone(),
         obligation.peer_projection_epoch,
-    ))
+    )
 }
 
 pub fn removal_authority_for_peer_id(
@@ -90,8 +103,9 @@ pub fn removal_authority_for_peer_id(
             "MeerkatMachine peer projection still requests trust for peer '{peer_id}'"
         ));
     }
-    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection(
+    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection(
+        obligation,
         peer_id.to_string(),
         obligation.peer_projection_epoch,
-    ))
+    )
 }

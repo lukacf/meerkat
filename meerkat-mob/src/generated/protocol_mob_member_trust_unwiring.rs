@@ -31,6 +31,18 @@ impl MobMemberTrustUnwiringObligation {
     }
 }
 
+impl meerkat_core::comms::generated_comms_trust_authority::Sealed
+    for MobMemberTrustUnwiringObligation
+{
+}
+impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for MobMemberTrustUnwiringObligation {
+    fn comms_trust_authority_source_kind(
+        &self,
+    ) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
+        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustUnwiring
+    }
+}
+
 pub fn extract_obligations(
     transition: &MobMachineTransition,
 ) -> Vec<MobMemberTrustUnwiringObligation> {
@@ -101,10 +113,9 @@ pub fn unwiring_authority_for_identity(
     expected_peer_id: &str,
 ) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {
     let peer_id = required_peer_id_for_identity(obligation, identity, expected_peer_id)?;
-    Ok(
-        meerkat_core::comms::CommsTrustMutationAuthority::from_generated_mob_machine_peer_unwiring(
-            peer_id.to_owned(),
-            obligation.epoch,
-        ),
+    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_mob_machine_peer_unwiring(
+        obligation,
+        peer_id.to_owned(),
+        obligation.epoch,
     )
 }

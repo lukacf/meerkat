@@ -359,8 +359,56 @@ fn generate_obligation_struct(
         writeln!(out, "}}")?;
         writeln!(out)?;
     }
+    emit_comms_trust_authority_source_impl(out, protocol.name.as_str(), &obligation_type)?;
 
     Ok(obligation_type)
+}
+
+fn emit_comms_trust_authority_source_impl(
+    out: &mut String,
+    protocol_name: &str,
+    obligation_type: &str,
+) -> Result<()> {
+    let Some(source_kind) = comms_trust_authority_source_kind(protocol_name) else {
+        return Ok(());
+    };
+
+    writeln!(
+        out,
+        "impl meerkat_core::comms::generated_comms_trust_authority::Sealed for {obligation_type} {{}}"
+    )?;
+    writeln!(
+        out,
+        "impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for {obligation_type} {{"
+    )?;
+    writeln!(
+        out,
+        "    fn comms_trust_authority_source_kind(&self) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {{"
+    )?;
+    writeln!(
+        out,
+        "        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{source_kind}"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    Ok(())
+}
+
+fn comms_trust_authority_source_kind(protocol_name: &str) -> Option<&'static str> {
+    match protocol_name {
+        "comms_trust_reconcile" => Some("MeerkatMachinePeerProjection"),
+        "supervisor_trust_publish" => Some("MeerkatMachineSupervisorPublish"),
+        "supervisor_trust_revoke" => Some("MeerkatMachineSupervisorRevoke"),
+        "mob_member_trust_wiring" => Some("MobMachineMemberTrustWiring"),
+        "mob_member_trust_unwiring" => Some("MobMachineMemberTrustUnwiring"),
+        "mob_external_peer_trust_wiring" => Some("MobMachineExternalPeerTrustWiring"),
+        "mob_external_peer_trust_unwiring" => Some("MobMachineExternalPeerTrustUnwiring"),
+        "mob_external_peer_trust_repair" => Some("MobMachineExternalPeerTrustRepair"),
+        "mob_external_peer_reciprocal_trust" => Some("MobMachineExternalPeerReciprocalTrust"),
+        _ => None,
+    }
 }
 
 fn protected_obligation_protocol(name: &str) -> bool {
@@ -627,11 +675,12 @@ fn generate_comms_trust_authority_helpers(
             writeln!(out, "    }}")?;
             writeln!(
                 out,
-                "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection("
+                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection("
             )?;
+            writeln!(out, "        obligation,")?;
             writeln!(out, "        endpoint.peer_id.0.clone(),")?;
             writeln!(out, "        obligation.peer_projection_epoch,")?;
-            writeln!(out, "    ))")?;
+            writeln!(out, "    )")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
             writeln!(
@@ -649,11 +698,12 @@ fn generate_comms_trust_authority_helpers(
             writeln!(out, "    }}")?;
             writeln!(
                 out,
-                "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection("
+                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection("
             )?;
+            writeln!(out, "        obligation,")?;
             writeln!(out, "        peer_id.to_string(),")?;
             writeln!(out, "        obligation.peer_projection_epoch,")?;
-            writeln!(out, "    ))")?;
+            writeln!(out, "    )")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
         }
@@ -669,11 +719,12 @@ fn generate_comms_trust_authority_helpers(
             )?;
             writeln!(
                 out,
-                "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_publish("
+                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_publish("
             )?;
+            writeln!(out, "        obligation,")?;
             writeln!(out, "        obligation.peer_id.clone(),")?;
             writeln!(out, "        obligation.epoch,")?;
-            writeln!(out, "    ))")?;
+            writeln!(out, "    )")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
         }
@@ -689,11 +740,12 @@ fn generate_comms_trust_authority_helpers(
             )?;
             writeln!(
                 out,
-                "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke("
+                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke("
             )?;
+            writeln!(out, "        obligation,")?;
             writeln!(out, "        obligation.peer_id.clone(),")?;
             writeln!(out, "        obligation.epoch,")?;
-            writeln!(out, "    ))")?;
+            writeln!(out, "    )")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
         }
@@ -843,11 +895,12 @@ fn emit_member_authority_fn(
     )?;
     writeln!(
         out,
-        "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
+        "    meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
     )?;
+    writeln!(out, "        obligation,")?;
     writeln!(out, "        peer_id.to_owned(),")?;
     writeln!(out, "        obligation.epoch,")?;
-    writeln!(out, "    ))")?;
+    writeln!(out, "    )")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
     Ok(())
@@ -871,11 +924,12 @@ fn emit_external_peer_trust_helper(
     )?;
     writeln!(
         out,
-        "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
+        "    meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
     )?;
+    writeln!(out, "        obligation,")?;
     writeln!(out, "        obligation.peer_id.0.clone(),")?;
     writeln!(out, "        obligation.epoch,")?;
-    writeln!(out, "    ))")?;
+    writeln!(out, "    )")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
     Ok(())

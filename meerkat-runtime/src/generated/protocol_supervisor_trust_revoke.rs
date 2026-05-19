@@ -21,6 +21,18 @@ impl SupervisorTrustRevokeObligation {
     }
 }
 
+impl meerkat_core::comms::generated_comms_trust_authority::Sealed
+    for SupervisorTrustRevokeObligation
+{
+}
+impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for SupervisorTrustRevokeObligation {
+    fn comms_trust_authority_source_kind(
+        &self,
+    ) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
+        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke
+    }
+}
+
 pub fn extract_obligations(
     transition: &MeerkatMachineTransition,
 ) -> Vec<SupervisorTrustRevokeObligation> {
@@ -62,8 +74,9 @@ pub fn revoke_authority_for_peer(
         &obligation.peer_id,
         expected_peer_id,
     )?;
-    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke(
+    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke(
+        obligation,
         obligation.peer_id.clone(),
         obligation.epoch,
-    ))
+    )
 }

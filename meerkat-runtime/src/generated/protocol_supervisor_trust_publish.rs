@@ -36,6 +36,18 @@ impl SupervisorTrustPublishObligation {
     }
 }
 
+impl meerkat_core::comms::generated_comms_trust_authority::Sealed
+    for SupervisorTrustPublishObligation
+{
+}
+impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for SupervisorTrustPublishObligation {
+    fn comms_trust_authority_source_kind(
+        &self,
+    ) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
+        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish
+    }
+}
+
 pub fn extract_obligations(
     transition: &MeerkatMachineTransition,
 ) -> Vec<SupervisorTrustPublishObligation> {
@@ -84,8 +96,9 @@ pub fn publish_authority_for_peer(
         &obligation.peer_id,
         expected_peer_id,
     )?;
-    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_publish(
+    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_publish(
+        obligation,
         obligation.peer_id.clone(),
         obligation.epoch,
-    ))
+    )
 }

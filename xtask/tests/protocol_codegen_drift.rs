@@ -202,3 +202,66 @@ fn every_protocol_helper_lands_under_an_owning_crate_generated_module() {
         "no protocols declared in canonical + compat catalogs — test is vacuous"
     );
 }
+
+#[test]
+fn comms_trust_authority_minting_is_generated_only() {
+    fn visit_rs_files(root: &std::path::Path, files: &mut Vec<PathBuf>) {
+        let entries = std::fs::read_dir(root)
+            .unwrap_or_else(|err| panic!("read_dir {}: {err}", root.display()));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|err| panic!("read_dir entry: {err}"));
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == ".git" || name == "target" {
+                continue;
+            }
+            if path.is_dir() {
+                visit_rs_files(&path, files);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+    }
+
+    fn allowed_minting_file(root: &std::path::Path, path: &std::path::Path) -> bool {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or_else(|_| panic!("strip repo root from {}", path.display()));
+        let rel = rel.to_string_lossy();
+        rel == "meerkat-core/src/comms.rs"
+            || rel == "xtask/src/protocol_codegen.rs"
+            || rel == "xtask/tests/protocol_codegen_drift.rs"
+            || (rel.contains("/src/generated/protocol_") && rel.ends_with(".rs"))
+    }
+
+    let root = repo_root();
+    let mut files = Vec::new();
+    visit_rs_files(&root, &mut files);
+
+    let patterns = [
+        "CommsTrustMutationAuthority::from_generated_",
+        "impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource",
+        "impl meerkat_core::comms::generated_comms_trust_authority::Sealed",
+    ];
+    let mut violations = Vec::new();
+    for path in files {
+        let source =
+            std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {}", path.display()));
+        if patterns.iter().any(|pattern| source.contains(pattern))
+            && !allowed_minting_file(&root, &path)
+        {
+            violations.push(
+                path.strip_prefix(&root)
+                    .unwrap_or_else(|_| panic!("strip repo root from {}", path.display()))
+                    .display()
+                    .to_string(),
+            );
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "comms trust authority minting/source impls must stay in generated protocol helpers or the codegen template; found {violations:?}",
+    );
+}

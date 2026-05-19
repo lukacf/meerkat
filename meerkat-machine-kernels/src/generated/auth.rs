@@ -96,6 +96,8 @@ pub struct State {
     pub last_refresh: Option<u64>,
     pub refresh_attempt: u64,
     pub credential_present: bool,
+    pub credential_generation: u64,
+    pub credential_published_at_millis: Option<u64>,
     pub oauth_browser_flow_ids: std::collections::BTreeSet<String>,
     pub oauth_browser_flow_providers: std::collections::BTreeMap<String, String>,
     pub oauth_browser_flow_redirect_uris: std::collections::BTreeMap<String, String>,
@@ -118,6 +120,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Acquire {
         pub expires_at_ts: Option<u64>,
+        pub credential_published_at_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MarkExpiring {}
@@ -127,6 +130,7 @@ pub mod inputs {
     pub struct CompleteRefresh {
         pub new_expires_at: Option<u64>,
         pub now_ts: u64,
+        pub credential_published_at_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RefreshFailedTransient {}
@@ -145,6 +149,8 @@ pub mod inputs {
         pub last_refresh: Option<u64>,
         pub refresh_attempt: u64,
         pub credential_present: bool,
+        pub credential_generation: u64,
+        pub credential_published_at_millis: Option<u64>,
         pub oauth_browser_flow_ids: std::collections::BTreeSet<String>,
         pub oauth_browser_flow_providers: std::collections::BTreeMap<String, String>,
         pub oauth_browser_flow_redirect_uris: std::collections::BTreeMap<String, String>,
@@ -305,6 +311,8 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EmitLifecycleEvent {
         pub new_state: AuthLifecyclePhase,
+        pub credential_generation: u64,
+        pub credential_published_at_millis: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WakeRefreshLoop {}
@@ -461,6 +469,8 @@ pub fn initial_state() -> State {
         last_refresh: None,
         refresh_attempt: 0,
         credential_present: false,
+        credential_generation: 0,
+        credential_published_at_millis: None,
         oauth_browser_flow_ids: Default::default(),
         oauth_browser_flow_providers: Default::default(),
         oauth_browser_flow_redirect_uris: Default::default(),

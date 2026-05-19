@@ -123,10 +123,10 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
         _lease_key: &LeaseKey,
         _expires_at: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(AuthLeaseTransition {
-            generation: 1,
-            credential_published_at_millis: self.credential_published_at_millis,
-        })
+        Ok(AuthLeaseTransition::__from_test_authority(
+            1,
+            self.credential_published_at_millis,
+        ))
     }
 
     fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -143,10 +143,10 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
         _new_expires_at: u64,
         _now: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(AuthLeaseTransition {
-            generation: 1,
-            credential_published_at_millis: self.credential_published_at_millis,
-        })
+        Ok(AuthLeaseTransition::__from_test_authority(
+            1,
+            self.credential_published_at_millis,
+        ))
     }
 
     fn refresh_failed(
@@ -208,10 +208,10 @@ impl AuthLeaseHandle for BootstrappingAuthLeaseHandle {
         snapshot.expires_at = (expires_at != u64::MAX).then_some(expires_at);
         snapshot.credential_present = true;
         snapshot.generation = snapshot.generation.saturating_add(1);
-        Ok(AuthLeaseTransition {
-            generation: snapshot.generation,
-            credential_published_at_millis: None,
-        })
+        Ok(AuthLeaseTransition::__from_test_authority(
+            snapshot.generation,
+            None,
+        ))
     }
 
     fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -388,10 +388,7 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
             &meerkat_core::mark_tokens_lifecycle_published_for_transition(
                 &persisted,
-                AuthLeaseTransition {
-                    generation: 1,
-                    credential_published_at_millis: Some(1_000),
-                },
+                AuthLeaseTransition::__from_test_authority(1, Some(1_000)),
             ),
         )
         .await
@@ -436,10 +433,7 @@ async fn openai_managed_chatgpt_oauth_force_refresh_bypasses_fresh_token() {
             &key,
             &meerkat_core::mark_tokens_lifecycle_published_for_transition(
                 &persisted,
-                AuthLeaseTransition {
-                    generation: 1,
-                    credential_published_at_millis: Some(1_000),
-                },
+                AuthLeaseTransition::__from_test_authority(1, Some(1_000)),
             ),
         )
         .await
@@ -499,10 +493,7 @@ async fn openai_managed_chatgpt_oauth_refresh_failure_is_typed() {
             &key,
             &meerkat_core::mark_tokens_lifecycle_published_for_transition(
                 &expired,
-                AuthLeaseTransition {
-                    generation: 1,
-                    credential_published_at_millis: Some(1_000),
-                },
+                AuthLeaseTransition::__from_test_authority(1, Some(1_000)),
             ),
         )
         .await
@@ -550,7 +541,10 @@ async fn openai_managed_chatgpt_oauth_rejects_marked_token_without_auth_lease() 
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &persisted,
+                meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
+            ),
         )
         .await
         .unwrap();
@@ -594,7 +588,10 @@ async fn openai_managed_chatgpt_oauth_rejects_marker_with_empty_auth_lifecycle()
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &persisted,
+                meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
+            ),
         )
         .await
         .unwrap();
@@ -695,7 +692,10 @@ async fn openai_managed_chatgpt_oauth_rejects_expired_marker_with_empty_auth_lif
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &persisted,
+                meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
+            ),
         )
         .await
         .unwrap();
@@ -871,7 +871,10 @@ async fn openai_managed_chatgpt_oauth_refresh_restores_tokens_when_lifecycle_pub
     store
         .save(
             &key,
-            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&old_tokens, 1),
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &old_tokens,
+                meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
+            ),
         )
         .await
         .unwrap();
@@ -930,7 +933,10 @@ async fn openai_external_chatgpt_tokens_returns_persisted_access() {
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &persisted,
+                meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
+            ),
         )
         .await
         .unwrap();
@@ -968,7 +974,10 @@ async fn openai_external_chatgpt_tokens_empty_lifecycle_requires_auth_lease() {
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &persisted,
+                meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
+            ),
         )
         .await
         .unwrap();

@@ -1066,17 +1066,142 @@ pub struct AuthLeaseSnapshot {
 /// timestamp attached to acquired/refreshed credential material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthLeaseTransition {
-    pub generation: u64,
-    pub credential_published_at_millis: Option<u64>,
+    generation: u64,
+    credential_published_at_millis: Option<u64>,
 }
 
 impl AuthLeaseTransition {
-    pub fn new(generation: u64, credential_published_at_millis: Option<u64>) -> Self {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn credential_published_at_millis(&self) -> Option<u64> {
+        self.credential_published_at_millis
+    }
+
+    #[cfg(any(test, feature = "test-authority"))]
+    #[doc(hidden)]
+    pub fn __from_test_authority(
+        generation: u64,
+        credential_published_at_millis: Option<u64>,
+    ) -> Self {
         Self {
             generation,
             credential_published_at_millis,
         }
     }
+
+    #[doc(hidden)]
+    ///
+    /// Converts a generated AuthMachine lifecycle publication obligation into
+    /// the public transition token consumed by token-marker projection code.
+    /// The source must be an allowlisted generated protocol type and must
+    /// authorize the exact generation/publication facts requested here.
+    pub fn from_generated_auth_lease_publication(
+        source: &(impl GeneratedAuthLeaseTransitionSource + ?Sized),
+        generation: u64,
+        credential_published_at_millis: Option<u64>,
+    ) -> Result<Self, String> {
+        let source_kind = source.auth_lease_transition_source_kind();
+        let source_type_name = std::any::type_name_of_val(source);
+        if !crate::generated::auth_lease_transition_authority_sources::source_type_allowed_for_kind(
+            source_kind,
+            source_type_name,
+        ) {
+            return Err(format!(
+                "generated auth lease transition source {source_type_name:?} is not registered for {source_kind:?}",
+            ));
+        }
+        let request = GeneratedAuthLeaseTransitionRequest {
+            generation,
+            credential_published_at_millis,
+        };
+        let grant = source.authorize_auth_lease_transition(&request)?;
+        if grant.source_kind != source_kind {
+            return Err(format!(
+                "generated auth lease transition source {source_kind:?} returned {:?}",
+                grant.source_kind
+            ));
+        }
+        if grant.generation != generation {
+            return Err(format!(
+                "generated auth lease transition source {source_kind:?} returned generation {} for requested {}",
+                grant.generation, generation,
+            ));
+        }
+        if grant.credential_published_at_millis != credential_published_at_millis {
+            return Err(format!(
+                "generated auth lease transition source {source_kind:?} returned publication time {:?} for requested {:?}",
+                grant.credential_published_at_millis, credential_published_at_millis,
+            ));
+        }
+        Ok(Self {
+            generation,
+            credential_published_at_millis,
+        })
+    }
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum GeneratedAuthLeaseTransitionSourceKind {
+    AuthMachineLifecyclePublication,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct GeneratedAuthLeaseTransitionRequest {
+    generation: u64,
+    credential_published_at_millis: Option<u64>,
+}
+
+impl GeneratedAuthLeaseTransitionRequest {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn credential_published_at_millis(&self) -> Option<u64> {
+        self.credential_published_at_millis
+    }
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GeneratedAuthLeaseTransitionGrant {
+    source_kind: GeneratedAuthLeaseTransitionSourceKind,
+    generation: u64,
+    credential_published_at_millis: Option<u64>,
+}
+
+impl GeneratedAuthLeaseTransitionGrant {
+    pub fn new(
+        request: &GeneratedAuthLeaseTransitionRequest,
+        source_kind: GeneratedAuthLeaseTransitionSourceKind,
+    ) -> Self {
+        Self {
+            source_kind,
+            generation: request.generation,
+            credential_published_at_millis: request.credential_published_at_millis,
+        }
+    }
+}
+
+#[doc(hidden)]
+pub mod generated_auth_lease_transition_authority {
+    #[doc(hidden)]
+    pub trait Sealed {}
+}
+
+#[doc(hidden)]
+pub trait GeneratedAuthLeaseTransitionSource:
+    generated_auth_lease_transition_authority::Sealed
+{
+    fn auth_lease_transition_source_kind(&self) -> GeneratedAuthLeaseTransitionSourceKind;
+
+    fn authorize_auth_lease_transition(
+        &self,
+        request: &GeneratedAuthLeaseTransitionRequest,
+    ) -> Result<GeneratedAuthLeaseTransitionGrant, String>;
 }
 
 /// Window (in seconds) before `expires_at` at which a `valid` lease is
@@ -1163,26 +1288,35 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         lease_key: &LeaseKey,
         snapshot: &AuthLeaseSnapshot,
         expires_at: Option<u64>,
-    ) -> Result<(), DslTransitionError> {
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
         if !snapshot.credential_present {
-            return Ok(());
+            return Ok(None);
         }
         let Some(phase) = snapshot.phase else {
-            return Ok(());
+            return Ok(None);
         };
         if phase == AuthLeasePhase::Released {
-            return Ok(());
+            return Ok(None);
         }
         let Some(expires_at) = expires_at else {
-            return Ok(());
+            return Ok(None);
         };
-        self.acquire_lease(lease_key, expires_at)?;
+        let transition = self.acquire_lease(lease_key, expires_at)?;
         match phase {
-            AuthLeasePhase::Valid => Ok(()),
-            AuthLeasePhase::Expiring => self.mark_expiring(lease_key),
-            AuthLeasePhase::Refreshing => self.begin_refresh(lease_key),
-            AuthLeasePhase::ReauthRequired => self.mark_reauth_required(lease_key),
-            AuthLeasePhase::Released => Ok(()),
+            AuthLeasePhase::Valid => Ok(Some(transition)),
+            AuthLeasePhase::Expiring => {
+                self.mark_expiring(lease_key)?;
+                Ok(Some(transition))
+            }
+            AuthLeasePhase::Refreshing => {
+                self.begin_refresh(lease_key)?;
+                Ok(Some(transition))
+            }
+            AuthLeasePhase::ReauthRequired => {
+                self.mark_reauth_required(lease_key)?;
+                Ok(Some(transition))
+            }
+            AuthLeasePhase::Released => Ok(None),
         }
     }
 

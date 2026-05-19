@@ -138,15 +138,9 @@ fn mark_tokens_lifecycle_published_inner(
     marked
 }
 
-pub fn mark_tokens_lifecycle_published(tokens: &PersistedTokens) -> PersistedTokens {
+#[cfg(test)]
+fn mark_tokens_lifecycle_published(tokens: &PersistedTokens) -> PersistedTokens {
     mark_tokens_lifecycle_published_inner(tokens, None, None)
-}
-
-pub fn mark_tokens_lifecycle_published_for_generation(
-    tokens: &PersistedTokens,
-    generation: u64,
-) -> PersistedTokens {
-    mark_tokens_lifecycle_published_inner(tokens, Some(generation), None)
 }
 
 pub fn mark_tokens_lifecycle_published_for_transition(
@@ -155,19 +149,8 @@ pub fn mark_tokens_lifecycle_published_for_transition(
 ) -> PersistedTokens {
     mark_tokens_lifecycle_published_inner(
         tokens,
-        Some(transition.generation),
-        transition.credential_published_at_millis,
-    )
-}
-
-pub fn mark_tokens_lifecycle_published_for_snapshot(
-    tokens: &PersistedTokens,
-    snapshot: &AuthLeaseSnapshot,
-) -> PersistedTokens {
-    mark_tokens_lifecycle_published_inner(
-        tokens,
-        Some(snapshot.generation),
-        snapshot.credential_published_at_millis,
+        Some(transition.generation()),
+        transition.credential_published_at_millis(),
     )
 }
 
@@ -327,22 +310,22 @@ pub fn restore_token_lifecycle_snapshot(
     lease_key: &LeaseKey,
     snapshot: &AuthLeaseSnapshot,
     previous: Option<&PersistedTokens>,
-) -> Result<(), DslTransitionError> {
+) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
     if !snapshot.credential_present {
-        return Ok(());
+        return Ok(None);
     }
     let Some(phase) = snapshot.phase else {
-        return Ok(());
+        return Ok(None);
     };
     if phase == AuthLeasePhase::Released {
-        return Ok(());
+        return Ok(None);
     }
 
     let Some(expires_at) = snapshot
         .expires_at
         .or_else(|| previous.map(persisted_token_expires_at_epoch_secs))
     else {
-        return Ok(());
+        return Ok(None);
     };
     handle.restore_auth_lifecycle_snapshot(lease_key, snapshot, Some(expires_at))
 }
@@ -480,10 +463,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((lease_key.clone(), expires_at));
-            Ok(AuthLeaseTransition {
-                generation: 1,
-                credential_published_at_millis: None,
-            })
+            Ok(AuthLeaseTransition::__from_test_authority(1, None))
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -500,10 +480,7 @@ mod tests {
             _new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition {
-                generation: 1,
-                credential_published_at_millis: None,
-            })
+            Ok(AuthLeaseTransition::__from_test_authority(1, None))
         }
 
         fn refresh_failed(

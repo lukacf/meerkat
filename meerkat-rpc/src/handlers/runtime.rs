@@ -208,6 +208,7 @@ mod tests {
                 admission_sequence: Some(7),
                 terminal_outcome: Some(InputTerminalOutcome::Consumed),
                 attempt_count: 3,
+                recovery_lane: None,
             },
         };
 
@@ -235,6 +236,7 @@ mod tests {
                     reason: InputAbandonReason::Cancelled,
                 }),
                 attempt_count: 1,
+                recovery_lane: None,
             },
         })
         .expect("cancelled terminal projection should be generated");

@@ -11,6 +11,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `last_refresh`: `Option<u64>`
 - `refresh_attempt`: `u64`
 - `credential_present`: `Bool`
+- `credential_generation`: `u64`
+- `credential_published_at_millis`: `Option<u64>`
 - `oauth_browser_flow_ids`: `Set<String>`
 - `oauth_browser_flow_providers`: `Map<String, String>`
 - `oauth_browser_flow_redirect_uris`: `Map<String, String>`
@@ -22,16 +24,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `oauth_outstanding_flow_count`: `u64`
 
 ## Inputs
-- `Acquire`(expires_at_ts: Option<u64>)
+- `Acquire`(expires_at_ts: Option<u64>, credential_published_at_millis: u64)
 - `MarkExpiring`
 - `BeginRefresh`
-- `CompleteRefresh`(new_expires_at: Option<u64>, now_ts: u64)
+- `CompleteRefresh`(new_expires_at: Option<u64>, now_ts: u64, credential_published_at_millis: u64)
 - `RefreshFailedTransient`
 - `RefreshFailedPermanent`
 - `MarkReauthRequired`
 - `ClearCredentialLifecycle`
 - `Release`
-- `RestoreAuthoritySnapshot`(lifecycle_phase: AuthLifecyclePhase, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, oauth_browser_flow_ids: Set<String>, oauth_browser_flow_providers: Map<String, String>, oauth_browser_flow_redirect_uris: Map<String, String>, oauth_browser_flow_expires_at_millis: Map<String, u64>, oauth_device_flow_ids: Set<String>, oauth_device_flow_providers: Map<String, String>, oauth_device_flow_expires_at_millis: Map<String, u64>, oauth_device_poll_ids: Set<String>, oauth_outstanding_flow_count: u64)
+- `RestoreAuthoritySnapshot`(lifecycle_phase: AuthLifecyclePhase, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, credential_generation: u64, credential_published_at_millis: Option<u64>, oauth_browser_flow_ids: Set<String>, oauth_browser_flow_providers: Map<String, String>, oauth_browser_flow_redirect_uris: Map<String, String>, oauth_browser_flow_expires_at_millis: Map<String, u64>, oauth_device_flow_ids: Set<String>, oauth_device_flow_providers: Map<String, String>, oauth_device_flow_expires_at_millis: Map<String, u64>, oauth_device_poll_ids: Set<String>, oauth_outstanding_flow_count: u64)
 - `AdmitOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64, observed_global_outstanding_flows: u64)
 - `VerifyOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
 - `ConsumeOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
@@ -47,7 +49,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Signals
 
 ## Effects
-- `EmitLifecycleEvent`(new_state: AuthLifecyclePhase)
+- `EmitLifecycleEvent`(new_state: AuthLifecyclePhase, credential_generation: u64, credential_published_at_millis: Option<u64>)
 - `WakeRefreshLoop`
 
 ## Invariants
@@ -55,7 +57,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Transitions
 ### `Acquire`
 - From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `Acquire`(expires_at_ts)
+- On: `Acquire`(expires_at_ts, credential_published_at_millis)
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
@@ -79,7 +81,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CompleteRefresh`
 - From: `Refreshing`
-- On: `CompleteRefresh`(new_expires_at, now_ts)
+- On: `CompleteRefresh`(new_expires_at, now_ts, credential_published_at_millis)
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
@@ -127,7 +129,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreAuthoritySnapshotValid`
 - From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
+- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
 - Guards:
   - ``
 - Emits: `EmitLifecycleEvent`
@@ -135,7 +137,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreAuthoritySnapshotExpiring`
 - From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
+- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
 - Guards:
   - ``
 - Emits: `EmitLifecycleEvent`
@@ -143,7 +145,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreAuthoritySnapshotRefreshing`
 - From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
+- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
 - Guards:
   - ``
 - Emits: `EmitLifecycleEvent`
@@ -151,7 +153,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreAuthoritySnapshotReauthRequired`
 - From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
+- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
 - Guards:
   - ``
 - Emits: `EmitLifecycleEvent`
@@ -159,7 +161,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreAuthoritySnapshotReleased`
 - From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
+- On: `RestoreAuthoritySnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count)
 - Guards:
   - ``
 - Emits: `EmitLifecycleEvent`

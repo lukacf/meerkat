@@ -47,6 +47,7 @@ default = ["schema", "jsonschema"]
 schema = []
 jsonschema = ["dep:jsonschema"]
 __meerkat-facade-agent-factory-build = []
+test-authority = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

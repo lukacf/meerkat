@@ -423,15 +423,10 @@ async fn mark_token_commit_lifecycle_published_unlocked(
     commit: &TokenCommitSnapshot,
     tokens: &PersistedTokens,
 ) -> Result<(), RpcResponse> {
-    let current_lifecycle = auth_lease.snapshot(&commit.lease_key);
-    let committed_tokens = if current_lifecycle.credential_present {
-        meerkat_core::mark_tokens_lifecycle_published_for_snapshot(tokens, &current_lifecycle)
-    } else {
-        meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            tokens,
-            commit.lifecycle_transition,
-        )
-    };
+    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+        tokens,
+        commit.lifecycle_transition,
+    );
     if let Err(e) = store.save(&commit.key, &committed_tokens).await {
         let message = match rollback_token_commit(store, auth_lease, commit).await {
             Ok(()) => {
@@ -484,19 +479,18 @@ async fn rollback_token_commit(
                     .save(&commit.key, previous)
                     .await
                     .map_err(|e| format!("TokenStore rollback save failed: {e}"))?;
-                meerkat_core::restore_token_lifecycle_snapshot(
+                let restored_transition = meerkat_core::restore_token_lifecycle_snapshot(
                     auth_lease,
                     &commit.lease_key,
                     &commit.previous_lifecycle,
                     Some(previous),
                 )
                 .map_err(|e| format!("AuthMachine lifecycle rollback failed: {e}"))?;
-                let restored_snapshot = auth_lease.snapshot(&commit.lease_key);
-                if restored_snapshot.credential_present {
+                if let Some(restored_transition) = restored_transition {
                     let restored_previous =
-                        meerkat_core::mark_tokens_lifecycle_published_for_snapshot(
+                        meerkat_core::mark_tokens_lifecycle_published_for_transition(
                             previous,
-                            &restored_snapshot,
+                            restored_transition,
                         );
                     store
                         .save(&commit.key, &restored_previous)
@@ -2284,10 +2278,7 @@ mod tests {
             _new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition {
-                generation: 1,
-                credential_published_at_millis: None,
-            })
+            Ok(AuthLeaseTransition::__from_test_authority(1, None))
         }
 
         fn refresh_failed(
@@ -2325,10 +2316,7 @@ mod tests {
             _lease_key: &LeaseKey,
             _expires_at: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition {
-                generation: 1,
-                credential_published_at_millis: None,
-            })
+            Ok(AuthLeaseTransition::__from_test_authority(1, None))
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -2345,10 +2333,7 @@ mod tests {
             _new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition {
-                generation: 1,
-                credential_published_at_millis: None,
-            })
+            Ok(AuthLeaseTransition::__from_test_authority(1, None))
         }
 
         fn refresh_failed(
@@ -3220,7 +3205,10 @@ mod tests {
         store
             .save(
                 &TokenKey::from_auth_binding(&auth_binding),
-                &meerkat_core::mark_tokens_lifecycle_published_for_generation(&tokens, 1),
+                &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                    &tokens,
+                    meerkat_core::handles::AuthLeaseTransition::__from_test_authority(1, None),
+                ),
             )
             .await
             .unwrap();

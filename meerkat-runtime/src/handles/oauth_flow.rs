@@ -3271,10 +3271,10 @@ mod tests {
             .expect("browser flow consumes");
 
         let snapshot = lifecycle.snapshot(&lease_key);
-        assert_eq!(snapshot.generation, transition.generation);
+        assert_eq!(snapshot.generation, transition.generation());
         assert_eq!(
             snapshot.credential_published_at_millis,
-            transition.credential_published_at_millis
+            transition.credential_published_at_millis()
         );
     }
 

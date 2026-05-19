@@ -185,10 +185,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             generation,
             credential_published_at_millis: None,
         };
-        Ok(AuthLeaseTransition {
-            generation,
-            credential_published_at_millis: None,
-        })
+        Ok(AuthLeaseTransition::__from_test_authority(generation, None))
     }
 
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -237,10 +234,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             generation,
             credential_published_at_millis: None,
         };
-        Ok(AuthLeaseTransition {
-            generation,
-            credential_published_at_millis: None,
-        })
+        Ok(AuthLeaseTransition::__from_test_authority(generation, None))
     }
 
     fn refresh_failed(

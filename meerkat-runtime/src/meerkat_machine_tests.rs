@@ -307,7 +307,10 @@ impl meerkat_core::handles::AuthLeaseHandle for DelegatingCustomAuthLeaseHandle 
         lease_key: &meerkat_core::handles::LeaseKey,
         snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
         expires_at: Option<u64>,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+    ) -> Result<
+        Option<meerkat_core::handles::AuthLeaseTransition>,
+        meerkat_core::handles::DslTransitionError,
+    > {
         self.0
             .restore_auth_lifecycle_snapshot(lease_key, snapshot, expires_at)
     }

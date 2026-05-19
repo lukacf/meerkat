@@ -175,7 +175,7 @@ impl LeaseFreshnessObserver {
                 .complete_refresh(&self.lease_key, expires_at, epoch_secs(now))
                 .map_err(|err| self.observer_error(authorizer_label, "complete_refresh", err))?,
         };
-        Ok(transition.generation)
+        Ok(transition.generation())
     }
 
     pub(crate) fn refresh_failed(
@@ -335,10 +335,10 @@ mod tests {
                 generation: accepted_generation + 1,
                 credential_published_at_millis: None,
             };
-            Ok(AuthLeaseTransition {
-                generation: accepted_generation,
-                credential_published_at_millis: None,
-            })
+            Ok(AuthLeaseTransition::__from_test_authority(
+                accepted_generation,
+                None,
+            ))
         }
 
         fn accepted_generations(&self) -> Vec<u64> {

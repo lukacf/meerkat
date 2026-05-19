@@ -1823,7 +1823,11 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
             effect_variant: ev_id("EmitLifecycleEvent"),
             realizing_actor: act_id("auth_lease_owner"),
             correlation_fields: vec![fld_id("new_state")],
-            obligation_fields: vec![fld_id("new_state")],
+            obligation_fields: vec![
+                fld_id("new_state"),
+                fld_id("credential_generation"),
+                fld_id("credential_published_at_millis"),
+            ],
             allowed_feedback_inputs: vec![],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: Some(

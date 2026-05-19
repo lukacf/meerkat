@@ -5608,10 +5608,7 @@ mod tests {
                 _new_expires_at: u64,
                 _now: u64,
             ) -> Result<AuthLeaseTransition, DslTransitionError> {
-                Ok(AuthLeaseTransition {
-                    generation: 0,
-                    credential_published_at_millis: None,
-                })
+                Ok(AuthLeaseTransition::__from_test_authority(0, None))
             }
 
             fn refresh_failed(

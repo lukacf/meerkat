@@ -58,6 +58,7 @@ tokio_with_wasm = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 
 [dev-dependencies]
+meerkat-core = { workspace = true, features = ["test-authority"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }
 schemars = { workspace = true }

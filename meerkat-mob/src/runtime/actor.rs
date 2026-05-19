@@ -3969,6 +3969,10 @@ impl MobActor {
                 MobCommand::QueryMachineState { reply_tx } => {
                     let _ = reply_tx.send(self.dsl_authority.state().clone());
                 }
+                MobCommand::AuthorizeExternalPeerReciprocalTrust { key, reply_tx } => {
+                    let result = self.authorize_external_peer_reciprocal_trust(key).await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::ProjectMachineSignal { signal } => {
                     let foreign_runtime_id =
                         foreign_runtime_observation(self.dsl_authority.state(), &signal).cloned();
@@ -7832,6 +7836,55 @@ impl MobActor {
             "wire_external_peer",
         )?;
         Self::wire_external_authority_from_effects(&effects, edge, "wire_external_peer")
+    }
+
+    async fn authorize_external_peer_reciprocal_trust(
+        &mut self,
+        key: mob_dsl::ExternalPeerKey,
+    ) -> Result<CommsTrustMutationAuthority, MobError> {
+        let effects = self.apply_dsl_input_collect_effects(
+            mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrust { key: key.clone() },
+            "authorize_external_peer_reciprocal_trust",
+        )?;
+        let handoff = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                mob_dsl::MobMachineEffect::ExternalPeerReciprocalTrustRequested {
+                    key: effect_key,
+                    ..
+                } if effect_key == &key
+            )
+        });
+        if !handoff {
+            return Err(MobError::WiringError(
+                "MobMachine produced no external reciprocal trust handoff".to_string(),
+            ));
+        }
+        let local_identity = AgentIdentity::from(key.local.0.as_str());
+        let local_entry = {
+            let roster = self.roster.read().await;
+            roster
+                .get(&local_identity)
+                .ok_or_else(|| MobError::MemberNotFound(local_identity.clone()))?
+                .clone()
+        };
+        let peer_id = match self
+            .resolve_wiring_endpoint(&local_entry, "authorize_external_peer_reciprocal_trust")
+            .await
+        {
+            Ok(WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. }) => {
+                Self::trusted_peer_removal_key(&spec)
+            }
+            Err(_) => local_entry
+                .peer_id()
+                .map(|peer_id| peer_id.to_string())
+                .ok_or_else(|| {
+                    MobError::WiringError(format!(
+                        "authorize_external_peer_reciprocal_trust requires peer id for '{local_identity}'"
+                    ))
+                })?,
+        };
+        Ok(self.mob_peer_wiring_authority(&peer_id))
     }
 
     fn apply_unwire_external_peer_idempotent(

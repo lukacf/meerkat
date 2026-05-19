@@ -285,6 +285,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `WireExternalPeerAlreadyWired`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `AuthorizeExternalPeerReciprocalTrustRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `RecoverExternalPeerWiringRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
@@ -732,6 +735,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `ExternalPeerTrustRepairRequested`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ExternalPeerReciprocalTrustRequested`
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `EmitWiringLifecycleNotice`

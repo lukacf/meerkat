@@ -126,6 +126,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `WireMembers`(edge: WiringEdge)
 - `UnwireMembers`(edge: WiringEdge)
 - `WireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
+- `AuthorizeExternalPeerReciprocalTrust`(key: ExternalPeerKey)
 - `UnwireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
 - `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
@@ -242,6 +243,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
 - `WiringTrustRepairRequested`(edge: WiringEdge)
 - `ExternalPeerTrustRepairRequested`(edge: ExternalPeerEdge)
+- `ExternalPeerReciprocalTrustRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge)
 - `EmitWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: WiringEdge)
 - `EmitExternalPeerWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: ExternalPeerEdge)
 
@@ -934,6 +936,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `external_peer_key_already_wired`
   - `external_peer_edge_already_wired`
 - Emits: `ExternalPeerTrustRepairRequested`
+- To: `Running`
+
+### `AuthorizeExternalPeerReciprocalTrustRunning`
+- From: `Running`
+- On: `AuthorizeExternalPeerReciprocalTrust`(key)
+- Guards:
+  - `external_peer_key_already_wired`
+- Emits: `ExternalPeerReciprocalTrustRequested`
 - To: `Running`
 
 ### `RecoverExternalPeerWiringRunning`

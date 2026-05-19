@@ -2140,6 +2140,10 @@ pub mod inputs {
         pub edge: ExternalPeerEdge,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeExternalPeerReciprocalTrust {
+        pub key: ExternalPeerKey,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct UnwireExternalPeer {
         pub key: ExternalPeerKey,
         pub edge: ExternalPeerEdge,
@@ -2285,6 +2289,7 @@ pub enum Input {
     WireMembers(inputs::WireMembers),
     UnwireMembers(inputs::UnwireMembers),
     WireExternalPeer(inputs::WireExternalPeer),
+    AuthorizeExternalPeerReciprocalTrust(inputs::AuthorizeExternalPeerReciprocalTrust),
     UnwireExternalPeer(inputs::UnwireExternalPeer),
     SessionIngressDetachedForMobDestroy(inputs::SessionIngressDetachedForMobDestroy),
     SessionIngressDetachFailedForMobDestroy(inputs::SessionIngressDetachFailedForMobDestroy),
@@ -2350,6 +2355,9 @@ impl Input {
             Self::WireMembers(_) => InputKind::WireMembers,
             Self::UnwireMembers(_) => InputKind::UnwireMembers,
             Self::WireExternalPeer(_) => InputKind::WireExternalPeer,
+            Self::AuthorizeExternalPeerReciprocalTrust(_) => {
+                InputKind::AuthorizeExternalPeerReciprocalTrust
+            }
             Self::UnwireExternalPeer(_) => InputKind::UnwireExternalPeer,
             Self::SessionIngressDetachedForMobDestroy(_) => {
                 InputKind::SessionIngressDetachedForMobDestroy
@@ -2416,6 +2424,7 @@ pub enum InputKind {
     WireMembers,
     UnwireMembers,
     WireExternalPeer,
+    AuthorizeExternalPeerReciprocalTrust,
     UnwireExternalPeer,
     SessionIngressDetachedForMobDestroy,
     SessionIngressDetachFailedForMobDestroy,
@@ -2841,6 +2850,11 @@ pub mod effects {
         pub edge: ExternalPeerEdge,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExternalPeerReciprocalTrustRequested {
+        pub key: ExternalPeerKey,
+        pub edge: ExternalPeerEdge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EmitWiringLifecycleNotice {
         pub kind: WiringLifecycleKind,
         pub edge: WiringEdge,
@@ -2879,6 +2893,7 @@ pub enum Effect {
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
     WiringTrustRepairRequested(effects::WiringTrustRepairRequested),
     ExternalPeerTrustRepairRequested(effects::ExternalPeerTrustRepairRequested),
+    ExternalPeerReciprocalTrustRequested(effects::ExternalPeerReciprocalTrustRequested),
     EmitWiringLifecycleNotice(effects::EmitWiringLifecycleNotice),
     EmitExternalPeerWiringLifecycleNotice(effects::EmitExternalPeerWiringLifecycleNotice),
 }
@@ -2909,6 +2924,7 @@ pub enum EffectKind {
     MemberSessionBindingChanged,
     WiringTrustRepairRequested,
     ExternalPeerTrustRepairRequested,
+    ExternalPeerReciprocalTrustRequested,
     EmitWiringLifecycleNotice,
     EmitExternalPeerWiringLifecycleNotice,
 }
@@ -3004,6 +3020,7 @@ pub enum TransitionId {
     UnwireMembersAlreadyAbsent,
     WireExternalPeerRunning,
     WireExternalPeerAlreadyWired,
+    AuthorizeExternalPeerReciprocalTrustRunning,
     RecoverExternalPeerWiringRunning,
     RecoverExternalPeerWiringAlreadyRecovered,
     RecoverExternalPeerUnwireRunning,

@@ -349,6 +349,7 @@ macro_rules! mob_catalog_machine_dsl {
             WireMembers { edge: WiringEdge },
             UnwireMembers { edge: WiringEdge },
             WireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
+            AuthorizeExternalPeerReciprocalTrust { key: ExternalPeerKey },
             UnwireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
             SessionIngressDetachedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
             SessionIngressDetachFailedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String },
@@ -482,6 +483,7 @@ macro_rules! mob_catalog_machine_dsl {
             MemberSessionBindingChanged { epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId> },
             WiringTrustRepairRequested { edge: WiringEdge },
             ExternalPeerTrustRepairRequested { edge: ExternalPeerEdge },
+            ExternalPeerReciprocalTrustRequested { key: ExternalPeerKey, edge: ExternalPeerEdge },
             // D-wiring-observability (#27): pair-valued notice emitted from
             // `WireMembers`/`UnwireMembers` alongside `WiringGraphChanged`.
             // Unlike `WiringGraphChanged` (opaque epoch bump), this carries
@@ -521,6 +523,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition MemberSessionBindingChanged => external,
         disposition WiringTrustRepairRequested => local,
         disposition ExternalPeerTrustRepairRequested => local,
+        disposition ExternalPeerReciprocalTrustRequested => local,
         disposition EmitWiringLifecycleNotice => external,
         disposition EmitExternalPeerWiringLifecycleNotice => external,
 
@@ -1615,6 +1618,15 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit ExternalPeerTrustRepairRequested { edge: edge }
+        }
+
+        transition AuthorizeExternalPeerReciprocalTrustRunning {
+            on input AuthorizeExternalPeerReciprocalTrust { key }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_key_already_wired" { self.external_peer_edges_by_key.contains_key(key) == true }
+            update {}
+            to Running
+            emit ExternalPeerReciprocalTrustRequested { key: key, edge: self.external_peer_edges_by_key.get_cloned(key).get("value") }
         }
 
         transition RecoverExternalPeerWiringRunning {

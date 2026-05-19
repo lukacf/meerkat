@@ -123,12 +123,8 @@ impl AgentMobToolSurface {
     async fn apply_parent_trusted_peer_add(
         comms: &Arc<dyn meerkat_core::agent::CommsRuntime>,
         peer: TrustedPeerDescriptor,
-        topology_epoch: u64,
+        authority: CommsTrustMutationAuthority,
     ) -> Result<(), SendError> {
-        let authority = CommsTrustMutationAuthority::mob_machine_peer_wiring(
-            peer.peer_id.to_string(),
-            topology_epoch,
-        );
         match comms
             .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer { peer, authority })
             .await?
@@ -616,10 +612,6 @@ impl AgentMobToolSurface {
         if !helper_trusts_parent {
             return false;
         }
-        let topology_epoch = match handle.topology_epoch().await {
-            Ok(epoch) => epoch,
-            Err(_) => return false,
-        };
 
         let Ok(helper_spec) = Self::trusted_descriptor_from_runtime(
             &helper_comms_name,
@@ -629,8 +621,14 @@ impl AgentMobToolSurface {
         ) else {
             return false;
         };
+        let Ok(parent_trust_authority) = handle
+            .authorize_external_peer_reciprocal_trust(identity, name.as_str())
+            .await
+        else {
+            return false;
+        };
 
-        if Self::apply_parent_trusted_peer_add(comms_rt, helper_spec, topology_epoch)
+        if Self::apply_parent_trusted_peer_add(comms_rt, helper_spec, parent_trust_authority)
             .await
             .is_err()
         {

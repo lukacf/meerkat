@@ -831,15 +831,15 @@ pub fn decode_supervisor_signing_public_key(encoded: &str) -> Result<[u8; 32], S
 pub fn trusted_peer_descriptor_from_supervisor_publish_obligation(
     obligation: &crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation,
 ) -> Result<TrustedPeerDescriptor, String> {
-    let signing_public_key = obligation.signing_public_key.as_ref().ok_or_else(|| {
+    let signing_public_key = obligation.signing_public_key().as_ref().ok_or_else(|| {
         "generated supervisor trust publish obligation omitted signing public key".to_string()
     })?;
     let pubkey = decode_supervisor_signing_public_key(signing_public_key)?;
     TrustedPeerDescriptor::unsigned_with_pubkey(
-        obligation.name.clone(),
-        obligation.peer_id.clone(),
+        obligation.name().clone(),
+        obligation.peer_id().clone(),
         pubkey,
-        obligation.address.clone(),
+        obligation.address().clone(),
     )
 }
 
@@ -865,7 +865,7 @@ fn matching_supervisor_revoke_obligation(
 ) -> Result<crate::protocol_supervisor_trust_revoke::SupervisorTrustRevokeObligation, String> {
     crate::protocol_supervisor_trust_revoke::extract_obligations(effects)
         .into_iter()
-        .find(|obligation| obligation.peer_id == peer_id && obligation.epoch == epoch)
+        .find(|obligation| obligation.peer_id().as_str() == peer_id && obligation.epoch() == epoch)
         .ok_or_else(|| format!("{context}: generated revoke effect was absent"))
 }
 
@@ -876,11 +876,11 @@ fn validate_supervisor_publish_obligation(
     context: &str,
 ) -> Result<(), String> {
     let expected_signing_key = encode_supervisor_signing_public_key(expected.pubkey);
-    if obligation.name != expected.name.as_str()
-        || obligation.peer_id != expected.peer_id.as_str()
-        || obligation.address != expected.address.to_string()
-        || obligation.signing_public_key.as_deref() != Some(expected_signing_key.as_str())
-        || obligation.epoch != expected_epoch
+    if obligation.name() != expected.name.as_str()
+        || obligation.peer_id().as_str() != expected.peer_id.as_str()
+        || obligation.address().as_str() != expected.address.to_string()
+        || obligation.signing_public_key().as_deref() != Some(expected_signing_key.as_str())
+        || obligation.epoch() != expected_epoch
     {
         return Err(format!(
             "{context}: generated publish obligation did not match the staged supervisor binding"
@@ -928,7 +928,7 @@ fn supervisor_publish_authority(
 ) -> Result<CommsTrustMutationAuthority, String> {
     crate::protocol_supervisor_trust_publish::publish_authority_for_peer(
         obligation,
-        &obligation.peer_id,
+        obligation.peer_id(),
     )
 }
 
@@ -937,7 +937,7 @@ fn supervisor_revoke_authority(
 ) -> Result<CommsTrustMutationAuthority, String> {
     crate::protocol_supervisor_trust_revoke::revoke_authority_for_peer(
         obligation,
-        &obligation.peer_id,
+        obligation.peer_id(),
     )
 }
 
@@ -955,7 +955,11 @@ async fn publish_supervisor_trust_from_generated_obligation(
     )
     .await?;
     adapter
-        .stage_supervisor_trust_published(session_id, obligation.peer_id.clone(), obligation.epoch)
+        .stage_supervisor_trust_published(
+            session_id,
+            obligation.peer_id().clone(),
+            obligation.epoch(),
+        )
         .await
         .map_err(|error| error.to_string())?;
     Ok(())
@@ -1015,10 +1019,14 @@ async fn rollback_bind_after_trust_publication_failure(
         .await?;
     if let Some(obligation) = crate::protocol_supervisor_trust_revoke::extract_obligations(&effects)
         .into_iter()
-        .find(|obligation| obligation.peer_id == peer_id && obligation.epoch == epoch)
+        .find(|obligation| obligation.peer_id().as_str() == peer_id && obligation.epoch() == epoch)
     {
         adapter
-            .stage_supervisor_trust_revoked(session_id, obligation.peer_id, obligation.epoch)
+            .stage_supervisor_trust_revoked(
+                session_id,
+                obligation.peer_id().clone(),
+                obligation.epoch(),
+            )
             .await?;
     }
     Ok(())
@@ -1505,8 +1513,8 @@ async fn try_handle_supervisor_bridge_command(
                 let _ = rollback_bind_after_trust_publication_failure(
                     adapter,
                     session_id,
-                    &publish_obligation.peer_id,
-                    publish_obligation.epoch,
+                    publish_obligation.peer_id(),
+                    publish_obligation.epoch(),
                 )
                 .await;
                 send_bridge_failure(
@@ -1526,8 +1534,8 @@ async fn try_handle_supervisor_bridge_command(
                     let _ = rollback_bind_after_trust_publication_failure(
                         adapter,
                         session_id,
-                        &publish_obligation.peer_id,
-                        publish_obligation.epoch,
+                        publish_obligation.peer_id(),
+                        publish_obligation.epoch(),
                     )
                     .await;
                     send_bridge_failure(
@@ -1549,8 +1557,8 @@ async fn try_handle_supervisor_bridge_command(
                         let _ = adapter
                             .stage_supervisor_trust_publish_failed(
                                 session_id,
-                                publish_obligation.peer_id.clone(),
-                                publish_obligation.epoch,
+                                publish_obligation.peer_id().clone(),
+                                publish_obligation.epoch(),
                                 error.clone(),
                             )
                             .await;
@@ -1570,16 +1578,16 @@ async fn try_handle_supervisor_bridge_command(
                 let _ = adapter
                     .stage_supervisor_trust_publish_failed(
                         session_id,
-                        publish_obligation.peer_id.clone(),
-                        publish_obligation.epoch,
+                        publish_obligation.peer_id().clone(),
+                        publish_obligation.epoch(),
                         error.clone(),
                     )
                     .await;
                 let reason = match rollback_bind_after_trust_publication_failure(
                     adapter,
                     session_id,
-                    &publish_obligation.peer_id,
-                    publish_obligation.epoch,
+                    publish_obligation.peer_id(),
+                    publish_obligation.epoch(),
                 )
                 .await
                 {
@@ -1602,8 +1610,8 @@ async fn try_handle_supervisor_bridge_command(
             if let Err(error) = adapter
                 .stage_supervisor_trust_published(
                     session_id,
-                    publish_obligation.peer_id.clone(),
-                    publish_obligation.epoch,
+                    publish_obligation.peer_id().clone(),
+                    publish_obligation.epoch(),
                 )
                 .await
             {
@@ -1762,8 +1770,8 @@ async fn try_handle_supervisor_bridge_command(
                     let _ = adapter
                         .stage_supervisor_trust_publish_failed(
                             session_id,
-                            publish_obligation.peer_id.clone(),
-                            publish_obligation.epoch,
+                            publish_obligation.peer_id().clone(),
+                            publish_obligation.epoch(),
                             error.clone(),
                         )
                         .await;
@@ -1836,15 +1844,15 @@ async fn try_handle_supervisor_bridge_command(
                 };
                 if let Err(error) = apply_generated_trust_remove(
                     comms_runtime,
-                    revoke_obligation.peer_id.clone(),
+                    revoke_obligation.peer_id().clone(),
                     match supervisor_revoke_authority(&revoke_obligation) {
                         Ok(authority) => authority,
                         Err(error) => {
                             let _ = adapter
                                 .stage_supervisor_trust_revoke_failed(
                                     session_id,
-                                    revoke_obligation.peer_id.clone(),
-                                    revoke_obligation.epoch,
+                                    revoke_obligation.peer_id().clone(),
+                                    revoke_obligation.epoch(),
                                     error.clone(),
                                 )
                                 .await;
@@ -1864,8 +1872,8 @@ async fn try_handle_supervisor_bridge_command(
                     let feedback = adapter
                         .stage_supervisor_trust_revoke_failed(
                             session_id,
-                            revoke_obligation.peer_id.clone(),
-                            revoke_obligation.epoch,
+                            revoke_obligation.peer_id().clone(),
+                            revoke_obligation.epoch(),
                             error.clone(),
                         )
                         .await;
@@ -1887,8 +1895,8 @@ async fn try_handle_supervisor_bridge_command(
                 if let Err(error) = adapter
                     .stage_supervisor_trust_revoked(
                         session_id,
-                        revoke_obligation.peer_id,
-                        revoke_obligation.epoch,
+                        revoke_obligation.peer_id().clone(),
+                        revoke_obligation.epoch(),
                     )
                     .await
                 {
@@ -1989,7 +1997,8 @@ async fn try_handle_supervisor_bridge_command(
             let revoke_obligations =
                 crate::protocol_supervisor_trust_revoke::extract_obligations(&revoke_effects);
             let Some(revoke_obligation) = revoke_obligations.into_iter().find(|obligation| {
-                obligation.peer_id == supervisor_peer_id && obligation.epoch == payload.epoch
+                obligation.peer_id().as_str() == supervisor_peer_id.as_str()
+                    && obligation.epoch() == payload.epoch
             }) else {
                 let reason =
                     "revoke supervisor failed: generated revoke effect was absent".to_string();
@@ -2020,15 +2029,15 @@ async fn try_handle_supervisor_bridge_command(
             };
             if let Err(error) = apply_generated_trust_remove(
                 comms_runtime,
-                revoke_obligation.peer_id.clone(),
+                revoke_obligation.peer_id().clone(),
                 match supervisor_revoke_authority(&revoke_obligation) {
                     Ok(authority) => authority,
                     Err(error) => {
                         let _ = adapter
                             .stage_supervisor_trust_revoke_failed(
                                 session_id,
-                                revoke_obligation.peer_id.clone(),
-                                revoke_obligation.epoch,
+                                revoke_obligation.peer_id().clone(),
+                                revoke_obligation.epoch(),
                                 error.clone(),
                             )
                             .await;
@@ -2048,8 +2057,8 @@ async fn try_handle_supervisor_bridge_command(
                 let feedback_result = adapter
                     .stage_supervisor_trust_revoke_failed(
                         session_id,
-                        revoke_obligation.peer_id.clone(),
-                        revoke_obligation.epoch,
+                        revoke_obligation.peer_id().clone(),
+                        revoke_obligation.epoch(),
                         error.clone(),
                     )
                     .await;
@@ -2076,8 +2085,8 @@ async fn try_handle_supervisor_bridge_command(
             if let Err(error) = adapter
                 .stage_supervisor_trust_revoked(
                     session_id,
-                    revoke_obligation.peer_id,
-                    revoke_obligation.epoch,
+                    revoke_obligation.peer_id().clone(),
+                    revoke_obligation.epoch(),
                 )
                 .await
             {
@@ -2555,11 +2564,19 @@ mod tests {
         context: &str,
     ) {
         let endpoint = crate::meerkat_machine::dsl::PeerEndpoint::from(&peer);
-        let obligation = crate::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
-            peer_projection_epoch: 0,
-        };
+        let effect =
+            crate::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
+                peer_projection_epoch: 0,
+                direct_peer_endpoints: std::collections::BTreeSet::from([endpoint.clone()]),
+                mob_overlay_peer_endpoints: std::collections::BTreeSet::new(),
+            };
+        let obligation = crate::protocol_comms_trust_reconcile::extract_obligations(&[effect])
+            .into_iter()
+            .next()
+            .expect("generated reconcile obligation");
         let authority =
-            crate::protocol_comms_trust_reconcile::authority_for_endpoint(&obligation, &endpoint);
+            crate::protocol_comms_trust_reconcile::authority_for_endpoint(&obligation, &endpoint)
+                .expect("generated authority");
         match runtime
             .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer { peer, authority })
             .await

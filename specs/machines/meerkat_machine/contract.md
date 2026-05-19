@@ -460,7 +460,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InteractionStreamCleanup`(corr_id: PeerCorrelationId)
 - `LocalEndpointChanged`(endpoint: Option<PeerEndpoint>)
 - `PeerProjectionChanged`(peer_projection_epoch: u64)
-- `CommsTrustReconcileRequested`(peer_projection_epoch: u64)
+- `CommsTrustReconcileRequested`(peer_projection_epoch: u64, direct_peer_endpoints: Set<PeerEndpoint>, mob_overlay_peer_endpoints: Set<PeerEndpoint>)
 
 ## Helpers
 - `deferred_authority_has_identity`(witness: ToolVisibilityWitness) -> `Bool`

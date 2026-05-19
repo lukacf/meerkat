@@ -1886,10 +1886,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             // Identity-level wiring from MobMachine is projected onto
             // endpoint-level peer sets here. See the schema DSL
             // (`catalog::dsl::meerkat_machine`) for the full rationale;
-            // the `effective` trust set is derived as
-            // `direct_peer_endpoints ∪ mob_overlay_peer_endpoints` by
-            // the comms reconciliation handler (Commit 4) on receipt
-            // of `CommsTrustReconcileRequested`.
+            // the `effective` trust set is emitted with
+            // `CommsTrustReconcileRequested` so the comms reconciliation
+            // handler cannot supply peer-trust truth outside machine
+            // authority.
             //
             // `peer_projection_epoch` carries general effective-set
             // change freshness; `mob_overlay_epoch` is the overlay-
@@ -2875,7 +2875,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             // Track-B (R5) peer-projection effects.
             LocalEndpointChanged { endpoint: Option<PeerEndpoint> },
             PeerProjectionChanged { peer_projection_epoch: u64 },
-            CommsTrustReconcileRequested { peer_projection_epoch: u64 },
+            CommsTrustReconcileRequested { peer_projection_epoch: u64, direct_peer_endpoints: Set<PeerEndpoint>, mob_overlay_peer_endpoints: Set<PeerEndpoint> },
         }
 
         // =====================================================================
@@ -11704,7 +11704,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit PeerProjectionChanged { peer_projection_epoch: self.peer_projection_epoch }
-            emit CommsTrustReconcileRequested { peer_projection_epoch: self.peer_projection_epoch }
+            emit CommsTrustReconcileRequested { peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
         }
 
         transition RemoveDirectPeerEndpoint {
@@ -11717,7 +11717,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit PeerProjectionChanged { peer_projection_epoch: self.peer_projection_epoch }
-            emit CommsTrustReconcileRequested { peer_projection_epoch: self.peer_projection_epoch }
+            emit CommsTrustReconcileRequested { peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
         }
 
         transition ApplyMobPeerOverlay {
@@ -11731,7 +11731,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit PeerProjectionChanged { peer_projection_epoch: self.peer_projection_epoch }
-            emit CommsTrustReconcileRequested { peer_projection_epoch: self.peer_projection_epoch }
+            emit CommsTrustReconcileRequested { peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
         }
     }
 }

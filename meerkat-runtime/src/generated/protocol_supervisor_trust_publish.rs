@@ -7,11 +7,33 @@ use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerId};
 
 #[derive(Debug, Clone)]
 pub struct SupervisorTrustPublishObligation {
-    pub peer_id: String,
-    pub name: String,
-    pub address: String,
-    pub signing_public_key: Option<String>,
-    pub epoch: u64,
+    peer_id: String,
+    name: String,
+    address: String,
+    signing_public_key: Option<String>,
+    epoch: u64,
+}
+
+impl SupervisorTrustPublishObligation {
+    pub fn peer_id(&self) -> &String {
+        &self.peer_id
+    }
+
+    pub fn name(&self) -> &String {
+        &self.name
+    }
+
+    pub fn address(&self) -> &String {
+        &self.address
+    }
+
+    pub fn signing_public_key(&self) -> &Option<String> {
+        &self.signing_public_key
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
 }
 
 pub fn extract_obligations(
@@ -61,8 +83,8 @@ pub fn publish_authority_for_peer(
         &obligation.peer_id,
         expected_peer_id,
     )?;
-    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_publish(
+    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_publish(
         obligation.peer_id.clone(),
         obligation.epoch,
-    ))
+    )
 }

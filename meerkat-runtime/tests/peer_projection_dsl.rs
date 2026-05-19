@@ -204,6 +204,7 @@ fn add_direct_peer_endpoint_inserts_bumps_epoch_and_emits_trust_reconcile() {
     let reconcile_epoch = effects.iter().find_map(|e| match e {
         mm_dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
             peer_projection_epoch,
+            ..
         } => Some(*peer_projection_epoch),
         _ => None,
     });

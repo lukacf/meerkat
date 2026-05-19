@@ -71,23 +71,41 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
+fn test_comms_reconcile_obligation(
+    direct_peer_endpoints: BTreeSet<meerkat_runtime::meerkat_machine::dsl::PeerEndpoint>,
+) -> meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
+    let effects = vec![
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
+            peer_projection_epoch: 0,
+            direct_peer_endpoints,
+            mob_overlay_peer_endpoints: BTreeSet::new(),
+        },
+    ];
+    let mut obligations =
+        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&effects);
+    assert_eq!(
+        obligations.len(),
+        1,
+        "test reconcile effect must produce one generated obligation"
+    );
+    obligations.pop().expect("obligation count checked")
+}
+
 async fn apply_test_peer_projection_trust(
     runtime: &dyn CoreCommsRuntime,
     peer: TrustedPeerDescriptor,
     context: &'static str,
 ) {
     let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
-    let obligation =
-        meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
-            peer_projection_epoch: 0,
-        };
+    let obligation = test_comms_reconcile_obligation(BTreeSet::from([endpoint.clone()]));
     CoreCommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
             authority: meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
                 &obligation,
                 &endpoint,
-            ),
+            )
+            .expect("generated peer projection add authority"),
             peer,
         },
     )
@@ -106,17 +124,16 @@ async fn remove_test_peer_projection_trust(
         "",
         [0u8; 32],
     );
-    let obligation =
-        meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
-            peer_projection_epoch: 0,
-        };
+    let obligation = test_comms_reconcile_obligation(BTreeSet::new());
     CoreCommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::RemoveTrustedPeer {
-            authority: meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
-                &obligation,
-                &endpoint,
-            ),
+            authority:
+                meerkat_runtime::protocol_comms_trust_reconcile::removal_authority_for_peer_id(
+                    &obligation,
+                    &endpoint.peer_id.0,
+                )
+                .expect("generated peer projection remove authority"),
             peer_id: peer_id.to_string(),
         },
     )
@@ -4356,17 +4373,15 @@ async fn trust_candidate_sender_for_reply(
     )
     .expect("typed ingress sender should convert to a reply trusted peer");
     let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&descriptor);
-    let obligation =
-        meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
-            peer_projection_epoch: 0,
-        };
+    let obligation = test_comms_reconcile_obligation(BTreeSet::from([endpoint.clone()]));
     CoreCommsRuntime::apply_trust_mutation(
         comms,
         CommsTrustMutation::AddTrustedPeer {
             authority: meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
                 &obligation,
                 &endpoint,
-            ),
+            )
+            .expect("generated peer projection add authority"),
             peer: descriptor,
         },
     )
@@ -26620,13 +26635,18 @@ async fn test_unwire_fails_closed_on_stale_local_trust_when_machine_edge_absent(
         crate::machines::mob_machine::AgentIdentity("l-1".to_string()),
         crate::machines::mob_machine::AgentIdentity("w-1".to_string()),
     );
-    let stale_obligation =
-        crate::generated::protocol_mob_member_trust_wiring::MobMemberTrustWiringObligation {
+    let stale_effects = vec![
+        crate::machines::mob_machine::MobMachineEffect::MemberTrustWiringRequested {
             edge: stale_edge,
             a_peer_id: crate::machines::mob_machine::PeerId(peer_id_a.clone()),
             b_peer_id: crate::machines::mob_machine::PeerId(peer_id_b.clone()),
             epoch: 3,
-        };
+        },
+    ];
+    let stale_obligation =
+        crate::generated::protocol_mob_member_trust_wiring::extract_obligations(&stale_effects)
+            .pop()
+            .expect("generated member wiring obligation");
     comms_a
         .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
             peer: TrustedPeerDescriptor::unsigned_with_pubkey(
@@ -26730,16 +26750,25 @@ async fn test_unwire_external_fails_closed_on_stale_trust_when_machine_edge_abse
         crate::machines::mob_machine::AgentIdentity("l-1".to_string()),
         crate::machines::mob_machine::ExternalPeerEndpoint::from(&spec),
     );
+    let stale_effects = vec![
+        crate::machines::mob_machine::MobMachineEffect::ExternalPeerTrustWiringRequested {
+            edge: stale_edge,
+            peer_id: crate::machines::mob_machine::PeerId(peer_id.clone()),
+            epoch: 3,
+        },
+    ];
+    let stale_obligation =
+        crate::generated::protocol_mob_external_peer_trust_wiring::extract_obligations(
+            &stale_effects,
+        )
+        .pop()
+        .expect("generated external wiring obligation");
     comms
         .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
             peer: spec.clone(),
             authority:
                 crate::generated::protocol_mob_external_peer_trust_wiring::wiring_authority_for_peer(
-                    &crate::generated::protocol_mob_external_peer_trust_wiring::MobExternalPeerTrustWiringObligation {
-                        edge: stale_edge,
-                        peer_id: crate::machines::mob_machine::PeerId(peer_id.clone()),
-                        epoch: 3,
-                    },
+                    &stale_obligation,
                     &peer_id,
                 )
                 .expect("generated external wiring obligation covers test peer"),

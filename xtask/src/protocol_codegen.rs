@@ -307,6 +307,7 @@ fn generate_obligation_struct(
     producer_machine: &MachineSchema,
 ) -> Result<String> {
     let obligation_type = format!("{}Obligation", to_pascal_case(protocol.name.as_str()));
+    let protected = protected_obligation_protocol(protocol.name.as_str());
     let producer_effect = producer_machine
         .effects
         .variant_named(protocol.effect_variant.as_str())
@@ -323,9 +324,10 @@ fn generate_obligation_struct(
                 .with_context(|| {
                     format!("obligation field `{field}` missing from producer effect")
                 })?;
+            let visibility = if protected { "" } else { "pub " };
             writeln!(
                 out,
-                "    pub {}: {},",
+                "    {visibility}{}: {},",
                 to_snake_case(field.as_str()),
                 rust_type(&effect_field.ty)
             )?;
@@ -334,7 +336,54 @@ fn generate_obligation_struct(
     writeln!(out, "}}")?;
     writeln!(out)?;
 
+    if protected && !protocol.obligation_fields.is_empty() {
+        writeln!(out, "impl {obligation_type} {{")?;
+        for field in &protocol.obligation_fields {
+            let rust_name = to_snake_case(field.as_str());
+            let effect_field = producer_effect
+                .field_named(field.as_str())
+                .with_context(|| {
+                    format!("obligation field `{field}` missing from producer effect")
+                })?;
+            let ty = rust_type(&effect_field.ty);
+            if getter_returns_copy(&effect_field.ty) {
+                writeln!(out, "    pub fn {rust_name}(&self) -> {ty} {{")?;
+                writeln!(out, "        self.{rust_name}")?;
+            } else {
+                writeln!(out, "    pub fn {rust_name}(&self) -> &{ty} {{")?;
+                writeln!(out, "        &self.{rust_name}")?;
+            }
+            writeln!(out, "    }}")?;
+            writeln!(out)?;
+        }
+        writeln!(out, "}}")?;
+        writeln!(out)?;
+    }
+
     Ok(obligation_type)
+}
+
+fn protected_obligation_protocol(name: &str) -> bool {
+    matches!(
+        name,
+        "comms_trust_reconcile"
+            | "supervisor_trust_publish"
+            | "supervisor_trust_revoke"
+            | "mob_member_trust_wiring"
+            | "mob_member_trust_unwiring"
+            | "mob_external_peer_trust_wiring"
+            | "mob_external_peer_trust_unwiring"
+            | "mob_external_peer_trust_repair"
+            | "mob_external_peer_reciprocal_trust"
+            | "mob_destroying_session_ingress"
+    )
+}
+
+fn getter_returns_copy(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::Enum(_)
+    ) || matches!(ty, TypeRef::Named(name) if is_known_copy_named_type(name.as_str()))
 }
 
 fn generate_executor_helpers(
@@ -539,13 +588,61 @@ fn generate_comms_trust_authority_helpers(
         "comms_trust_reconcile" => {
             writeln!(
                 out,
-                "pub fn authority_for_endpoint(obligation: &{obligation_type}, endpoint: &crate::meerkat_machine::dsl::PeerEndpoint) -> meerkat_core::comms::CommsTrustMutationAuthority {{"
+                "pub fn effective_peers(obligation: &{obligation_type}) -> std::collections::BTreeSet<crate::meerkat_machine::dsl::PeerEndpoint> {{"
             )?;
+            writeln!(
+                out,
+                "    obligation.direct_peer_endpoints.iter().chain(obligation.mob_overlay_peer_endpoints.iter()).cloned().collect()"
+            )?;
+            writeln!(out, "}}")?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "pub fn peer_projection_epoch(obligation: &{obligation_type}) -> u64 {{"
+            )?;
+            writeln!(out, "    obligation.peer_projection_epoch")?;
+            writeln!(out, "}}")?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "pub fn authority_for_endpoint(obligation: &{obligation_type}, endpoint: &crate::meerkat_machine::dsl::PeerEndpoint) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {{"
+            )?;
+            writeln!(
+                out,
+                "    if !effective_peers(obligation).contains(endpoint) {{"
+            )?;
+            writeln!(
+                out,
+                "        return Err(format!(\"MeerkatMachine peer projection did not request trust for peer '{{}}'\", endpoint.peer_id.0));"
+            )?;
+            writeln!(out, "    }}")?;
             writeln!(
                 out,
                 "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection("
             )?;
             writeln!(out, "        endpoint.peer_id.0.clone(),")?;
+            writeln!(out, "        obligation.peer_projection_epoch,")?;
+            writeln!(out, "    )")?;
+            writeln!(out, "}}")?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "pub fn removal_authority_for_peer_id(obligation: &{obligation_type}, peer_id: &str) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {{"
+            )?;
+            writeln!(
+                out,
+                "    if effective_peers(obligation).iter().any(|endpoint| endpoint.peer_id.0 == peer_id) {{"
+            )?;
+            writeln!(
+                out,
+                "        return Err(format!(\"MeerkatMachine peer projection still requests trust for peer '{{peer_id}}'\"));"
+            )?;
+            writeln!(out, "    }}")?;
+            writeln!(
+                out,
+                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection("
+            )?;
+            writeln!(out, "        peer_id.to_string(),")?;
             writeln!(out, "        obligation.peer_projection_epoch,")?;
             writeln!(out, "    )")?;
             writeln!(out, "}}")?;
@@ -563,11 +660,11 @@ fn generate_comms_trust_authority_helpers(
             )?;
             writeln!(
                 out,
-                "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_publish("
+                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_publish("
             )?;
             writeln!(out, "        obligation.peer_id.clone(),")?;
             writeln!(out, "        obligation.epoch,")?;
-            writeln!(out, "    ))")?;
+            writeln!(out, "    )")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
         }
@@ -583,11 +680,11 @@ fn generate_comms_trust_authority_helpers(
             )?;
             writeln!(
                 out,
-                "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke("
+                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke("
             )?;
             writeln!(out, "        obligation.peer_id.clone(),")?;
             writeln!(out, "        obligation.epoch,")?;
-            writeln!(out, "    ))")?;
+            writeln!(out, "    )")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
         }
@@ -737,11 +834,11 @@ fn emit_member_authority_fn(
     )?;
     writeln!(
         out,
-        "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
+        "    meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
     )?;
     writeln!(out, "        peer_id.to_owned(),")?;
     writeln!(out, "        obligation.epoch,")?;
-    writeln!(out, "    ))")?;
+    writeln!(out, "    )")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
     Ok(())
@@ -765,11 +862,11 @@ fn emit_external_peer_trust_helper(
     )?;
     writeln!(
         out,
-        "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
+        "    meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
     )?;
     writeln!(out, "        obligation.peer_id.0.clone(),")?;
     writeln!(out, "        obligation.epoch,")?;
-    writeln!(out, "    ))")?;
+    writeln!(out, "    )")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
     Ok(())
@@ -1163,7 +1260,8 @@ fn rust_type(ty: &TypeRef) -> String {
         TypeRef::Named(name) => name.as_str().to_string(),
         TypeRef::Enum(name) => name.as_str().to_string(),
         TypeRef::Option(inner) => format!("Option<{}>", rust_type(inner)),
-        TypeRef::Set(inner) | TypeRef::Seq(inner) => format!("Vec<{}>", rust_type(inner)),
+        TypeRef::Set(inner) => format!("std::collections::BTreeSet<{}>", rust_type(inner)),
+        TypeRef::Seq(inner) => format!("Vec<{}>", rust_type(inner)),
         TypeRef::Map(key, value) => {
             format!(
                 "std::collections::BTreeMap<{}, {}>",

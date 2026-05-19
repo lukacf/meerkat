@@ -53,10 +53,20 @@ fn endpoint(name: &str, peer_id_uuid: &str) -> PeerEndpoint {
     }
 }
 
-fn obligation(epoch: u64) -> CommsTrustReconcileObligation {
-    CommsTrustReconcileObligation {
-        peer_projection_epoch: epoch,
-    }
+fn obligation(
+    epoch: u64,
+    direct_peer_endpoints: BTreeSet<PeerEndpoint>,
+) -> CommsTrustReconcileObligation {
+    let effect =
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
+            peer_projection_epoch: epoch,
+            direct_peer_endpoints,
+            mob_overlay_peer_endpoints: BTreeSet::new(),
+        };
+    meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&[effect])
+        .into_iter()
+        .next()
+        .expect("generated reconcile obligation")
 }
 
 /// Mock `CommsRuntime` that records every trust-store interaction and
@@ -188,12 +198,12 @@ async fn concurrent_reconciles_complete_against_canonical_store() {
     let reconciler_newer = reconciler.clone();
     let older_task = tokio::spawn(async move {
         reconciler_older
-            .reconcile(&obligation(1), BTreeSet::from([endpoint("A", UUID_A)]))
+            .reconcile(&obligation(1, BTreeSet::from([endpoint("A", UUID_A)])))
             .await
     });
     let newer_task = tokio::spawn(async move {
         reconciler_newer
-            .reconcile(&obligation(2), BTreeSet::from([endpoint("B", UUID_B)]))
+            .reconcile(&obligation(2, BTreeSet::from([endpoint("B", UUID_B)])))
             .await
     });
     let older_res: ReconcileReport = older_task
@@ -226,7 +236,7 @@ async fn lower_epoch_reconcile_reads_canonical_store() {
 
     // Newer commits first at epoch=5 with peer set {A}.
     let newer = reconciler
-        .reconcile(&obligation(5), BTreeSet::from([endpoint("A", UUID_A)]))
+        .reconcile(&obligation(5, BTreeSet::from([endpoint("A", UUID_A)])))
         .await
         .expect("newer reconcile");
     assert_eq!(newer.applied_epoch, 5);
@@ -236,7 +246,7 @@ async fn lower_epoch_reconcile_reads_canonical_store() {
     // Lower epoch arrives with a different set {B}. Expected: canonical diff
     // removes A and adds B; no helper-local watermark short-circuits it.
     let lower = reconciler
-        .reconcile(&obligation(3), BTreeSet::from([endpoint("B", UUID_B)]))
+        .reconcile(&obligation(3, BTreeSet::from([endpoint("B", UUID_B)])))
         .await
         .expect("lower-epoch reconcile");
     assert_eq!(lower.applied_epoch, 3);

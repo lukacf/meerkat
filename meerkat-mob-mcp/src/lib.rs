@@ -3411,16 +3411,26 @@ mod tests {
             meerkat_mob::machines::mob_machine::AgentIdentity("local".to_string()),
             meerkat_mob::machines::mob_machine::ExternalPeerEndpoint::from(&peer),
         );
+        let wiring_effects =
+            vec![
+                meerkat_mob::machines::mob_machine::MobMachineEffect::ExternalPeerTrustWiringRequested {
+                    edge: external_edge.clone(),
+                    peer_id: meerkat_mob::machines::mob_machine::PeerId(peer_id.clone()),
+                    epoch: 1,
+                },
+            ];
+        let wiring_obligation =
+            meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::extract_obligations(
+                &wiring_effects,
+            )
+            .pop()
+            .expect("generated wiring obligation");
 
         let added = runtime
             .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
                 peer: peer.clone(),
                 authority: meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::wiring_authority_for_peer(
-                    &meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::MobExternalPeerTrustWiringObligation {
-                        edge: external_edge.clone(),
-                        peer_id: meerkat_mob::machines::mob_machine::PeerId(peer_id.clone()),
-                        epoch: 1,
-                    },
+                    &wiring_obligation,
                     &peer_id,
                 )
                 .expect("generated wiring obligation covers peer"),
@@ -3435,17 +3445,27 @@ mod tests {
             .await
             .expect_err("raw remove must fail closed");
         assert!(matches!(raw_remove, SendError::Unsupported(_)));
+        let unwiring_effects =
+            vec![
+                meerkat_mob::machines::mob_machine::MobMachineEffect::ExternalPeerTrustUnwiringRequested {
+                    edge: external_edge,
+                    peer_id: meerkat_mob::machines::mob_machine::PeerId(peer_id.clone()),
+                    epoch: 2,
+                },
+            ];
+        let unwiring_obligation =
+            meerkat_mob::generated::protocol_mob_external_peer_trust_unwiring::extract_obligations(
+                &unwiring_effects,
+            )
+            .pop()
+            .expect("generated unwiring obligation");
 
         let removed = runtime
             .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
                 authority:
                     meerkat_mob::generated::protocol_mob_external_peer_trust_unwiring::unwiring_authority_for_peer(
-                        &meerkat_mob::generated::protocol_mob_external_peer_trust_unwiring::MobExternalPeerTrustUnwiringObligation {
-                            edge: external_edge,
-                            peer_id: meerkat_mob::machines::mob_machine::PeerId(peer_id.clone()),
-                            epoch: 2,
-                        },
+                        &unwiring_obligation,
                         &peer_id,
                     )
                     .expect("generated unwiring obligation covers peer"),

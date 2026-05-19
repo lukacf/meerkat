@@ -7,10 +7,28 @@ use crate::machines::mob_machine::{MobMachineEffect, PeerId, WiringEdge};
 
 #[derive(Debug, Clone)]
 pub struct MobMemberTrustUnwiringObligation {
-    pub edge: WiringEdge,
-    pub a_peer_id: PeerId,
-    pub b_peer_id: PeerId,
-    pub epoch: u64,
+    edge: WiringEdge,
+    a_peer_id: PeerId,
+    b_peer_id: PeerId,
+    epoch: u64,
+}
+
+impl MobMemberTrustUnwiringObligation {
+    pub fn edge(&self) -> &WiringEdge {
+        &self.edge
+    }
+
+    pub fn a_peer_id(&self) -> &PeerId {
+        &self.a_peer_id
+    }
+
+    pub fn b_peer_id(&self) -> &PeerId {
+        &self.b_peer_id
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
 }
 
 pub fn extract_obligations(effects: &[MobMachineEffect]) -> Vec<MobMemberTrustUnwiringObligation> {
@@ -80,10 +98,8 @@ pub fn unwiring_authority_for_identity(
     expected_peer_id: &str,
 ) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {
     let peer_id = required_peer_id_for_identity(obligation, identity, expected_peer_id)?;
-    Ok(
-        meerkat_core::comms::CommsTrustMutationAuthority::from_generated_mob_machine_peer_unwiring(
-            peer_id.to_owned(),
-            obligation.epoch,
-        ),
+    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_mob_machine_peer_unwiring(
+        peer_id.to_owned(),
+        obligation.epoch,
     )
 }

@@ -2123,6 +2123,11 @@ pub mod inputs {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestPendingSessionIngressDetachForMobDestroy {
+        pub mob_id: MobId,
+        pub agent_runtime_id: AgentRuntimeId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Respawn {
         pub agent_runtime_id: AgentRuntimeId,
     }
@@ -2310,6 +2315,9 @@ pub enum Input {
     EnsureMember(inputs::EnsureMember),
     Reconcile(inputs::Reconcile),
     Retire(inputs::Retire),
+    RequestPendingSessionIngressDetachForMobDestroy(
+        inputs::RequestPendingSessionIngressDetachForMobDestroy,
+    ),
     Respawn(inputs::Respawn),
     RetireAll(inputs::RetireAll),
     WireMembers(inputs::WireMembers),
@@ -2380,6 +2388,9 @@ impl Input {
             Self::EnsureMember(_) => InputKind::EnsureMember,
             Self::Reconcile(_) => InputKind::Reconcile,
             Self::Retire(_) => InputKind::Retire,
+            Self::RequestPendingSessionIngressDetachForMobDestroy(_) => {
+                InputKind::RequestPendingSessionIngressDetachForMobDestroy
+            }
             Self::Respawn(_) => InputKind::Respawn,
             Self::RetireAll(_) => InputKind::RetireAll,
             Self::WireMembers(_) => InputKind::WireMembers,
@@ -2453,6 +2464,7 @@ pub enum InputKind {
     EnsureMember,
     Reconcile,
     Retire,
+    RequestPendingSessionIngressDetachForMobDestroy,
     Respawn,
     RetireAll,
     WireMembers,
@@ -3214,6 +3226,8 @@ pub enum TransitionId {
     RetireRunningPreservingBinding,
     RetireRunningNoBinding,
     RetireStoppedReleasing,
+    RequestPendingSessionIngressDetachForMobDestroyRunning,
+    RequestPendingSessionIngressDetachForMobDestroyStopped,
     SessionIngressDetachedForMobDestroyRunning,
     SessionIngressDetachedForMobDestroyStopped,
     SessionIngressDetachFailedForMobDestroyRunning,

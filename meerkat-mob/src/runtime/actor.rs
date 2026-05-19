@@ -196,19 +196,19 @@ impl MemberTrustHandoff {
         let identity = mob_dsl::AgentIdentity::from_domain(identity);
         let actual = match &self.authority {
             MemberTrustAuthority::Wiring(obligation) | MemberTrustAuthority::Repair(obligation) => {
-                if obligation.edge.a == identity {
-                    Some(obligation.a_peer_id.0.as_str())
-                } else if obligation.edge.b == identity {
-                    Some(obligation.b_peer_id.0.as_str())
+                if obligation.edge().a == identity {
+                    Some(obligation.a_peer_id().0.as_str())
+                } else if obligation.edge().b == identity {
+                    Some(obligation.b_peer_id().0.as_str())
                 } else {
                     None
                 }
             }
             MemberTrustAuthority::Unwiring(obligation) => {
-                if obligation.edge.a == identity {
-                    Some(obligation.a_peer_id.0.as_str())
-                } else if obligation.edge.b == identity {
-                    Some(obligation.b_peer_id.0.as_str())
+                if obligation.edge().a == identity {
+                    Some(obligation.a_peer_id().0.as_str())
+                } else if obligation.edge().b == identity {
+                    Some(obligation.b_peer_id().0.as_str())
                 } else {
                     None
                 }
@@ -695,7 +695,7 @@ impl MobActor {
     ) -> Result<CommsTrustMutationAuthority, String> {
         meerkat_runtime::protocol_supervisor_trust_publish::publish_authority_for_peer(
             obligation,
-            &obligation.peer_id,
+            obligation.peer_id(),
         )
     }
 
@@ -704,7 +704,7 @@ impl MobActor {
     ) -> Result<CommsTrustMutationAuthority, String> {
         meerkat_runtime::protocol_supervisor_trust_revoke::revoke_authority_for_peer(
             obligation,
-            &obligation.peer_id,
+            obligation.peer_id(),
         )
     }
 
@@ -880,8 +880,8 @@ impl MobActor {
                     )
                     .into_iter()
                     .find(|obligation| {
-                        obligation.peer_id == previous_peer_id
-                            && obligation.epoch == previous_epoch
+                        obligation.peer_id() == &previous_peer_id
+                            && obligation.epoch() == previous_epoch
                     })
                     .ok_or_else(|| {
                         MobError::WiringError(format!(
@@ -890,7 +890,7 @@ impl MobActor {
                     })?;
                 let previous_removal_key = previous_private_trust_removal_key
                     .map(str::to_string)
-                    .unwrap_or_else(|| revoke_obligation.peer_id.clone());
+                    .unwrap_or_else(|| revoke_obligation.peer_id().clone());
                 if let Err(error) = Self::apply_private_trusted_peer_remove(
                     comms.as_ref(),
                     previous_removal_key,
@@ -902,8 +902,8 @@ impl MobActor {
                     let feedback = adapter
                         .stage_supervisor_trust_revoke_failed(
                             session_id,
-                            revoke_obligation.peer_id.clone(),
-                            revoke_obligation.epoch,
+                            revoke_obligation.peer_id().clone(),
+                            revoke_obligation.epoch(),
                             error.to_string(),
                         )
                         .await;
@@ -918,8 +918,8 @@ impl MobActor {
                 adapter
                     .stage_supervisor_trust_revoked(
                         session_id,
-                        revoke_obligation.peer_id,
-                        revoke_obligation.epoch,
+                        revoke_obligation.peer_id().clone(),
+                        revoke_obligation.epoch(),
                     )
                     .await
                     .map_err(|error| {
@@ -1019,12 +1019,12 @@ impl MobActor {
                     )));
                 }
             };
-            if publish_obligation.name != next_name
-                || publish_obligation.peer_id != next_peer_id
-                || publish_obligation.address != next_address
-                || publish_obligation.signing_public_key.as_deref()
+            if publish_obligation.name() != &next_name
+                || publish_obligation.peer_id() != &next_peer_id
+                || publish_obligation.address() != &next_address
+                || publish_obligation.signing_public_key().as_deref()
                     != Some(next_signing_public_key.as_str())
-                || publish_obligation.epoch != next_epoch
+                || publish_obligation.epoch() != next_epoch
             {
                 return Err(MobError::WiringError(format!(
                     "supervisor private trust publication for session '{session_id}' generated obligation did not match the staged supervisor binding"
@@ -1039,8 +1039,8 @@ impl MobActor {
                         "supervisor private trust publication for session '{session_id}' generated invalid trust descriptor: {error}"
                     ))
                 })?;
-            let publish_peer_id = publish_obligation.peer_id.clone();
-            let publish_epoch = publish_obligation.epoch;
+            let publish_peer_id = publish_obligation.peer_id().clone();
+            let publish_epoch = publish_obligation.epoch();
             let publish_removal_key = Self::trusted_peer_removal_key(&publish_spec);
             let rollback_binding = previous.clone();
 
@@ -1159,7 +1159,7 @@ impl MobActor {
             let obligations =
                 meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations(&effects);
             let Some(obligation) = obligations.into_iter().find(|obligation| {
-                obligation.peer_id == install.peer_id && obligation.epoch == install.epoch
+                obligation.peer_id() == &install.peer_id && obligation.epoch() == install.epoch
             }) else {
                 let reason =
                     "generated supervisor private trust cleanup effect was absent".to_string();
@@ -1189,8 +1189,8 @@ impl MobActor {
                         let _ = adapter
                             .stage_supervisor_trust_revoke_failed(
                                 session_id,
-                                obligation.peer_id,
-                                obligation.epoch,
+                                obligation.peer_id().clone(),
+                                obligation.epoch(),
                                 error.clone(),
                             )
                             .await;
@@ -1210,8 +1210,8 @@ impl MobActor {
                 let _ = adapter
                     .stage_supervisor_trust_revoke_failed(
                         session_id,
-                        obligation.peer_id,
-                        obligation.epoch,
+                        obligation.peer_id().clone(),
+                        obligation.epoch(),
                         error.to_string(),
                     )
                     .await;
@@ -1225,7 +1225,11 @@ impl MobActor {
                 return;
             }
             if let Err(error) = adapter
-                .stage_supervisor_trust_revoked(session_id, obligation.peer_id, obligation.epoch)
+                .stage_supervisor_trust_revoked(
+                    session_id,
+                    obligation.peer_id().clone(),
+                    obligation.epoch(),
+                )
                 .await
             {
                 tracing::warn!(
@@ -1268,15 +1272,15 @@ impl MobActor {
                     meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations(&effects)
                         .into_iter()
                         .find(|obligation| {
-                            obligation.peer_id == current_peer_id
-                                && obligation.epoch == current_epoch
+                            obligation.peer_id().as_str() == current_peer_id
+                                && obligation.epoch() == current_epoch
                         })
                 {
                     adapter
                         .stage_supervisor_trust_revoked(
                             session_id,
-                            obligation.peer_id,
-                            obligation.epoch,
+                            obligation.peer_id().clone(),
+                            obligation.epoch(),
                         )
                         .await
                         .map_err(|error| MobError::WiringError(error.to_string()))?;
@@ -1307,9 +1311,9 @@ impl MobActor {
                     )
                     .into_iter()
                     .find(|obligation| {
-                        obligation.peer_id == *peer_id
-                            && obligation.epoch == *epoch
-                            && obligation.signing_public_key.as_deref()
+                        obligation.peer_id() == peer_id
+                            && obligation.epoch() == *epoch
+                            && obligation.signing_public_key().as_deref()
                                 == Some(signing_public_key.as_str())
                     })
                     .ok_or_else(|| {
@@ -1333,8 +1337,8 @@ impl MobActor {
                 adapter
                     .stage_supervisor_trust_published(
                         session_id,
-                        obligation.peer_id,
-                        obligation.epoch,
+                        obligation.peer_id().clone(),
+                        obligation.epoch(),
                     )
                     .await
                     .map_err(|error| MobError::WiringError(error.to_string()))?;
@@ -2058,7 +2062,7 @@ impl MobActor {
         let obligation =
             crate::generated::protocol_mob_member_trust_wiring::extract_obligations(effects)
                 .into_iter()
-                .find(|obligation| &obligation.edge == edge)
+                .find(|obligation| obligation.edge() == edge)
                 .ok_or_else(|| {
                     MobError::WiringError(format!(
                         "{context} produced no generated member wiring trust obligation"
@@ -2090,11 +2094,11 @@ impl MobActor {
         let wiring_obligation =
             crate::generated::protocol_mob_external_peer_trust_wiring::extract_obligations(effects)
                 .into_iter()
-                .find(|obligation| &obligation.edge == edge);
+                .find(|obligation| obligation.edge() == edge);
         let repair_obligation =
             crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations(effects)
                 .into_iter()
-                .find(|obligation| &obligation.edge == edge);
+                .find(|obligation| obligation.edge() == edge);
         let repair_requested = repair_obligation.is_some();
         match (graph_changed, repair_requested) {
             (true, false) => {
@@ -2144,7 +2148,7 @@ impl MobActor {
         let obligation =
             crate::generated::protocol_mob_member_trust_unwiring::extract_obligations(effects)
                 .into_iter()
-                .find(|obligation| &obligation.edge == edge)
+                .find(|obligation| obligation.edge() == edge)
                 .ok_or_else(|| {
                     MobError::WiringError(format!(
                         "{context} produced no generated member unwiring trust obligation"
@@ -8309,13 +8313,13 @@ impl MobActor {
                 &effects,
             )
             .into_iter()
-            .find(|obligation| obligation.key == key)
+            .find(|obligation| obligation.key() == &key)
         else {
             return Err(MobError::WiringError(
                 "MobMachine produced no external reciprocal trust obligation".to_string(),
             ));
         };
-        let peer_id = obligation.peer_id.0.clone();
+        let peer_id = obligation.peer_id().0.clone();
         crate::generated::protocol_mob_external_peer_reciprocal_trust::reciprocal_wiring_authority_for_peer(
             &obligation,
             &peer_id,
@@ -8343,7 +8347,7 @@ impl MobActor {
                 &effects,
             )
             .into_iter()
-            .find(|obligation| &obligation.edge == edge)
+            .find(|obligation| obligation.edge() == edge)
             .ok_or_else(|| {
                 MobError::WiringError(
                     "unwire_external_peer produced graph authority without generated unwiring trust obligation"
@@ -9029,10 +9033,37 @@ impl MobActor {
             .pending_session_ingress_detach_runtime_ids
             .contains(&dsl_runtime_id)
         {
-            let obligation = MobDestroyingSessionIngressObligation {
-                mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
-                agent_runtime_id: dsl_runtime_id,
+            let effects = self.apply_dsl_input_collect_effects(
+                mob_dsl::MobMachineInput::RequestPendingSessionIngressDetachForMobDestroy {
+                    mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
+                    agent_runtime_id: dsl_runtime_id.clone(),
+                },
+                "destroy_request_pending_session_ingress_detach",
+            )?;
+            let obligations =
+                crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(
+                    &effects,
+                );
+            let obligation = match obligations.as_slice() {
+                [obligation] => obligation.clone(),
+                [] => {
+                    return Err(MobError::Internal(format!(
+                        "MobMachine pending destroy detach for member '{agent_identity}' produced no generated session ingress obligation"
+                    )));
+                }
+                _ => {
+                    return Err(MobError::Internal(format!(
+                        "MobMachine pending destroy detach for member '{agent_identity}' produced multiple generated session ingress obligations"
+                    )));
+                }
             };
+            if obligation.mob_id() != &mob_dsl::MobId::from_domain(&self.definition.id)
+                || obligation.agent_runtime_id() != &dsl_runtime_id
+            {
+                return Err(MobError::Internal(format!(
+                    "MobMachine pending destroy detach for member '{agent_identity}' generated an obligation for a different mob/runtime"
+                )));
+            }
             if let Some(detach_session_id) =
                 Self::destroy_ingress_detach_session_id(entry, releasing.as_ref())?
             {

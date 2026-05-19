@@ -7,9 +7,23 @@ use crate::machines::mob_machine::{ExternalPeerEdge, MobMachineEffect, PeerId};
 
 #[derive(Debug, Clone)]
 pub struct MobExternalPeerTrustUnwiringObligation {
-    pub edge: ExternalPeerEdge,
-    pub peer_id: PeerId,
-    pub epoch: u64,
+    edge: ExternalPeerEdge,
+    peer_id: PeerId,
+    epoch: u64,
+}
+
+impl MobExternalPeerTrustUnwiringObligation {
+    pub fn edge(&self) -> &ExternalPeerEdge {
+        &self.edge
+    }
+
+    pub fn peer_id(&self) -> &PeerId {
+        &self.peer_id
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
 }
 
 pub fn extract_obligations(
@@ -55,10 +69,8 @@ pub fn unwiring_authority_for_peer(
         obligation.peer_id.0.as_str(),
         expected_peer_id,
     )?;
-    Ok(
-        meerkat_core::comms::CommsTrustMutationAuthority::from_generated_mob_machine_peer_unwiring(
-            obligation.peer_id.0.clone(),
-            obligation.epoch,
-        ),
+    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_mob_machine_peer_unwiring(
+        obligation.peer_id.0.clone(),
+        obligation.epoch,
     )
 }

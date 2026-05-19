@@ -49,10 +49,20 @@ fn endpoint(name: &str, peer_id_uuid: &str) -> PeerEndpoint {
     }
 }
 
-fn obligation(epoch: u64) -> CommsTrustReconcileObligation {
-    CommsTrustReconcileObligation {
-        peer_projection_epoch: epoch,
-    }
+fn obligation(
+    epoch: u64,
+    direct_peer_endpoints: BTreeSet<PeerEndpoint>,
+) -> CommsTrustReconcileObligation {
+    let effect =
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
+            peer_projection_epoch: epoch,
+            direct_peer_endpoints,
+            mob_overlay_peer_endpoints: BTreeSet::new(),
+        };
+    meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&[effect])
+        .into_iter()
+        .next()
+        .expect("generated reconcile obligation")
 }
 
 /// `CommsRuntime` mock whose next generated trust add mutation returns
@@ -146,7 +156,7 @@ async fn add_failure_surfaces_typed_error_and_preserves_canonical_store() {
 
     // First reconcile: add fails.
     let err = reconciler
-        .reconcile(&obligation(1), BTreeSet::from([endpoint("A", UUID_A)]))
+        .reconcile(&obligation(1, BTreeSet::from([endpoint("A", UUID_A)])))
         .await
         .expect_err("add_trust failure must surface");
     match err {
@@ -170,7 +180,7 @@ async fn add_failure_surfaces_typed_error_and_preserves_canonical_store() {
     // flag is cleared; the retry succeeds because the reconciler
     // re-reads the canonical store and still sees the peer absent.
     let retry = reconciler
-        .reconcile(&obligation(1), BTreeSet::from([endpoint("A", UUID_A)]))
+        .reconcile(&obligation(1, BTreeSet::from([endpoint("A", UUID_A)])))
         .await
         .expect("retry succeeds with flag cleared");
     assert_eq!(retry.applied_epoch, 1);

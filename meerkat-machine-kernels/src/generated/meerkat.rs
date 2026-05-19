@@ -8512,6 +8512,8 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommsTrustReconcileRequested {
         pub peer_projection_epoch: u64,
+        pub direct_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
+        pub mob_overlay_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
     }
 }
 

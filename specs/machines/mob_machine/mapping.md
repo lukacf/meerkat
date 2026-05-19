@@ -618,6 +618,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RetireStoppedReleasing`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `RequestPendingSessionIngressDetachForMobDestroyRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `RequestPendingSessionIngressDetachForMobDestroyStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
 - `SessionIngressDetachedForMobDestroyRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`

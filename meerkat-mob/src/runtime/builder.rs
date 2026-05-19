@@ -173,12 +173,12 @@ fn resume_member_repair_authority_from_effects(
     crate::generated::protocol_mob_member_trust_wiring::extract_obligations(&handoff_effects)
         .into_iter()
         .find_map(|obligation| {
-            if &obligation.edge != edge
-                || (obligation.a_peer_id.0 != peer_id && obligation.b_peer_id.0 != peer_id)
+            if obligation.edge() != edge
+                || (obligation.a_peer_id().0 != peer_id && obligation.b_peer_id().0 != peer_id)
             {
                 return None;
             }
-            let identity = if obligation.a_peer_id.0 == peer_id {
+            let identity = if obligation.a_peer_id().0 == peer_id {
                 edge.a.0.as_str()
             } else {
                 edge.b.0.as_str()
@@ -207,7 +207,7 @@ fn resume_external_repair_authority_from_effects(
     let repair_obligation =
         crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations(effects)
             .into_iter()
-            .find(|obligation| &obligation.edge == edge);
+            .find(|obligation| obligation.edge() == edge);
     if let Some(obligation) = repair_obligation
         && !graph_changed
     {

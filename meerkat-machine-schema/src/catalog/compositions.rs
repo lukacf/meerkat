@@ -1213,9 +1213,15 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 producer_instance: "meerkat",
                 effect_variant: "CommsTrustReconcileRequested",
                 realizing_actor: "comms_trust_reconcile_owner",
-                obligation_fields: &["peer_projection_epoch"],
+                obligation_fields: &[
+                    "peer_projection_epoch",
+                    "direct_peer_endpoints",
+                    "mob_overlay_peer_endpoints",
+                ],
                 module_path: "meerkat-runtime/src/generated/protocol_comms_trust_reconcile.rs",
-                required_imports: &["use crate::meerkat_machine::dsl::MeerkatMachineEffect;"],
+                required_imports: &[
+                    "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerEndpoint};",
+                ],
                 effect_enum_path: "crate::meerkat_machine::dsl::MeerkatMachineEffect",
             }),
             trust_handoff_protocol(TrustHandoffProtocolSpec {

@@ -123,8 +123,8 @@ impl CommsTrustReconciler {
     pub async fn reconcile(
         &self,
         obligation: &CommsTrustReconcileObligation,
-        effective_peers: BTreeSet<PeerEndpoint>,
     ) -> Result<ReconcileReport, CommsTrustReconcileError> {
+        let effective_peers = crate::protocol_comms_trust_reconcile::effective_peers(obligation);
         let previous_peers = self.canonical_trusted_peer_snapshot().await?;
 
         let to_add: Vec<PeerEndpoint> = effective_peers
@@ -132,9 +132,13 @@ impl CommsTrustReconciler {
             .filter(|ep| !previous_peers.contains(*ep))
             .cloned()
             .collect();
+        let effective_peer_ids = effective_peers
+            .iter()
+            .map(|endpoint| endpoint.peer_id.0.as_str())
+            .collect::<BTreeSet<_>>();
         let to_remove: Vec<PeerEndpoint> = previous_peers
             .iter()
-            .filter(|ep| !effective_peers.contains(*ep))
+            .filter(|ep| !effective_peer_ids.contains(ep.peer_id.0.as_str()))
             .cloned()
             .collect();
 
@@ -148,7 +152,11 @@ impl CommsTrustReconciler {
             let descriptor = endpoint_to_descriptor(&endpoint)?;
             let authority = crate::protocol_comms_trust_reconcile::authority_for_endpoint(
                 obligation, &endpoint,
-            );
+            )
+            .map_err(|detail| CommsTrustReconcileError::AddTrustFailed {
+                peer_id: endpoint.peer_id.0.clone(),
+                source: SendError::Validation(detail),
+            })?;
             self.comms
                 .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
                     authority,
@@ -163,9 +171,14 @@ impl CommsTrustReconciler {
         }
 
         for endpoint in to_remove {
-            let authority = crate::protocol_comms_trust_reconcile::authority_for_endpoint(
-                obligation, &endpoint,
-            );
+            let authority = crate::protocol_comms_trust_reconcile::removal_authority_for_peer_id(
+                obligation,
+                endpoint.peer_id.0.as_str(),
+            )
+            .map_err(|detail| CommsTrustReconcileError::RemoveTrustFailed {
+                peer_id: endpoint.peer_id.0.clone(),
+                source: SendError::Validation(detail),
+            })?;
             let result = self
                 .comms
                 .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
@@ -191,7 +204,7 @@ impl CommsTrustReconciler {
         Ok(ReconcileReport {
             added,
             removed,
-            applied_epoch: obligation.peer_projection_epoch,
+            applied_epoch: obligation.peer_projection_epoch(),
         })
     }
 
@@ -330,6 +343,10 @@ mod tests {
                     self.trusted
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .retain(|endpoint| endpoint.peer_id.0 != peer.peer_id.to_string());
+                    self.trusted
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .insert(descriptor_to_endpoint(&peer).expect("test descriptor should map"));
                     Ok(CommsTrustMutationResult::Added)
                 }
@@ -392,10 +409,20 @@ mod tests {
         }
     }
 
-    fn obligation(epoch: u64) -> CommsTrustReconcileObligation {
-        CommsTrustReconcileObligation {
-            peer_projection_epoch: epoch,
-        }
+    fn obligation(
+        epoch: u64,
+        direct_peer_endpoints: BTreeSet<PeerEndpoint>,
+    ) -> CommsTrustReconcileObligation {
+        let effect =
+            crate::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
+                peer_projection_epoch: epoch,
+                direct_peer_endpoints,
+                mob_overlay_peer_endpoints: BTreeSet::new(),
+            };
+        crate::protocol_comms_trust_reconcile::extract_obligations(&[effect])
+            .into_iter()
+            .next()
+            .expect("generated reconcile obligation")
     }
 
     #[tokio::test]
@@ -405,7 +432,7 @@ mod tests {
         let peers = BTreeSet::from([endpoint("A", UUID_A), endpoint("B", UUID_B)]);
 
         let report = reconciler
-            .reconcile(&obligation(1), peers.clone())
+            .reconcile(&obligation(1, peers.clone()))
             .await
             .expect("first reconcile succeeds");
 
@@ -442,13 +469,13 @@ mod tests {
 
         let peers_v1 = BTreeSet::from([endpoint("A", UUID_A), endpoint("B", UUID_B)]);
         reconciler
-            .reconcile(&obligation(1), peers_v1)
+            .reconcile(&obligation(1, peers_v1))
             .await
             .expect("v1 reconcile");
 
         let peers_v2 = BTreeSet::from([endpoint("A", UUID_A), endpoint("C", UUID_C)]);
         let report = reconciler
-            .reconcile(&obligation(2), peers_v2)
+            .reconcile(&obligation(2, peers_v2))
             .await
             .expect("v2 reconcile");
 
@@ -465,12 +492,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_metadata_update_does_not_remove_still_desired_peer_id() {
+        let comms = Arc::new(RecordingCommsRuntime::default());
+        let reconciler = CommsTrustReconciler::new(comms.clone());
+
+        reconciler
+            .reconcile(&obligation(1, BTreeSet::from([endpoint("A", UUID_A)])))
+            .await
+            .expect("initial reconcile");
+
+        let updated = endpoint("A2", UUID_A);
+        let report = reconciler
+            .reconcile(&obligation(2, BTreeSet::from([updated.clone()])))
+            .await
+            .expect("metadata update reconcile");
+
+        assert_eq!(report.added, vec![updated]);
+        assert!(report.removed.is_empty());
+        assert!(comms.remove_calls().is_empty());
+        assert_eq!(comms.add_calls().len(), 2);
+    }
+
+    #[tokio::test]
     async fn reconcile_reads_canonical_store_not_local_applied_view() {
         let comms = Arc::new(RecordingCommsRuntime::default());
         let reconciler = CommsTrustReconciler::new(comms.clone());
 
         reconciler
-            .reconcile(&obligation(5), BTreeSet::from([endpoint("A", UUID_A)]))
+            .reconcile(&obligation(5, BTreeSet::from([endpoint("A", UUID_A)])))
             .await
             .expect("first reconcile");
 
@@ -490,7 +539,7 @@ mod tests {
             .insert(endpoint("B", UUID_B));
 
         let report = reconciler
-            .reconcile(&obligation(4), BTreeSet::from([endpoint("A", UUID_A)]))
+            .reconcile(&obligation(4, BTreeSet::from([endpoint("A", UUID_A)])))
             .await
             .expect("reconcile should read canonical trust store");
         assert_eq!(report.added, vec![endpoint("A", UUID_A)]);
@@ -507,15 +556,15 @@ mod tests {
         let reconciler = CommsTrustReconciler::new(comms.clone());
 
         reconciler
-            .reconcile(
-                &obligation(1),
+            .reconcile(&obligation(
+                1,
                 BTreeSet::from([endpoint("A", UUID_A), endpoint("B", UUID_B)]),
-            )
+            ))
             .await
             .expect("seed");
 
         let report = reconciler
-            .reconcile(&obligation(2), BTreeSet::new())
+            .reconcile(&obligation(2, BTreeSet::new()))
             .await
             .expect("clear all");
         assert_eq!(report.removed.len(), 2);
@@ -539,7 +588,7 @@ mod tests {
             signing_key: crate::meerkat_machine::dsl::PeerSigningKey([9u8; 32]),
         };
         let err = reconciler
-            .reconcile(&obligation(1), BTreeSet::from([bad]))
+            .reconcile(&obligation(1, BTreeSet::from([bad])))
             .await
             .expect_err("invalid endpoint must surface a typed error");
         assert!(
@@ -557,7 +606,7 @@ mod tests {
         bad.address = crate::meerkat_machine::dsl::PeerAddress("http://127.0.0.1:4200".into());
 
         let err = reconciler
-            .reconcile(&obligation(1), BTreeSet::from([bad]))
+            .reconcile(&obligation(1, BTreeSet::from([bad])))
             .await
             .expect_err("unknown address scheme must surface a typed error");
         match err {

@@ -338,6 +338,7 @@ macro_rules! mob_catalog_machine_dsl {
             EnsureMember { agent_identity: AgentIdentity },
             Reconcile { desired: Set<AgentIdentity>, retire_stale: bool },
             Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, releasing: Option<SessionId>, session_id: SessionId },
+            RequestPendingSessionIngressDetachForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
             Respawn { agent_runtime_id: AgentRuntimeId },
             RetireAll,
             // Track-B (R5): explicit identity-level wiring and session-binding
@@ -3365,6 +3366,24 @@ macro_rules! mob_catalog_machine_dsl {
         // MobMachine does not own a mob-id field, so feedback `mob_id` and
         // failure `reason` remain protocol payload. The machine-owned check is
         // the pending-detach runtime id opened by the Retire transition.
+        transition RequestPendingSessionIngressDetachForMobDestroyRunning {
+            on input RequestPendingSessionIngressDetachForMobDestroy { mob_id, agent_runtime_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pending_detach_present" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true }
+            update {}
+            to Running
+            emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
+        }
+
+        transition RequestPendingSessionIngressDetachForMobDestroyStopped {
+            on input RequestPendingSessionIngressDetachForMobDestroy { mob_id, agent_runtime_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "pending_detach_present" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true }
+            update {}
+            to Stopped
+            emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
+        }
+
         transition SessionIngressDetachedForMobDestroyRunning {
             on input SessionIngressDetachedForMobDestroy { mob_id, agent_runtime_id }
             guard { self.lifecycle_phase == Phase::Running }

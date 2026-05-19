@@ -195,18 +195,11 @@ impl MobSupervisorBridge {
                 ));
             }
         };
-        let state = dsl.snapshot_state();
-        let effective_peers = state
-            .direct_peer_endpoints
-            .iter()
-            .chain(state.mob_overlay_peer_endpoints.iter())
-            .cloned()
-            .collect();
         let comms_runtime: Arc<dyn CoreCommsRuntime> = runtime.clone();
         let reconciler =
             meerkat_runtime::comms_trust_reconcile::CommsTrustReconciler::new(comms_runtime);
         reconciler
-            .reconcile(&obligation, effective_peers)
+            .reconcile(&obligation)
             .await
             .map(|_report| ())
             .map_err(|error| {

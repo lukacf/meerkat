@@ -130,6 +130,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }
             | mob_dsl::MobMachineInput::Retire { .. }
+            | mob_dsl::MobMachineInput::RequestPendingSessionIngressDetachForMobDestroy { .. }
             | mob_dsl::MobMachineInput::Respawn { .. }
             | mob_dsl::MobMachineInput::RetireAll
             | mob_dsl::MobMachineInput::WireMembers { .. }
@@ -1207,6 +1208,9 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }
             | mob_dsl::MobMachineInput::Retire { .. }
+            | mob_dsl::MobMachineInput::RequestPendingSessionIngressDetachForMobDestroy {
+                ..
+            }
             | mob_dsl::MobMachineInput::Respawn { .. }
             | mob_dsl::MobMachineInput::RetireAll
             | mob_dsl::MobMachineInput::WireMembers { .. }

@@ -7,8 +7,18 @@ use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerId};
 
 #[derive(Debug, Clone)]
 pub struct SupervisorTrustRevokeObligation {
-    pub peer_id: String,
-    pub epoch: u64,
+    peer_id: String,
+    epoch: u64,
+}
+
+impl SupervisorTrustRevokeObligation {
+    pub fn peer_id(&self) -> &String {
+        &self.peer_id
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
 }
 
 pub fn extract_obligations(
@@ -51,8 +61,8 @@ pub fn revoke_authority_for_peer(
         &obligation.peer_id,
         expected_peer_id,
     )?;
-    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke(
+    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke(
         obligation.peer_id.clone(),
         obligation.epoch,
-    ))
+    )
 }

@@ -8,7 +8,7 @@ use crate::handles::{DslTransitionError, TurnStateHandle};
 
 #[derive(Debug, Clone)]
 pub struct OpsBarrierSatisfactionObligation {
-    pub operation_ids: Vec<OperationId>,
+    pub operation_ids: std::collections::BTreeSet<OperationId>,
 }
 
 pub fn submit_ops_barrier_satisfied(

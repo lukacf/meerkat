@@ -976,7 +976,7 @@ impl MeerkatMachine {
         endpoint: crate::meerkat_machine::dsl::PeerEndpoint,
         comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
     ) -> Result<(), PeerEndpointStageError> {
-        let (reconciler, reconcile_epoch, effective_peers) = self
+        let (reconciler, reconcile_obligation) = self
             .stage_peer_projection_input(
                 session_id,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
@@ -985,7 +985,7 @@ impl MeerkatMachine {
                 comms_runtime,
             )
             .await?;
-        drive_reconciler(&reconciler, reconcile_epoch, effective_peers).await
+        drive_reconciler(&reconciler, reconcile_obligation).await
     }
 
     /// D-track-b: stage a `RemoveDirectPeerEndpoint` DSL input and
@@ -998,7 +998,7 @@ impl MeerkatMachine {
         endpoint: crate::meerkat_machine::dsl::PeerEndpoint,
         comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
     ) -> Result<(), PeerEndpointStageError> {
-        let (reconciler, reconcile_epoch, effective_peers) = self
+        let (reconciler, reconcile_obligation) = self
             .stage_peer_projection_input(
                 session_id,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::RemoveDirectPeerEndpoint {
@@ -1007,7 +1007,7 @@ impl MeerkatMachine {
                 comms_runtime,
             )
             .await?;
-        drive_reconciler(&reconciler, reconcile_epoch, effective_peers).await
+        drive_reconciler(&reconciler, reconcile_obligation).await
     }
 
     /// D-track-b: stage an `ApplyMobPeerOverlay` DSL input and drive
@@ -1021,7 +1021,7 @@ impl MeerkatMachine {
         endpoints: BTreeSet<crate::meerkat_machine::dsl::PeerEndpoint>,
         comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
     ) -> Result<(), PeerEndpointStageError> {
-        let (reconciler, reconcile_epoch, effective_peers) = self
+        let (reconciler, reconcile_obligation) = self
             .stage_peer_projection_input(
                 session_id,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
@@ -1031,19 +1031,19 @@ impl MeerkatMachine {
                 comms_runtime,
             )
             .await?;
-        drive_reconciler(&reconciler, reconcile_epoch, effective_peers).await
+        drive_reconciler(&reconciler, reconcile_obligation).await
     }
 
     /// Apply a peer-projection DSL input, sample the emitted
     /// `CommsTrustReconcileRequested` effect under the same DSL lock,
-    /// and return a reconciler for the current runtime with the post-transition
-    /// effective peer set `direct ∪ overlay`.
+    /// and return a reconciler for the current runtime with the generated
+    /// obligation carrying the post-transition effective peer facts.
     ///
     /// The reconciler is driven OUTSIDE the `sessions` RwLock to avoid
     /// blocking other adapter operations behind trust-store I/O. There
     /// is no helper-local applied truth: each reconcile pass diffs the
     /// supplied runtime's canonical trust-store snapshot against the
-    /// DSL-owned effective peer set.
+    /// DSL-owned effective peer set carried by the generated obligation.
     async fn stage_peer_projection_input(
         &self,
         session_id: &SessionId,
@@ -1053,7 +1053,6 @@ impl MeerkatMachine {
         (
             Arc<crate::comms_trust_reconcile::CommsTrustReconciler>,
             crate::protocol_comms_trust_reconcile::CommsTrustReconcileObligation,
-            BTreeSet<crate::meerkat_machine::dsl::PeerEndpoint>,
         ),
         PeerEndpointStageError,
     > {
@@ -1062,7 +1061,7 @@ impl MeerkatMachine {
             .get_mut(session_id)
             .ok_or(PeerEndpointStageError::SessionNotRegistered)?;
 
-        let (reconcile_obligation, effective_peers) = {
+        let reconcile_obligation = {
             let mut authority = entry
                 .dsl_authority
                 .lock()
@@ -1070,40 +1069,26 @@ impl MeerkatMachine {
             let transition =
                 crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
                     .map_err(PeerEndpointStageError::Dsl)?;
-            let obligation =
-                crate::protocol_comms_trust_reconcile::extract_obligations(&transition.effects)
-                    .into_iter()
-                    .next()
-                    .ok_or(PeerEndpointStageError::MissingReconcileEffect)?;
-            // Effective peer set is the union of direct + overlay
-            // sampled inside the same DSL-lock critical section that
-            // just committed the transition. No interleaved mutation
-            // can slip between the commit and this read.
-            let effective: BTreeSet<_> = authority
-                .state()
-                .direct_peer_endpoints
-                .iter()
-                .chain(authority.state().mob_overlay_peer_endpoints.iter())
-                .cloned()
-                .collect();
-            (obligation, effective)
+            crate::protocol_comms_trust_reconcile::extract_obligations(&transition.effects)
+                .into_iter()
+                .next()
+                .ok_or(PeerEndpointStageError::MissingReconcileEffect)?
         };
 
         let reconciler = Arc::new(crate::comms_trust_reconcile::CommsTrustReconciler::new(
             comms_runtime,
         ));
 
-        Ok((reconciler, reconcile_obligation, effective_peers))
+        Ok((reconciler, reconcile_obligation))
     }
 }
 
 async fn drive_reconciler(
     reconciler: &crate::comms_trust_reconcile::CommsTrustReconciler,
     reconcile_obligation: crate::protocol_comms_trust_reconcile::CommsTrustReconcileObligation,
-    effective_peers: BTreeSet<crate::meerkat_machine::dsl::PeerEndpoint>,
 ) -> Result<(), PeerEndpointStageError> {
     reconciler
-        .reconcile(&reconcile_obligation, effective_peers)
+        .reconcile(&reconcile_obligation)
         .await
         .map(|_report| ())
         .map_err(PeerEndpointStageError::Reconcile)

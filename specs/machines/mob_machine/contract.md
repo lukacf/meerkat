@@ -122,6 +122,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, releasing: Option<SessionId>, session_id: SessionId)
+- `RequestPendingSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `Respawn`(agent_runtime_id: AgentRuntimeId)
 - `RetireAll`
 - `WireMembers`(edge: WiringEdge)
@@ -2045,6 +2046,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `releasing_present`
   - `releasing_matches_current`
 - Emits: `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`
+- To: `Stopped`
+
+### `RequestPendingSessionIngressDetachForMobDestroyRunning`
+- From: `Running`
+- On: `RequestPendingSessionIngressDetachForMobDestroy`(mob_id, agent_runtime_id)
+- Guards:
+  - `pending_detach_present`
+- Emits: `RequestSessionIngressDetachForMobDestroy`
+- To: `Running`
+
+### `RequestPendingSessionIngressDetachForMobDestroyStopped`
+- From: `Stopped`
+- On: `RequestPendingSessionIngressDetachForMobDestroy`(mob_id, agent_runtime_id)
+- Guards:
+  - `pending_detach_present`
+- Emits: `RequestSessionIngressDetachForMobDestroy`
 - To: `Stopped`
 
 ### `SessionIngressDetachedForMobDestroyRunning`

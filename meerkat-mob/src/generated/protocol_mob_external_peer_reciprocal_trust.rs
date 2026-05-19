@@ -7,10 +7,28 @@ use crate::machines::mob_machine::{ExternalPeerEdge, ExternalPeerKey, MobMachine
 
 #[derive(Debug, Clone)]
 pub struct MobExternalPeerReciprocalTrustObligation {
-    pub key: ExternalPeerKey,
-    pub edge: ExternalPeerEdge,
-    pub peer_id: PeerId,
-    pub epoch: u64,
+    key: ExternalPeerKey,
+    edge: ExternalPeerEdge,
+    peer_id: PeerId,
+    epoch: u64,
+}
+
+impl MobExternalPeerReciprocalTrustObligation {
+    pub fn key(&self) -> &ExternalPeerKey {
+        &self.key
+    }
+
+    pub fn edge(&self) -> &ExternalPeerEdge {
+        &self.edge
+    }
+
+    pub fn peer_id(&self) -> &PeerId {
+        &self.peer_id
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
 }
 
 pub fn extract_obligations(
@@ -58,10 +76,8 @@ pub fn reciprocal_wiring_authority_for_peer(
         obligation.peer_id.0.as_str(),
         expected_peer_id,
     )?;
-    Ok(
-        meerkat_core::comms::CommsTrustMutationAuthority::from_generated_mob_machine_peer_wiring(
-            obligation.peer_id.0.clone(),
-            obligation.epoch,
-        ),
+    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_mob_machine_peer_wiring(
+        obligation.peer_id.0.clone(),
+        obligation.epoch,
     )
 }

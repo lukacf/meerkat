@@ -2962,14 +2962,21 @@ mod tests {
         epoch: u64,
     ) -> meerkat_core::comms::CommsTrustMutationAuthority {
         let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
-        let obligation =
-            meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
+        let effects = vec![
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
                 peer_projection_epoch: epoch,
-            };
+                direct_peer_endpoints: std::collections::BTreeSet::from([endpoint.clone()]),
+                mob_overlay_peer_endpoints: std::collections::BTreeSet::new(),
+            },
+        ];
+        let mut obligations =
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&effects);
+        let obligation = obligations.pop().expect("generated reconcile obligation");
         meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
             &obligation,
             &endpoint,
         )
+        .expect("generated peer projection add authority")
     }
 
     #[tokio::test]

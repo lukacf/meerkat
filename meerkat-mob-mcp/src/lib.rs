@@ -3412,7 +3412,12 @@ mod tests {
         let added = runtime
             .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
                 peer: peer.clone(),
-                authority: comms_trust_authority::mob_machine_peer_wiring(peer_id.clone(), 1),
+                authority: comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_wiring(
+                    peer_id.clone(),
+                    1,
+                )
+                .authority_for_wiring(&peer_id)
+                .expect("generated wiring handoff covers peer"),
             })
             .await
             .expect("authorized add succeeds");
@@ -3428,7 +3433,13 @@ mod tests {
         let removed = runtime
             .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
-                authority: comms_trust_authority::mob_machine_peer_unwiring(peer_id.clone(), 2),
+                authority:
+                    comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_unwiring(
+                        peer_id.clone(),
+                        2,
+                    )
+                    .authority_for_unwiring(&peer_id)
+                    .expect("generated unwiring handoff covers peer"),
             })
             .await
             .expect("authorized remove succeeds");

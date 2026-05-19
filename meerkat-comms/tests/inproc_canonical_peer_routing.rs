@@ -62,13 +62,16 @@ async fn apply_generated_trust(
     runtime: &CommsRuntime,
     peer: meerkat_core::comms::TrustedPeerDescriptor,
 ) {
+    let peer_id = peer.peer_id.to_string();
     CoreCommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
-            authority: comms_trust_authority::meerkat_machine_peer_projection(
-                peer.peer_id.to_string(),
+            authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
+                peer_id.clone(),
                 0,
-            ),
+            )
+            .authority_for(&peer_id)
+            .expect("valid generated trust authority"),
             peer,
         },
     )

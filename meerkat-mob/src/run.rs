@@ -138,6 +138,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::RegisterMemberPeer { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustWiring { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustUnwiring { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanup { .. }
             | mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrust { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
             | mob_dsl::MobMachineInput::SubmitWork { .. }
@@ -1214,6 +1215,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::RegisterMemberPeer { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustWiring { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustUnwiring { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanup { .. }
             | mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrust { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
             | mob_dsl::MobMachineInput::SubmitWork { .. }

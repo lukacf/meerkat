@@ -923,6 +923,28 @@ async fn apply_generated_trust_remove(
     }
 }
 
+fn supervisor_publish_authority(
+    peer_id: &str,
+    epoch: u64,
+) -> Result<CommsTrustMutationAuthority, String> {
+    comms_trust_authority::MeerkatMachineSupervisorTrustHandoff::from_generated_supervisor_publish(
+        peer_id.to_owned(),
+        epoch,
+    )
+    .publish_authority_for(peer_id)
+}
+
+fn supervisor_revoke_authority(
+    peer_id: &str,
+    epoch: u64,
+) -> Result<CommsTrustMutationAuthority, String> {
+    comms_trust_authority::MeerkatMachineSupervisorTrustHandoff::from_generated_supervisor_revoke(
+        peer_id.to_owned(),
+        epoch,
+    )
+    .revoke_authority_for(peer_id)
+}
+
 async fn publish_supervisor_trust_from_generated_obligation(
     adapter: &Arc<MeerkatMachine>,
     session_id: &SessionId,
@@ -933,10 +955,7 @@ async fn publish_supervisor_trust_from_generated_obligation(
     apply_generated_trust_add(
         comms_runtime,
         trusted_peer,
-        comms_trust_authority::meerkat_machine_supervisor_publish(
-            obligation.peer_id.clone(),
-            obligation.epoch,
-        ),
+        supervisor_publish_authority(&obligation.peer_id, obligation.epoch)?,
     )
     .await?;
     adapter
@@ -1528,10 +1547,30 @@ async fn try_handle_supervisor_bridge_command(
             if let Err(error) = apply_generated_trust_add(
                 comms_runtime,
                 publish_spec,
-                comms_trust_authority::meerkat_machine_supervisor_publish(
-                    publish_obligation.peer_id.clone(),
+                match supervisor_publish_authority(
+                    &publish_obligation.peer_id,
                     publish_obligation.epoch,
-                ),
+                ) {
+                    Ok(authority) => authority,
+                    Err(error) => {
+                        let _ = adapter
+                            .stage_supervisor_trust_publish_failed(
+                                session_id,
+                                publish_obligation.peer_id.clone(),
+                                publish_obligation.epoch,
+                                error.clone(),
+                            )
+                            .await;
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            error,
+                        )
+                        .await;
+                        return true;
+                    }
+                },
             )
             .await
             {
@@ -1805,10 +1844,30 @@ async fn try_handle_supervisor_bridge_command(
                 if let Err(error) = apply_generated_trust_remove(
                     comms_runtime,
                     revoke_obligation.peer_id.clone(),
-                    comms_trust_authority::meerkat_machine_supervisor_revoke(
-                        revoke_obligation.peer_id.clone(),
+                    match supervisor_revoke_authority(
+                        &revoke_obligation.peer_id,
                         revoke_obligation.epoch,
-                    ),
+                    ) {
+                        Ok(authority) => authority,
+                        Err(error) => {
+                            let _ = adapter
+                                .stage_supervisor_trust_revoke_failed(
+                                    session_id,
+                                    revoke_obligation.peer_id.clone(),
+                                    revoke_obligation.epoch,
+                                    error.clone(),
+                                )
+                                .await;
+                            send_bridge_failure(
+                                comms_runtime,
+                                candidate,
+                                BridgeRejectionCause::Internal,
+                                error,
+                            )
+                            .await;
+                            return true;
+                        }
+                    },
                 )
                 .await
                 {
@@ -1972,10 +2031,30 @@ async fn try_handle_supervisor_bridge_command(
             if let Err(error) = apply_generated_trust_remove(
                 comms_runtime,
                 revoke_obligation.peer_id.clone(),
-                comms_trust_authority::meerkat_machine_supervisor_revoke(
-                    revoke_obligation.peer_id.clone(),
+                match supervisor_revoke_authority(
+                    &revoke_obligation.peer_id,
                     revoke_obligation.epoch,
-                ),
+                ) {
+                    Ok(authority) => authority,
+                    Err(error) => {
+                        let _ = adapter
+                            .stage_supervisor_trust_revoke_failed(
+                                session_id,
+                                revoke_obligation.peer_id.clone(),
+                                revoke_obligation.epoch,
+                                error.clone(),
+                            )
+                            .await;
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            error,
+                        )
+                        .await;
+                        return true;
+                    }
+                },
             )
             .await
             {

@@ -294,6 +294,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeMemberTrustUnwiringRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `AuthorizeMemberTrustCleanupRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `AuthorizeExternalPeerReciprocalTrustRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`

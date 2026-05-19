@@ -26511,28 +26511,44 @@ async fn test_unwire_fails_closed_on_stale_local_trust_when_machine_edge_absent(
     let name_b = test_comms_name("worker", "w-1");
     let key_a = comms_a.public_key();
     let key_b = comms_b.public_key();
+    let peer_id_a = key_a.to_peer_id().to_string();
+    let peer_id_b = key_b.to_peer_id().to_string();
+    let stale_handoff =
+        meerkat_core::generated::comms_trust_authority::MobMachineMemberTrustHandoff::from_generated_member_wiring(
+            "l-1",
+            "w-1",
+            peer_id_a.clone(),
+            peer_id_b.clone(),
+            3,
+        );
     comms_a
-        .add_trusted_peer(
-            TrustedPeerDescriptor::unsigned_with_pubkey(
+        .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
+            peer: TrustedPeerDescriptor::unsigned_with_pubkey(
                 &name_b,
-                key_b.to_peer_id().to_string(),
+                peer_id_b.clone(),
                 *key_b.as_bytes(),
                 format!("inproc://{name_b}"),
             )
             .expect("valid worker trusted spec"),
-        )
+            authority: stale_handoff
+                .wiring_authority_for_identity("w-1", &peer_id_b)
+                .expect("generated member wiring handoff covers worker"),
+        })
         .await
         .expect("re-add stale trust on lead");
     comms_b
-        .add_trusted_peer(
-            TrustedPeerDescriptor::unsigned_with_pubkey(
+        .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
+            peer: TrustedPeerDescriptor::unsigned_with_pubkey(
                 &name_a,
-                key_a.to_peer_id().to_string(),
+                peer_id_a.clone(),
                 *key_a.as_bytes(),
                 format!("inproc://{name_a}"),
             )
             .expect("valid lead trusted spec"),
-        )
+            authority: stale_handoff
+                .wiring_authority_for_identity("l-1", &peer_id_a)
+                .expect("generated member wiring handoff covers lead"),
+        })
         .await
         .expect("re-add stale trust on worker");
 
@@ -26595,8 +26611,17 @@ async fn test_unwire_external_fails_closed_on_stale_trust_when_machine_edge_abse
         .expect("initial external unwire");
 
     let comms = service.real_comms(&sid).await.expect("comms for l-1");
+    let peer_id = spec.peer_id.to_string();
     comms
-        .add_trusted_peer(spec.clone())
+        .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
+            peer: spec.clone(),
+            authority: meerkat_core::generated::comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_wiring(
+                peer_id.clone(),
+                3,
+            )
+            .authority_for_wiring(&peer_id)
+            .expect("generated external wiring handoff covers test peer"),
+        })
         .await
         .expect("re-add stale external trust");
 

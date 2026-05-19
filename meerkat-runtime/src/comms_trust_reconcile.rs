@@ -146,12 +146,19 @@ impl CommsTrustReconciler {
         // an older session hasn't completed.
         for endpoint in to_add {
             let descriptor = endpoint_to_descriptor(&endpoint)?;
+            let authority =
+                comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
+                    endpoint.peer_id.0.clone(),
+                    epoch,
+                )
+                .authority_for(&endpoint.peer_id.0)
+                .map_err(|source| CommsTrustReconcileError::AddTrustFailed {
+                    peer_id: endpoint.peer_id.0.clone(),
+                    source: SendError::Validation(source),
+                })?;
             self.comms
                 .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
-                    authority: comms_trust_authority::meerkat_machine_peer_projection(
-                        endpoint.peer_id.0.clone(),
-                        epoch,
-                    ),
+                    authority,
                     peer: descriptor,
                 })
                 .await
@@ -163,14 +170,21 @@ impl CommsTrustReconciler {
         }
 
         for endpoint in to_remove {
+            let authority =
+                comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
+                    endpoint.peer_id.0.clone(),
+                    epoch,
+                )
+                .authority_for(&endpoint.peer_id.0)
+                .map_err(|source| CommsTrustReconcileError::RemoveTrustFailed {
+                    peer_id: endpoint.peer_id.0.clone(),
+                    source: SendError::Validation(source),
+                })?;
             let result = self
                 .comms
                 .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
                     peer_id: endpoint.peer_id.0.clone(),
-                    authority: comms_trust_authority::meerkat_machine_peer_projection(
-                        endpoint.peer_id.0.clone(),
-                        epoch,
-                    ),
+                    authority,
                 })
                 .await
                 .map_err(|source| CommsTrustReconcileError::RemoveTrustFailed {

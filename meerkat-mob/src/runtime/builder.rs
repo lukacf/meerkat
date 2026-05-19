@@ -179,9 +179,22 @@ fn resume_member_repair_authority_from_effects(
                 a_peer_id,
                 b_peer_id,
                 epoch,
-            } if effect_edge == edge && (a_peer_id.0 == peer_id || b_peer_id.0 == peer_id) => Some(
-                comms_trust_authority::mob_machine_peer_repair(peer_id, *epoch),
-            ),
+            } if effect_edge == edge && (a_peer_id.0 == peer_id || b_peer_id.0 == peer_id) => {
+                let identity = if a_peer_id.0 == peer_id {
+                    edge.a.0.as_str()
+                } else {
+                    edge.b.0.as_str()
+                };
+                comms_trust_authority::MobMachineMemberTrustHandoff::from_generated_member_repair(
+                    edge.a.0.clone(),
+                    edge.b.0.clone(),
+                    a_peer_id.0.clone(),
+                    b_peer_id.0.clone(),
+                    *epoch,
+                )
+                .repair_authority_for_identity(identity, peer_id)
+                .ok()
+            }
             _ => None,
         })
         .ok_or_else(|| {
@@ -208,9 +221,12 @@ fn resume_external_repair_authority_from_effects(
         )
     });
     if repair_requested && !graph_changed {
-        return Ok(comms_trust_authority::mob_machine_peer_repair(
-            peer_id, epoch,
-        ));
+        return comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_repair(
+            peer_id.to_string(),
+            epoch,
+        )
+        .authority_for_repair(peer_id)
+        .map_err(MobError::WiringError);
     }
     Err(MobError::WiringError(format!(
         "{context} produced no generated external trust repair authority"

@@ -354,6 +354,7 @@ macro_rules! mob_catalog_machine_dsl {
             RegisterMemberPeer { agent_identity: AgentIdentity, peer_id: PeerId },
             AuthorizeMemberTrustWiring { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             AuthorizeMemberTrustUnwiring { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
+            AuthorizeMemberTrustCleanup { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             AuthorizeExternalPeerReciprocalTrust { key: ExternalPeerKey, agent_identity: AgentIdentity },
             UnwireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
             SessionIngressDetachedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
@@ -1666,6 +1667,22 @@ macro_rules! mob_catalog_machine_dsl {
             on input AuthorizeMemberTrustUnwiring { edge, a_identity, b_identity }
             guard { self.lifecycle_phase == Phase::Running }
             guard "edge_currently_wired" { self.wiring_edges.contains(edge) == true }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "a_member_peer_registered" { self.member_peer_ids.contains_key(a_identity) == true }
+            guard "b_member_peer_registered" { self.member_peer_ids.contains_key(b_identity) == true }
+            update {}
+            to Running
+            emit MemberTrustUnwiringRequested {
+                edge: edge,
+                a_peer_id: self.member_peer_ids.get_cloned(a_identity).get("value"),
+                b_peer_id: self.member_peer_ids.get_cloned(b_identity).get("value"),
+                epoch: self.topology_epoch
+            }
+        }
+
+        transition AuthorizeMemberTrustCleanupRunning {
+            on input AuthorizeMemberTrustCleanup { edge, a_identity, b_identity }
+            guard { self.lifecycle_phase == Phase::Running }
             guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
             guard "a_member_peer_registered" { self.member_peer_ids.contains_key(a_identity) == true }
             guard "b_member_peer_registered" { self.member_peer_ids.contains_key(b_identity) == true }

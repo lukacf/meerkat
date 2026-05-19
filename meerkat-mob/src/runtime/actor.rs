@@ -130,27 +130,42 @@ struct PreparedDslInput {
 enum WireTrustAuthority {
     GraphAdded(MemberTrustHandoff),
     RepairRequested(MemberTrustHandoff),
-    ExternalGraphAdded,
-    ExternalRepairRequested,
+    ExternalGraphAdded(comms_trust_authority::MobMachineExternalPeerTrustHandoff),
+    ExternalRepairRequested(comms_trust_authority::MobMachineExternalPeerTrustHandoff),
 }
 
 impl WireTrustAuthority {
     fn dsl_added(&self) -> bool {
-        matches!(self, Self::GraphAdded(_) | Self::ExternalGraphAdded)
+        matches!(self, Self::GraphAdded(_) | Self::ExternalGraphAdded(_))
     }
 
     fn is_repair(&self) -> bool {
         matches!(
             self,
-            Self::RepairRequested(_) | Self::ExternalRepairRequested
+            Self::RepairRequested(_) | Self::ExternalRepairRequested(_)
         )
     }
 
     fn member_handoff(&self) -> Result<&MemberTrustHandoff, MobError> {
         match self {
             Self::GraphAdded(handoff) | Self::RepairRequested(handoff) => Ok(handoff),
-            Self::ExternalGraphAdded | Self::ExternalRepairRequested => Err(MobError::WiringError(
-                "external peer authority does not carry member peer handoff".to_string(),
+            Self::ExternalGraphAdded(_) | Self::ExternalRepairRequested(_) => {
+                Err(MobError::WiringError(
+                    "external peer authority does not carry member peer handoff".to_string(),
+                ))
+            }
+        }
+    }
+
+    fn external_handoff(
+        &self,
+    ) -> Result<&comms_trust_authority::MobMachineExternalPeerTrustHandoff, MobError> {
+        match self {
+            Self::ExternalGraphAdded(handoff) | Self::ExternalRepairRequested(handoff) => {
+                Ok(handoff)
+            }
+            Self::GraphAdded(_) | Self::RepairRequested(_) => Err(MobError::WiringError(
+                "member trust authority does not carry external peer handoff".to_string(),
             )),
         }
     }
@@ -162,9 +177,49 @@ struct MemberTrustHandoff {
     a_peer_id: String,
     b_peer_id: String,
     epoch: u64,
+    operation: MemberTrustOperation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberTrustOperation {
+    Wiring,
+    Unwiring,
+    Repair,
 }
 
 impl MemberTrustHandoff {
+    fn generated_handoff(&self) -> comms_trust_authority::MobMachineMemberTrustHandoff {
+        match self.operation {
+            MemberTrustOperation::Wiring => {
+                comms_trust_authority::MobMachineMemberTrustHandoff::from_generated_member_wiring(
+                    self.edge.a.0.clone(),
+                    self.edge.b.0.clone(),
+                    self.a_peer_id.clone(),
+                    self.b_peer_id.clone(),
+                    self.epoch,
+                )
+            }
+            MemberTrustOperation::Unwiring => {
+                comms_trust_authority::MobMachineMemberTrustHandoff::from_generated_member_unwiring(
+                    self.edge.a.0.clone(),
+                    self.edge.b.0.clone(),
+                    self.a_peer_id.clone(),
+                    self.b_peer_id.clone(),
+                    self.epoch,
+                )
+            }
+            MemberTrustOperation::Repair => {
+                comms_trust_authority::MobMachineMemberTrustHandoff::from_generated_member_repair(
+                    self.edge.a.0.clone(),
+                    self.edge.b.0.clone(),
+                    self.a_peer_id.clone(),
+                    self.b_peer_id.clone(),
+                    self.epoch,
+                )
+            }
+        }
+    }
+
     fn peer_id_for(&self, identity: &AgentIdentity) -> Result<&str, MobError> {
         let identity = mob_dsl::AgentIdentity::from_domain(identity);
         if self.edge.a == identity {
@@ -190,6 +245,50 @@ impl MemberTrustHandoff {
             Err(MobError::WiringError(format!(
                 "generated member trust handoff peer id '{actual}' does not match resolved peer id '{expected_peer_id}' for '{identity}'"
             )))
+        }
+    }
+
+    fn wiring_authority_for(
+        &self,
+        identity: &AgentIdentity,
+        expected_peer_id: &str,
+    ) -> Result<CommsTrustMutationAuthority, MobError> {
+        self.generated_handoff()
+            .wiring_authority_for_identity(identity.as_str(), expected_peer_id)
+            .map_err(MobError::WiringError)
+    }
+
+    fn unwiring_authority_for(
+        &self,
+        identity: &AgentIdentity,
+        expected_peer_id: &str,
+    ) -> Result<CommsTrustMutationAuthority, MobError> {
+        self.generated_handoff()
+            .unwiring_authority_for_identity(identity.as_str(), expected_peer_id)
+            .map_err(MobError::WiringError)
+    }
+
+    fn repair_authority_for(
+        &self,
+        identity: &AgentIdentity,
+        expected_peer_id: &str,
+    ) -> Result<CommsTrustMutationAuthority, MobError> {
+        self.generated_handoff()
+            .repair_authority_for_identity(identity.as_str(), expected_peer_id)
+            .map_err(MobError::WiringError)
+    }
+
+    fn add_authority_for(
+        &self,
+        identity: &AgentIdentity,
+        expected_peer_id: &str,
+    ) -> Result<CommsTrustMutationAuthority, MobError> {
+        match self.operation {
+            MemberTrustOperation::Wiring => self.wiring_authority_for(identity, expected_peer_id),
+            MemberTrustOperation::Repair => self.repair_authority_for(identity, expected_peer_id),
+            MemberTrustOperation::Unwiring => Err(MobError::WiringError(
+                "generated member unwiring handoff cannot add trust".to_string(),
+            )),
         }
     }
 }
@@ -567,32 +666,26 @@ impl MobActor {
         peer.peer_id.to_string()
     }
 
-    fn trust_epoch(&self) -> u64 {
-        self.dsl_authority.state().topology_epoch
+    fn supervisor_publish_authority(
+        peer_id: &str,
+        epoch: u64,
+    ) -> Result<CommsTrustMutationAuthority, String> {
+        comms_trust_authority::MeerkatMachineSupervisorTrustHandoff::from_generated_supervisor_publish(
+            peer_id.to_owned(),
+            epoch,
+        )
+        .publish_authority_for(peer_id)
     }
 
-    fn mob_peer_wiring_authority(&self, peer_id: &str) -> CommsTrustMutationAuthority {
-        comms_trust_authority::mob_machine_peer_wiring(peer_id, self.trust_epoch())
-    }
-
-    fn mob_peer_unwiring_authority(&self, peer_id: &str) -> CommsTrustMutationAuthority {
-        comms_trust_authority::mob_machine_peer_unwiring(peer_id, self.trust_epoch())
-    }
-
-    fn mob_peer_repair_authority(&self, peer_id: &str) -> CommsTrustMutationAuthority {
-        comms_trust_authority::mob_machine_peer_repair(peer_id, self.trust_epoch())
-    }
-
-    fn mob_peer_retire_authority(&self, peer_id: &str) -> CommsTrustMutationAuthority {
-        comms_trust_authority::mob_machine_peer_retire(peer_id, self.trust_epoch())
-    }
-
-    fn supervisor_publish_authority(peer_id: &str, epoch: u64) -> CommsTrustMutationAuthority {
-        comms_trust_authority::meerkat_machine_supervisor_publish(peer_id, epoch)
-    }
-
-    fn supervisor_revoke_authority(peer_id: &str, epoch: u64) -> CommsTrustMutationAuthority {
-        comms_trust_authority::meerkat_machine_supervisor_revoke(peer_id, epoch)
+    fn supervisor_revoke_authority(
+        peer_id: &str,
+        epoch: u64,
+    ) -> Result<CommsTrustMutationAuthority, String> {
+        comms_trust_authority::MeerkatMachineSupervisorTrustHandoff::from_generated_supervisor_revoke(
+            peer_id.to_owned(),
+            epoch,
+        )
+        .revoke_authority_for(peer_id)
     }
 
     fn unexpected_trust_mutation_result(
@@ -784,7 +877,8 @@ impl MobActor {
                     Self::supervisor_revoke_authority(
                         &revoke_obligation.peer_id,
                         revoke_obligation.epoch,
-                    ),
+                    )
+                    .map_err(MobError::WiringError)?,
                 )
                 .await
                 {
@@ -936,7 +1030,8 @@ impl MobActor {
             if let Err(error) = Self::apply_private_trusted_peer_add(
                 comms.as_ref(),
                 publish_spec.clone(),
-                Self::supervisor_publish_authority(&publish_peer_id, publish_epoch),
+                Self::supervisor_publish_authority(&publish_peer_id, publish_epoch)
+                    .map_err(MobError::WiringError)?,
             )
             .await
             {
@@ -968,7 +1063,8 @@ impl MobActor {
                         Self::apply_private_trusted_peer_remove(
                             comms.as_ref(),
                             publish_removal_key.clone(),
-                            Self::supervisor_revoke_authority(&publish_peer_id, publish_epoch),
+                            Self::supervisor_revoke_authority(&publish_peer_id, publish_epoch)
+                                .map_err(MobError::WiringError)?,
                         )
                         .await,
                     )
@@ -1015,7 +1111,8 @@ impl MobActor {
                         Self::apply_private_trusted_peer_remove(
                             comms.as_ref(),
                             publish_removal_key.clone(),
-                            Self::supervisor_revoke_authority(&publish_peer_id, publish_epoch),
+                            Self::supervisor_revoke_authority(&publish_peer_id, publish_epoch)
+                                .map_err(MobError::WiringError)?,
                         )
                         .await,
                     )
@@ -1093,7 +1190,27 @@ impl MobActor {
             if let Err(error) = Self::apply_private_trusted_peer_remove(
                 comms.as_ref(),
                 install.removal_key.clone(),
-                Self::supervisor_revoke_authority(&install.peer_id, install.epoch),
+                match Self::supervisor_revoke_authority(&install.peer_id, install.epoch) {
+                    Ok(authority) => authority,
+                    Err(error) => {
+                        let _ = adapter
+                            .stage_supervisor_trust_revoke_failed(
+                                session_id,
+                                obligation.peer_id,
+                                obligation.epoch,
+                                error.clone(),
+                            )
+                            .await;
+                        tracing::warn!(
+                            %session_id,
+                            peer_id = %install.peer_id,
+                            epoch = install.epoch,
+                            %error,
+                            "failed to build generated supervisor private trust cleanup authority"
+                        );
+                        return;
+                    }
+                },
             )
             .await
             {
@@ -1129,21 +1246,13 @@ impl MobActor {
             return;
         }
 
-        if let Err(error) = Self::apply_private_trusted_peer_remove(
-            comms.as_ref(),
-            install.removal_key.clone(),
-            Self::supervisor_revoke_authority(&install.peer_id, install.epoch),
-        )
-        .await
-        {
-            tracing::warn!(
-                %session_id,
-                peer_id = %install.peer_id,
-                epoch = install.epoch,
-                %error,
-                "failed to clean up supervisor private trust"
-            );
-        }
+        let _ = comms;
+        tracing::warn!(
+            %session_id,
+            peer_id = %install.peer_id,
+            epoch = install.epoch,
+            "skipping supervisor private trust cleanup because generated runtime adapter authority is unavailable"
+        );
     }
 
     #[cfg(feature = "runtime-adapter")]
@@ -1223,7 +1332,8 @@ impl MobActor {
                 Self::apply_private_trusted_peer_add(
                     comms.as_ref(),
                     trusted_peer,
-                    Self::supervisor_publish_authority(&obligation.peer_id, obligation.epoch),
+                    Self::supervisor_publish_authority(&obligation.peer_id, obligation.epoch)
+                        .map_err(MobError::WiringError)?,
                 )
                 .await
                 .map_err(|error| MobError::WiringError(error.to_string()))?;
@@ -1950,6 +2060,7 @@ impl MobActor {
         effects: &[mob_dsl::MobMachineEffect],
         edge: &mob_dsl::WiringEdge,
         context: &str,
+        operation: MemberTrustOperation,
     ) -> Result<MemberTrustHandoff, MobError> {
         effects
             .iter()
@@ -1964,6 +2075,7 @@ impl MobActor {
                     a_peer_id: a_peer_id.0.clone(),
                     b_peer_id: b_peer_id.0.clone(),
                     epoch: *epoch,
+                    operation,
                 }),
                 _ => None,
             })
@@ -1975,11 +2087,16 @@ impl MobActor {
     }
 
     fn wire_external_authority_from_effects(
+        &self,
         effects: &[mob_dsl::MobMachineEffect],
         edge: &mob_dsl::ExternalPeerEdge,
         context: &str,
     ) -> Result<WireTrustAuthority, MobError> {
         let graph_changed = Self::effects_include_wiring_graph_change(effects);
+        let graph_epoch = effects.iter().find_map(|effect| match effect {
+            mob_dsl::MobMachineEffect::WiringGraphChanged { epoch } => Some(*epoch),
+            _ => None,
+        });
         let repair_requested = effects.iter().any(|effect| {
             matches!(
                 effect,
@@ -1989,8 +2106,25 @@ impl MobActor {
             )
         });
         match (graph_changed, repair_requested) {
-            (true, false) => Ok(WireTrustAuthority::ExternalGraphAdded),
-            (false, true) => Ok(WireTrustAuthority::ExternalRepairRequested),
+            (true, false) => {
+                let epoch = graph_epoch.ok_or_else(|| {
+                    MobError::WiringError(format!(
+                        "{context} produced external graph authority without topology epoch"
+                    ))
+                })?;
+                Ok(WireTrustAuthority::ExternalGraphAdded(
+                    comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_wiring(
+                        edge.endpoint.peer_id.0.clone(),
+                        epoch,
+                    ),
+                ))
+            }
+            (false, true) => Ok(WireTrustAuthority::ExternalRepairRequested(
+                comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_repair(
+                    edge.endpoint.peer_id.0.clone(),
+                    self.dsl_authority.state().topology_epoch,
+                ),
+            )),
             (false, false) => Err(MobError::WiringError(format!(
                 "{context} produced no generated external-peer trust authority"
             ))),
@@ -2018,6 +2152,7 @@ impl MobActor {
                     a_peer_id: a_peer_id.0.clone(),
                     b_peer_id: b_peer_id.0.clone(),
                     epoch: *epoch,
+                    operation: MemberTrustOperation::Unwiring,
                 }),
                 _ => None,
             })
@@ -2032,6 +2167,7 @@ impl MobActor {
         &mut self,
         edge: &mob_dsl::WiringEdge,
         context: &str,
+        operation: MemberTrustOperation,
     ) -> Result<MemberTrustHandoff, MobError> {
         let effects = self.apply_dsl_input_collect_effects(
             mob_dsl::MobMachineInput::AuthorizeMemberTrustWiring {
@@ -2041,7 +2177,7 @@ impl MobActor {
             },
             context,
         )?;
-        Self::member_trust_wiring_handoff_from_effects(&effects, edge, context)
+        Self::member_trust_wiring_handoff_from_effects(&effects, edge, context, operation)
     }
 
     fn authorize_member_trust_unwiring(
@@ -2051,6 +2187,22 @@ impl MobActor {
     ) -> Result<MemberTrustHandoff, MobError> {
         let effects = self.apply_dsl_input_collect_effects(
             mob_dsl::MobMachineInput::AuthorizeMemberTrustUnwiring {
+                edge: edge.clone(),
+                a_identity: edge.a.clone(),
+                b_identity: edge.b.clone(),
+            },
+            context,
+        )?;
+        Self::unwire_members_authority_from_effects(&effects, edge, context)
+    }
+
+    fn authorize_member_trust_cleanup(
+        &mut self,
+        edge: &mob_dsl::WiringEdge,
+        context: &str,
+    ) -> Result<MemberTrustHandoff, MobError> {
+        let effects = self.apply_dsl_input_collect_effects(
+            mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanup {
                 edge: edge.clone(),
                 a_identity: edge.a.clone(),
                 b_identity: edge.b.clone(),
@@ -6551,10 +6703,7 @@ impl MobActor {
                     if let Err(error) = Self::apply_trusted_peer_add(
                         local_comms.as_ref(),
                         peer_spec.clone(),
-                        comms_trust_authority::mob_machine_peer_repair(
-                            peer_key.clone(),
-                            handoff.epoch,
-                        ),
+                        handoff.repair_authority_for(&peer_meerkat_id, &peer_key)?,
                     )
                     .await
                     {
@@ -6564,17 +6713,14 @@ impl MobActor {
                     if let Err(error) = Self::apply_trusted_peer_add(
                         peer_comms.as_ref(),
                         local_spec.clone(),
-                        comms_trust_authority::mob_machine_peer_repair(
-                            local_key.clone(),
-                            handoff.epoch,
-                        ),
+                        handoff.repair_authority_for(&local, &local_key)?,
                     )
                     .await
                     {
                         let _ = Self::apply_trusted_peer_remove(
                             local_comms.as_ref(),
                             peer_key.clone(),
-                            self.mob_peer_unwiring_authority(&peer_key),
+                            handoff.unwiring_authority_for(&peer_meerkat_id, &peer_key)?,
                         )
                         .await;
                         return Err(MobError::from(error));
@@ -6641,10 +6787,7 @@ impl MobActor {
                     if let Err(error) = Self::apply_trusted_peer_add(
                         local_comms.as_ref(),
                         peer_spec.clone(),
-                        comms_trust_authority::mob_machine_peer_repair(
-                            peer_key.clone(),
-                            handoff.epoch,
-                        ),
+                        handoff.repair_authority_for(&peer_meerkat_id, &peer_key)?,
                     )
                     .await
                     {
@@ -6662,7 +6805,7 @@ impl MobActor {
                         let _ = Self::apply_trusted_peer_remove(
                             local_comms.as_ref(),
                             peer_key.clone(),
-                            self.mob_peer_unwiring_authority(&peer_key),
+                            handoff.unwiring_authority_for(&peer_meerkat_id, &peer_key)?,
                         )
                         .await;
                         return Err(error);
@@ -6684,10 +6827,7 @@ impl MobActor {
                     if let Err(error) = Self::apply_trusted_peer_add(
                         peer_comms.as_ref(),
                         local_spec.clone(),
-                        comms_trust_authority::mob_machine_peer_repair(
-                            local_key.clone(),
-                            handoff.epoch,
-                        ),
+                        handoff.repair_authority_for(&local, &local_key)?,
                     )
                     .await
                     {
@@ -6705,7 +6845,7 @@ impl MobActor {
                         let _ = Self::apply_trusted_peer_remove(
                             peer_comms.as_ref(),
                             local_key.clone(),
-                            self.mob_peer_unwiring_authority(&local_key),
+                            handoff.unwiring_authority_for(&local, &local_key)?,
                         )
                         .await;
                         return Err(error);
@@ -6798,7 +6938,7 @@ impl MobActor {
             if let Err(error) = Self::apply_trusted_peer_add(
                 local_comms.as_ref(),
                 peer_spec.clone(),
-                comms_trust_authority::mob_machine_peer_wiring(peer_key.clone(), handoff.epoch),
+                handoff.wiring_authority_for(&peer_meerkat_id, &peer_key)?,
             )
             .await
             {
@@ -6818,7 +6958,7 @@ impl MobActor {
                 let _ = Self::apply_trusted_peer_remove(
                     local_comms.as_ref(),
                     peer_key.clone(),
-                    self.mob_peer_unwiring_authority(&peer_key),
+                    handoff.unwiring_authority_for(&peer_meerkat_id, &peer_key)?,
                 )
                 .await;
                 self.rollback_peer_only_wire(&edge, dsl_added, &[], local_spec, peer_spec)
@@ -6839,7 +6979,7 @@ impl MobActor {
                     let _ = Self::apply_trusted_peer_remove(
                         local_comms.as_ref(),
                         peer_key.clone(),
-                        self.mob_peer_unwiring_authority(&peer_key),
+                        handoff.unwiring_authority_for(&peer_meerkat_id, &peer_key)?,
                     )
                     .await;
                     self.rollback_peer_only_wire(
@@ -6876,7 +7016,7 @@ impl MobActor {
             if let Err(error) = Self::apply_trusted_peer_add(
                 peer_comms.as_ref(),
                 local_spec.clone(),
-                comms_trust_authority::mob_machine_peer_wiring(local_key.clone(), handoff.epoch),
+                handoff.wiring_authority_for(&local, &local_key)?,
             )
             .await
             {
@@ -6896,7 +7036,7 @@ impl MobActor {
                 let _ = Self::apply_trusted_peer_remove(
                     peer_comms.as_ref(),
                     local_key.clone(),
-                    self.mob_peer_unwiring_authority(&local_key),
+                    handoff.unwiring_authority_for(&local, &local_key)?,
                 )
                 .await;
                 self.rollback_peer_only_wire(&edge, dsl_added, &[], local_spec, peer_spec)
@@ -6917,7 +7057,7 @@ impl MobActor {
                     let _ = Self::apply_trusted_peer_remove(
                         peer_comms.as_ref(),
                         local_key.clone(),
-                        self.mob_peer_unwiring_authority(&local_key),
+                        handoff.unwiring_authority_for(&local, &local_key)?,
                     )
                     .await;
                     self.rollback_peer_only_wire(
@@ -6966,7 +7106,7 @@ impl MobActor {
         if let Err(err) = Self::apply_trusted_peer_add(
             local_comms.as_ref(),
             peer_spec.clone(),
-            comms_trust_authority::mob_machine_peer_wiring(peer_peer_id.clone(), handoff.epoch),
+            handoff.wiring_authority_for(&peer_meerkat_id, &peer_peer_id)?,
         )
         .await
         {
@@ -6979,6 +7119,7 @@ impl MobActor {
                 &peer_comms,
                 &local_peer_id,
                 &peer_peer_id,
+                handoff,
             )
             .await;
             return Err(MobError::from(err));
@@ -6989,7 +7130,7 @@ impl MobActor {
         if let Err(err) = Self::apply_trusted_peer_add(
             peer_comms.as_ref(),
             local_spec.clone(),
-            comms_trust_authority::mob_machine_peer_wiring(local_peer_id.clone(), handoff.epoch),
+            handoff.wiring_authority_for(&local, &local_peer_id)?,
         )
         .await
         {
@@ -7002,6 +7143,7 @@ impl MobActor {
                 &peer_comms,
                 &local_peer_id,
                 &peer_peer_id,
+                handoff,
             )
             .await;
             return Err(MobError::from(err));
@@ -7021,6 +7163,7 @@ impl MobActor {
                 &peer_comms,
                 &local_peer_id,
                 &peer_peer_id,
+                handoff,
             )
             .await;
             return Err(err);
@@ -7040,6 +7183,7 @@ impl MobActor {
                 &peer_comms,
                 &local_peer_id,
                 &peer_peer_id,
+                handoff,
             )
             .await;
             return Err(err);
@@ -7066,6 +7210,7 @@ impl MobActor {
                     &peer_comms,
                     &local_peer_id,
                     &peer_peer_id,
+                    handoff,
                 )
                 .await;
                 return Err(MobError::from(err));
@@ -7222,7 +7367,11 @@ impl MobActor {
             .collect::<Vec<_>>();
         self.commit_prepared_dsl_input(prepared);
 
-        let mut installed_trust: Vec<(Arc<dyn CoreCommsRuntime>, String)> = Vec::new();
+        let mut installed_trust: Vec<(
+            Arc<dyn CoreCommsRuntime>,
+            String,
+            CommsTrustMutationAuthority,
+        )> = Vec::new();
         for (event_edge, dsl_edge) in &to_add {
             let left = endpoints.get(&event_edge.a).ok_or_else(|| {
                 MobError::WiringError(format!(
@@ -7236,17 +7385,21 @@ impl MobActor {
                     event_edge.b
                 ))
             })?;
-            let handoff =
-                self.authorize_member_trust_wiring(dsl_edge, "wire_members_batch_trust_authority")?;
+            let handoff = self.authorize_member_trust_wiring(
+                dsl_edge,
+                "wire_members_batch_trust_authority",
+                MemberTrustOperation::Wiring,
+            )?;
+            let rollback_handoff = self.authorize_member_trust_unwiring(
+                dsl_edge,
+                "wire_members_batch_trust_rollback_authority",
+            )?;
 
             handoff.require_peer_id_for(&event_edge.b, &right.removal_key)?;
             if let Err(error) = Self::apply_trusted_peer_add(
                 left.comms.as_ref(),
                 right.spec.clone(),
-                comms_trust_authority::mob_machine_peer_wiring(
-                    right.removal_key.clone(),
-                    handoff.epoch,
-                ),
+                handoff.wiring_authority_for(&event_edge.b, &right.removal_key)?,
             )
             .await
             {
@@ -7254,16 +7407,17 @@ impl MobActor {
                     .await;
                 return Err(MobError::from(error));
             }
-            installed_trust.push((left.comms.clone(), right.removal_key.clone()));
+            installed_trust.push((
+                left.comms.clone(),
+                right.removal_key.clone(),
+                rollback_handoff.unwiring_authority_for(&event_edge.b, &right.removal_key)?,
+            ));
 
             handoff.require_peer_id_for(&event_edge.a, &left.removal_key)?;
             if let Err(error) = Self::apply_trusted_peer_add(
                 right.comms.as_ref(),
                 left.spec.clone(),
-                comms_trust_authority::mob_machine_peer_wiring(
-                    left.removal_key.clone(),
-                    handoff.epoch,
-                ),
+                handoff.wiring_authority_for(&event_edge.a, &left.removal_key)?,
             )
             .await
             {
@@ -7271,7 +7425,11 @@ impl MobActor {
                     .await;
                 return Err(MobError::from(error));
             }
-            installed_trust.push((right.comms.clone(), left.removal_key.clone()));
+            installed_trust.push((
+                right.comms.clone(),
+                left.removal_key.clone(),
+                rollback_handoff.unwiring_authority_for(&event_edge.a, &left.removal_key)?,
+            ));
         }
 
         let event = NewMobEvent {
@@ -7390,15 +7548,16 @@ impl MobActor {
     async fn rollback_wire_members_batch(
         &mut self,
         added_edges: &[(crate::event::MemberWireEdge, mob_dsl::WiringEdge)],
-        installed_trust: Vec<(Arc<dyn CoreCommsRuntime>, String)>,
+        installed_trust: Vec<(
+            Arc<dyn CoreCommsRuntime>,
+            String,
+            CommsTrustMutationAuthority,
+        )>,
     ) {
-        for (comms, removal_key) in installed_trust.into_iter().rev() {
-            if let Err(error) = Self::apply_trusted_peer_remove(
-                comms.as_ref(),
-                removal_key.clone(),
-                self.mob_peer_unwiring_authority(&removal_key),
-            )
-            .await
+        for (comms, removal_key, authority) in installed_trust.into_iter().rev() {
+            if let Err(error) =
+                Self::apply_trusted_peer_remove(comms.as_ref(), removal_key.clone(), authority)
+                    .await
             {
                 tracing::warn!(
                     mob_id = %self.definition.id,
@@ -7435,7 +7594,15 @@ impl MobActor {
         )?;
         let graph_added =
             Self::wire_members_disposition_from_effects(&effects, edge, "wire_members")?;
-        let handoff = self.authorize_member_trust_wiring(edge, "wire_members_trust_authority")?;
+        let handoff = self.authorize_member_trust_wiring(
+            edge,
+            "wire_members_trust_authority",
+            if graph_added {
+                MemberTrustOperation::Wiring
+            } else {
+                MemberTrustOperation::Repair
+            },
+        )?;
         if graph_added {
             Ok(WireTrustAuthority::GraphAdded(handoff))
         } else {
@@ -7511,12 +7678,52 @@ impl MobActor {
         peer_comms: &Arc<dyn CoreCommsRuntime>,
         local_peer_id: &str,
         peer_peer_id: &str,
+        _handoff: &MemberTrustHandoff,
     ) {
+        let local_identity = AgentIdentity::from(edge.a.0.as_str());
+        let peer_identity = AgentIdentity::from(edge.b.0.as_str());
+        let rollback_handoff = if installed_local_trust || installed_peer_trust {
+            match self
+                .authorize_member_trust_unwiring(edge, "wire_members_rollback_trust_authority")
+            {
+                Ok(handoff) => Some(handoff),
+                Err(err) => {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        %err,
+                        "wire rollback: failed to obtain generated trust removal authority"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         if installed_local_trust {
             if let Err(err) = Self::apply_trusted_peer_remove(
                 local_comms.as_ref(),
                 peer_peer_id.to_string(),
-                self.mob_peer_unwiring_authority(peer_peer_id),
+                match rollback_handoff
+                    .as_ref()
+                    .ok_or_else(|| {
+                        MobError::WiringError(
+                            "wire rollback has no generated local trust removal authority"
+                                .to_string(),
+                        )
+                    })
+                    .and_then(|handoff| {
+                        handoff.unwiring_authority_for(&peer_identity, peer_peer_id)
+                    }) {
+                    Ok(authority) => authority,
+                    Err(err) => {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            %err,
+                            "wire rollback: failed to build generated local trust removal authority"
+                        );
+                        return;
+                    }
+                },
             )
             .await
             {
@@ -7531,7 +7738,27 @@ impl MobActor {
             if let Err(err) = Self::apply_trusted_peer_remove(
                 peer_comms.as_ref(),
                 local_peer_id.to_string(),
-                self.mob_peer_unwiring_authority(local_peer_id),
+                match rollback_handoff
+                    .as_ref()
+                    .ok_or_else(|| {
+                        MobError::WiringError(
+                            "wire rollback has no generated peer trust removal authority"
+                                .to_string(),
+                        )
+                    })
+                    .and_then(|handoff| {
+                        handoff.unwiring_authority_for(&local_identity, local_peer_id)
+                    }) {
+                    Ok(authority) => authority,
+                    Err(err) => {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            %err,
+                            "wire rollback: failed to build generated peer trust removal authority"
+                        );
+                        return;
+                    }
+                },
             )
             .await
             {
@@ -7838,6 +8065,7 @@ impl MobActor {
                 &peer_meerkat_id,
                 &local_entry,
                 &peer_entry,
+                &unwire_handoff,
             )
             .await;
             return Err(err);
@@ -7869,6 +8097,7 @@ impl MobActor {
                 &peer_meerkat_id,
                 &local_entry,
                 &peer_entry,
+                &unwire_handoff,
             )
             .await;
             return Err(err);
@@ -7880,10 +8109,7 @@ impl MobActor {
         if let Err(err) = Self::apply_trusted_peer_remove(
             local_comms.as_ref(),
             peer_peer_id.clone(),
-            comms_trust_authority::mob_machine_peer_unwiring(
-                peer_peer_id.clone(),
-                unwire_handoff.epoch,
-            ),
+            unwire_handoff.unwiring_authority_for(&peer_meerkat_id, &peer_peer_id)?,
         )
         .await
         {
@@ -7902,6 +8128,7 @@ impl MobActor {
                 &peer_meerkat_id,
                 &local_entry,
                 &peer_entry,
+                &unwire_handoff,
             )
             .await;
             return Err(MobError::from(err));
@@ -7913,10 +8140,7 @@ impl MobActor {
         if let Err(err) = Self::apply_trusted_peer_remove(
             peer_comms.as_ref(),
             local_peer_id.clone(),
-            comms_trust_authority::mob_machine_peer_unwiring(
-                local_peer_id.clone(),
-                unwire_handoff.epoch,
-            ),
+            unwire_handoff.unwiring_authority_for(&local, &local_peer_id)?,
         )
         .await
         {
@@ -7935,6 +8159,7 @@ impl MobActor {
                 &peer_meerkat_id,
                 &local_entry,
                 &peer_entry,
+                &unwire_handoff,
             )
             .await;
             return Err(MobError::from(err));
@@ -7968,6 +8193,7 @@ impl MobActor {
                     &peer_meerkat_id,
                     &local_entry,
                     &peer_entry,
+                    &unwire_handoff,
                 )
                 .await;
                 return Err(MobError::from(err));
@@ -8045,7 +8271,7 @@ impl MobActor {
             },
             "wire_external_peer",
         )?;
-        Self::wire_external_authority_from_effects(&effects, edge, "wire_external_peer")
+        self.wire_external_authority_from_effects(&effects, edge, "wire_external_peer")
     }
 
     async fn authorize_external_peer_reciprocal_trust(
@@ -8073,14 +8299,19 @@ impl MobActor {
                 "MobMachine produced no external reciprocal trust handoff".to_string(),
             ));
         };
-        Ok(self.mob_peer_wiring_authority(&peer_id))
+        comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_wiring(
+            peer_id.clone(),
+            self.dsl_authority.state().topology_epoch,
+        )
+        .authority_for_wiring(&peer_id)
+        .map_err(MobError::WiringError)
     }
 
     fn apply_unwire_external_peer_idempotent(
         &mut self,
         key: &mob_dsl::ExternalPeerKey,
         edge: &mob_dsl::ExternalPeerEdge,
-    ) -> Result<bool, MobError> {
+    ) -> Result<Option<comms_trust_authority::MobMachineExternalPeerTrustHandoff>, MobError> {
         let effects = self.apply_dsl_input_collect_effects(
             mob_dsl::MobMachineInput::UnwireExternalPeer {
                 key: key.clone(),
@@ -8088,7 +8319,27 @@ impl MobActor {
             },
             "unwire_external_peer",
         )?;
-        Ok(Self::effects_include_wiring_graph_change(&effects))
+        if !Self::effects_include_wiring_graph_change(&effects) {
+            return Ok(None);
+        }
+        let epoch = effects
+            .iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::WiringGraphChanged { epoch } => Some(*epoch),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::WiringError(
+                    "unwire_external_peer produced graph authority without topology epoch"
+                        .to_string(),
+                )
+            })?;
+        Ok(Some(
+            comms_trust_authority::MobMachineExternalPeerTrustHandoff::from_generated_external_peer_unwiring(
+                edge.endpoint.peer_id.0.clone(),
+                epoch,
+            ),
+        ))
     }
 
     /// Unwind side effects from a failed local-local unwire. Best-effort.
@@ -8114,13 +8365,58 @@ impl MobActor {
         peer_meerkat_id: &MeerkatId,
         local_entry: &RosterEntry,
         peer_entry: &RosterEntry,
+        _handoff: &MemberTrustHandoff,
     ) {
+        let rollback_handoff = if dsl_removed {
+            match self.apply_wire_members_idempotent(edge) {
+                Ok(authority) => match authority.member_handoff() {
+                    Ok(handoff) => Some(handoff.clone()),
+                    Err(err) => {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            %err,
+                            "unwire rollback: generated wire authority did not include member handoff"
+                        );
+                        None
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        %err,
+                        "unwire rollback: failed to re-submit DSL wire for generated trust authority"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         if removed_local_trust {
             let peer_key = Self::trusted_peer_removal_key(peer_spec);
             if let Err(err) = Self::apply_trusted_peer_add(
                 local_comms.as_ref(),
                 peer_spec.clone(),
-                self.mob_peer_wiring_authority(&peer_key),
+                match rollback_handoff
+                    .as_ref()
+                    .ok_or_else(|| {
+                        MobError::WiringError(
+                            "unwire rollback has no generated local trust add authority"
+                                .to_string(),
+                        )
+                    })
+                    .and_then(|handoff| handoff.add_authority_for(peer_meerkat_id, &peer_key))
+                {
+                    Ok(authority) => authority,
+                    Err(err) => {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            %err,
+                            "unwire rollback: failed to build generated local trust add authority"
+                        );
+                        return;
+                    }
+                },
             )
             .await
             {
@@ -8136,7 +8432,25 @@ impl MobActor {
             if let Err(err) = Self::apply_trusted_peer_add(
                 peer_comms.as_ref(),
                 local_spec.clone(),
-                self.mob_peer_wiring_authority(&local_key),
+                match rollback_handoff
+                    .as_ref()
+                    .ok_or_else(|| {
+                        MobError::WiringError(
+                            "unwire rollback has no generated peer trust add authority".to_string(),
+                        )
+                    })
+                    .and_then(|handoff| handoff.add_authority_for(local_meerkat_id, &local_key))
+                {
+                    Ok(authority) => authority,
+                    Err(err) => {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            %err,
+                            "unwire rollback: failed to build generated peer trust add authority"
+                        );
+                        return;
+                    }
+                },
             )
             .await
             {
@@ -8169,18 +8483,6 @@ impl MobActor {
                     mob_id = %self.definition.id,
                     %err,
                     "unwire rollback: failed to send compensating peer_added from peer side"
-                );
-            }
-        }
-        if dsl_removed {
-            if let Err(err) = self.apply_dsl_input(
-                mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
-                "unwire_members_rollback",
-            ) {
-                tracing::warn!(
-                    mob_id = %self.definition.id,
-                    %err,
-                    "unwire rollback: failed to re-submit DSL wire"
                 );
             }
         }
@@ -8273,10 +8575,13 @@ impl MobActor {
         let authority = self.apply_wire_external_peer_idempotent(&key, &edge)?;
         let removal_key = Self::trusted_peer_removal_key(&spec);
         if authority.is_repair() {
+            let handoff = authority.external_handoff()?;
             Self::apply_trusted_peer_add(
                 comms.as_ref(),
                 spec.clone(),
-                self.mob_peer_repair_authority(&removal_key),
+                handoff
+                    .authority_for_repair(&removal_key)
+                    .map_err(MobError::WiringError)?,
             )
             .await?;
             return Ok(());
@@ -8296,7 +8601,10 @@ impl MobActor {
         if let Err(error) = Self::apply_trusted_peer_add(
             comms.as_ref(),
             spec.clone(),
-            self.mob_peer_wiring_authority(&removal_key),
+            authority
+                .external_handoff()?
+                .authority_for_wiring(&removal_key)
+                .map_err(MobError::WiringError)?,
         )
         .await
         {
@@ -8318,22 +8626,47 @@ impl MobActor {
         let stored = match self.events.append(event).await {
             Ok(stored) => stored,
             Err(append_err) => {
-                if let Err(rollback_err) = Self::apply_trusted_peer_remove(
-                    comms.as_ref(),
-                    removal_key.clone(),
-                    self.mob_peer_unwiring_authority(&removal_key),
-                )
-                .await
-                {
+                let rollback_handoff = if dsl_added {
+                    match self.apply_unwire_external_peer_idempotent(&key, &edge) {
+                        Ok(Some(handoff)) => Some(handoff),
+                        Ok(None) => None,
+                        Err(error) => {
+                            tracing::warn!(
+                                mob_id = %self.definition.id,
+                                local = %local,
+                                %error,
+                                "failed to obtain generated external unwiring authority after event append failure"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                if let Some(rollback_handoff) = rollback_handoff {
+                    if let Err(rollback_err) = Self::apply_trusted_peer_remove(
+                        comms.as_ref(),
+                        removal_key.clone(),
+                        rollback_handoff
+                            .authority_for_unwiring(&removal_key)
+                            .map_err(MobError::WiringError)?,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            local = %local,
+                            error = %rollback_err,
+                            "failed to rollback external trust install after event append failure"
+                        );
+                    }
+                } else {
                     tracing::warn!(
                         mob_id = %self.definition.id,
                         local = %local,
-                        error = %rollback_err,
-                        "failed to rollback external trust install after event append failure"
+                        "external trust install rollback skipped without generated unwiring authority"
                     );
                 }
-                self.rollback_external_wire_dsl(&key, &edge, dsl_added)
-                    .await;
                 return Err(MobError::from(append_err));
             }
         };
@@ -8408,13 +8741,14 @@ impl MobActor {
             .or_else(|| self.external_peer_edge_for_name(&local_identity, &peer_name));
 
         let Some(prior_spec) = prior_spec else {
-            let dsl_removed = match authority_edge.as_ref() {
+            let unwire_handoff = match authority_edge.as_ref() {
                 Some(edge) => {
                     let key = Self::external_peer_key_for_edge(edge);
                     self.apply_unwire_external_peer_idempotent(&key, edge)?
                 }
-                None => false,
+                None => None,
             };
+            let dsl_removed = unwire_handoff.is_some();
             if let Some(spec) = stale_cleanup_spec
                 && let Some(comms) = self.provisioner_comms(&member_ref).await
             {
@@ -8435,7 +8769,15 @@ impl MobActor {
                 if let Err(error) = Self::apply_trusted_peer_remove(
                     comms.as_ref(),
                     removal_key.clone(),
-                    self.mob_peer_unwiring_authority(&removal_key),
+                    unwire_handoff
+                        .as_ref()
+                        .ok_or_else(|| {
+                            MobError::WiringError(format!(
+                                "external stale cleanup for '{local}' -> '{peer_name}' has no generated unwiring handoff"
+                            ))
+                        })?
+                        .authority_for_unwiring(&removal_key)
+                        .map_err(MobError::WiringError)?,
                 )
                 .await
                 {
@@ -8471,19 +8813,21 @@ impl MobActor {
             ))
         })?;
 
-        let dsl_removed = self.apply_unwire_external_peer_idempotent(&key, &edge)?;
-        if !dsl_removed {
+        let Some(unwire_handoff) = self.apply_unwire_external_peer_idempotent(&key, &edge)? else {
             return Err(MobError::WiringError(format!(
                 "external unwire for '{local}' -> '{peer_name}' was not authorized by MobMachine"
             )));
-        }
+        };
+        let dsl_removed = true;
 
         // Remove trust on the local session runtime.
         let prior_removal_key = Self::trusted_peer_removal_key(&prior_spec);
         if let Err(error) = Self::apply_trusted_peer_remove(
             comms.as_ref(),
             prior_removal_key.clone(),
-            self.mob_peer_unwiring_authority(&prior_removal_key),
+            unwire_handoff
+                .authority_for_unwiring(&prior_removal_key)
+                .map_err(MobError::WiringError)?,
         )
         .await
         {
@@ -8519,35 +8863,44 @@ impl MobActor {
             Err(append_err) => {
                 // Restore trust on append failure so the unwire is a full
                 // no-op from the caller's perspective.
-                if let Err(rollback_err) = Self::apply_trusted_peer_add(
-                    comms.as_ref(),
-                    prior_spec.clone(),
-                    self.mob_peer_wiring_authority(&prior_removal_key),
-                )
-                .await
-                {
-                    tracing::warn!(
-                        mob_id = %self.definition.id,
-                        local = %local,
-                        error = %rollback_err,
-                        "failed to rollback external trust removal after event append failure"
-                    );
-                }
-                if dsl_removed
-                    && let Err(rollback_err) = self.apply_dsl_input(
-                        mob_dsl::MobMachineInput::WireExternalPeer {
-                            key: key.clone(),
-                            edge: edge.clone(),
-                        },
-                        "external_unwire_rollback",
-                    )
-                {
-                    tracing::warn!(
-                        mob_id = %self.definition.id,
-                        local = %local,
-                        error = %rollback_err,
-                        "failed to rollback external DSL unwire after event append failure"
-                    );
+                if dsl_removed {
+                    match self.apply_wire_external_peer_idempotent(&key, &edge) {
+                        Ok(rollback_authority) => {
+                            let rollback_authority = if rollback_authority.is_repair() {
+                                rollback_authority
+                                    .external_handoff()?
+                                    .authority_for_repair(&prior_removal_key)
+                                    .map_err(MobError::WiringError)?
+                            } else {
+                                rollback_authority
+                                    .external_handoff()?
+                                    .authority_for_wiring(&prior_removal_key)
+                                    .map_err(MobError::WiringError)?
+                            };
+                            if let Err(rollback_err) = Self::apply_trusted_peer_add(
+                                comms.as_ref(),
+                                prior_spec.clone(),
+                                rollback_authority,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    mob_id = %self.definition.id,
+                                    local = %local,
+                                    error = %rollback_err,
+                                    "failed to rollback external trust removal after event append failure"
+                                );
+                            }
+                        }
+                        Err(rollback_err) => {
+                            tracing::warn!(
+                                mob_id = %self.definition.id,
+                                local = %local,
+                                error = %rollback_err,
+                                "failed to obtain generated external wiring authority after event append failure"
+                            );
+                        }
+                    }
                 }
                 return Err(MobError::from(append_err));
             }
@@ -8807,6 +9160,10 @@ impl MobActor {
                 .await?;
         }
 
+        let trust_unwire_authority_by_peer = self
+            .member_retire_trust_unwire_authorities(agent_identity, &entry)
+            .await?;
+
         let effects = self
             .apply_dsl_input_collect_effects(retire_input, "handle_retire_inner_mark_retiring")?;
         let mut detach_obligations =
@@ -8844,7 +9201,7 @@ impl MobActor {
 
         // Snapshot context and run disposal pipeline.
         let ctx = self
-            .disposal_context_from_entry(agent_identity, &entry)
+            .disposal_context_from_entry(agent_identity, &entry, trust_unwire_authority_by_peer)
             .await;
         let mut policy: Box<dyn ErrorPolicy> = if bulk {
             Box::new(BulkBestEffort)
@@ -9289,11 +9646,50 @@ impl MobActor {
     // Disposal pipeline
     // -----------------------------------------------------------------------
 
+    async fn member_retire_trust_unwire_authorities(
+        &mut self,
+        agent_identity: &MeerkatId,
+        entry: &RosterEntry,
+    ) -> Result<BTreeMap<AgentIdentity, CommsTrustMutationAuthority>, MobError> {
+        if entry.wired_to.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let retiring_spec = match self
+            .resolve_wiring_endpoint(entry, "retire trust authority retiring member")
+            .await?
+        {
+            WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
+        };
+        let retiring_peer_id = Self::trusted_peer_removal_key(&retiring_spec);
+        let mut authorities = BTreeMap::new();
+        let retiring_identity = AgentIdentity::from(agent_identity.as_str());
+        for peer_identity in &entry.wired_to {
+            let peer_present = {
+                let roster = self.roster.read().await;
+                roster.get_by_identity(peer_identity).is_some()
+            };
+            if !peer_present {
+                continue;
+            }
+            let edge = mob_dsl::WiringEdge::new(
+                mob_dsl::AgentIdentity::from_domain(&retiring_identity),
+                mob_dsl::AgentIdentity::from_domain(peer_identity),
+            );
+            let handoff =
+                self.authorize_member_trust_unwiring(&edge, "member_retire_trust_authority")?;
+            let authority =
+                handoff.unwiring_authority_for(&retiring_identity, &retiring_peer_id)?;
+            authorities.insert(peer_identity.clone(), authority);
+        }
+        Ok(authorities)
+    }
+
     /// Snapshot member state for disposal from a roster entry.
     async fn disposal_context_from_entry(
         &self,
         agent_identity: &MeerkatId,
         entry: &RosterEntry,
+        trust_unwire_authority_by_peer: BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
     ) -> DisposalContext {
         let retiring_key = self
             .provisioner_comms(&entry.member_ref)
@@ -9303,6 +9699,7 @@ impl MobActor {
             agent_identity: agent_identity.clone(),
             entry: entry.clone(),
             retiring_key,
+            trust_unwire_authority_by_peer,
         }
     }
 
@@ -9502,10 +9899,19 @@ impl MobActor {
                     }
                     if let Some(recipient_comms) = recipient_comms {
                         let retiring_key = Self::trusted_peer_removal_key(&retiring_spec);
+                        let Some(authority) = ctx
+                            .trust_unwire_authority_by_peer
+                            .get(&peer_identity)
+                            .cloned()
+                        else {
+                            return Some(MobError::WiringError(format!(
+                                "dispose_notify_peers missing generated retire trust handoff for '{peer_identity}'"
+                            )));
+                        };
                         if let Err(error) = Self::apply_trusted_peer_remove(
                             recipient_comms.as_ref(),
                             retiring_key.clone(),
-                            self.mob_peer_retire_authority(&retiring_key),
+                            authority,
                         )
                         .await
                         {
@@ -9882,7 +10288,7 @@ impl MobActor {
         };
 
         let ctx = self
-            .disposal_context_from_entry(&agent_identity, &entry)
+            .disposal_context_from_entry(&agent_identity, &entry, BTreeMap::new())
             .await;
         let disposal = self.dispose_member_for_destroy(&ctx).await;
 
@@ -10047,7 +10453,7 @@ impl MobActor {
         report: &mut super::handle::MobDestroyReport,
     ) -> Result<(), super::handle::MobDestroyError> {
         let ctx = self
-            .disposal_context_from_entry(&entry.agent_identity, &entry)
+            .disposal_context_from_entry(&entry.agent_identity, &entry, BTreeMap::new())
             .await;
         let disposal_report = self.dispose_member_for_destroy(&ctx).await;
         if let Some(error) = Self::destroy_disposal_failure(&disposal_report) {
@@ -12836,16 +13242,58 @@ impl MobActor {
         successful_wiring_targets: &[MeerkatId],
         planned_wiring_targets: &[MeerkatId],
     ) -> Result<(), MobError> {
+        let spawned_entry = {
+            let roster = self.roster.read().await;
+            roster.get(agent_identity).cloned()
+        };
         let retire_event_already_present =
             self.retire_event_exists(agent_identity, member_ref).await?;
         if !retire_event_already_present {
             self.append_retire_event(agent_identity, profile_name, member_ref)
                 .await?;
         }
-        let spawned_entry = {
-            let roster = self.roster.read().await;
-            roster.get(agent_identity).cloned()
-        };
+        let mut wired_peers = successful_wiring_targets.to_vec();
+        wired_peers.sort();
+        wired_peers.dedup();
+
+        let mut cleanup_peers = wired_peers.clone();
+        for peer_id in planned_wiring_targets {
+            if peer_id != agent_identity && !cleanup_peers.contains(peer_id) {
+                cleanup_peers.push(peer_id.clone());
+            }
+        }
+        let mut cleanup_handoffs = BTreeMap::new();
+        if spawned_entry.is_some() {
+            for peer_meerkat_id in &cleanup_peers {
+                let peer_entry = {
+                    let roster = self.roster.read().await;
+                    roster.get(peer_meerkat_id).cloned()
+                };
+                let Some(peer_entry) = peer_entry else {
+                    continue;
+                };
+                let cleanup_edge = mob_dsl::WiringEdge::new(
+                    mob_dsl::AgentIdentity::from_domain(agent_identity),
+                    mob_dsl::AgentIdentity::from_domain(&peer_entry.agent_identity),
+                );
+                match self.authorize_member_trust_cleanup(
+                    &cleanup_edge,
+                    "spawn_rollback_trust_cleanup_authority",
+                ) {
+                    Ok(handoff) => {
+                        cleanup_handoffs.insert(peer_entry.agent_identity.clone(), handoff);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            peer = %peer_entry.agent_identity,
+                            %error,
+                            "spawn rollback trust cleanup skipped without generated unwiring authority"
+                        );
+                    }
+                }
+            }
+        }
         if let Some(entry) = spawned_entry.as_ref() {
             let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
             let releasing = member_ref
@@ -12873,16 +13321,6 @@ impl MobActor {
             }
         }
 
-        let mut wired_peers = successful_wiring_targets.to_vec();
-        wired_peers.sort();
-        wired_peers.dedup();
-
-        let mut cleanup_peers = wired_peers.clone();
-        for peer_id in planned_wiring_targets {
-            if peer_id != agent_identity && !cleanup_peers.contains(peer_id) {
-                cleanup_peers.push(peer_id.clone());
-            }
-        }
         let spawned_comms = self.provisioner_comms(member_ref).await;
         let mut rollback = LifecycleRollback::new("spawn rollback");
 
@@ -12976,14 +13414,32 @@ impl MobActor {
                     WiringEndpoint::Local { comms, spec, .. } => (spec, Some(comms), None),
                     WiringEndpoint::PeerOnly { spec, binding } => (spec, None, Some(binding)),
                 };
+                let cleanup_handoff = cleanup_handoffs.get(&peer_entry.agent_identity);
                 if let Some(spawned_comms) = spawned_comms.as_ref() {
                     let peer_key = Self::trusted_peer_removal_key(&peer_spec);
-                    let _ = Self::apply_trusted_peer_remove(
-                        spawned_comms.as_ref(),
-                        peer_key.clone(),
-                        self.mob_peer_unwiring_authority(&peer_key),
-                    )
-                    .await;
+                    if let Some(handoff) = cleanup_handoff.as_ref() {
+                        let authority =
+                            handoff.unwiring_authority_for(&peer_entry.agent_identity, &peer_key);
+                        if let Ok(authority) = authority {
+                            let removed = Self::apply_trusted_peer_remove(
+                                spawned_comms.as_ref(),
+                                peer_key.clone(),
+                                authority,
+                            )
+                            .await;
+                            if removed.is_err()
+                                && let Ok(retry_authority) = handoff
+                                    .unwiring_authority_for(&peer_entry.agent_identity, &peer_key)
+                            {
+                                let _ = Self::apply_trusted_peer_remove(
+                                    spawned_comms.as_ref(),
+                                    peer_key.clone(),
+                                    retry_authority,
+                                )
+                                .await;
+                            }
+                        }
+                    }
                 } else if let Some(spawned_binding) = spawned_binding.as_ref() {
                     let _ = self
                         .unwire_peer_only_recipient(
@@ -12996,12 +13452,29 @@ impl MobActor {
                 }
                 if let Some(peer_comms) = peer_comms {
                     let spawned_key = Self::trusted_peer_removal_key(&spawned_spec);
-                    let _ = Self::apply_trusted_peer_remove(
-                        peer_comms.as_ref(),
-                        spawned_key.clone(),
-                        self.mob_peer_unwiring_authority(&spawned_key),
-                    )
-                    .await;
+                    if let Some(handoff) = cleanup_handoff.as_ref() {
+                        let authority =
+                            handoff.unwiring_authority_for(agent_identity, &spawned_key);
+                        if let Ok(authority) = authority {
+                            let removed = Self::apply_trusted_peer_remove(
+                                peer_comms.as_ref(),
+                                spawned_key.clone(),
+                                authority,
+                            )
+                            .await;
+                            if removed.is_err()
+                                && let Ok(retry_authority) =
+                                    handoff.unwiring_authority_for(agent_identity, &spawned_key)
+                            {
+                                let _ = Self::apply_trusted_peer_remove(
+                                    peer_comms.as_ref(),
+                                    spawned_key.clone(),
+                                    retry_authority,
+                                )
+                                .await;
+                            }
+                        }
+                    }
                 } else if let Some(peer_binding) = peer_binding {
                     let _ = self
                         .unwire_peer_only_recipient(
@@ -13039,6 +13512,7 @@ impl MobActor {
                 }
             }),
             retiring_key: spawned_comms.as_ref().and_then(|c| c.public_key()),
+            trust_unwire_authority_by_peer: BTreeMap::new(),
         };
         if let Err(error) = self.dispose_archive_session(&rollback_ctx).await {
             return Err(rollback.fail(error).await);

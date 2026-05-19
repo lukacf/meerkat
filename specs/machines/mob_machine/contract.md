@@ -130,6 +130,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RegisterMemberPeer`(agent_identity: AgentIdentity, peer_id: PeerId)
 - `AuthorizeMemberTrustWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `AuthorizeMemberTrustUnwiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
+- `AuthorizeMemberTrustCleanup`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `AuthorizeExternalPeerReciprocalTrust`(key: ExternalPeerKey, agent_identity: AgentIdentity)
 - `UnwireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
 - `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
@@ -969,6 +970,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeMemberTrustUnwiring`(edge, a_identity, b_identity)
 - Guards:
   - `edge_currently_wired`
+  - `edge_matches_members`
+  - `a_member_peer_registered`
+  - `b_member_peer_registered`
+- Emits: `MemberTrustUnwiringRequested`
+- To: `Running`
+
+### `AuthorizeMemberTrustCleanupRunning`
+- From: `Running`
+- On: `AuthorizeMemberTrustCleanup`(edge, a_identity, b_identity)
+- Guards:
   - `edge_matches_members`
   - `a_member_peer_registered`
   - `b_member_peer_registered`

@@ -44,13 +44,16 @@ fn descriptor_for(name: &str, pubkey: &meerkat_comms::identity::PubKey) -> Trust
 }
 
 async fn apply_generated_trust(runtime: &CommsRuntime, peer: TrustedPeerDescriptor) {
+    let peer_id = peer.peer_id.to_string();
     meerkat_core::agent::CommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
-            authority: comms_trust_authority::meerkat_machine_peer_projection(
-                peer.peer_id.to_string(),
+            authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
+                peer_id.clone(),
                 0,
-            ),
+            )
+            .authority_for(&peer_id)
+            .expect("valid generated trust authority"),
             peer,
         },
     )
@@ -62,7 +65,12 @@ async fn revoke_generated_trust(runtime: &CommsRuntime, peer_id: String) -> bool
     match meerkat_core::agent::CommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::RemoveTrustedPeer {
-            authority: comms_trust_authority::meerkat_machine_peer_projection(peer_id.clone(), 0),
+            authority: comms_trust_authority::MeerkatMachinePeerProjectionHandoff::from_generated_projection(
+                peer_id.clone(),
+                0,
+            )
+            .authority_for(&peer_id)
+            .expect("valid generated trust authority"),
             peer_id,
         },
     )

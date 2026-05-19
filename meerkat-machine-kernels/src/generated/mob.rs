@@ -2159,6 +2159,12 @@ pub mod inputs {
         pub b_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMemberTrustCleanup {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub b_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeExternalPeerReciprocalTrust {
         pub key: ExternalPeerKey,
         pub agent_identity: AgentIdentity,
@@ -2312,6 +2318,7 @@ pub enum Input {
     RegisterMemberPeer(inputs::RegisterMemberPeer),
     AuthorizeMemberTrustWiring(inputs::AuthorizeMemberTrustWiring),
     AuthorizeMemberTrustUnwiring(inputs::AuthorizeMemberTrustUnwiring),
+    AuthorizeMemberTrustCleanup(inputs::AuthorizeMemberTrustCleanup),
     AuthorizeExternalPeerReciprocalTrust(inputs::AuthorizeExternalPeerReciprocalTrust),
     UnwireExternalPeer(inputs::UnwireExternalPeer),
     SessionIngressDetachedForMobDestroy(inputs::SessionIngressDetachedForMobDestroy),
@@ -2381,6 +2388,7 @@ impl Input {
             Self::RegisterMemberPeer(_) => InputKind::RegisterMemberPeer,
             Self::AuthorizeMemberTrustWiring(_) => InputKind::AuthorizeMemberTrustWiring,
             Self::AuthorizeMemberTrustUnwiring(_) => InputKind::AuthorizeMemberTrustUnwiring,
+            Self::AuthorizeMemberTrustCleanup(_) => InputKind::AuthorizeMemberTrustCleanup,
             Self::AuthorizeExternalPeerReciprocalTrust(_) => {
                 InputKind::AuthorizeExternalPeerReciprocalTrust
             }
@@ -2453,6 +2461,7 @@ pub enum InputKind {
     RegisterMemberPeer,
     AuthorizeMemberTrustWiring,
     AuthorizeMemberTrustUnwiring,
+    AuthorizeMemberTrustCleanup,
     AuthorizeExternalPeerReciprocalTrust,
     UnwireExternalPeer,
     SessionIngressDetachedForMobDestroy,
@@ -3078,6 +3087,7 @@ pub enum TransitionId {
     RegisterMemberPeerRunning,
     AuthorizeMemberTrustWiringRunning,
     AuthorizeMemberTrustUnwiringRunning,
+    AuthorizeMemberTrustCleanupRunning,
     AuthorizeExternalPeerReciprocalTrustRunning,
     RecoverExternalPeerWiringRunning,
     RecoverExternalPeerWiringAlreadyRecovered,

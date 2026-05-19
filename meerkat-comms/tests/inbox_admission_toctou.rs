@@ -68,7 +68,12 @@ fn test_projection_add_authority(
     )
     .expect("AddDirectPeerEndpoint input");
     let mut obligations =
-        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition);
+        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+            &transition,
+            meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                std::sync::Arc::new(std::sync::Mutex::new(authority)),
+            ),
+        );
     let obligation = obligations.pop().expect("generated reconcile obligation");
     meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(&obligation, &endpoint)
         .expect("generated peer projection add authority")
@@ -107,7 +112,12 @@ fn test_projection_remove_authority(
     )
     .expect("RemoveDirectPeerEndpoint input");
     let mut obligations =
-        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition);
+        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+            &transition,
+            meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                std::sync::Arc::new(std::sync::Mutex::new(authority)),
+            ),
+        );
     let obligation = obligations.pop().expect("generated reconcile obligation");
     meerkat_runtime::protocol_comms_trust_reconcile::removal_authority_for_peer_id(
         &obligation,

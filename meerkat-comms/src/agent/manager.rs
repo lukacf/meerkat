@@ -1,6 +1,6 @@
 //! CommsManager - Central manager for agent communication.
 //!
-//! The CommsManager holds the keypair, trusted peers, inbox, and router,
+//! The CommsManager holds the keypair, compatibility peer directory, inbox, and router,
 //! providing a unified interface for comms operations.
 
 use std::sync::Arc;
@@ -16,7 +16,8 @@ use super::types::CommsMessage;
 pub struct CommsManagerConfig {
     /// Our keypair for signing messages.
     pub keypair: Keypair,
-    /// List of trusted peers.
+    /// Compatibility peer-directory mirror. These rows are not live
+    /// send/admission trust.
     pub trusted_peers: TrustedPeers,
     /// Comms configuration (timeouts, limits).
     pub comms_config: CommsConfig,
@@ -41,7 +42,11 @@ impl CommsManagerConfig {
         }
     }
 
-    /// Set the trusted peers.
+    /// Set the compatibility peer-directory mirror.
+    ///
+    /// Compatibility mirror only. `CommsManager` no longer promotes these
+    /// rows into live send/admission trust; generated machine/composition
+    /// trust authority must install runtime trust through the mutation seam.
     pub fn trusted_peers(mut self, trusted_peers: TrustedPeers) -> Self {
         self.trusted_peers = trusted_peers;
         self
@@ -70,7 +75,7 @@ impl Default for CommsManagerConfig {
 pub struct CommsManager {
     /// Our keypair for signing messages.
     keypair: Arc<Keypair>,
-    /// List of trusted peers.
+    /// Compatibility peer-directory mirror.
     trusted_peers: Arc<TrustedPeers>,
     /// The inbox for receiving messages.
     inbox: Inbox,
@@ -84,7 +89,7 @@ impl CommsManager {
     /// Create a new CommsManager with the given configuration.
     pub fn new(config: CommsManagerConfig) -> std::io::Result<Self> {
         let (inbox, inbox_sender) = Inbox::new();
-        let trusted_peers = Arc::new(config.trusted_peers.clone());
+        let trusted_peers = Arc::new(TrustedPeers::new());
 
         let router = Router::new(
             config.keypair,
@@ -118,7 +123,7 @@ impl CommsManager {
         self.keypair.public_key()
     }
 
-    /// Get the trusted peers.
+    /// Get the compatibility peer-directory mirror.
     pub fn trusted_peers(&self) -> &Arc<TrustedPeers> {
         &self.trusted_peers
     }
@@ -207,8 +212,10 @@ mod tests {
 
         let manager = CommsManager::new(config).unwrap();
 
-        assert_eq!(manager.trusted_peers().peers().len(), 1);
-        assert_eq!(manager.trusted_peers().peers()[0].name, "test-peer");
+        assert!(
+            manager.trusted_peers().peers().is_empty(),
+            "constructor trusted_peers are compatibility data only; live trust requires generated authority",
+        );
     }
 
     #[test]

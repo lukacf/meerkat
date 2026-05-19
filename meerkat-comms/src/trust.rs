@@ -332,14 +332,6 @@ impl TrustedPeers {
         self.peers.len()
     }
 
-    pub(crate) fn retain_raw_sendable_identities(&mut self) {
-        // Keep duplicate non-zero identities visible to the canonical router
-        // resolver so it can fail closed as ambiguous. Dropping them here would
-        // make ambiguous trust indistinguishable from missing trust and can
-        // enable auth-disabled discovery fallback.
-        self.peers.retain(|peer| peer.validate().is_ok());
-    }
-
     #[cfg(test)]
     pub(crate) fn push_unchecked_for_test(&mut self, peer: TrustedPeer) {
         self.peers.push(peer);

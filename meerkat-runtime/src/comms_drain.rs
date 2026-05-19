@@ -889,13 +889,13 @@ fn validate_supervisor_publish_obligation(
     Ok(())
 }
 
-async fn apply_generated_trust_add(
+async fn apply_generated_private_trust_add(
     comms_runtime: &Arc<dyn CommsRuntime>,
     peer: TrustedPeerDescriptor,
     authority: CommsTrustMutationAuthority,
 ) -> Result<(), String> {
     match comms_runtime
-        .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer { peer, authority })
+        .apply_trust_mutation(CommsTrustMutation::AddPrivateTrustedPeer { peer, authority })
         .await
         .map_err(|error| error.to_string())?
     {
@@ -906,13 +906,13 @@ async fn apply_generated_trust_add(
     }
 }
 
-async fn apply_generated_trust_remove(
+async fn apply_generated_private_trust_remove(
     comms_runtime: &Arc<dyn CommsRuntime>,
     peer_id: String,
     authority: CommsTrustMutationAuthority,
 ) -> Result<bool, String> {
     match comms_runtime
-        .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer { peer_id, authority })
+        .apply_trust_mutation(CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority })
         .await
         .map_err(|error| error.to_string())?
     {
@@ -948,7 +948,7 @@ async fn publish_supervisor_trust_from_generated_obligation(
     obligation: &crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation,
 ) -> Result<(), String> {
     let trusted_peer = trusted_peer_descriptor_from_supervisor_publish_obligation(obligation)?;
-    apply_generated_trust_add(
+    apply_generated_private_trust_add(
         comms_runtime,
         trusted_peer,
         supervisor_publish_authority(obligation)?,
@@ -1551,7 +1551,7 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            if let Err(error) = apply_generated_trust_add(
+            if let Err(error) = apply_generated_private_trust_add(
                 comms_runtime,
                 publish_spec,
                 match supervisor_publish_authority(&publish_obligation) {
@@ -1845,7 +1845,7 @@ async fn try_handle_supervisor_bridge_command(
                         return true;
                     }
                 };
-                if let Err(error) = apply_generated_trust_remove(
+                if let Err(error) = apply_generated_private_trust_remove(
                     comms_runtime,
                     revoke_obligation.peer_id().clone(),
                     match supervisor_revoke_authority(&revoke_obligation) {
@@ -2030,7 +2030,7 @@ async fn try_handle_supervisor_bridge_command(
                 .await;
                 return true;
             };
-            if let Err(error) = apply_generated_trust_remove(
+            if let Err(error) = apply_generated_private_trust_remove(
                 comms_runtime,
                 revoke_obligation.peer_id().clone(),
                 match supervisor_revoke_authority(&revoke_obligation) {
@@ -2588,10 +2588,15 @@ mod tests {
             },
         )
         .expect("ApplyMobPeerOverlay input");
-        let obligation = crate::protocol_comms_trust_reconcile::extract_obligations(&transition)
-            .into_iter()
-            .next()
-            .expect("generated reconcile obligation");
+        let obligation = crate::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+            &transition,
+            crate::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                std::sync::Arc::new(std::sync::Mutex::new(authority)),
+            ),
+        )
+        .into_iter()
+        .next()
+        .expect("generated reconcile obligation");
         let authority =
             crate::protocol_comms_trust_reconcile::authority_for_endpoint(&obligation, &endpoint)
                 .expect("generated authority");

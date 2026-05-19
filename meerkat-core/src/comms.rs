@@ -358,6 +358,7 @@ pub struct TrustedPeerDescriptor {
 #[derive(Debug, Clone)]
 pub struct CommsTrustMutationAuthority {
     source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    source_epoch: u64,
     trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
     operation: GeneratedCommsTrustAuthorityOperation,
     peer_id: String,
@@ -414,6 +415,7 @@ impl<'a> GeneratedCommsTrustAuthorityRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedCommsTrustAuthorityGrant {
     operation: GeneratedCommsTrustAuthorityOperation,
+    source_epoch: u64,
     trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
     peer_id: String,
     peer_descriptor: Option<TrustedPeerDescriptor>,
@@ -422,11 +424,12 @@ pub struct GeneratedCommsTrustAuthorityGrant {
 impl GeneratedCommsTrustAuthorityGrant {
     pub fn new(
         request: &GeneratedCommsTrustAuthorityRequest<'_>,
-        _epoch: u64,
+        source_epoch: u64,
         trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
     ) -> Self {
         Self {
             operation: request.operation,
+            source_epoch,
             trust_row_owner_kind,
             peer_id: request.peer_id.to_owned(),
             peer_descriptor: None,
@@ -435,7 +438,7 @@ impl GeneratedCommsTrustAuthorityGrant {
 
     pub fn new_add(
         request: &GeneratedCommsTrustAuthorityRequest<'_>,
-        _epoch: u64,
+        source_epoch: u64,
         trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
         peer_descriptor: TrustedPeerDescriptor,
     ) -> Result<Self, String> {
@@ -469,6 +472,7 @@ impl GeneratedCommsTrustAuthorityGrant {
         }
         Ok(Self {
             operation: request.operation,
+            source_epoch,
             trust_row_owner_kind,
             peer_id: request.peer_id.to_owned(),
             peer_descriptor: Some(peer_descriptor),
@@ -622,6 +626,7 @@ impl CommsTrustMutationAuthority {
         }
         Ok(Self {
             source_kind,
+            source_epoch: grant.source_epoch,
             trust_row_owner_kind: grant.trust_row_owner_kind,
             operation,
             peer_id: grant.peer_id,
@@ -736,6 +741,10 @@ impl CommsTrustMutationAuthority {
 
     pub fn source_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind {
         self.source_kind
+    }
+
+    pub fn source_epoch(&self) -> u64 {
+        self.source_epoch
     }
 
     pub fn trust_row_owner_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind {

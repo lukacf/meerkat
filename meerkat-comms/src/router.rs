@@ -29,6 +29,13 @@ use crate::trust::{TrustError, TrustedPeer, TrustedPeers, TrustedPeersView};
 use crate::types::{Envelope, MessageKind};
 use meerkat_core::comms::{GeneratedCommsTrustAuthoritySourceKind, PeerId};
 
+type TrustSourceSet = std::collections::BTreeSet<GeneratedCommsTrustAuthoritySourceKind>;
+type TrustSourceMap = std::collections::HashMap<PeerId, TrustSourceSet>;
+type TrustDescriptorMap = std::collections::HashMap<
+    PeerId,
+    std::collections::BTreeMap<GeneratedCommsTrustAuthoritySourceKind, TrustedPeer>,
+>;
+
 /// Derive the canonical [`PeerId`] for a signing [`crate::identity::PubKey`].
 ///
 /// Thin wrapper over [`crate::identity::PubKey::to_peer_id`] — kept for
@@ -114,22 +121,13 @@ pub struct Router {
     /// Mechanical projection of which generated source currently owns each
     /// trust row. Admission uses the union; generated removals are scoped to
     /// the source that authorized them.
-    trusted_peer_sources: Arc<
-        RwLock<
-            std::collections::HashMap<
-                PeerId,
-                std::collections::BTreeSet<GeneratedCommsTrustAuthoritySourceKind>,
-            >,
-        >,
-    >,
-    private_peer_sources: Arc<
-        RwLock<
-            std::collections::HashMap<
-                PeerId,
-                std::collections::BTreeSet<GeneratedCommsTrustAuthoritySourceKind>,
-            >,
-        >,
-    >,
+    trusted_peer_sources: Arc<RwLock<TrustSourceMap>>,
+    /// Source-owned descriptors for generated trust rows. The public
+    /// `trusted_peers` set remains the send/admission union, but source-scoped
+    /// snapshots read this map so one generated owner cannot rewrite another
+    /// owner's descriptor projection.
+    trusted_peer_descriptors_by_source: Arc<RwLock<TrustDescriptorMap>>,
+    private_peer_sources: Arc<RwLock<TrustSourceMap>>,
     config: CommsConfig,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
@@ -143,20 +141,27 @@ enum TrustedPeerLookup {
 }
 
 impl Router {
+    /// Construct a router with an empty live trust projection.
+    ///
+    /// The `TrustedPeers` argument is retained for source compatibility but is
+    /// intentionally not promoted into send/admission trust. Live trust rows
+    /// are installed only by generated machine/composition mutation authority.
     pub fn new(
         keypair: Keypair,
-        mut trusted_peers: TrustedPeers,
+        _trusted_peers: TrustedPeers,
         config: CommsConfig,
         inbox_sender: InboxSender,
         require_peer_auth: bool,
     ) -> Self {
-        trusted_peers.retain_raw_sendable_identities();
         Self {
             keypair: Arc::new(keypair),
-            trusted_peers: Arc::new(RwLock::new(trusted_peers)),
+            trusted_peers: Arc::new(RwLock::new(TrustedPeers::new())),
             trusted_peer_ids: Arc::new(RwLock::new(std::collections::HashMap::new())),
             private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             trusted_peer_sources: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            trusted_peer_descriptors_by_source: Arc::new(RwLock::new(
+                std::collections::HashMap::new(),
+            )),
             private_peer_sources: Arc::new(RwLock::new(std::collections::HashMap::new())),
             config,
             require_peer_auth,
@@ -172,13 +177,16 @@ impl Router {
         inbox_sender: InboxSender,
         require_peer_auth: bool,
     ) -> Self {
-        trusted_peers.write().retain_raw_sendable_identities();
+        *trusted_peers.write() = TrustedPeers::new();
         Self {
             keypair: Arc::new(keypair),
             trusted_peers,
             trusted_peer_ids: Arc::new(RwLock::new(std::collections::HashMap::new())),
             private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             trusted_peer_sources: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            trusted_peer_descriptors_by_source: Arc::new(RwLock::new(
+                std::collections::HashMap::new(),
+            )),
             private_peer_sources: Arc::new(RwLock::new(std::collections::HashMap::new())),
             config,
             require_peer_auth,
@@ -207,6 +215,22 @@ impl Router {
             .read()
             .get(peer_id)
             .is_some_and(|sources| sources.contains(&source_kind))
+    }
+
+    pub(crate) fn trusted_peers_for_source(
+        &self,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> Vec<(PeerId, TrustedPeer)> {
+        self.trusted_peer_descriptors_by_source
+            .read()
+            .iter()
+            .filter_map(|(peer_id, descriptors)| {
+                descriptors
+                    .get(&source_kind)
+                    .cloned()
+                    .map(|peer| (*peer_id, peer))
+            })
+            .collect()
     }
 
     pub(crate) fn peer_id_for_pubkey(&self, pubkey: &crate::identity::PubKey) -> PeerId {
@@ -253,8 +277,13 @@ impl Router {
         private: bool,
     ) -> Result<(), TrustError> {
         let pubkey = peer.pubkey;
-        self.trusted_peers.write().upsert(peer)?;
+        self.trusted_peers.write().upsert(peer.clone())?;
         self.trusted_peer_ids.write().insert(pubkey, peer_id);
+        self.trusted_peer_descriptors_by_source
+            .write()
+            .entry(peer_id)
+            .or_default()
+            .insert(source_kind, peer);
         self.trusted_peer_sources
             .write()
             .entry(peer_id)
@@ -295,6 +324,18 @@ impl Router {
         if !source_removed {
             return false;
         }
+        let remaining_descriptor = {
+            let mut descriptors_by_source = self.trusted_peer_descriptors_by_source.write();
+            let Some(descriptors) = descriptors_by_source.get_mut(peer_id) else {
+                return false;
+            };
+            descriptors.remove(&source_kind);
+            let remaining = descriptors.values().next().cloned();
+            if descriptors.is_empty() {
+                descriptors_by_source.remove(peer_id);
+            }
+            remaining
+        };
         {
             let mut private_sources = self.private_peer_sources.write();
             if let Some(peer_sources) = private_sources.get_mut(peer_id) {
@@ -304,6 +345,20 @@ impl Router {
                     self.private_peer_ids.write().remove(peer_id);
                 }
             }
+        }
+        if let Some(peer) = remaining_descriptor {
+            let peer_ids = self.trusted_peer_ids.read().clone();
+            let removed_pubkeys = self
+                .trusted_peers
+                .write()
+                .remove_all_by_resolved_peer_id(&peer_ids, peer_id);
+            let mut trusted_peer_ids = self.trusted_peer_ids.write();
+            for pubkey in removed_pubkeys {
+                trusted_peer_ids.remove(&pubkey);
+            }
+            trusted_peer_ids.insert(peer.pubkey, *peer_id);
+            drop(trusted_peer_ids);
+            return self.trusted_peers.write().upsert(peer).is_ok();
         }
         if self.trusted_peer_sources.read().contains_key(peer_id) {
             return true;

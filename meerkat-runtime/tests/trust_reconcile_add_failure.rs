@@ -81,10 +81,15 @@ fn obligation(
         );
     }
     let transition = transition.expect("projection epoch loop produces transition");
-    meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition)
-        .into_iter()
-        .next()
-        .expect("generated reconcile obligation")
+    meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+        &transition,
+        meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+            Arc::new(std::sync::Mutex::new(authority)),
+        ),
+    )
+    .into_iter()
+    .next()
+    .expect("generated reconcile obligation")
 }
 
 /// `CommsRuntime` mock whose next generated trust add mutation returns

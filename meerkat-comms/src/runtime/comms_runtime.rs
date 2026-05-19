@@ -2021,11 +2021,19 @@ impl CommsRuntime {
         include_private: bool,
         source_kind: Option<GeneratedCommsTrustAuthoritySourceKind>,
     ) -> Vec<TrustedPeerDescriptor> {
-        let mut trusted_peers: Vec<TrustedPeerDescriptor> = self
-            .trusted_peers
-            .read()
-            .iter()
-            .filter_map(|peer| {
+        let peer_rows: Vec<(meerkat_core::comms::PeerId, TrustedPeer)> =
+            if let Some(source_kind) = source_kind {
+                self.router.trusted_peers_for_source(source_kind)
+            } else {
+                self.trusted_peers
+                    .read()
+                    .iter()
+                    .map(|peer| (self.router.peer_id_for_pubkey(&peer.pubkey), peer.clone()))
+                    .collect()
+            };
+        let mut trusted_peers: Vec<TrustedPeerDescriptor> = peer_rows
+            .into_iter()
+            .filter_map(|(peer_id, peer)| {
                 if peer.pubkey.is_zero() {
                     tracing::warn!(
                         peer_name = %peer.name,
@@ -2033,13 +2041,7 @@ impl CommsRuntime {
                     );
                     return None;
                 }
-                let peer_id = self.router.peer_id_for_pubkey(&peer.pubkey);
                 if !include_private && self.router.is_private_peer_id(&peer_id) {
-                    return None;
-                }
-                if let Some(source_kind) = source_kind
-                    && !self.router.has_trust_source(&peer_id, source_kind)
-                {
                     return None;
                 }
                 let name = match PeerName::new(peer.name.clone()) {
@@ -3010,7 +3012,12 @@ mod tests {
         )
         .expect("AddDirectPeerEndpoint input");
         let mut obligations =
-            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition);
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &transition,
+                meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                    Arc::new(std::sync::Mutex::new(authority)),
+                ),
+            );
         let obligation = obligations.pop().expect("generated reconcile obligation");
         meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
             &obligation,
@@ -3070,7 +3077,12 @@ mod tests {
         )
         .expect("RemoveDirectPeerEndpoint input");
         let mut obligations =
-            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition);
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &transition,
+                meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                    Arc::new(std::sync::Mutex::new(authority)),
+                ),
+            );
         let obligation = obligations.pop().expect("generated reconcile obligation");
         meerkat_runtime::protocol_comms_trust_reconcile::removal_authority_for_peer_id(
             &obligation,
@@ -3233,6 +3245,69 @@ mod tests {
             "MobMachine-owned trust must remain after a MeerkatMachine removal no-op",
         );
         assert_eq!(public_snapshot[0].peer_id, descriptor.peer_id);
+    }
+
+    #[tokio::test]
+    async fn source_scoped_snapshot_uses_source_owned_descriptor() {
+        let runtime =
+            CommsRuntime::inproc_only("trust-mutator-source-scoped-descriptor").expect("runtime");
+        let peer_key = Keypair::generate().public_key();
+        let projection_descriptor =
+            trusted_descriptor("projection-owned", peer_key, "inproc://projection-owned");
+        let mob_descriptor = trusted_descriptor("mob-owned", peer_key, "inproc://mob-owned");
+        let peer_id = projection_descriptor.peer_id;
+        let projection_peer =
+            descriptor_to_trusted_peer(projection_descriptor.clone()).expect("valid descriptor");
+        let mob_peer =
+            descriptor_to_trusted_peer(mob_descriptor.clone()).expect("valid descriptor");
+
+        runtime
+            .router
+            .add_trusted_peer_with_peer_id(
+                peer_id,
+                projection_peer,
+                GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+                false,
+            )
+            .expect("test setup installs MeerkatMachine-owned trust");
+        runtime
+            .router
+            .add_trusted_peer_with_peer_id(
+                peer_id,
+                mob_peer,
+                GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring,
+                false,
+            )
+            .expect("test setup installs MobMachine-owned trust");
+
+        let projection_snapshot = CoreCommsRuntime::trusted_peer_projection_snapshot_for_source(
+            &runtime,
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+        )
+        .await
+        .expect("projection source snapshot");
+        assert_eq!(projection_snapshot, vec![projection_descriptor.clone()]);
+        let mob_snapshot = CoreCommsRuntime::trusted_peer_projection_snapshot_for_source(
+            &runtime,
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring,
+        )
+        .await
+        .expect("mob source snapshot");
+        assert_eq!(mob_snapshot, vec![mob_descriptor.clone()]);
+
+        let remove = runtime.router.remove_trusted_peer_for_source(
+            &peer_id,
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring,
+        );
+        assert!(remove, "test setup removal should remove MobMachine source");
+        let public_snapshot = CoreCommsRuntime::public_trusted_peer_projection_snapshot(&runtime)
+            .await
+            .expect("public trust snapshot");
+        assert_eq!(
+            public_snapshot,
+            vec![projection_descriptor],
+            "union projection should fall back to the remaining source-owned descriptor",
+        );
     }
 
     #[tokio::test]

@@ -95,7 +95,12 @@ fn test_comms_reconcile_obligation(
     )
     .expect("ApplyMobPeerOverlay input");
     let mut obligations =
-        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition);
+        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+            &transition,
+            meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                std::sync::Arc::new(std::sync::Mutex::new(authority)),
+            ),
+        );
     assert_eq!(
         obligations.len(),
         1,

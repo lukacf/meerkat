@@ -5,6 +5,54 @@
 
 use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};
 
+#[derive(Clone)]
+pub struct PeerProjectionFreshnessAuthority {
+    authority: Option<
+        std::sync::Arc<std::sync::Mutex<crate::meerkat_machine::dsl::MeerkatMachineAuthority>>,
+    >,
+}
+
+impl std::fmt::Debug for PeerProjectionFreshnessAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerProjectionFreshnessAuthority")
+            .field("present", &self.authority.is_some())
+            .finish()
+    }
+}
+
+impl PeerProjectionFreshnessAuthority {
+    pub fn from_authority(
+        authority: std::sync::Arc<
+            std::sync::Mutex<crate::meerkat_machine::dsl::MeerkatMachineAuthority>,
+        >,
+    ) -> Self {
+        Self {
+            authority: Some(authority),
+        }
+    }
+
+    fn missing() -> Self {
+        Self { authority: None }
+    }
+
+    fn validate_peer_projection_epoch(&self, expected_epoch: u64) -> Result<(), String> {
+        let Some(authority) = &self.authority else {
+            return Err("generated peer projection freshness authority is absent".to_string());
+        };
+        let guard = authority.lock().map_err(|_| {
+            "generated peer projection freshness authority was poisoned".to_string()
+        })?;
+        let current_epoch = guard.state().peer_projection_epoch;
+        if current_epoch == expected_epoch {
+            Ok(())
+        } else {
+            Err(format!(
+                "stale generated peer projection trust obligation at epoch {expected_epoch} (current {current_epoch})"
+            ))
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CommsTrustReconcileObligation {
     peer_projection_epoch: u64,
@@ -12,6 +60,7 @@ pub struct CommsTrustReconcileObligation {
     mob_overlay_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
     comms_trust_authority_claims:
         std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+    peer_projection_freshness_authority: PeerProjectionFreshnessAuthority,
 }
 
 impl CommsTrustReconcileObligation {
@@ -87,6 +136,8 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for CommsTrustRecon
                 request.operation()
             ));
         }
+        self.peer_projection_freshness_authority
+            .validate_peer_projection_epoch(self.peer_projection_epoch)?;
         match request.operation() {
             Operation::PublicAdd => {
                 let requested = self
@@ -141,6 +192,13 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for CommsTrustRecon
 pub fn extract_obligations(
     transition: &MeerkatMachineTransition,
 ) -> Vec<CommsTrustReconcileObligation> {
+    extract_obligations_with_freshness(transition, PeerProjectionFreshnessAuthority::missing())
+}
+
+pub fn extract_obligations_with_freshness(
+    transition: &MeerkatMachineTransition,
+    peer_projection_freshness_authority: PeerProjectionFreshnessAuthority,
+) -> Vec<CommsTrustReconcileObligation> {
     transition
         .effects()
         .iter()
@@ -154,6 +212,7 @@ pub fn extract_obligations(
                 direct_peer_endpoints: direct_peer_endpoints.clone(),
                 mob_overlay_peer_endpoints: mob_overlay_peer_endpoints.clone(),
                 comms_trust_authority_claims: Default::default(),
+                peer_projection_freshness_authority: peer_projection_freshness_authority.clone(),
             }),
             _ => None,
         })

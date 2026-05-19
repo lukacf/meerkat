@@ -324,6 +324,10 @@ fn generate_obligation_struct(
         .variant_named(protocol.effect_variant.as_str())
         .context("producer effect variant missing")?;
 
+    if protocol.name.as_str() == "comms_trust_reconcile" {
+        emit_peer_projection_freshness_authority(out)?;
+    }
+
     writeln!(out, "#[derive(Debug, Clone)]")?;
     writeln!(out, "pub struct {obligation_type} {{")?;
     if protocol.obligation_fields.is_empty() {
@@ -348,6 +352,12 @@ fn generate_obligation_struct(
         writeln!(
             out,
             "    comms_trust_authority_claims: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,"
+        )?;
+    }
+    if protocol.name.as_str() == "comms_trust_reconcile" {
+        writeln!(
+            out,
+            "    peer_projection_freshness_authority: PeerProjectionFreshnessAuthority,"
         )?;
     }
     writeln!(out, "}}")?;
@@ -379,6 +389,74 @@ fn generate_obligation_struct(
     emit_comms_trust_authority_source_impl(out, protocol, &obligation_type)?;
 
     Ok(obligation_type)
+}
+
+fn emit_peer_projection_freshness_authority(out: &mut String) -> Result<()> {
+    writeln!(out, "#[derive(Clone)]")?;
+    writeln!(out, "pub struct PeerProjectionFreshnessAuthority {{")?;
+    writeln!(
+        out,
+        "    authority: Option<std::sync::Arc<std::sync::Mutex<crate::meerkat_machine::dsl::MeerkatMachineAuthority>>>,"
+    )?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "impl std::fmt::Debug for PeerProjectionFreshnessAuthority {{"
+    )?;
+    writeln!(
+        out,
+        "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
+    )?;
+    writeln!(
+        out,
+        "        f.debug_struct(\"PeerProjectionFreshnessAuthority\").field(\"present\", &self.authority.is_some()).finish()"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(out, "impl PeerProjectionFreshnessAuthority {{")?;
+    writeln!(
+        out,
+        "    pub fn from_authority(authority: std::sync::Arc<std::sync::Mutex<crate::meerkat_machine::dsl::MeerkatMachineAuthority>>) -> Self {{"
+    )?;
+    writeln!(out, "        Self {{ authority: Some(authority) }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(out, "    fn missing() -> Self {{")?;
+    writeln!(out, "        Self {{ authority: None }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "    fn validate_peer_projection_epoch(&self, expected_epoch: u64) -> Result<(), String> {{"
+    )?;
+    writeln!(out, "        let Some(authority) = &self.authority else {{")?;
+    writeln!(
+        out,
+        "            return Err(\"generated peer projection freshness authority is absent\".to_string());"
+    )?;
+    writeln!(out, "        }};")?;
+    writeln!(
+        out,
+        "        let guard = authority.lock().map_err(|_| \"generated peer projection freshness authority was poisoned\".to_string())?;"
+    )?;
+    writeln!(
+        out,
+        "        let current_epoch = guard.state().peer_projection_epoch;"
+    )?;
+    writeln!(out, "        if current_epoch == expected_epoch {{")?;
+    writeln!(out, "            Ok(())")?;
+    writeln!(out, "        }} else {{")?;
+    writeln!(
+        out,
+        "            Err(format!(\"stale generated peer projection trust obligation at epoch {{expected_epoch}} (current {{current_epoch}})\"))"
+    )?;
+    writeln!(out, "        }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
 }
 
 fn emit_comms_trust_authority_source_impl(
@@ -428,6 +506,12 @@ fn emit_comms_trust_authority_source_impl(
         "    ) -> Result<meerkat_core::comms::GeneratedCommsTrustAuthorityGrant, String> {{"
     )?;
     emit_comms_trust_allowed_operation_check(out, protocol)?;
+    if protocol.name.as_str() == "comms_trust_reconcile" {
+        writeln!(
+            out,
+            "        self.peer_projection_freshness_authority.validate_peer_projection_epoch(self.peer_projection_epoch)?;"
+        )?;
+    }
     emit_comms_trust_payload_authorization(out, protocol)?;
     writeln!(
         out,
@@ -1041,7 +1125,26 @@ fn generate_effect_extractor_helpers(
         .variant_named(protocol.effect_variant.as_str())
         .context("producer effect missing")?;
 
-    if let Some(transition_type) = transition_type {
+    if protocol.name.as_str() == "comms_trust_reconcile" {
+        let transition_type = transition_type
+            .as_ref()
+            .context("comms_trust_reconcile requires transition extractor")?;
+        writeln!(
+            out,
+            "pub fn extract_obligations(transition: &{transition_type}) -> Vec<{obligation_type}> {{"
+        )?;
+        writeln!(
+            out,
+            "    extract_obligations_with_freshness(transition, PeerProjectionFreshnessAuthority::missing())"
+        )?;
+        writeln!(out, "}}")?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "pub fn extract_obligations_with_freshness(transition: &{transition_type}, peer_projection_freshness_authority: PeerProjectionFreshnessAuthority) -> Vec<{obligation_type}> {{"
+        )?;
+        writeln!(out, "    transition.effects()")?;
+    } else if let Some(transition_type) = transition_type {
         writeln!(
             out,
             "pub fn extract_obligations(transition: &{transition_type}) -> Vec<{obligation_type}> {{"
@@ -1978,10 +2081,19 @@ fn obligation_ctor_expr(
     producer_effect: &meerkat_machine_schema::VariantSchema,
 ) -> Result<String> {
     if protocol.obligation_fields.is_empty() {
-        let trust_claims = if protocol.comms_trust_authority.is_some() {
-            ", comms_trust_authority_claims: Default::default()"
+        let mut extra_fields = Vec::new();
+        if protocol.comms_trust_authority.is_some() {
+            extra_fields.push("comms_trust_authority_claims: Default::default()");
+        }
+        if protocol.name.as_str() == "comms_trust_reconcile" {
+            extra_fields.push(
+                "peer_projection_freshness_authority: peer_projection_freshness_authority.clone()",
+            );
+        }
+        let trust_claims = if extra_fields.is_empty() {
+            String::new()
         } else {
-            ""
+            format!(", {}", extra_fields.join(", "))
         };
         return Ok(format!(
             "{obligation_type} {{ _private: (){trust_claims} }}"
@@ -2006,6 +2118,12 @@ fn obligation_ctor_expr(
         .collect::<Result<Vec<_>>>()?;
     if protocol.comms_trust_authority.is_some() {
         fields.push("comms_trust_authority_claims: Default::default()".to_string());
+    }
+    if protocol.name.as_str() == "comms_trust_reconcile" {
+        fields.push(
+            "peer_projection_freshness_authority: peer_projection_freshness_authority.clone()"
+                .to_string(),
+        );
     }
     let fields = fields.join(", ");
     Ok(format!("{obligation_type} {{ {fields} }}"))

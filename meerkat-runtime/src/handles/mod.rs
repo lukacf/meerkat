@@ -268,6 +268,18 @@ impl HandleDslAuthority {
         guard.state().clone()
     }
 
+    /// Generated comms-trust freshness authority for peer-projection
+    /// handoffs. The generated `comms_trust_reconcile` protocol uses this
+    /// handle to fail closed when an obligation no longer matches the current
+    /// MeerkatMachine peer-projection epoch.
+    pub fn peer_projection_freshness_authority(
+        &self,
+    ) -> crate::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority {
+        crate::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+            Arc::clone(&self.inner),
+        )
+    }
+
     /// Run `body` under the shared authority's mutex. The closure observes
     /// the DSL state atomically with any side effects it performs on the
     /// handle's external state (e.g. installing an observer before any

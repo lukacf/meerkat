@@ -83,7 +83,12 @@ fn test_projection_authority(
     )
     .expect("AddDirectPeerEndpoint input");
     let mut obligations =
-        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition);
+        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+            &transition,
+            meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                std::sync::Arc::new(std::sync::Mutex::new(authority)),
+            ),
+        );
     let obligation = obligations.pop().expect("generated reconcile obligation");
     meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(&obligation, &endpoint)
         .expect("generated peer projection add authority")

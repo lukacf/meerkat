@@ -437,38 +437,112 @@ mod tests {
         epoch: u64,
         direct_peer_endpoints: BTreeSet<PeerEndpoint>,
     ) -> CommsTrustReconcileObligation {
-        let mut authority = crate::meerkat_machine::dsl::MeerkatMachineAuthority::new();
-        authority
-            .apply_signal(crate::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
-            .expect("Initialize signal");
-        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut authority,
-            crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
-                session_id: crate::meerkat_machine::dsl::SessionId::from(
-                    "comms-trust-reconcile-test",
-                ),
-            },
-        )
-        .expect("RegisterSession input");
+        let authority = Arc::new(std::sync::Mutex::new(
+            crate::meerkat_machine::dsl::MeerkatMachineAuthority::new(),
+        ));
         let projection_epoch = epoch.max(1);
-        let mut transition = None;
-        for overlay_epoch in 1..=projection_epoch {
-            transition = Some(
-                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                    &mut authority,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
-                        epoch: overlay_epoch,
-                        endpoints: direct_peer_endpoints.clone(),
-                    },
-                )
-                .expect("ApplyMobPeerOverlay input"),
+        let transition = {
+            let mut guard = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard
+                .apply_signal(crate::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
+                .expect("Initialize signal");
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *guard,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                    session_id: crate::meerkat_machine::dsl::SessionId::from(
+                        "comms-trust-reconcile-test",
+                    ),
+                },
+            )
+            .expect("RegisterSession input");
+            let mut transition = None;
+            for overlay_epoch in 1..=projection_epoch {
+                transition = Some(
+                    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                        &mut *guard,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                            epoch: overlay_epoch,
+                            endpoints: direct_peer_endpoints.clone(),
+                        },
+                    )
+                    .expect("ApplyMobPeerOverlay input"),
+                );
+            }
+            transition.expect("projection epoch loop produces transition")
+        };
+        crate::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+            &transition,
+            crate::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                authority,
+            ),
+        )
+        .into_iter()
+        .next()
+        .expect("generated reconcile obligation")
+    }
+
+    fn stale_obligation_pair(
+        first_peer_endpoints: BTreeSet<PeerEndpoint>,
+        second_peer_endpoints: BTreeSet<PeerEndpoint>,
+    ) -> (CommsTrustReconcileObligation, CommsTrustReconcileObligation) {
+        let authority = Arc::new(std::sync::Mutex::new(
+            crate::meerkat_machine::dsl::MeerkatMachineAuthority::new(),
+        ));
+        let (first_transition, second_transition) = {
+            let mut guard = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard
+                .apply_signal(crate::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
+                .expect("Initialize signal");
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *guard,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                    session_id: crate::meerkat_machine::dsl::SessionId::from(
+                        "comms-trust-reconcile-stale-test",
+                    ),
+                },
+            )
+            .expect("RegisterSession input");
+            let first = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *guard,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                    epoch: 1,
+                    endpoints: first_peer_endpoints,
+                },
+            )
+            .expect("ApplyMobPeerOverlay first input");
+            let second = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *guard,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                    epoch: 2,
+                    endpoints: second_peer_endpoints,
+                },
+            )
+            .expect("ApplyMobPeerOverlay second input");
+            (first, second)
+        };
+        let freshness =
+            crate::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                Arc::clone(&authority),
             );
-        }
-        let transition = transition.expect("projection epoch loop produces transition");
-        crate::protocol_comms_trust_reconcile::extract_obligations(&transition)
-            .into_iter()
-            .next()
-            .expect("generated reconcile obligation")
+        let first = crate::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+            &first_transition,
+            freshness.clone(),
+        )
+        .into_iter()
+        .next()
+        .expect("first generated reconcile obligation");
+        let second = crate::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+            &second_transition,
+            freshness,
+        )
+        .into_iter()
+        .next()
+        .expect("second generated reconcile obligation");
+        (first, second)
     }
 
     #[test]
@@ -497,6 +571,26 @@ mod tests {
         assert!(
             duplicate_remove.contains("already minted"),
             "unexpected duplicate remove rejection: {duplicate_remove}",
+        );
+    }
+
+    #[test]
+    fn stale_generated_reconcile_obligation_cannot_mint_authority() {
+        let endpoint_a = endpoint("A", UUID_A);
+        let endpoint_b = endpoint("B", UUID_B);
+        let (stale, current) = stale_obligation_pair(
+            BTreeSet::from([endpoint_a.clone()]),
+            BTreeSet::from([endpoint_b.clone()]),
+        );
+
+        crate::protocol_comms_trust_reconcile::authority_for_endpoint(&current, &endpoint_b)
+            .expect("current obligation mints authority");
+        let stale_error =
+            crate::protocol_comms_trust_reconcile::authority_for_endpoint(&stale, &endpoint_a)
+                .expect_err("stale obligation must fail closed");
+        assert!(
+            stale_error.contains("stale generated peer projection trust obligation"),
+            "unexpected stale-obligation rejection: {stale_error}",
         );
     }
 

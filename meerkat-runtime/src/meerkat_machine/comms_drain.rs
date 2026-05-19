@@ -1062,6 +1062,10 @@ impl MeerkatMachine {
             .ok_or(PeerEndpointStageError::SessionNotRegistered)?;
 
         let reconcile_obligation = {
+            let freshness_authority =
+                crate::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                    Arc::clone(&entry.dsl_authority),
+                );
             let mut authority = entry
                 .dsl_authority
                 .lock()
@@ -1069,10 +1073,13 @@ impl MeerkatMachine {
             let transition =
                 crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
                     .map_err(PeerEndpointStageError::Dsl)?;
-            crate::protocol_comms_trust_reconcile::extract_obligations(&transition)
-                .into_iter()
-                .next()
-                .ok_or(PeerEndpointStageError::MissingReconcileEffect)?
+            crate::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &transition,
+                freshness_authority,
+            )
+            .into_iter()
+            .next()
+            .ok_or(PeerEndpointStageError::MissingReconcileEffect)?
         };
 
         let reconciler = Arc::new(crate::comms_trust_reconcile::CommsTrustReconciler::new(

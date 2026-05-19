@@ -180,7 +180,10 @@ impl MobSupervisorBridge {
                 ))
             })?;
         let obligations =
-            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition);
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &transition,
+                dsl.peer_projection_freshness_authority(),
+            );
         let obligation = match obligations.as_slice() {
             [obligation] => obligation.clone(),
             [] => {

@@ -7210,7 +7210,7 @@ async fn prepare_run_mob_tools(
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
 ) -> anyhow::Result<RunMobToolsContext> {
     let _lock = acquire_mob_registry_lock(scope).await?;
-    let (state, registry) = hydrate_mob_state(
+    let (state, _registry) = hydrate_mob_state(
         scope,
         session_service,
         None,
@@ -7219,7 +7219,12 @@ async fn prepare_run_mob_tools(
         std::collections::BTreeMap::new(),
     )
     .await?;
-    let known_mob_ids = registry.mobs.keys().cloned().collect();
+    let known_mob_ids = state
+        .mob_list()
+        .await
+        .into_iter()
+        .map(|(mob_id, _)| mob_id.to_string())
+        .collect();
     Ok(RunMobToolsContext {
         state,
         known_mob_ids,
@@ -7239,8 +7244,12 @@ async fn prepare_run_mob_tools_from_surface(
         Arc::clone(&surface.mob_state_cache),
     )
     .await?;
-    let registry = load_mob_registry(scope).await?;
-    let known_mob_ids = registry.mobs.keys().cloned().collect();
+    let known_mob_ids = state
+        .mob_list()
+        .await
+        .into_iter()
+        .map(|(mob_id, _)| mob_id.to_string())
+        .collect();
     Ok(RunMobToolsContext {
         state,
         known_mob_ids,
@@ -10581,6 +10590,13 @@ fn mob_registry_lock_path(scope: &RuntimeScope) -> PathBuf {
 }
 
 #[cfg(feature = "mob")]
+fn mob_persistent_runtime_root(scope: &RuntimeScope) -> PathBuf {
+    let paths =
+        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
+    paths.root
+}
+
+#[cfg(feature = "mob")]
 struct MobRegistryLock {
     #[cfg(unix)]
     _lock: nix::fcntl::Flock<std::fs::File>,
@@ -10848,32 +10864,6 @@ fn cache_run_snapshot(
 }
 
 #[cfg(feature = "mob")]
-fn cached_run_snapshot(
-    registry: &PersistedMobRegistry,
-    mob_id: &str,
-    run_id: &str,
-) -> Option<meerkat_mob::MobRun> {
-    registry
-        .mobs
-        .get(mob_id)
-        .and_then(|mob| mob.runs.get(run_id))
-        .filter(|run| run.status().is_terminal())
-        .cloned()
-}
-
-#[cfg(feature = "mob")]
-fn parse_mob_state(value: &str) -> Option<meerkat_mob::MobState> {
-    match value {
-        "Creating" => Some(meerkat_mob::MobState::Creating),
-        "Running" => Some(meerkat_mob::MobState::Running),
-        "Stopped" => Some(meerkat_mob::MobState::Stopped),
-        "Completed" => Some(meerkat_mob::MobState::Completed),
-        "Destroyed" => Some(meerkat_mob::MobState::Destroyed),
-        _ => None,
-    }
-}
-
-#[cfg(feature = "mob")]
 type LlmClientProvider =
     Arc<dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync + 'static>;
 
@@ -10893,6 +10883,7 @@ async fn hydrate_mob_state(
             session_service.clone(),
             runtime_adapter.clone(),
         )
+        .with_persistent_storage_root(Some(mob_persistent_runtime_root(scope)))
         .with_default_llm_client_provider(default_llm_client_provider)
         .with_external_tools_provider(external_tools_provider.clone()),
     );
@@ -10900,70 +10891,6 @@ async fn hydrate_mob_state(
         state
             .mob_insert_handle(meerkat_mob::MobId::from(mob_id.clone()), handle.clone())
             .await;
-    }
-    for (mob_id, persisted) in &registry.mobs {
-        if seeded_handles.contains_key(mob_id) {
-            continue;
-        }
-        let storage = meerkat_mob::MobStorage::in_memory();
-        let terminal_runs = persisted
-            .runs
-            .values()
-            .filter(|run| run.status().is_terminal())
-            .cloned()
-            .collect();
-        let handoff = meerkat_mob::MobLegacyRegistryHandoff::try_from_legacy_registry_snapshot(
-            meerkat_mob::MobId::from(mob_id.clone()),
-            persisted.definition.clone(),
-            persisted.events.clone(),
-            terminal_runs,
-        )
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-        storage
-            .import_validated_legacy_registry(handoff)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        let mut builder = meerkat_mob::MobBuilder::for_resume(storage)
-            .with_session_service(session_service.clone())
-            .with_default_external_tools_provider(external_tools_provider.clone())
-            .notify_orchestrator_on_resume(false);
-        if let Some(adapter) = runtime_adapter.clone() {
-            builder = builder.with_runtime_adapter(adapter);
-        }
-        let handle = builder.resume().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        let created = handle.mob_id().clone();
-        if created.as_str() != mob_id {
-            return Err(anyhow::anyhow!(
-                "mob registry id mismatch: key='{mob_id}' definition='{created}'"
-            ));
-        }
-
-        if let Some(target_status) = persisted.status.as_deref().and_then(parse_mob_state) {
-            let current = handle
-                .status()
-                .await
-                .map_err(|e| anyhow::anyhow!("read mob status: {e}"))?;
-            match (current, target_status) {
-                (meerkat_mob::MobState::Running, meerkat_mob::MobState::Stopped) => {
-                    handle.stop().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-                }
-                (meerkat_mob::MobState::Stopped, meerkat_mob::MobState::Running) => {
-                    handle.resume().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-                }
-                (
-                    meerkat_mob::MobState::Running | meerkat_mob::MobState::Stopped,
-                    meerkat_mob::MobState::Completed,
-                ) => {
-                    handle
-                        .complete()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                }
-                _ => {}
-            }
-        }
-        state.mob_insert_handle(created, handle).await;
     }
     Ok((state, registry))
 }
@@ -11219,7 +11146,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     cache_run_snapshot(&mut registry, &mob_id, run.clone())?;
                     Some(run)
                 }
-                None => cached_run_snapshot(&registry, &mob_id, &run_id),
+                None => None,
             };
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
@@ -18676,77 +18603,6 @@ supports_reasoning = true
 
         let null_json = render_flow_status_json(None).expect("encode null json");
         assert_eq!(null_json, "null");
-    }
-
-    #[cfg(feature = "mob")]
-    #[test]
-    fn test_cached_run_snapshot_returns_only_terminal_runs() {
-        let completed_id = RunId::new();
-        let running_id = RunId::new();
-        let now = chrono::Utc::now();
-        let mut registry = PersistedMobRegistry::default();
-        registry.mobs.insert(
-            "flow-mob".to_string(),
-            PersistedMob {
-                definition: None,
-                status: Some("Running".to_string()),
-                events: Vec::new(),
-                runs: std::collections::BTreeMap::from([
-                    (
-                        completed_id.to_string(),
-                        meerkat_mob::MobRun {
-                            run_id: completed_id.clone(),
-                            mob_id: meerkat_mob::MobId::from("flow-mob"),
-                            flow_id: FlowId::from("demo"),
-                            status: meerkat_mob::MobRunStatus::Completed,
-                            activation_params: serde_json::json!({}),
-                            created_at: now,
-                            completed_at: Some(now),
-                            step_ledger: Vec::new(),
-                            failure_ledger: Vec::new(),
-                            flow_state: Default::default(),
-                            flow_authority_inputs: Vec::new(),
-                            frames: std::collections::BTreeMap::new(),
-                            loops: std::collections::BTreeMap::new(),
-                            loop_iteration_ledger: Vec::new(),
-                            schema_version: 4,
-                            root_step_outputs: Default::default(),
-                            loop_iteration_outputs: Default::default(),
-                        },
-                    ),
-                    (
-                        running_id.to_string(),
-                        meerkat_mob::MobRun {
-                            run_id: running_id.clone(),
-                            mob_id: meerkat_mob::MobId::from("flow-mob"),
-                            flow_id: FlowId::from("demo"),
-                            status: meerkat_mob::MobRunStatus::Running,
-                            activation_params: serde_json::json!({}),
-                            created_at: now,
-                            completed_at: None,
-                            step_ledger: Vec::new(),
-                            failure_ledger: Vec::new(),
-                            flow_state: Default::default(),
-                            flow_authority_inputs: Vec::new(),
-                            frames: std::collections::BTreeMap::new(),
-                            loops: std::collections::BTreeMap::new(),
-                            loop_iteration_ledger: Vec::new(),
-                            schema_version: 4,
-                            root_step_outputs: Default::default(),
-                            loop_iteration_outputs: Default::default(),
-                        },
-                    ),
-                ]),
-            },
-        );
-
-        let completed = cached_run_snapshot(&registry, "flow-mob", &completed_id.to_string());
-        let running = cached_run_snapshot(&registry, "flow-mob", &running_id.to_string());
-        assert!(completed.is_some(), "terminal cached run should resolve");
-        assert!(
-            running.is_none(),
-            "non-terminal cached run must never be treated as authoritative"
-        );
     }
 
     #[test]

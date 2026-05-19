@@ -554,35 +554,6 @@ fn seed_mob_authority_sync_from_events(
     Ok(())
 }
 
-pub(crate) fn mob_event_kind_is_replayed_by_generated_recovery(
-    kind: &crate::event::MobEventKind,
-) -> bool {
-    matches!(
-        kind,
-        crate::event::MobEventKind::MobCreated { .. }
-            | crate::event::MobEventKind::MobCompleted
-            | crate::event::MobEventKind::MobDestroying
-            | crate::event::MobEventKind::MobDestroyStorageFinalizing
-            | crate::event::MobEventKind::MemberSpawned(_)
-            | crate::event::MobEventKind::MemberRetired { .. }
-            | crate::event::MobEventKind::MemberReset { .. }
-            | crate::event::MobEventKind::MembersWired { .. }
-            | crate::event::MobEventKind::MembersWiredBatch { .. }
-            | crate::event::MobEventKind::MembersUnwired { .. }
-            | crate::event::MobEventKind::ExternalPeerWired { .. }
-            | crate::event::MobEventKind::ExternalPeerUnwired { .. }
-    )
-}
-
-pub(crate) fn validate_mob_events_with_generated_recovery(
-    events: &[crate::event::MobEvent],
-    definition: &MobDefinition,
-) -> Result<MobState, MobError> {
-    let mut authority = Box::new(seed_mob_authority());
-    seed_mob_authority_sync_from_events(&mut authority, events, definition)?;
-    Ok(seeded_mob_public_phase(authority.state()))
-}
-
 async fn seed_mob_authority_sync_from_flow_runs(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     run_store: Arc<dyn crate::store::MobRunStore>,

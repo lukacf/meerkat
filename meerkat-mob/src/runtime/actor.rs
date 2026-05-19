@@ -9333,6 +9333,9 @@ impl MobActor {
                     .cloned()
             })
             .unwrap_or_else(mob_dsl::SessionId::default);
+        let release_session_for_failed_projection = releasing
+            .as_ref()
+            .and_then(|session_id| SessionId::parse(&session_id.0).ok());
         let retire_input = mob_dsl::MobMachineInput::Retire {
             mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
             agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
@@ -9341,20 +9344,9 @@ impl MobActor {
             session_id: session_id_for_route,
         };
 
-        // MobMachine admits the command before the event projection records
-        // retirement. The actual transition is still applied after the durable
-        // event append so crash recovery keeps its event-first ordering.
-        self.preview_dsl_input(retire_input.clone(), "handle_retire_inner_admission")?;
-
-        // Append retire event (event-first for crash recovery).
         let retire_event_already_present = self
             .retire_event_exists(agent_identity, &entry.member_ref)
             .await?;
-        if !retire_event_already_present {
-            self.append_retire_event(agent_identity, &entry.role, &entry.member_ref)
-                .await?;
-        }
-
         let trust_unwire_authority_by_peer = self
             .member_retire_trust_unwire_authorities(agent_identity, &entry)
             .await?;
@@ -9371,6 +9363,16 @@ impl MobActor {
         {
             self.detach_session_ingress_for_mob_destroy(&session_id, obligation)
                 .await?;
+        }
+        if !retire_event_already_present
+            && let Err(error) = self
+                .append_retire_event(agent_identity, &entry.role, &entry.member_ref)
+                .await
+        {
+            if let Some(session_id) = release_session_for_failed_projection.as_ref() {
+                self.discard_pending_routed_effects_for_session(session_id);
+            }
+            return Err(error);
         }
 
         // Flush routed effects *before* the disposal pipeline tears down
@@ -10207,6 +10209,13 @@ impl MobActor {
             .await;
         self.retire_all_members("complete").await?;
 
+        // MobMachine owns the lifecycle transition; the event log records the
+        // accepted transition for durable recovery after authority has moved.
+        self.apply_command_admission(
+            mob_dsl::MobMachineInput::Complete,
+            MobState::Completed,
+            "complete_input",
+        )?;
         self.events
             .append(NewMobEvent {
                 mob_id: self.definition.id.clone(),
@@ -10214,12 +10223,6 @@ impl MobActor {
                 kind: MobEventKind::MobCompleted,
             })
             .await?;
-        // Apply Complete input to set active_run_count = 0 and transition to Completed phase
-        self.apply_command_admission(
-            mob_dsl::MobMachineInput::Complete,
-            MobState::Completed,
-            "complete_input",
-        )?;
         self.ensure_pending_spawn_alignment("handle_complete completion")?;
         self.ensure_flow_tracker_alignment("handle_complete completion")
             .await?;
@@ -10338,19 +10341,34 @@ impl MobActor {
     }
 
     async fn record_destroying_event(&mut self) -> Result<(), MobError> {
-        self.events
-            .append(NewMobEvent {
-                mob_id: self.definition.id.clone(),
-                timestamp: None,
-                kind: MobEventKind::MobDestroying,
-            })
-            .await?;
-        self.apply_dsl_signal(
-            mob_dsl::MobMachineSignal::AdmitDestroyCleanup,
-            "record_destroying_event",
-        )?;
+        if !self.destroy_admitted() {
+            self.apply_dsl_signal(
+                mob_dsl::MobMachineSignal::AdmitDestroyCleanup,
+                "record_destroying_event",
+            )?;
+        }
+        if !self.destroying_event_exists().await? {
+            self.events
+                .append(NewMobEvent {
+                    mob_id: self.definition.id.clone(),
+                    timestamp: None,
+                    kind: MobEventKind::MobDestroying,
+                })
+                .await?;
+        }
         let _ = self.phase_watch_tx.send(self.state());
         Ok(())
+    }
+
+    async fn destroying_event_exists(&self) -> Result<bool, MobError> {
+        let events = self.events.replay_all().await?;
+        let epoch_start = events
+            .iter()
+            .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
+            .map_or(0, |pos| pos + 1);
+        Ok(events[epoch_start..]
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MobDestroying)))
     }
 
     async fn destroy_storage_finalizing_event_exists(&self) -> Result<bool, MobError> {
@@ -10773,10 +10791,7 @@ impl MobActor {
                 }
             }
         }
-        if !self.destroy_admitted()
-            && destroy_input_needed
-            && let Err(error) = self.record_destroying_event().await
-        {
+        if destroy_input_needed && let Err(error) = self.record_destroying_event().await {
             report.push_error(format!("destroy marker append failed: {error}"));
             return Err(MobDestroyError::Incomplete { report });
         }
@@ -11964,6 +11979,21 @@ impl MobActor {
             }
             return Err(error);
         }
+        // Commit ResetToRunning on the live authority before projecting the
+        // new durable epoch. ResetToRunning owns active/pending run counters
+        // and coordinator binding, so reset does not need shell Stop/Resume or
+        // orchestrator stop/resume choreography.
+        if let Err(error) = self.apply_command_admission(
+            mob_dsl::MobMachineInput::Reset,
+            MobState::Running,
+            "reset_to_running",
+        ) {
+            if was_stopped {
+                self.provisioner.cancel_all_checkpointers().await;
+            }
+            return Err(error);
+        }
+
         // --- Event rewrite phase: append new epoch markers. ---
         // Append-only epoch model: MobCreated (for resume) + MobReset (epoch
         // marker). Projections clear on MobReset; resume uses the last
@@ -11996,17 +12026,6 @@ impl MobActor {
         self.edge_locks.clear().await;
         self.retired_event_index.write().await.clear();
 
-        // The command handler already checked Reset's live MobMachine phase
-        // guard before destructive shell work began. Once side effects and
-        // epoch events have succeeded, commit the typed ResetToRunning
-        // transition on the live authority. ResetToRunning owns active/pending
-        // run counters and coordinator binding, so reset does not need shell
-        // Stop/Resume or orchestrator stop/resume choreography.
-        self.apply_command_admission(
-            mob_dsl::MobMachineInput::Reset,
-            MobState::Running,
-            "reset_to_running",
-        )?;
         self.ensure_pending_spawn_alignment("handle_reset completion")?;
         self.ensure_flow_tracker_alignment("handle_reset completion")
             .await?;
@@ -13496,10 +13515,6 @@ impl MobActor {
         };
         let retire_event_already_present =
             self.retire_event_exists(agent_identity, member_ref).await?;
-        if !retire_event_already_present {
-            self.append_retire_event(agent_identity, profile_name, member_ref)
-                .await?;
-        }
         let mut wired_peers = successful_wiring_targets.to_vec();
         wired_peers.sort();
         wired_peers.dedup();
@@ -13529,7 +13544,14 @@ impl MobActor {
                     "spawn_rollback_trust_cleanup_authority",
                 ) {
                     Ok(handoff) => {
-                        cleanup_handoffs.insert(peer_entry.agent_identity.clone(), handoff);
+                        let retry_handoff = self
+                            .authorize_member_trust_cleanup(
+                                &cleanup_edge,
+                                "spawn_rollback_trust_cleanup_retry_authority",
+                            )
+                            .ok();
+                        cleanup_handoffs
+                            .insert(peer_entry.agent_identity.clone(), (handoff, retry_handoff));
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -13563,10 +13585,24 @@ impl MobActor {
                     %error,
                     "spawn rollback could not mark runtime retired in DSL"
                 );
+                if let Some(session_id) = member_ref.bridge_session_id() {
+                    self.discard_pending_routed_effects_for_session(session_id);
+                }
+                return Err(error);
             }
             if let Some(session_id) = member_ref.bridge_session_id() {
                 self.discard_pending_routed_effects_for_session(session_id);
             }
+        }
+        if !retire_event_already_present
+            && let Err(error) = self
+                .append_retire_event(agent_identity, profile_name, member_ref)
+                .await
+        {
+            if let Some(session_id) = member_ref.bridge_session_id() {
+                self.discard_pending_routed_effects_for_session(session_id);
+            }
+            return Err(error);
         }
 
         let spawned_comms = self.provisioner_comms(member_ref).await;
@@ -13665,7 +13701,7 @@ impl MobActor {
                 let cleanup_handoff = cleanup_handoffs.get(&peer_entry.agent_identity);
                 if let Some(spawned_comms) = spawned_comms.as_ref() {
                     let peer_key = Self::trusted_peer_removal_key(&peer_spec);
-                    if let Some(handoff) = cleanup_handoff.as_ref() {
+                    if let Some((handoff, retry_handoff)) = cleanup_handoff.as_ref() {
                         let authority =
                             handoff.unwiring_authority_for(&peer_entry.agent_identity, &peer_key);
                         if let Ok(authority) = authority {
@@ -13676,7 +13712,8 @@ impl MobActor {
                             )
                             .await;
                             if removed.is_err()
-                                && let Ok(retry_authority) = handoff
+                                && let Some(retry_handoff) = retry_handoff.as_ref()
+                                && let Ok(retry_authority) = retry_handoff
                                     .unwiring_authority_for(&peer_entry.agent_identity, &peer_key)
                             {
                                 let _ = Self::apply_trusted_peer_remove(
@@ -13700,7 +13737,7 @@ impl MobActor {
                 }
                 if let Some(peer_comms) = peer_comms {
                     let spawned_key = Self::trusted_peer_removal_key(&spawned_spec);
-                    if let Some(handoff) = cleanup_handoff.as_ref() {
+                    if let Some((handoff, retry_handoff)) = cleanup_handoff.as_ref() {
                         let authority =
                             handoff.unwiring_authority_for(agent_identity, &spawned_key);
                         if let Ok(authority) = authority {
@@ -13711,8 +13748,9 @@ impl MobActor {
                             )
                             .await;
                             if removed.is_err()
-                                && let Ok(retry_authority) =
-                                    handoff.unwiring_authority_for(agent_identity, &spawned_key)
+                                && let Some(retry_handoff) = retry_handoff.as_ref()
+                                && let Ok(retry_authority) = retry_handoff
+                                    .unwiring_authority_for(agent_identity, &spawned_key)
                             {
                                 let _ = Self::apply_trusted_peer_remove(
                                     peer_comms.as_ref(),

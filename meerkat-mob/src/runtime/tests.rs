@@ -17823,13 +17823,13 @@ async fn test_spawn_rollback_ignores_missing_comms_for_non_wired_planned_targets
 }
 
 #[tokio::test]
-async fn test_spawn_rollback_archive_failure_keeps_spawned_entry_and_persists_retired_event() {
+async fn test_spawn_rollback_archive_failure_closes_projection_and_persists_retired_event() {
     let (handle, service) = create_test_mob(sample_definition_with_auto_wire()).await;
     service
         .set_comms_behavior(
-            &test_comms_name("worker", "w-1"),
+            &test_comms_name("lead", "l-1"),
             MockCommsBehavior {
-                missing_public_key: true,
+                fail_send_peer_added: true,
                 ..MockCommsBehavior::default()
             },
         )
@@ -17852,18 +17852,27 @@ async fn test_spawn_rollback_archive_failure_keeps_spawned_entry_and_persists_re
     );
     assert!(
         handle
-            .get_member(&AgentIdentity::from("w-1"))
+            .list_members()
             .await
-            .is_some(),
-        "rollback archive failure must not remove spawned roster entry"
+            .iter()
+            .all(|member| member.agent_identity != AgentIdentity::from("w-1")),
+        "generated retirement authority must close the active member projection even when archive cleanup fails"
     );
 
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
+        events.iter().any(|e| matches!(
+            &e.kind,
+            MobEventKind::MemberSpawned(event)
+                if event.agent_identity == AgentIdentity::from("w-1")
+        )),
+        "test must exercise post-spawn rollback after generated spawn authority accepts"
+    );
+    assert!(
         events
             .iter()
             .any(|e| matches!(e.kind, MobEventKind::MemberRetired { .. })),
-        "rollback must persist MemberRetired before side-effect cleanup so retries stay replay-safe"
+        "rollback must persist MemberRetired after generated retirement authority accepts"
     );
 }
 

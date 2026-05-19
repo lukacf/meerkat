@@ -42,10 +42,9 @@ fn stamp_runtime_semantics(state: &mut InputState) {
 
 fn stored_accepted(mut state: InputState) -> StoredInputState {
     stamp_runtime_semantics(&mut state);
-    StoredInputState {
-        seed: InputStateSeed::new_accepted(),
-        state,
-    }
+    let mut seed = InputStateSeed::new_accepted();
+    seed.recovery_lane = Some(meerkat_core::types::HandlingMode::Queue);
+    StoredInputState { seed, state }
 }
 
 struct FailPersistInputStore {
@@ -759,6 +758,7 @@ async fn recover_allows_legacy_unstamped_terminal_rows() {
                     terminal_outcome: Some(InputTerminalOutcome::Consumed),
                     attempt_count: 0,
                     admission_sequence: None,
+                    recovery_lane: None,
                 },
             },
         )
@@ -826,6 +826,7 @@ async fn recover_consumes_committed_applied_pending_inputs() {
             terminal_outcome: None,
             attempt_count: 1,
             admission_sequence: None,
+            recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
         },
     };
     store.persist_input_state(&rid, &stored).await.unwrap();
@@ -898,6 +899,7 @@ async fn recover_duplicate_legacy_input_row_keeps_canonical_boundary_receipt() {
             terminal_outcome: None,
             attempt_count: 1,
             admission_sequence: None,
+            recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
         },
     };
     store
@@ -972,6 +974,7 @@ async fn recover_prefers_canonical_duplicate_over_newer_stale_legacy_row() {
             terminal_outcome: None,
             attempt_count: 1,
             admission_sequence: None,
+            recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
         },
     };
     store
@@ -1043,6 +1046,7 @@ async fn recover_ignores_legacy_boundary_receipt_load_error_after_canonical_miss
                     terminal_outcome: None,
                     attempt_count: 1,
                     admission_sequence: None,
+                    recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
                 },
             },
         )
@@ -1104,6 +1108,7 @@ async fn recover_treats_canonical_boundary_receipt_miss_as_authoritative() {
                     terminal_outcome: None,
                     attempt_count: 1,
                     admission_sequence: None,
+                    recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
                 },
             },
         )

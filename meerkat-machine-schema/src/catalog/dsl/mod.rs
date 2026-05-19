@@ -386,7 +386,6 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "RecoveredInputNormalizationReasonKind",
                 &[
-                    "ConsumeOnAccept",
                     "QueueAccepted",
                     "RollbackStaged",
                     "BoundaryReceiptCommitted",
@@ -730,10 +729,6 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "RecoveredInputRecoveryDisposition",
                 &["Retain", "Discard"],
-            ),
-            NamedTypeBinding::string_enum(
-                "RecoveredRoutingDisposition",
-                &["Queue", "Steer", "Immediate", "Drop"],
             ),
             NamedTypeBinding::string_enum(
                 "RecoveredRunApplyBoundary",

@@ -2515,7 +2515,6 @@ pub enum WaitAllRejectReasonKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RecoveredInputNormalizationReasonKind {
     #[default]
-    ConsumeOnAccept,
     QueueAccepted,
     RollbackStaged,
     BoundaryReceiptCommitted,
@@ -2573,27 +2572,6 @@ impl From<crate::identifiers::InputKind> for RecoveredInputKind {
             crate::identifiers::InputKind::ExternalEvent => Self::ExternalEvent,
             crate::identifiers::InputKind::Continuation => Self::Continuation,
             crate::identifiers::InputKind::Operation => Self::Operation,
-        }
-    }
-}
-
-/// Typed mirror of recovered routing disposition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum RecoveredRoutingDisposition {
-    #[default]
-    Queue,
-    Steer,
-    Immediate,
-    Drop,
-}
-
-impl From<crate::policy::RoutingDisposition> for RecoveredRoutingDisposition {
-    fn from(disposition: crate::policy::RoutingDisposition) -> Self {
-        match disposition {
-            crate::policy::RoutingDisposition::Queue => Self::Queue,
-            crate::policy::RoutingDisposition::Steer => Self::Steer,
-            crate::policy::RoutingDisposition::Immediate => Self::Immediate,
-            crate::policy::RoutingDisposition::Drop => Self::Drop,
         }
     }
 }

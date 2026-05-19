@@ -587,6 +587,13 @@ impl EphemeralRuntimeDriver {
             as u32
     }
 
+    /// Read the machine-owned recovery lane for an input from the DSL.
+    pub fn input_recovery_lane(&self, input_id: &InputId) -> Option<HandlingMode> {
+        let key = Self::dsl_key(input_id);
+        let lane = self.with_dsl_state(|state| state.input_recovery_lanes.get(&key).copied())?;
+        Some(Self::handling_mode_from_admission_lane(lane))
+    }
+
     // ---- Admission metadata accessors (read-only) ----
 
     /// The admission order as minted by the DSL's `input_admission_seq`.
@@ -750,7 +757,7 @@ impl EphemeralRuntimeDriver {
     ///
     /// Important: this first submits a recovered-admission witness to
     /// MeerkatMachine. Mechanical metadata is re-materialized only after that
-    /// generated authority accepts the persisted kind/policy/semantics tuple.
+    /// generated authority accepts the persisted kind/lane/semantics tuple.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn admit_recovered_to_ingress(
         &mut self,
@@ -758,7 +765,6 @@ impl EphemeralRuntimeDriver {
         runtime_semantics: RuntimeInputSemantics,
         recovered_state: &InputState,
         recovered_seed: &InputStateSeed,
-        policy: PolicyDecision,
         request_id: Option<RequestId>,
         reservation_key: Option<ReservationKey>,
         admission_sequence_recovery: Option<mm_dsl::RecoveredInputNormalizationReasonKind>,
@@ -769,7 +775,11 @@ impl EphemeralRuntimeDriver {
             ))
         })?;
         let input_kind = persisted_input.kind();
-        let handling_mode = crate::accept::handling_mode_from_policy(&policy);
+        let handling_mode = recovered_seed.recovery_lane.ok_or_else(|| {
+            RuntimeDriverError::Internal(format!(
+                "store corruption: recovered input '{work_id}' missing generated recovery lane witness"
+            ))
+        })?;
         let content_shape = ContentShape::from_kind(input_kind);
         let primitive_projection = crate::input::runtime_input_projection(persisted_input);
         let is_prompt = matches!(persisted_input, Input::Prompt(_));
@@ -779,14 +789,8 @@ impl EphemeralRuntimeDriver {
             input_kind,
             handling_mode,
             runtime_semantics,
-            &policy,
         )?;
-        self.apply_recovered_lifecycle(
-            &work_id,
-            recovered_seed,
-            Some(handling_mode),
-            admission_sequence_recovery,
-        )?;
+        self.apply_recovered_lifecycle(&work_id, recovered_seed, admission_sequence_recovery)?;
         self.register_accepted_idempotency(&work_id, recovered_state.idempotency_key.as_ref())?;
         self.record_admission_metadata(
             &work_id,
@@ -795,7 +799,7 @@ impl EphemeralRuntimeDriver {
             runtime_semantics,
             primitive_projection,
             is_prompt,
-            &policy,
+            None,
             request_id.as_ref(),
             reservation_key.as_ref(),
         );
@@ -808,7 +812,6 @@ impl EphemeralRuntimeDriver {
         input_kind: crate::identifiers::InputKind,
         handling_mode: HandlingMode,
         runtime_semantics: RuntimeInputSemantics,
-        policy: &PolicyDecision,
     ) -> Result<(), RuntimeDriverError> {
         let terminal_apply_intent = runtime_semantics
             .peer_response_terminal_apply_intent
@@ -826,10 +829,6 @@ impl EphemeralRuntimeDriver {
             mm_dsl::MeerkatMachineInput::RecoverAdmittedInput {
                 input_id: Self::dsl_key(work_id),
                 input_kind: mm_dsl::RecoveredInputKind::from(input_kind),
-                policy_routing_disposition: mm_dsl::RecoveredRoutingDisposition::from(
-                    policy.routing_disposition,
-                ),
-                policy_apply_mode: mm_dsl::AdmissionPolicyApplyMode::from(policy.apply_mode),
                 runtime_boundary,
                 runtime_execution_kind: mm_dsl::RecoveredRuntimeExecutionKind::from(
                     runtime_semantics.execution_kind,
@@ -862,7 +861,7 @@ impl EphemeralRuntimeDriver {
                 "terminal recovery path received non-terminal input '{work_id}'"
             )));
         }
-        self.apply_recovered_lifecycle(work_id, recovered_seed, None, None)?;
+        self.apply_recovered_lifecycle(work_id, recovered_seed, None)?;
         self.register_accepted_idempotency(work_id, idempotency_key)
     }
 
@@ -890,7 +889,6 @@ impl EphemeralRuntimeDriver {
         &mut self,
         work_id: &InputId,
         recovered_seed: &InputStateSeed,
-        handling_mode: Option<HandlingMode>,
         admission_sequence_recovery: Option<mm_dsl::RecoveredInputNormalizationReasonKind>,
     ) -> Result<(), RuntimeDriverError> {
         let key = Self::dsl_key(work_id);
@@ -946,8 +944,9 @@ impl EphemeralRuntimeDriver {
                 }
                 None => (None, None, None, None, 0),
             };
+        let recovery_lane = recovered_seed.recovery_lane.map(mm_dsl::InputLane::from);
         let lane = matches!(lifecycle_state, InputLifecycleState::Queued)
-            .then(|| handling_mode.map(mm_dsl::InputLane::from))
+            .then_some(recovery_lane)
             .flatten();
         self.dsl_apply(
             mm_dsl::MeerkatMachineInput::RecoverInputLifecycle {
@@ -966,6 +965,7 @@ impl EphemeralRuntimeDriver {
                 boundary_sequence: recovered_seed.last_boundary_sequence,
                 admission_sequence: recovered_seed.admission_sequence,
                 admission_sequence_recovery,
+                recovery_lane,
                 lane,
             },
             "RecoverInputLifecycle",
@@ -981,7 +981,7 @@ impl EphemeralRuntimeDriver {
         runtime_semantics: RuntimeInputSemantics,
         primitive_projection: RuntimeInputProjection,
         is_prompt: bool,
-        policy: &PolicyDecision,
+        policy: Option<&PolicyDecision>,
         request_id: Option<&RequestId>,
         reservation_key: Option<&ReservationKey>,
     ) {
@@ -1005,7 +1005,11 @@ impl EphemeralRuntimeDriver {
         self.request_id.insert(work_id.clone(), request_id.cloned());
         self.reservation_key
             .insert(work_id.clone(), reservation_key.cloned());
-        self.policy_snapshot.insert(work_id.clone(), policy.clone());
+        if let Some(policy) = policy {
+            self.policy_snapshot.insert(work_id.clone(), policy.clone());
+        } else {
+            self.policy_snapshot.remove(work_id);
+        }
     }
 
     fn sync_terminal_projection_from_machine(
@@ -1228,7 +1232,7 @@ impl EphemeralRuntimeDriver {
             runtime_semantics,
             primitive_projection,
             is_prompt,
-            policy,
+            Some(policy),
             None,
             None,
         );
@@ -1582,7 +1586,8 @@ impl EphemeralRuntimeDriver {
     }
     /// Build a `StoredInputState` bundle for a specific input, pairing the
     /// ledger-side shell with the DSL-owned seed (phase / run association /
-    /// boundary sequence). Used by persistence callsites and test helpers.
+    /// boundary sequence / recovery lane). Used by persistence callsites and
+    /// test helpers.
     pub fn stored_input_state(&self, input_id: &InputId) -> Option<StoredInputState> {
         let mut state = self.ledger.get(input_id)?.clone();
         if state.runtime_semantics.is_none() {
@@ -1596,6 +1601,7 @@ impl EphemeralRuntimeDriver {
             admission_sequence: self.input_admission_sequence(input_id),
             terminal_outcome: self.input_terminal_outcome(input_id),
             attempt_count: self.input_attempt_count(input_id),
+            recovery_lane: self.input_recovery_lane(input_id),
         };
         Some(StoredInputState { state, seed })
     }
@@ -1623,6 +1629,7 @@ impl EphemeralRuntimeDriver {
                     admission_sequence: self.input_admission_sequence(input_id),
                     terminal_outcome: self.input_terminal_outcome(input_id),
                     attempt_count: self.input_attempt_count(input_id),
+                    recovery_lane: self.input_recovery_lane(input_id),
                 };
                 Ok(StoredInputState { state, seed })
             })
@@ -1846,18 +1853,17 @@ impl EphemeralRuntimeDriver {
                 );
             } else {
                 // Still have attempts — rollback to Queued. The shell
-                // passes the input's recorded `HandlingMode` so
-                // `RollbackStaged` can re-admit it to the correct lane.
-                let lane = self
-                    .handling_mode
-                    .get(input_id)
-                    .copied()
-                    .map(mm_dsl::InputLane::from)
-                    .unwrap_or(mm_dsl::InputLane::Queue);
+                // passes the generated recovery lane so `RollbackStaged` can
+                // re-admit it to the correct lane without a shell default.
+                let lane = self.input_recovery_lane(input_id).ok_or_else(|| {
+                    RuntimeDriverError::Internal(format!(
+                        "generated recovery lane missing for rollback of staged input '{input_id}'"
+                    ))
+                })?;
                 self.dsl_apply(
                     mm_dsl::MeerkatMachineInput::RollbackStaged {
                         input_id: key,
-                        lane,
+                        lane: mm_dsl::InputLane::from(lane),
                     },
                     "RollbackStaged",
                 )?;
@@ -2659,7 +2665,7 @@ impl EphemeralRuntimeDriver {
                     runtime_semantics,
                     primitive_projection,
                     is_prompt,
-                    &policy,
+                    Some(&policy),
                     None,
                     None,
                 );
@@ -3558,6 +3564,7 @@ mod tests {
             admission_sequence: None,
             terminal_outcome: None,
             attempt_count: 0,
+            recovery_lane: None,
         };
 
         let err = driver
@@ -3583,6 +3590,7 @@ mod tests {
                     boundary_sequence: None,
                     admission_sequence: None,
                     admission_sequence_recovery: None,
+                    recovery_lane: None,
                     lane: None,
                 },
                 "RecoverInputLifecycle(test)",
@@ -3607,6 +3615,7 @@ mod tests {
                 reason: InputAbandonReason::MaxAttemptsExhausted { attempts: 3 },
             }),
             attempt_count: 2,
+            recovery_lane: None,
         };
 
         let err = driver

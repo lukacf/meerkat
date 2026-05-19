@@ -1282,7 +1282,6 @@ pub enum RecoveredInputObservedPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RecoveredInputNormalizationReasonKind {
     #[default]
-    ConsumeOnAccept,
     QueueAccepted,
     RollbackStaged,
     BoundaryReceiptCommitted,
@@ -1315,18 +1314,6 @@ pub enum RecoveredInputRecoveryDisposition {
     #[default]
     Retain,
     Discard,
-}
-
-/// Typed mirror of recovered routing disposition. The machine validates this
-/// against the recovered lane witness so queue/steer truth is not rebuilt by
-/// recovery glue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum RecoveredRoutingDisposition {
-    #[default]
-    Queue,
-    Steer,
-    Immediate,
-    Drop,
 }
 
 /// Typed persisted runtime apply boundary carried by recovered-admission
@@ -1701,6 +1688,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             // maps to exactly one `InputLane` value by construction.
             // Replaces the former `queue_lane`/`steer_lane` parallel sets.
             input_lane: Map<String, Enum<InputLane>>,
+            // Machine-owned recovery lane witness for admitted inputs. Unlike
+            // `input_lane`, this survives staging so crash recovery and
+            // rollback can re-enter the lane fact without consulting policy
+            // snapshots or shell caches.
+            input_recovery_lanes: Map<String, Enum<InputLane>>,
             // Live admission authority witnesses minted by
             // `ResolveAdmissionPlan`. Queue/steer/consume lifecycle
             // transitions are guarded by these maps so shell projections
@@ -1988,6 +1980,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             next_priority_admission_seq = 999999999999,
             input_admission_seq = EmptyMap,
             input_lane = EmptyMap,
+            input_recovery_lanes = EmptyMap,
             admission_authorized_lanes = EmptyMap,
             admission_authorized_plans = EmptyMap,
             admission_authorized_existing_actions = EmptyMap,
@@ -2217,7 +2210,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             NormalizeRecoveredInputLifecycle {
                 input_id: String,
                 phase: Enum<RecoveredInputObservedPhase>,
-                consume_on_accept: bool,
                 applied_boundary_committed: Option<bool>,
             },
             ClassifyRecoveredInputDurability {
@@ -2308,8 +2300,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             RecoverAdmittedInput {
                 input_id: String,
                 input_kind: Enum<RecoveredInputKind>,
-                policy_routing_disposition: Enum<RecoveredRoutingDisposition>,
-                policy_apply_mode: Enum<AdmissionPolicyApplyMode>,
                 runtime_boundary: Enum<RecoveredRunApplyBoundary>,
                 runtime_execution_kind: Enum<RecoveredRuntimeExecutionKind>,
                 runtime_peer_response_terminal_apply_intent: Option<Enum<RecoveredPeerResponseTerminalApplyIntent>>,
@@ -2328,6 +2318,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 boundary_sequence: Option<u64>,
                 admission_sequence: Option<u64>,
                 admission_sequence_recovery: Option<Enum<RecoveredInputNormalizationReasonKind>>,
+                recovery_lane: Option<Enum<InputLane>>,
                 lane: Option<Enum<InputLane>>,
             },
             QueueAccepted { input_id: String },
@@ -5101,33 +5092,16 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         // 26b. NormalizeRecoveredInputLifecycle: generated recovery
         // lifecycle-normalization authority. The shell supplies typed
-        // observations from durable storage (observed phase, consume-on-
-        // accept policy predicate, boundary receipt presence); the machine
-        // emits the normalized lifecycle fact and accounting deltas that the
-        // recovery shell may project into the recovered bundle.
-        transition NormalizeRecoveredInputAcceptedConsumeOnAccept {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
-            guard "accepted_phase" { phase == RecoveredInputObservedPhase::Accepted }
-            guard "consume_on_accept" { consume_on_accept == true }
-            update {}
-            to Idle
-            emit RecoveredInputLifecycleNormalized {
-                input_id: input_id,
-                phase: InputPhase::Consumed,
-                terminal_kind: Some(InputTerminalKind::Consumed),
-                recovered: true,
-                abandoned: true,
-                requeued: false,
-                history_reason: Some(RecoveredInputNormalizationReasonKind::ConsumeOnAccept)
-            }
-        }
-
+        // observations from durable storage (observed phase and boundary
+        // receipt presence); the machine emits the normalized lifecycle fact
+        // and accounting deltas that the recovery shell may project into the
+        // recovered bundle. Consume-on-accept must arrive as an already
+        // terminal seed; recovery does not consult persisted policy mirrors
+        // to turn an accepted row into a terminal fact.
         transition NormalizeRecoveredInputAcceptedQueue {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, applied_boundary_committed }
             guard "accepted_phase" { phase == RecoveredInputObservedPhase::Accepted }
-            guard "not_consume_on_accept" { consume_on_accept == false }
             update {}
             to Idle
             emit RecoveredInputLifecycleNormalized {
@@ -5143,7 +5117,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition NormalizeRecoveredInputStaged {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, applied_boundary_committed }
             guard "staged_phase" { phase == RecoveredInputObservedPhase::Staged }
             update {}
             to Idle
@@ -5160,7 +5134,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition NormalizeRecoveredInputAppliedCommitted {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, applied_boundary_committed }
             guard "applied_phase" {
                 phase == RecoveredInputObservedPhase::Applied
                 || phase == RecoveredInputObservedPhase::AppliedPendingConsumption
@@ -5184,7 +5158,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition NormalizeRecoveredInputAppliedMissingReceipt {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, applied_boundary_committed }
             guard "applied_phase" {
                 phase == RecoveredInputObservedPhase::Applied
                 || phase == RecoveredInputObservedPhase::AppliedPendingConsumption
@@ -5208,7 +5182,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition NormalizeRecoveredInputAppliedUnobservedReceipt {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, applied_boundary_committed }
             guard "applied_phase" {
                 phase == RecoveredInputObservedPhase::Applied
                 || phase == RecoveredInputObservedPhase::AppliedPendingConsumption
@@ -5229,7 +5203,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition NormalizeRecoveredInputQueued {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, applied_boundary_committed }
             guard "queued_phase" { phase == RecoveredInputObservedPhase::Queued }
             update {}
             to Idle
@@ -9624,14 +9598,13 @@ macro_rules! meerkat_catalog_machine_dsl {
         // RecoverAdmittedInput: accept or reject the recovered admission
         // witness before shell recovery may re-materialize admission metadata.
         // This is the coherence check for persisted input kind, lane, and
-        // runtime semantics stamps.
+        // runtime semantics stamps. The lane witness is the persisted
+        // machine-owned recovery lane, not a policy mirror.
         transition RecoverAdmittedInput {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RecoverAdmittedInput {
                 input_id,
                 input_kind,
-                policy_routing_disposition,
-                policy_apply_mode,
                 runtime_boundary,
                 runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent,
@@ -9649,23 +9622,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (input_kind != RecoveredInputKind::PeerResponseTerminal
                     && runtime_peer_response_terminal_apply_intent == None)
             }
-            guard "recovered_lane_matches_policy" {
-                ((policy_routing_disposition == RecoveredRoutingDisposition::Steer
-                    || policy_routing_disposition == RecoveredRoutingDisposition::Immediate)
-                    && lane == InputLane::Steer)
-                || ((policy_routing_disposition == RecoveredRoutingDisposition::Queue
-                    || policy_routing_disposition == RecoveredRoutingDisposition::Drop)
-                    && lane == InputLane::Queue)
-            }
-            guard "recovered_boundary_matches_policy_apply_mode" {
-                (policy_apply_mode == AdmissionPolicyApplyMode::StageRunStart
-                    && runtime_boundary == RecoveredRunApplyBoundary::RunStart)
-                || (policy_apply_mode == AdmissionPolicyApplyMode::StageRunBoundary
-                    && runtime_boundary == RecoveredRunApplyBoundary::RunCheckpoint)
-                || (policy_apply_mode == AdmissionPolicyApplyMode::InjectNow
-                    && runtime_boundary == RecoveredRunApplyBoundary::Immediate)
-                || (policy_apply_mode == AdmissionPolicyApplyMode::Ignore
-                    && runtime_boundary == RecoveredRunApplyBoundary::RunStart)
+            guard "recovered_immediate_boundary_uses_steer_lane" {
+                runtime_boundary != RecoveredRunApplyBoundary::Immediate
+                || lane == InputLane::Steer
             }
             update {
                 self.recovered_admitted_inputs.insert(input_id);
@@ -9694,6 +9653,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 boundary_sequence,
                 admission_sequence,
                 admission_sequence_recovery,
+                recovery_lane,
                 lane
             }
             guard "recovered_lifecycle_has_admission_witness" {
@@ -9703,11 +9663,29 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || phase == InputPhase::Abandoned
                 || self.recovered_admitted_inputs.contains(input_id)
             }
-            guard "recovered_queued_lane_matches_witness" {
+            guard "recovered_recovery_lane_matches_witness" {
+                (
+                    (phase == InputPhase::Consumed
+                        || phase == InputPhase::Superseded
+                        || phase == InputPhase::Coalesced
+                        || phase == InputPhase::Abandoned)
+                    && recovery_lane == None
+                )
+                || (
+                    phase != InputPhase::Consumed
+                    && phase != InputPhase::Superseded
+                    && phase != InputPhase::Coalesced
+                    && phase != InputPhase::Abandoned
+                    && self.recovered_admitted_lanes.contains_key(input_id)
+                    && recovery_lane == Some(self.recovered_admitted_lanes.get_cloned(input_id).get("value"))
+                )
+            }
+            guard "recovered_current_lane_matches_phase" {
                 (phase != InputPhase::Queued && lane == None)
                 || (phase == InputPhase::Queued
                     && self.recovered_admitted_lanes.contains_key(input_id)
-                    && lane == Some(self.recovered_admitted_lanes.get_cloned(input_id).get("value")))
+                    && lane == Some(self.recovered_admitted_lanes.get_cloned(input_id).get("value"))
+                    && lane == recovery_lane)
             }
             guard "recovered_queued_order_has_witness" {
                 phase != InputPhase::Queued
@@ -9827,6 +9805,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 } else {
                     self.input_lane.remove(input_id);
                 }
+
+                if recovery_lane != None {
+                    self.input_recovery_lanes.insert(input_id, recovery_lane.get("value"));
+                } else {
+                    self.input_recovery_lanes.remove(input_id);
+                }
             }
             to Idle
             emit InputLifecycleNotice
@@ -9844,6 +9828,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_lane.insert(input_id, InputLane::Queue);
+                self.input_recovery_lanes.insert(input_id, InputLane::Queue);
                 self.input_admission_seq.insert(input_id, self.next_admission_seq);
                 self.next_admission_seq += 1;
             }
@@ -9866,6 +9851,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_lane.insert(input_id, InputLane::Steer);
+                self.input_recovery_lanes.insert(input_id, InputLane::Steer);
                 self.input_admission_seq.insert(input_id, self.next_admission_seq);
                 self.next_admission_seq += 1;
             }
@@ -9883,6 +9869,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
                 self.input_lane.insert(input_id, new_lane);
+                self.input_recovery_lanes.insert(input_id, new_lane);
             }
             to Idle
         }
@@ -9957,6 +9944,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_run_associations.remove(input_id);
                 self.input_lane.insert(input_id, lane);
+                self.input_recovery_lanes.insert(input_id, lane);
             }
             to Idle
             emit InputLifecycleNotice
@@ -9998,6 +9986,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.input_phases.insert(input_id, InputPhase::Consumed);
                 self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Consumed);
                 self.input_superseded_by.remove(input_id);
                 self.input_aggregate_id.remove(input_id);
@@ -10028,6 +10017,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.input_phases.insert(input_id, InputPhase::Consumed);
                 self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Consumed);
                 self.input_superseded_by.remove(input_id);
                 self.input_aggregate_id.remove(input_id);
@@ -10054,6 +10044,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.input_phases.insert(input_id, InputPhase::Superseded);
                 self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Superseded);
                 self.input_superseded_by.insert(input_id, superseded_by);
                 self.input_aggregate_id.remove(input_id);
@@ -10081,6 +10072,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.input_phases.insert(input_id, InputPhase::Coalesced);
                 self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Coalesced);
                 self.input_aggregate_id.insert(input_id, aggregate_id);
                 self.input_superseded_by.remove(input_id);
@@ -10101,6 +10093,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.input_phases.insert(input_id, InputPhase::Abandoned);
                 self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
                 self.input_abandon_reason.insert(input_id, reason);
                 self.input_abandon_attempt_count.insert(input_id, attempt_count);

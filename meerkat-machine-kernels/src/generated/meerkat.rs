@@ -3862,8 +3862,6 @@ impl std::fmt::Display for RecoveredInputKind {
 )]
 pub enum RecoveredInputNormalizationReasonKind {
     #[default]
-    #[serde(rename = "ConsumeOnAccept")]
-    ConsumeOnAccept,
     #[serde(rename = "QueueAccepted")]
     QueueAccepted,
     #[serde(rename = "RollbackStaged")]
@@ -3876,7 +3874,6 @@ pub enum RecoveredInputNormalizationReasonKind {
 impl RecoveredInputNormalizationReasonKind {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::ConsumeOnAccept => "ConsumeOnAccept",
             Self::QueueAccepted => "QueueAccepted",
             Self::RollbackStaged => "RollbackStaged",
             Self::BoundaryReceiptCommitted => "BoundaryReceiptCommitted",
@@ -3888,7 +3885,6 @@ impl std::convert::TryFrom<&str> for RecoveredInputNormalizationReasonKind {
     type Error = String;
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "ConsumeOnAccept" => Ok(Self::ConsumeOnAccept),
             "QueueAccepted" => Ok(Self::QueueAccepted),
             "RollbackStaged" => Ok(Self::RollbackStaged),
             "BoundaryReceiptCommitted" => Ok(Self::BoundaryReceiptCommitted),
@@ -4086,66 +4082,6 @@ impl std::convert::TryFrom<String> for RecoveredPeerResponseTerminalApplyIntent 
     }
 }
 impl std::fmt::Display for RecoveredPeerResponseTerminalApplyIntent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RecoveredRoutingDisposition {
-    #[default]
-    #[serde(rename = "Queue")]
-    Queue,
-    #[serde(rename = "Steer")]
-    Steer,
-    #[serde(rename = "Immediate")]
-    Immediate,
-    #[serde(rename = "Drop")]
-    Drop,
-}
-impl RecoveredRoutingDisposition {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Queue => "Queue",
-            Self::Steer => "Steer",
-            Self::Immediate => "Immediate",
-            Self::Drop => "Drop",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for RecoveredRoutingDisposition {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Queue" => Ok(Self::Queue),
-            "Steer" => Ok(Self::Steer),
-            "Immediate" => Ok(Self::Immediate),
-            "Drop" => Ok(Self::Drop),
-            other => Err(format!(
-                "invalid RecoveredRoutingDisposition value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for RecoveredRoutingDisposition {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for RecoveredRoutingDisposition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -6427,6 +6363,7 @@ pub struct State {
     pub next_priority_admission_seq: u64,
     pub input_admission_seq: std::collections::BTreeMap<String, u64>,
     pub input_lane: std::collections::BTreeMap<String, InputLane>,
+    pub input_recovery_lanes: std::collections::BTreeMap<String, InputLane>,
     pub admission_authorized_lanes: std::collections::BTreeMap<String, InputLane>,
     pub admission_authorized_plans: std::collections::BTreeMap<String, AdmissionPlanKind>,
     pub admission_authorized_existing_actions:
@@ -6792,7 +6729,6 @@ pub mod inputs {
     pub struct NormalizeRecoveredInputLifecycle {
         pub input_id: String,
         pub phase: RecoveredInputObservedPhase,
-        pub consume_on_accept: bool,
         pub applied_boundary_committed: Option<bool>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -6968,8 +6904,6 @@ pub mod inputs {
     pub struct RecoverAdmittedInput {
         pub input_id: String,
         pub input_kind: RecoveredInputKind,
-        pub policy_routing_disposition: RecoveredRoutingDisposition,
-        pub policy_apply_mode: AdmissionPolicyApplyMode,
         pub runtime_boundary: RecoveredRunApplyBoundary,
         pub runtime_execution_kind: RecoveredRuntimeExecutionKind,
         pub runtime_peer_response_terminal_apply_intent:
@@ -6990,6 +6924,7 @@ pub mod inputs {
         pub boundary_sequence: Option<u64>,
         pub admission_sequence: Option<u64>,
         pub admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>,
+        pub recovery_lane: Option<InputLane>,
         pub lane: Option<InputLane>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -8960,12 +8895,6 @@ pub enum TransitionId {
     ResolveAdmissionValidationAcceptedIdle,
     ResolveAdmissionValidationAcceptedAttached,
     ResolveAdmissionValidationAcceptedRunning,
-    NormalizeRecoveredInputAcceptedConsumeOnAcceptInitializing,
-    NormalizeRecoveredInputAcceptedConsumeOnAcceptIdle,
-    NormalizeRecoveredInputAcceptedConsumeOnAcceptAttached,
-    NormalizeRecoveredInputAcceptedConsumeOnAcceptRunning,
-    NormalizeRecoveredInputAcceptedConsumeOnAcceptRetired,
-    NormalizeRecoveredInputAcceptedConsumeOnAcceptStopped,
     NormalizeRecoveredInputAcceptedQueueInitializing,
     NormalizeRecoveredInputAcceptedQueueIdle,
     NormalizeRecoveredInputAcceptedQueueAttached,
@@ -9845,6 +9774,7 @@ pub fn initial_state() -> State {
         next_priority_admission_seq: 999999999999,
         input_admission_seq: Default::default(),
         input_lane: Default::default(),
+        input_recovery_lanes: Default::default(),
         admission_authorized_lanes: Default::default(),
         admission_authorized_plans: Default::default(),
         admission_authorized_existing_actions: Default::default(),

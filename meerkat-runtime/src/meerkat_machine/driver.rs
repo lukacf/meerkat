@@ -1527,9 +1527,6 @@ fn recovery_normalization_reason(
     reason: crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind,
 ) -> &'static str {
     match reason {
-        crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind::ConsumeOnAccept => {
-            "recovery: ConsumeOnAccept (Ignore+OnAccept policy)"
-        }
         crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind::QueueAccepted => {
             "recovery: QueueAccepted"
         }
@@ -1561,14 +1558,6 @@ pub(crate) fn machine_apply_recovered_input_normalization(
         return Ok(delta);
     }
 
-    let consume_on_accept = state
-        .policy
-        .as_ref()
-        .map(|policy| {
-            policy.decision.apply_mode == crate::policy::ApplyMode::Ignore
-                && policy.decision.consume_point == crate::policy::ConsumePoint::OnAccept
-        })
-        .unwrap_or(false);
     let input_id = state.input_id.to_string();
     let mut authority = crate::meerkat_machine::dsl::MeerkatMachineAuthority::new();
     let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
@@ -1576,7 +1565,6 @@ pub(crate) fn machine_apply_recovered_input_normalization(
         crate::meerkat_machine::dsl::MeerkatMachineInput::NormalizeRecoveredInputLifecycle {
             input_id: input_id.clone(),
             phase: recovered_observed_phase(seed.phase),
-            consume_on_accept,
             applied_boundary_committed,
         },
     )
@@ -1664,6 +1652,9 @@ pub(crate) fn machine_apply_recovered_input_normalization(
 
     seed.phase = next_phase;
     seed.terminal_outcome = next_terminal.clone();
+    if next_terminal.is_some() {
+        seed.recovery_lane = None;
+    }
     state.terminal_outcome = next_terminal;
 
     if recovered {
@@ -1724,23 +1715,20 @@ pub(crate) fn machine_classify_recovered_input_durability(
 
 pub(crate) struct RecoveredIngressEntry {
     pub runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
-    pub policy: crate::policy::PolicyDecision,
 }
 
 pub(crate) fn machine_build_recovered_ingress_entry(
     state: &InputState,
+    seed: &InputStateSeed,
 ) -> Option<RecoveredIngressEntry> {
     state.persisted_input.as_ref()?;
     let runtime_semantics = state.runtime_semantics?;
-    let policy = state.policy.as_ref()?.decision.clone();
+    seed.recovery_lane?;
 
-    Some(RecoveredIngressEntry {
-        runtime_semantics,
-        policy,
-    })
+    Some(RecoveredIngressEntry { runtime_semantics })
 }
 
-fn missing_recovered_ingress_entry_reason(state: &InputState) -> String {
+fn missing_recovered_ingress_entry_reason(state: &InputState, seed: &InputStateSeed) -> String {
     if state.persisted_input.is_none() {
         return format!(
             "store corruption: recovered input '{}' has no persisted input; cannot derive admitted-input content shape",
@@ -1753,9 +1741,9 @@ fn missing_recovered_ingress_entry_reason(state: &InputState) -> String {
             state.input_id
         );
     }
-    if state.policy.is_none() {
+    if seed.recovery_lane.is_none() {
         return format!(
-            "store corruption: recovered input '{}' missing runtime admission policy stamp; cannot recover without runtime-stamped policy and lane metadata",
+            "store corruption: recovered input '{}' missing generated recovery lane witness; cannot recover without machine-owned lane metadata",
             state.input_id
         );
     }
@@ -1803,9 +1791,9 @@ pub(crate) fn machine_recover_ephemeral_driver(
         Option<crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind>,
     )> = Vec::with_capacity(normalized.len());
     for (input_id, bundle, delta) in normalized {
-        let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {
+        let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state, &bundle.seed) else {
             return Err(RuntimeDriverError::Internal(
-                missing_recovered_ingress_entry_reason(&bundle.state),
+                missing_recovered_ingress_entry_reason(&bundle.state, &bundle.seed),
             ));
         };
         recovered_entries.push((
@@ -1823,7 +1811,6 @@ pub(crate) fn machine_recover_ephemeral_driver(
             entry.runtime_semantics,
             &state,
             &seed,
-            entry.policy,
             None,
             None,
             admission_sequence_recovery,
@@ -1885,9 +1872,10 @@ pub(crate) async fn machine_recover_persistent_driver(
                 continue;
             }
 
-            let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {
+            let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state, &bundle.seed)
+            else {
                 return Err(RuntimeDriverError::Internal(
-                    missing_recovered_ingress_entry_reason(&bundle.state),
+                    missing_recovered_ingress_entry_reason(&bundle.state, &bundle.seed),
                 ));
             };
 
@@ -1896,7 +1884,6 @@ pub(crate) async fn machine_recover_persistent_driver(
                 entry.runtime_semantics,
                 &bundle.state,
                 &bundle.seed,
-                entry.policy,
                 None,
                 None,
                 admission_sequence_recovery,
@@ -2008,6 +1995,7 @@ mod tests {
         let mut seed = InputStateSeed::new_accepted();
         seed.phase = InputLifecycleState::Queued;
         seed.admission_sequence = Some(1_000_000_000_000);
+        seed.recovery_lane = Some(meerkat_core::types::HandlingMode::Queue);
         seed
     }
 
@@ -2054,7 +2042,7 @@ mod tests {
         });
 
         assert!(
-            machine_build_recovered_ingress_entry(&state).is_none(),
+            machine_build_recovered_ingress_entry(&state, &queued_seed()).is_none(),
             "recovery must not infer Prompt/ContentTurn when persisted input payload is missing"
         );
     }
@@ -2088,7 +2076,6 @@ mod tests {
                 runtime_semantics,
                 &state,
                 &seed,
-                policy,
                 None,
                 None,
                 None,
@@ -2139,11 +2126,6 @@ mod tests {
         let seed = queued_seed();
         assert!(driver.ledger_mut().recover(resume_state.clone()));
         assert!(driver.ledger_mut().recover(prompt_state.clone()));
-        let mut resume_policy = queue_policy(
-            crate::policy::WakeMode::None,
-            crate::policy::DrainPolicy::QueueNextTurn,
-        );
-        resume_policy.apply_mode = crate::policy::ApplyMode::StageRunBoundary;
 
         driver
             .admit_recovered_to_ingress(
@@ -2156,7 +2138,6 @@ mod tests {
                 },
                 &resume_state,
                 &seed,
-                resume_policy,
                 None,
                 None,
                 None,
@@ -2172,10 +2153,6 @@ mod tests {
                 },
                 &prompt_state,
                 &seed,
-                queue_policy(
-                    crate::policy::WakeMode::WakeIfIdle,
-                    crate::policy::DrainPolicy::QueueNextTurn,
-                ),
                 None,
                 None,
                 None,
@@ -2213,11 +2190,6 @@ mod tests {
         let seed = queued_seed();
         assert!(driver.ledger_mut().recover(prefix_state.clone()));
         assert!(driver.ledger_mut().recover(prompt_state.clone()));
-        let mut prefix_policy = queue_policy(
-            crate::policy::WakeMode::None,
-            crate::policy::DrainPolicy::QueueNextTurn,
-        );
-        prefix_policy.apply_mode = crate::policy::ApplyMode::StageRunBoundary;
 
         driver
             .admit_recovered_to_ingress(
@@ -2230,7 +2202,6 @@ mod tests {
                 },
                 &prefix_state,
                 &seed,
-                prefix_policy,
                 None,
                 None,
                 None,
@@ -2246,10 +2217,6 @@ mod tests {
                 },
                 &prompt_state,
                 &seed,
-                queue_policy(
-                    crate::policy::WakeMode::WakeIfIdle,
-                    crate::policy::DrainPolicy::QueueNextTurn,
-                ),
                 None,
                 None,
                 None,
@@ -2322,10 +2289,6 @@ mod tests {
                 },
                 &event_state,
                 &seed,
-                queue_policy(
-                    crate::policy::WakeMode::WakeIfIdle,
-                    crate::policy::DrainPolicy::QueueNextTurn,
-                ),
                 None,
                 None,
                 None,
@@ -2341,10 +2304,6 @@ mod tests {
                 },
                 &prompt_state,
                 &seed,
-                queue_policy(
-                    crate::policy::WakeMode::WakeIfIdle,
-                    crate::policy::DrainPolicy::QueueNextTurn,
-                ),
                 None,
                 None,
                 None,
@@ -2388,10 +2347,6 @@ mod tests {
                 },
                 &state,
                 &seed,
-                queue_policy(
-                    crate::policy::WakeMode::WakeIfIdle,
-                    crate::policy::DrainPolicy::QueueNextTurn,
-                ),
                 None,
                 None,
                 None,
@@ -2420,13 +2375,8 @@ mod tests {
         let input_id = input.id().clone();
         let mut state = InputState::new_accepted(input_id.clone());
         state.persisted_input = Some(input.clone());
-        let seed = queued_seed();
-        let mut policy = queue_policy(
-            crate::policy::WakeMode::WakeIfIdle,
-            crate::policy::DrainPolicy::SteerBatch,
-        );
-        policy.apply_mode = crate::policy::ApplyMode::StageRunBoundary;
-        policy.routing_disposition = crate::policy::RoutingDisposition::Steer;
+        let mut seed = queued_seed();
+        seed.recovery_lane = Some(meerkat_core::types::HandlingMode::Steer);
 
         assert!(driver.ledger_mut().recover(state.clone()));
         driver
@@ -2440,7 +2390,6 @@ mod tests {
                 },
                 &state,
                 &seed,
-                policy,
                 None,
                 None,
                 None,
@@ -3087,6 +3036,7 @@ mod recovery_tests {
     fn queued_seed() -> InputStateSeed {
         let mut seed = InputStateSeed::new_accepted();
         seed.phase = InputLifecycleState::Queued;
+        seed.recovery_lane = Some(meerkat_core::types::HandlingMode::Queue);
         seed
     }
 
@@ -3123,7 +3073,8 @@ mod recovery_tests {
     }
 
     fn recovered_admission_rejection(state: crate::input_state::InputState) -> String {
-        let entry = machine_build_recovered_ingress_entry(&state)
+        let seed = queued_seed();
+        let entry = machine_build_recovered_ingress_entry(&state, &seed)
             .expect("test state should carry the recovered admission witness fields");
         let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(
             LogicalRuntimeId::new("recovered-admission-authority-test"),
@@ -3134,8 +3085,7 @@ mod recovery_tests {
                 input_id.clone(),
                 entry.runtime_semantics,
                 &state,
-                &queued_seed(),
-                entry.policy,
+                &seed,
                 None,
                 None,
                 None,
@@ -3157,7 +3107,7 @@ mod recovery_tests {
         });
 
         assert!(
-            machine_build_recovered_ingress_entry(&state).is_none(),
+            machine_build_recovered_ingress_entry(&state, &queued_seed()).is_none(),
             "recovery must not synthesize an unknown admitted-input content shape"
         );
     }
@@ -3173,13 +3123,13 @@ mod recovery_tests {
         });
 
         assert!(
-            machine_build_recovered_ingress_entry(&state).is_none(),
+            machine_build_recovered_ingress_entry(&state, &queued_seed()).is_none(),
             "recovery must not derive execution kind from payload/policy when the durable runtime semantics stamp is missing"
         );
     }
 
     #[test]
-    fn recovered_ingress_entry_requires_policy_snapshot() {
+    fn recovered_ingress_entry_requires_generated_recovery_lane() {
         let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
         let decision = policy(ApplyMode::StageRunStart);
         let mut state = crate::input_state::InputState::new_accepted(input.id().clone());
@@ -3190,10 +3140,12 @@ mod recovery_tests {
             ),
         );
         state.persisted_input = Some(input);
+        let mut seed = queued_seed();
+        seed.recovery_lane = None;
 
         assert!(
-            machine_build_recovered_ingress_entry(&state).is_none(),
-            "recovery must not derive policy or handling mode when the durable policy stamp is missing"
+            machine_build_recovered_ingress_entry(&state, &seed).is_none(),
+            "recovery must not derive lane metadata from policy or handling-mode caches"
         );
     }
 
@@ -3240,7 +3192,7 @@ mod recovery_tests {
     }
 
     #[test]
-    fn recovered_admission_authority_rejects_boundary_mismatch() {
+    fn recovered_admission_authority_rejects_immediate_boundary_on_queue_lane() {
         let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
         let decision = policy(ApplyMode::StageRunStart);
         let mut runtime_semantics =
@@ -3249,13 +3201,13 @@ mod recovery_tests {
                 input.kind(),
             );
         runtime_semantics.boundary =
-            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint;
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate;
         let state = state_with_runtime_semantics(input, decision, runtime_semantics);
 
         assert!(
             recovered_admission_rejection(state)
                 .contains("generated recovered-admission authority"),
-            "recovery must reject a durable stamp whose boundary disagrees with policy"
+            "recovery must reject an immediate runtime boundary without a generated steer lane"
         );
     }
 
@@ -3323,10 +3275,10 @@ mod recovery_tests {
     }
 
     #[tokio::test]
-    async fn persistent_recovery_rejects_state_without_policy_snapshot() {
+    async fn persistent_recovery_accepts_state_without_policy_snapshot_when_lane_witness_exists() {
         use crate::store::RuntimeStore;
 
-        let runtime_id = LogicalRuntimeId::new("missing-policy-snapshot");
+        let runtime_id = LogicalRuntimeId::new("policyless-with-generated-lane");
         let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
         let input_id = input.id().clone();
         let decision = policy(ApplyMode::StageRunStart);
@@ -3338,8 +3290,7 @@ mod recovery_tests {
             ),
         );
         state.persisted_input = Some(input);
-        let mut seed = InputStateSeed::new_accepted();
-        seed.phase = InputLifecycleState::Queued;
+        let seed = queued_seed_with_admission_sequence(10);
         let bundle = crate::input_state::StoredInputState { state, seed };
         let store = crate::store::memory::InMemoryRuntimeStore::new();
         store
@@ -3348,21 +3299,15 @@ mod recovery_tests {
             .expect("persist corrupt recovered input state");
 
         let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(runtime_id.clone());
-        let err = machine_recover_persistent_driver(&store, &runtime_id, &mut driver)
+        machine_recover_persistent_driver(&store, &runtime_id, &mut driver)
             .await
-            .expect_err(
-                "policy-less recovered input must not recover through local classification",
-            );
+            .expect("policy-less recovered input should recover through generated lane witness");
 
         assert!(
-            err.to_string()
-                .contains("missing runtime admission policy stamp"),
-            "unexpected recovery error: {err}"
+            driver.input_state(&input_id).is_some(),
+            "successful recovery should restore the input row"
         );
-        assert!(
-            driver.input_state(&input_id).is_none(),
-            "failed recovery must not leave a ledger-only input row"
-        );
+        assert_eq!(driver.queue_lane(), vec![input_id]);
     }
 
     #[tokio::test]

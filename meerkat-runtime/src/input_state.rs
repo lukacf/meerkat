@@ -4,10 +4,10 @@
 //! (`input_phases`, `input_run_associations`, `input_boundary_sequences` plus
 //! the `QueueAccepted` / `StageForRun` / `RecordBoundarySeq` / etc.
 //! transitions). This module owns ONLY the per-input shell metadata needed for
-//! persistence/projection: a history log, timestamps, policy snapshot,
-//! durability observation, idempotency key, and the cached payload needed to
-//! rebuild queued work after recovery. Durability admission validity and
-//! recovered keep/drop behavior are emitted by generated MeerkatMachine
+//! persistence/projection: a history log, timestamps, compatibility policy
+//! snapshot, durability observation, idempotency key, and the cached payload
+//! needed to rebuild queued work after recovery. Durability admission validity
+//! and recovered keep/drop behavior are emitted by generated MeerkatMachine
 //! inputs/effects.
 //!
 //! `InputState` still caches terminal outcome and attempt count for persistence,
@@ -16,6 +16,7 @@
 
 use chrono::{DateTime, Utc};
 use meerkat_core::lifecycle::{InputId, RunId};
+use meerkat_core::types::HandlingMode;
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::PolicyVersion;
@@ -117,10 +118,10 @@ pub const MAX_STAGE_ATTEMPTS: u32 = 3;
 /// (`input_phases`, `input_run_associations`, `input_boundary_sequences`,
 /// `input_terminal_kind` + `input_superseded_by` / `input_aggregate_id` /
 /// `input_abandon_reason` / `input_abandon_attempt_count`, and
-/// `input_attempt_counts` / `input_admission_seq`) so they can travel alongside a persisted
-/// [`InputState`] at the store boundary, where no live DSL is available to
-/// query. Inside a running driver, these values are always read from the DSL
-/// directly, never from the seed.
+/// `input_attempt_counts` / `input_admission_seq` / `input_recovery_lanes`) so
+/// they can travel alongside a persisted [`InputState`] at the store boundary,
+/// where no live DSL is available to query. Inside a running driver, these
+/// values are always read from the DSL directly, never from the seed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputStateSeed {
     pub phase: InputLifecycleState,
@@ -129,6 +130,7 @@ pub struct InputStateSeed {
     pub admission_sequence: Option<u64>,
     pub terminal_outcome: Option<InputTerminalOutcome>,
     pub attempt_count: u32,
+    pub recovery_lane: Option<HandlingMode>,
 }
 
 impl InputStateSeed {
@@ -142,6 +144,7 @@ impl InputStateSeed {
             admission_sequence: None,
             terminal_outcome: None,
             attempt_count: 0,
+            recovery_lane: None,
         }
     }
 }
@@ -171,12 +174,13 @@ impl StoredInputState {
 /// Per-input shell data. Plain fields, no hidden state machine.
 ///
 /// All DSL-owned lifecycle fields (`phase`, `last_run_id`,
-/// `last_boundary_sequence`, `terminal_outcome`, `attempt_count`) are
+/// `last_boundary_sequence`, `terminal_outcome`, `attempt_count`,
+/// `recovery_lane`) are
 /// authoritative in the DSL. Live code reads them via
 /// `EphemeralRuntimeDriver::input_phase` / `input_last_run_id` /
 /// `input_last_boundary_sequence` / `input_terminal_outcome` /
-/// `input_attempt_count`. Persistence callsites serialize them via
-/// [`InputStateSeed`] bundled on [`StoredInputState`].
+/// `input_attempt_count` / `input_recovery_lane`. Persistence callsites
+/// serialize them via [`InputStateSeed`] bundled on [`StoredInputState`].
 #[derive(Debug, Clone)]
 pub struct InputState {
     pub input_id: InputId,
@@ -284,6 +288,8 @@ struct InputStateSerde {
     last_boundary_sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     admission_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_lane: Option<HandlingMode>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -306,6 +312,7 @@ impl Serialize for StoredInputState {
             last_run_id: self.seed.last_run_id.clone(),
             last_boundary_sequence: self.seed.last_boundary_sequence,
             admission_sequence: self.seed.admission_sequence,
+            recovery_lane: self.seed.recovery_lane,
             created_at: self.state.created_at,
             updated_at: self.state.updated_at,
         };
@@ -338,6 +345,7 @@ impl<'de> Deserialize<'de> for StoredInputState {
             admission_sequence: helper.admission_sequence,
             terminal_outcome: helper.terminal_outcome,
             attempt_count: helper.attempt_count,
+            recovery_lane: helper.recovery_lane,
         };
         Ok(StoredInputState { state, seed })
     }
@@ -427,6 +435,7 @@ mod tests {
                 admission_sequence: Some(42),
                 terminal_outcome: None,
                 attempt_count: 0,
+                recovery_lane: Some(HandlingMode::Queue),
             },
         };
 
@@ -438,6 +447,7 @@ mod tests {
             parsed.seed.admission_sequence,
             bundle.seed.admission_sequence
         );
+        assert_eq!(parsed.seed.recovery_lane, bundle.seed.recovery_lane);
         assert_eq!(
             parsed.state.runtime_semantics,
             bundle.state.runtime_semantics

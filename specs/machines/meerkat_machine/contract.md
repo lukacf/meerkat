@@ -87,6 +87,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `next_priority_admission_seq`: `u64`
 - `input_admission_seq`: `Map<String, u64>`
 - `input_lane`: `Map<String, InputLane>`
+- `input_recovery_lanes`: `Map<String, InputLane>`
 - `admission_authorized_lanes`: `Map<String, InputLane>`
 - `admission_authorized_plans`: `Map<String, AdmissionPlanKind>`
 - `admission_authorized_existing_actions`: `Map<String, AdmissionExistingQueuedActionKind>`
@@ -214,7 +215,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveAdmissionValidation`(input_id: String, input_kind: AdmissionInputKind, input_origin: AdmissionInputOriginKind, durability: InputDurabilityKind, peer_handling_mode_valid: Bool, peer_response_terminal_structurally_valid: Bool, peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus)
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
 - `RegisterAcceptedIdempotency`(input_id: String, idempotency_key: String)
-- `NormalizeRecoveredInputLifecycle`(input_id: String, phase: RecoveredInputObservedPhase, consume_on_accept: Bool, applied_boundary_committed: Option<Bool>)
+- `NormalizeRecoveredInputLifecycle`(input_id: String, phase: RecoveredInputObservedPhase, applied_boundary_committed: Option<Bool>)
 - `ClassifyRecoveredInputDurability`(input_id: String, durability: InputDurabilityKind)
 - `ResolveInputPublicLifecycle`(input_id: String, phase: RecoveredInputObservedPhase)
 - `ResolveInputPublicTerminalOutcome`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
@@ -258,8 +259,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ServiceTurnCommitted`(run_id: RunId)
 - `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, terminal_outcome: TurnTerminalOutcome, terminal_cause_kind: TurnTerminalCauseKind, error: String)
 - `RunCancelled`(run_id: RunId)
-- `RecoverAdmittedInput`(input_id: String, input_kind: RecoveredInputKind, policy_routing_disposition: RecoveredRoutingDisposition, policy_apply_mode: AdmissionPolicyApplyMode, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, lane: InputLane)
-- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>, lane: Option<InputLane>)
+- `RecoverAdmittedInput`(input_id: String, input_kind: RecoveredInputKind, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, lane: InputLane)
+- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>, recovery_lane: Option<InputLane>, lane: Option<InputLane>)
 - `QueueAccepted`(input_id: String)
 - `SteerAccepted`(input_id: String)
 - `ChangeLane`(input_id: String, new_lane: InputLane)
@@ -2735,117 +2736,57 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `AdmissionValidationResolved`
 - To: `Running`
 
-### `NormalizeRecoveredInputAcceptedConsumeOnAcceptInitializing`
-- From: `Initializing`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
-- Guards:
-  - `accepted_phase`
-  - `consume_on_accept`
-- Emits: `RecoveredInputLifecycleNormalized`
-- To: `Initializing`
-
-### `NormalizeRecoveredInputAcceptedConsumeOnAcceptIdle`
-- From: `Idle`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
-- Guards:
-  - `accepted_phase`
-  - `consume_on_accept`
-- Emits: `RecoveredInputLifecycleNormalized`
-- To: `Idle`
-
-### `NormalizeRecoveredInputAcceptedConsumeOnAcceptAttached`
-- From: `Attached`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
-- Guards:
-  - `accepted_phase`
-  - `consume_on_accept`
-- Emits: `RecoveredInputLifecycleNormalized`
-- To: `Attached`
-
-### `NormalizeRecoveredInputAcceptedConsumeOnAcceptRunning`
-- From: `Running`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
-- Guards:
-  - `accepted_phase`
-  - `consume_on_accept`
-- Emits: `RecoveredInputLifecycleNormalized`
-- To: `Running`
-
-### `NormalizeRecoveredInputAcceptedConsumeOnAcceptRetired`
-- From: `Retired`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
-- Guards:
-  - `accepted_phase`
-  - `consume_on_accept`
-- Emits: `RecoveredInputLifecycleNormalized`
-- To: `Retired`
-
-### `NormalizeRecoveredInputAcceptedConsumeOnAcceptStopped`
-- From: `Stopped`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
-- Guards:
-  - `accepted_phase`
-  - `consume_on_accept`
-- Emits: `RecoveredInputLifecycleNormalized`
-- To: `Stopped`
-
 ### `NormalizeRecoveredInputAcceptedQueueInitializing`
 - From: `Initializing`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `accepted_phase`
-  - `not_consume_on_accept`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Initializing`
 
 ### `NormalizeRecoveredInputAcceptedQueueIdle`
 - From: `Idle`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `accepted_phase`
-  - `not_consume_on_accept`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Idle`
 
 ### `NormalizeRecoveredInputAcceptedQueueAttached`
 - From: `Attached`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `accepted_phase`
-  - `not_consume_on_accept`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Attached`
 
 ### `NormalizeRecoveredInputAcceptedQueueRunning`
 - From: `Running`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `accepted_phase`
-  - `not_consume_on_accept`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Running`
 
 ### `NormalizeRecoveredInputAcceptedQueueRetired`
 - From: `Retired`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `accepted_phase`
-  - `not_consume_on_accept`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Retired`
 
 ### `NormalizeRecoveredInputAcceptedQueueStopped`
 - From: `Stopped`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `accepted_phase`
-  - `not_consume_on_accept`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Stopped`
 
 ### `NormalizeRecoveredInputStagedInitializing`
 - From: `Initializing`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `staged_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -2853,7 +2794,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputStagedIdle`
 - From: `Idle`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `staged_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -2861,7 +2802,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputStagedAttached`
 - From: `Attached`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `staged_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -2869,7 +2810,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputStagedRunning`
 - From: `Running`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `staged_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -2877,7 +2818,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputStagedRetired`
 - From: `Retired`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `staged_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -2885,7 +2826,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputStagedStopped`
 - From: `Stopped`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `staged_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -2893,7 +2834,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedCommittedInitializing`
 - From: `Initializing`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_committed_observed`
@@ -2902,7 +2843,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedCommittedIdle`
 - From: `Idle`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_committed_observed`
@@ -2911,7 +2852,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedCommittedAttached`
 - From: `Attached`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_committed_observed`
@@ -2920,7 +2861,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedCommittedRunning`
 - From: `Running`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_committed_observed`
@@ -2929,7 +2870,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedCommittedRetired`
 - From: `Retired`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_committed_observed`
@@ -2938,7 +2879,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedCommittedStopped`
 - From: `Stopped`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_committed_observed`
@@ -2947,7 +2888,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedMissingReceiptInitializing`
 - From: `Initializing`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_missing_observed`
@@ -2956,7 +2897,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedMissingReceiptIdle`
 - From: `Idle`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_missing_observed`
@@ -2965,7 +2906,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedMissingReceiptAttached`
 - From: `Attached`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_missing_observed`
@@ -2974,7 +2915,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedMissingReceiptRunning`
 - From: `Running`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_missing_observed`
@@ -2983,7 +2924,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedMissingReceiptRetired`
 - From: `Retired`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_missing_observed`
@@ -2992,7 +2933,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedMissingReceiptStopped`
 - From: `Stopped`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_missing_observed`
@@ -3001,7 +2942,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedUnobservedReceiptInitializing`
 - From: `Initializing`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_receipt_unobserved`
@@ -3010,7 +2951,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedUnobservedReceiptIdle`
 - From: `Idle`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_receipt_unobserved`
@@ -3019,7 +2960,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedUnobservedReceiptAttached`
 - From: `Attached`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_receipt_unobserved`
@@ -3028,7 +2969,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedUnobservedReceiptRunning`
 - From: `Running`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_receipt_unobserved`
@@ -3037,7 +2978,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedUnobservedReceiptRetired`
 - From: `Retired`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_receipt_unobserved`
@@ -3046,7 +2987,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedUnobservedReceiptStopped`
 - From: `Stopped`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `applied_phase`
   - `boundary_receipt_unobserved`
@@ -3055,7 +2996,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputQueuedInitializing`
 - From: `Initializing`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -3063,7 +3004,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputQueuedIdle`
 - From: `Idle`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -3071,7 +3012,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputQueuedAttached`
 - From: `Attached`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -3079,7 +3020,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputQueuedRunning`
 - From: `Running`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -3087,7 +3028,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputQueuedRetired`
 - From: `Retired`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -3095,7 +3036,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputQueuedStopped`
 - From: `Stopped`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
 - Guards:
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -5296,60 +5237,56 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverAdmittedInputIdle`
 - From: `Idle`
-- On: `RecoverAdmittedInput`(input_id, input_kind, policy_routing_disposition, policy_apply_mode, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- On: `RecoverAdmittedInput`(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
 - Guards:
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
-  - `recovered_lane_matches_policy`
-  - `recovered_boundary_matches_policy_apply_mode`
+  - `recovered_immediate_boundary_uses_steer_lane`
 - To: `Idle`
 
 ### `RecoverAdmittedInputAttached`
 - From: `Attached`
-- On: `RecoverAdmittedInput`(input_id, input_kind, policy_routing_disposition, policy_apply_mode, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- On: `RecoverAdmittedInput`(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
 - Guards:
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
-  - `recovered_lane_matches_policy`
-  - `recovered_boundary_matches_policy_apply_mode`
+  - `recovered_immediate_boundary_uses_steer_lane`
 - To: `Attached`
 
 ### `RecoverAdmittedInputRunning`
 - From: `Running`
-- On: `RecoverAdmittedInput`(input_id, input_kind, policy_routing_disposition, policy_apply_mode, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- On: `RecoverAdmittedInput`(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
 - Guards:
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
-  - `recovered_lane_matches_policy`
-  - `recovered_boundary_matches_policy_apply_mode`
+  - `recovered_immediate_boundary_uses_steer_lane`
 - To: `Running`
 
 ### `RecoverAdmittedInputRetired`
 - From: `Retired`
-- On: `RecoverAdmittedInput`(input_id, input_kind, policy_routing_disposition, policy_apply_mode, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- On: `RecoverAdmittedInput`(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
 - Guards:
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
-  - `recovered_lane_matches_policy`
-  - `recovered_boundary_matches_policy_apply_mode`
+  - `recovered_immediate_boundary_uses_steer_lane`
 - To: `Retired`
 
 ### `RecoverAdmittedInputStopped`
 - From: `Stopped`
-- On: `RecoverAdmittedInput`(input_id, input_kind, policy_routing_disposition, policy_apply_mode, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- On: `RecoverAdmittedInput`(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
 - Guards:
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
-  - `recovered_lane_matches_policy`
-  - `recovered_boundary_matches_policy_apply_mode`
+  - `recovered_immediate_boundary_uses_steer_lane`
 - To: `Stopped`
 
 ### `RecoverInputLifecycleIdle`
 - From: `Idle`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
-  - `recovered_queued_lane_matches_witness`
+  - `recovered_recovery_lane_matches_witness`
+  - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
   - `recovered_order_recovery_matches_missing_sequence`
   - `recovered_terminal_payload_matches_phase`
@@ -5358,10 +5295,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleAttached`
 - From: `Attached`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
-  - `recovered_queued_lane_matches_witness`
+  - `recovered_recovery_lane_matches_witness`
+  - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
   - `recovered_order_recovery_matches_missing_sequence`
   - `recovered_terminal_payload_matches_phase`
@@ -5370,10 +5308,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleRunning`
 - From: `Running`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
-  - `recovered_queued_lane_matches_witness`
+  - `recovered_recovery_lane_matches_witness`
+  - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
   - `recovered_order_recovery_matches_missing_sequence`
   - `recovered_terminal_payload_matches_phase`
@@ -5382,10 +5321,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleRetired`
 - From: `Retired`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
-  - `recovered_queued_lane_matches_witness`
+  - `recovered_recovery_lane_matches_witness`
+  - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
   - `recovered_order_recovery_matches_missing_sequence`
   - `recovered_terminal_payload_matches_phase`
@@ -5394,10 +5334,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleStopped`
 - From: `Stopped`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
-  - `recovered_queued_lane_matches_witness`
+  - `recovered_recovery_lane_matches_witness`
+  - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
   - `recovered_order_recovery_matches_missing_sequence`
   - `recovered_terminal_payload_matches_phase`

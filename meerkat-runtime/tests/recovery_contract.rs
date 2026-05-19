@@ -140,6 +140,7 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
             terminal_outcome: None,
             attempt_count: 1,
             admission_sequence: None,
+            recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
         },
     }
 }

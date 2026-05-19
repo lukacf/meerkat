@@ -331,6 +331,7 @@ struct TokenCommitSnapshot {
     lease_key: LeaseKey,
     previous: Option<PersistedTokens>,
     previous_lifecycle: meerkat_core::handles::AuthLeaseSnapshot,
+    previous_lifecycle_restore: meerkat_core::handles::AuthLeaseRestoreSnapshot,
     lifecycle_transition: meerkat_core::handles::AuthLeaseTransition,
 }
 
@@ -368,7 +369,8 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
     let key = TokenKey::from_auth_binding(auth_binding);
     let lease_key = LeaseKey::from_auth_binding(auth_binding);
     let auth_lease = runtime.auth_lease_handle();
-    let previous_lifecycle = auth_lease.snapshot(&lease_key);
+    let previous_lifecycle_restore = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
+    let previous_lifecycle = previous_lifecycle_restore.snapshot().clone();
     let previous = match store.load(&key).await {
         Ok(previous) => previous,
         Err(e) => {
@@ -401,6 +403,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         lease_key,
         previous,
         previous_lifecycle,
+        previous_lifecycle_restore,
         lifecycle_transition: transition,
     };
     if mark_for_rehydration {
@@ -481,9 +484,7 @@ async fn rollback_token_commit(
                     .map_err(|e| format!("TokenStore rollback save failed: {e}"))?;
                 let restored_transition = meerkat_core::restore_token_lifecycle_snapshot(
                     auth_lease,
-                    &commit.lease_key,
-                    &commit.previous_lifecycle,
-                    Some(previous),
+                    &commit.previous_lifecycle_restore,
                 )
                 .map_err(|e| format!("AuthMachine lifecycle rollback failed: {e}"))?;
                 if let Some(restored_transition) = restored_transition {
@@ -530,7 +531,9 @@ async fn save_prepared_tokens_after_terminal_consume_unlocked(
     prepared: PreparedTokenCommitSnapshot,
 ) -> Result<(), RpcResponse> {
     let auth_lease = runtime.auth_lease_handle();
-    let previous_lifecycle = auth_lease.snapshot(&prepared.lease_key);
+    let previous_lifecycle_restore =
+        auth_lease.capture_auth_lifecycle_restore_snapshot(&prepared.lease_key);
+    let previous_lifecycle = previous_lifecycle_restore.snapshot().clone();
     let transition = match meerkat_core::publish_token_lifecycle_acquired(
         auth_lease.as_ref(),
         auth_binding,
@@ -552,6 +555,7 @@ async fn save_prepared_tokens_after_terminal_consume_unlocked(
         lease_key: prepared.lease_key,
         previous: prepared.previous,
         previous_lifecycle,
+        previous_lifecycle_restore,
         lifecycle_transition: transition,
     };
     if let Err(e) = store.save(&commit.key, &committed_tokens).await {

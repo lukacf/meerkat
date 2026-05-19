@@ -23,8 +23,8 @@ use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::AuthBindingRef;
 use meerkat_core::handles::{
-    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
-    LeaseKey,
+    AuthLeaseHandle, AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot,
+    AuthLeaseTransition, DslTransitionError, LeaseKey,
 };
 use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
 
@@ -1048,10 +1048,16 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
 
     fn restore_auth_lifecycle_snapshot(
         &self,
-        lease_key: &LeaseKey,
-        snapshot: &AuthLeaseSnapshot,
-        expires_at: Option<u64>,
+        captured: &AuthLeaseRestoreSnapshot,
     ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+        if captured.captured_by_type_id() != std::any::TypeId::of::<RuntimeAuthLeaseHandle>() {
+            return Err(DslTransitionError::new(
+                "AuthLeaseHandle::restore_auth_lifecycle_snapshot",
+                "auth lifecycle restore snapshot was not captured from RuntimeAuthLeaseHandle",
+            ));
+        }
+        let lease_key = captured.lease_key();
+        let snapshot = captured.snapshot();
         let mut guard = self
             .machines
             .lock()
@@ -1123,14 +1129,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         let Some(phase) = snapshot.phase else {
             return Ok(None);
         };
-        let Some(expires_at) = expires_at else {
-            return Ok(None);
-        };
-        let expires_at = if expires_at == u64::MAX {
-            None
-        } else {
-            Some(expires_at)
-        };
+        let expires_at = snapshot.expires_at;
         let oauth = existing_oauth.unwrap_or_default();
         let (to_phase, auth_transition) = apply_restore_input_to_registry(
             &mut guard,
@@ -1531,6 +1530,7 @@ mod tests {
 
         h.acquire_lease(&key, 1_800_000_000).unwrap();
         let before = h.snapshot(&key);
+        let before_restore = h.capture_auth_lifecycle_restore_snapshot(&key);
         assert_eq!(before.phase, Some(AuthLeasePhase::Valid));
         assert!(before.credential_present);
         assert!(before.credential_published_at_millis.is_some());
@@ -1539,8 +1539,7 @@ mod tests {
         let advanced = h.snapshot(&key);
         assert!(advanced.generation > before.generation);
 
-        h.restore_auth_lifecycle_snapshot(&key, &before, before.expires_at)
-            .unwrap();
+        h.restore_auth_lifecycle_snapshot(&before_restore).unwrap();
 
         let restored = h.snapshot(&key);
         assert_eq!(restored.phase, before.phase);
@@ -1557,20 +1556,10 @@ mod tests {
     fn restore_empty_zero_generation_snapshot_clears_runtime_authority() {
         let h = RuntimeAuthLeaseHandle::new();
         let key = lease("dev", "shared");
+        let empty = h.capture_auth_lifecycle_restore_snapshot(&key);
         h.acquire_lease(&key, 1_800_000_000).unwrap();
 
-        h.restore_auth_lifecycle_snapshot(
-            &key,
-            &AuthLeaseSnapshot {
-                phase: None,
-                expires_at: None,
-                credential_present: false,
-                generation: 0,
-                credential_published_at_millis: None,
-            },
-            None,
-        )
-        .unwrap();
+        h.restore_auth_lifecycle_snapshot(&empty).unwrap();
 
         let restored = h.snapshot(&key);
         assert_eq!(restored.phase, None);

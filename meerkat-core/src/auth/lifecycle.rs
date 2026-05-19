@@ -20,8 +20,8 @@ use super::token_store::{
 };
 use crate::connection::AuthBindingRef;
 use crate::handles::{
-    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
-    LeaseKey,
+    AuthLeaseHandle, AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot,
+    AuthLeaseTransition, DslTransitionError, LeaseKey,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -262,7 +262,7 @@ pub async fn clear_tokens_and_publish_lifecycle_released(
 ) -> Result<(), TokenLifecycleClearError> {
     let key = TokenKey::from_auth_binding(auth_binding);
     let lease_key = LeaseKey::from_auth_binding(auth_binding);
-    let previous_lifecycle = handle.snapshot(&lease_key);
+    let previous_lifecycle = handle.capture_auth_lifecycle_restore_snapshot(&lease_key);
     let previous = match store.load(&key).await {
         Ok(previous) => previous,
         Err(load_error) => {
@@ -280,12 +280,8 @@ pub async fn clear_tokens_and_publish_lifecycle_released(
     publish_token_lifecycle_released(handle, auth_binding)
         .map_err(TokenLifecycleClearError::AuthMachineRelease)?;
     if let Err(clear_error) = store.clear(&key).await {
-        if let Err(restore_error) = restore_token_lifecycle_snapshot(
-            handle,
-            &lease_key,
-            &previous_lifecycle,
-            previous.as_ref(),
-        ) {
+        let _ = previous;
+        if let Err(restore_error) = restore_token_lifecycle_snapshot(handle, &previous_lifecycle) {
             return Err(
                 TokenLifecycleClearError::TokenStoreClearAndLifecycleRestore {
                     clear_error,
@@ -307,10 +303,9 @@ pub async fn clear_tokens_and_publish_lifecycle_released(
 /// must not recreate credential authority from token bytes alone.
 pub fn restore_token_lifecycle_snapshot(
     handle: &dyn AuthLeaseHandle,
-    lease_key: &LeaseKey,
-    snapshot: &AuthLeaseSnapshot,
-    previous: Option<&PersistedTokens>,
+    captured: &AuthLeaseRestoreSnapshot,
 ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+    let snapshot = captured.snapshot();
     if !snapshot.credential_present {
         return Ok(None);
     }
@@ -321,13 +316,7 @@ pub fn restore_token_lifecycle_snapshot(
         return Ok(None);
     }
 
-    let Some(expires_at) = snapshot
-        .expires_at
-        .or_else(|| previous.map(persisted_token_expires_at_epoch_secs))
-    else {
-        return Ok(None);
-    };
-    handle.restore_auth_lifecycle_snapshot(lease_key, snapshot, Some(expires_at))
+    handle.restore_auth_lifecycle_snapshot(captured)
 }
 
 pub fn lease_snapshot_expires_at_datetime(snapshot: &AuthLeaseSnapshot) -> Option<DateTime<Utc>> {
@@ -428,16 +417,26 @@ mod tests {
 
     use crate::auth::PersistedAuthMode;
     use crate::connection::{BindingId, RealmId};
-    use crate::handles::{AuthLeasePhase, AuthLeaseTransition, DslTransitionError};
+    use crate::handles::{
+        AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseTransition, DslTransitionError,
+    };
     use async_trait::async_trait;
 
     #[derive(Default)]
     struct RecordingAuthLeaseHandle {
         acquired: Mutex<Vec<(LeaseKey, u64)>>,
         released: Mutex<Vec<LeaseKey>>,
+        snapshot_expires_at: Option<u64>,
     }
 
     impl RecordingAuthLeaseHandle {
+        fn with_snapshot_expires_at(expires_at: u64) -> Self {
+            Self {
+                snapshot_expires_at: Some(expires_at),
+                ..Self::default()
+            }
+        }
+
         fn acquired(&self) -> Vec<(LeaseKey, u64)> {
             self.acquired
                 .lock()
@@ -503,10 +502,25 @@ mod tests {
             Ok(())
         }
 
+        fn restore_auth_lifecycle_snapshot(
+            &self,
+            captured: &AuthLeaseRestoreSnapshot,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            let snapshot = captured.snapshot();
+            if !snapshot.credential_present {
+                return Ok(None);
+            }
+            let transition = self.acquire_lease(
+                captured.lease_key(),
+                snapshot.expires_at.unwrap_or(u64::MAX),
+            )?;
+            Ok(Some(transition))
+        }
+
         fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
             AuthLeaseSnapshot {
                 phase: Some(AuthLeasePhase::Valid),
-                expires_at: None,
+                expires_at: self.snapshot_expires_at,
                 credential_present: true,
                 generation: 1,
                 credential_published_at_millis: None,
@@ -710,9 +724,11 @@ mod tests {
 
     #[tokio::test]
     async fn clear_boundary_restores_lifecycle_when_token_clear_fails() {
-        let handle = RecordingAuthLeaseHandle::default();
         let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
         let tokens = tokens_with_expiry(Some(expires_at));
+        let handle = RecordingAuthLeaseHandle::with_snapshot_expires_at(
+            persisted_token_expires_at_epoch_secs(&tokens),
+        );
         let store = ClearFailingTokenStore::new(tokens.clone());
         let auth_binding = auth_binding();
 

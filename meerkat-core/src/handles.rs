@@ -1057,6 +1057,46 @@ pub struct AuthLeaseSnapshot {
     pub credential_published_at_millis: Option<u64>,
 }
 
+/// Opaque token for restoring a previously captured auth lease snapshot.
+///
+/// This is intentionally not constructible from public snapshot fields. A
+/// rollback caller must first capture it from an [`AuthLeaseHandle`], then hand
+/// that exact token back to the same authority boundary if a later durable
+/// write fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthLeaseRestoreSnapshot {
+    lease_key: LeaseKey,
+    snapshot: AuthLeaseSnapshot,
+    captured_by: std::any::TypeId,
+}
+
+impl AuthLeaseRestoreSnapshot {
+    fn capture(
+        lease_key: LeaseKey,
+        snapshot: AuthLeaseSnapshot,
+        captured_by: std::any::TypeId,
+    ) -> Self {
+        Self {
+            lease_key,
+            snapshot,
+            captured_by,
+        }
+    }
+
+    pub fn lease_key(&self) -> &LeaseKey {
+        &self.lease_key
+    }
+
+    pub fn snapshot(&self) -> &AuthLeaseSnapshot {
+        &self.snapshot
+    }
+
+    #[doc(hidden)]
+    pub fn captured_by_type_id(&self) -> std::any::TypeId {
+        self.captured_by
+    }
+}
+
 /// Result of an accepted auth lease lifecycle transition.
 ///
 /// `generation` is the projection version assigned while the transition is
@@ -1277,47 +1317,36 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         self.release_lease(lease_key)
     }
 
-    /// Restore a captured lifecycle snapshot after a later durable write failed.
+    /// Capture the current lifecycle snapshot for possible rollback.
     ///
-    /// The default implementation can reconstruct credential-present snapshots
-    /// through public lease transitions. Runtime-backed handles override this to
-    /// preserve machine-owned metadata such as credential publication time and to
-    /// restore empty snapshots without leaving an unretryable generation behind.
-    fn restore_auth_lifecycle_snapshot(
+    /// The returned token is an opaque handoff for `restore_auth_lifecycle_snapshot`;
+    /// callers may inspect the read-only snapshot but cannot fabricate a restore
+    /// request from token-store or projection metadata.
+    fn capture_auth_lifecycle_restore_snapshot(
         &self,
         lease_key: &LeaseKey,
-        snapshot: &AuthLeaseSnapshot,
-        expires_at: Option<u64>,
+    ) -> AuthLeaseRestoreSnapshot {
+        AuthLeaseRestoreSnapshot::capture(
+            lease_key.clone(),
+            self.snapshot(lease_key),
+            self.type_id(),
+        )
+    }
+
+    /// Restore a captured lifecycle snapshot after a later durable write failed.
+    ///
+    /// Production handles must implement this through generated machine
+    /// authority. The default fails closed so a handwritten handle cannot become
+    /// a lifecycle reducer by replaying public snapshot fields.
+    fn restore_auth_lifecycle_snapshot(
+        &self,
+        snapshot: &AuthLeaseRestoreSnapshot,
     ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
-        if !snapshot.credential_present {
-            return Ok(None);
-        }
-        let Some(phase) = snapshot.phase else {
-            return Ok(None);
-        };
-        if phase == AuthLeasePhase::Released {
-            return Ok(None);
-        }
-        let Some(expires_at) = expires_at else {
-            return Ok(None);
-        };
-        let transition = self.acquire_lease(lease_key, expires_at)?;
-        match phase {
-            AuthLeasePhase::Valid => Ok(Some(transition)),
-            AuthLeasePhase::Expiring => {
-                self.mark_expiring(lease_key)?;
-                Ok(Some(transition))
-            }
-            AuthLeasePhase::Refreshing => {
-                self.begin_refresh(lease_key)?;
-                Ok(Some(transition))
-            }
-            AuthLeasePhase::ReauthRequired => {
-                self.mark_reauth_required(lease_key)?;
-                Ok(Some(transition))
-            }
-            AuthLeasePhase::Released => Ok(None),
-        }
+        let _ = snapshot;
+        Err(DslTransitionError::new(
+            "AuthLeaseHandle::restore_auth_lifecycle_snapshot",
+            "restoring auth lifecycle snapshots requires generated AuthMachine authority",
+        ))
     }
 
     /// Observe the current DSL-level state of a binding.

@@ -152,6 +152,8 @@ pub struct ManagedStoreTokens {
     pub key: TokenKey,
     pub tokens: PersistedTokens,
     pub lifecycle_snapshot: Option<meerkat_core::handles::AuthLeaseSnapshot>,
+    #[doc(hidden)]
+    pub lifecycle_restore_snapshot: Option<meerkat_core::handles::AuthLeaseRestoreSnapshot>,
     pub lifecycle: ManagedStoreLifecycle,
     #[doc(hidden)]
     pub lifecycle_guard: Option<meerkat_core::AuthLoginLifecycleGuard>,
@@ -268,46 +270,6 @@ fn oauth_lifecycle_marker_payload_valid_for_tokens(tokens: &PersistedTokens) -> 
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn restore_fresh_oauth_lifecycle_from_marker(
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
-    lease_key: &meerkat_core::handles::LeaseKey,
-    snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
-    tokens: &PersistedTokens,
-) -> Result<Option<meerkat_core::handles::AuthLeaseSnapshot>, ProviderAuthError> {
-    if snapshot.phase.is_some() || snapshot.credential_present || snapshot.generation != 0 {
-        return Ok(None);
-    }
-    let Some(publication) = meerkat_core::tokens_lifecycle_publication_with_explicit_expiry(tokens)
-    else {
-        return Err(stale_credential_error());
-    };
-    if publication.expires_at != meerkat_core::persisted_token_expires_at_epoch_secs(tokens) {
-        return Err(stale_credential_error());
-    }
-    let Some(generation) = publication.generation else {
-        return Err(stale_credential_error());
-    };
-    let Some(credential_published_at_millis) = publication.credential_published_at_millis else {
-        return Err(stale_credential_error());
-    };
-    let restored = meerkat_core::handles::AuthLeaseSnapshot {
-        phase: Some(meerkat_core::handles::AuthLeasePhase::Valid),
-        expires_at: (publication.expires_at != u64::MAX).then_some(publication.expires_at),
-        credential_present: true,
-        generation,
-        credential_published_at_millis: Some(credential_published_at_millis),
-    };
-    auth_lease
-        .restore_auth_lifecycle_snapshot(lease_key, &restored, restored.expires_at)
-        .map_err(|e| {
-            ProviderAuthError::SourceResolutionFailed(format!(
-                "AuthMachine lifecycle restore failed: {e}"
-            ))
-        })?;
-    Ok(Some(auth_lease.snapshot(lease_key)))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn persisted_token_material_matches(left: &PersistedTokens, right: &PersistedTokens) -> bool {
     left.auth_mode == right.auth_mode
         && left.primary_secret == right.primary_secret
@@ -399,17 +361,8 @@ pub async fn load_managed_store_tokens_with_lifecycle(
     let lifecycle = managed_store_lifecycle_from_phase(token_phase);
 
     if let Some(auth_lease) = env.auth_lease_handle.as_ref() {
-        let mut snapshot = auth_lease.snapshot(&lease_key);
-        if is_oauth_login
-            && let Some(restored) = restore_fresh_oauth_lifecycle_from_marker(
-                auth_lease.as_ref(),
-                &lease_key,
-                &snapshot,
-                &tokens,
-            )?
-        {
-            snapshot = restored;
-        }
+        let restore_snapshot = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
+        let snapshot = restore_snapshot.snapshot().clone();
         if snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired) {
             return Err(user_reauth_required_error());
         }
@@ -440,6 +393,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
                 key,
                 tokens,
                 Some(snapshot),
+                Some(restore_snapshot),
                 lifecycle,
                 lifecycle_guard,
             ));
@@ -451,6 +405,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
                 key,
                 tokens,
                 Some(snapshot),
+                Some(restore_snapshot),
                 managed_store_lifecycle_from_phase(phase),
                 lifecycle_guard,
             )),
@@ -459,6 +414,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
                 key,
                 tokens,
                 Some(snapshot),
+                Some(restore_snapshot),
                 ManagedStoreLifecycle::RefreshRequired,
                 lifecycle_guard,
             )),
@@ -475,6 +431,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
             store,
             key,
             tokens,
+            None,
             None,
             lifecycle,
             lifecycle_guard,
@@ -511,6 +468,7 @@ fn managed_store_tokens(
     key: TokenKey,
     tokens: PersistedTokens,
     lifecycle_snapshot: Option<meerkat_core::handles::AuthLeaseSnapshot>,
+    lifecycle_restore_snapshot: Option<meerkat_core::handles::AuthLeaseRestoreSnapshot>,
     lifecycle: ManagedStoreLifecycle,
     lifecycle_guard: Option<meerkat_core::AuthLoginLifecycleGuard>,
 ) -> ManagedStoreTokens {
@@ -519,6 +477,7 @@ fn managed_store_tokens(
         key,
         tokens,
         lifecycle_snapshot,
+        lifecycle_restore_snapshot,
         lifecycle,
         lifecycle_guard,
     }
@@ -540,9 +499,11 @@ pub fn begin_managed_store_oauth_refresh_lifecycle(
         .as_ref()
         .ok_or_else(lease_absent_error)?;
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
-    let current_snapshot = auth_lease.snapshot(&lease_key);
+    let current_restore_snapshot = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
+    let current_snapshot = current_restore_snapshot.snapshot().clone();
     if current_snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::Refreshing) {
         previous.lifecycle_snapshot = Some(current_snapshot);
+        previous.lifecycle_restore_snapshot = Some(current_restore_snapshot);
         return Ok(false);
     }
     if let Some(expected) = previous.lifecycle_snapshot.as_ref()
@@ -563,7 +524,10 @@ pub fn begin_managed_store_oauth_refresh_lifecycle(
                     "AuthMachine lifecycle begin_refresh failed: {e}"
                 ))
             })?;
-            previous.lifecycle_snapshot = Some(auth_lease.snapshot(&lease_key));
+            let refreshing_snapshot =
+                auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
+            previous.lifecycle_snapshot = Some(refreshing_snapshot.snapshot().clone());
+            previous.lifecycle_restore_snapshot = Some(refreshing_snapshot);
             Ok(true)
         }
         Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired) => {
@@ -571,6 +535,7 @@ pub fn begin_managed_store_oauth_refresh_lifecycle(
         }
         Some(meerkat_core::handles::AuthLeasePhase::Refreshing) => {
             previous.lifecycle_snapshot = Some(current_snapshot);
+            previous.lifecycle_restore_snapshot = Some(current_restore_snapshot);
             Ok(false)
         }
         Some(meerkat_core::handles::AuthLeasePhase::Released) | None => Err(lease_absent_error()),
@@ -909,6 +874,16 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
             "managed_store OAuth refresh missing AuthMachine lifecycle snapshot".into(),
         )
     })?;
+    let previous_restore_snapshot =
+        previous
+            .lifecycle_restore_snapshot
+            .as_ref()
+            .ok_or_else(|| {
+                ProviderAuthError::SourceResolutionFailed(
+                    "managed_store OAuth refresh missing AuthMachine lifecycle restore token"
+                        .into(),
+                )
+            })?;
     let current_tokens = previous
         .store
         .load(&previous.key)
@@ -948,9 +923,7 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
         let mut restored_previous = previous.tokens.clone();
         let restored_transition = match meerkat_core::restore_token_lifecycle_snapshot(
             auth_lease.as_ref(),
-            &lease_key,
-            previous_snapshot,
-            Some(&previous.tokens),
+            previous_restore_snapshot,
         ) {
             Ok(restored_transition) => restored_transition,
             Err(err) => {
@@ -1661,10 +1634,9 @@ mod tests {
 
         fn restore_auth_lifecycle_snapshot(
             &self,
-            _lease_key: &LeaseKey,
-            snapshot: &AuthLeaseSnapshot,
-            _expires_at: Option<u64>,
+            captured: &meerkat_core::handles::AuthLeaseRestoreSnapshot,
         ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            let snapshot = captured.snapshot();
             *self.snapshot.lock().expect("snapshot lock") = snapshot.clone();
             Ok(snapshot.credential_present.then(|| {
                 AuthLeaseTransition::__from_test_authority(
@@ -2059,14 +2031,13 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn managed_store_oauth_fresh_runtime_restores_valid_lifecycle_marker() {
+    async fn managed_store_oauth_empty_lifecycle_rejects_valid_lifecycle_marker() {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
         let lease_key = LeaseKey::from_auth_binding(binding.auth_binding_ref());
         let tokens = chatgpt_oauth_tokens("fresh-runtime-access");
-        let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
         let published_at = Some(12_345);
         store
             .save(
@@ -2083,18 +2054,21 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(auth_lease.clone());
 
-        let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
-            .expect("fresh CLI process should use a valid lifecycle-marked OAuth token");
+            .unwrap_err();
 
-        assert_eq!(secret, "fresh-runtime-access");
+        assert!(matches!(
+            err,
+            ProviderAuthError::Auth(AuthError::LeaseAbsent)
+        ));
         assert_eq!(auth_lease.acquire_count(), 0);
         let snapshot = auth_lease.snapshot(&lease_key);
-        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
-        assert_eq!(snapshot.expires_at, Some(expires_at));
-        assert!(snapshot.credential_present);
-        assert_eq!(snapshot.generation, 1);
-        assert_eq!(snapshot.credential_published_at_millis, published_at);
+        assert_eq!(snapshot.phase, None);
+        assert_eq!(snapshot.expires_at, None);
+        assert!(!snapshot.credential_present);
+        assert_eq!(snapshot.generation, 0);
+        assert_eq!(snapshot.credential_published_at_millis, None);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2513,6 +2487,7 @@ mod tests {
             key.clone(),
             previous_tokens,
             Some(initial_snapshot),
+            Some(auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key)),
             ManagedStoreLifecycle::RefreshRequired,
             None,
         );
@@ -2570,6 +2545,9 @@ mod tests {
             key: key.clone(),
             tokens: previous_tokens,
             lifecycle_snapshot: Some(auth_lease.snapshot(&lease_key)),
+            lifecycle_restore_snapshot: Some(
+                auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key),
+            ),
             lifecycle: ManagedStoreLifecycle::RefreshRequired,
             lifecycle_guard: None,
         };
@@ -2619,6 +2597,7 @@ mod tests {
             key,
             tokens,
             Some(auth_lease.snapshot(&lease_key)),
+            Some(auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key)),
             ManagedStoreLifecycle::RefreshRequired,
             None,
         );
@@ -2671,6 +2650,7 @@ mod tests {
             key,
             tokens,
             Some(auth_lease.snapshot(&lease_key)),
+            Some(auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key)),
             ManagedStoreLifecycle::RefreshRequired,
             None,
         );
@@ -2770,6 +2750,7 @@ mod tests {
             key.clone(),
             tokens,
             Some(auth_lease.snapshot(&lease_key)),
+            Some(auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key)),
             ManagedStoreLifecycle::RefreshRequired,
             None,
         );
@@ -2853,6 +2834,7 @@ mod tests {
             key,
             tokens,
             Some(auth_lease.snapshot(&lease_key)),
+            Some(auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key)),
             ManagedStoreLifecycle::RefreshRequired,
             None,
         );
@@ -2932,6 +2914,7 @@ mod tests {
             key.clone(),
             tokens,
             Some(auth_lease.snapshot(&lease_key)),
+            Some(auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key)),
             ManagedStoreLifecycle::RefreshRequired,
             None,
         );
@@ -3039,6 +3022,9 @@ mod tests {
             key: key.clone(),
             tokens: previous_tokens,
             lifecycle_snapshot: Some(auth_lease.snapshot(&lease_key)),
+            lifecycle_restore_snapshot: Some(
+                auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key),
+            ),
             lifecycle: ManagedStoreLifecycle::RefreshRequired,
             lifecycle_guard: None,
         };
@@ -3088,6 +3074,9 @@ mod tests {
             key: key.clone(),
             tokens: previous_tokens,
             lifecycle_snapshot: Some(auth_lease.snapshot(&lease_key)),
+            lifecycle_restore_snapshot: Some(
+                auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key),
+            ),
             lifecycle: ManagedStoreLifecycle::RefreshRequired,
             lifecycle_guard: None,
         };
@@ -3142,6 +3131,9 @@ mod tests {
             key: key.clone(),
             tokens: previous_tokens,
             lifecycle_snapshot: Some(auth_lease.snapshot(&lease_key)),
+            lifecycle_restore_snapshot: Some(
+                auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key),
+            ),
             lifecycle: ManagedStoreLifecycle::RefreshRequired,
             lifecycle_guard: None,
         };

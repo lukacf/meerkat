@@ -92,6 +92,7 @@ default = ["runtime-adapter"]
 # is empty because the dep is always present.
 runtime-adapter = []
 integration-real-tests = []
+test-support = []
 
 [package.metadata.cargo-machete]
 ignored = [

@@ -2499,8 +2499,6 @@ mod tests {
     use std::collections::HashMap;
     #[cfg(not(target_arch = "wasm32"))]
     use std::sync::Arc;
-    #[cfg(not(target_arch = "wasm32"))]
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn test_mobpack_bytes(capabilities: &[&str]) -> Vec<u8> {
         let capability_values = capabilities
@@ -2564,89 +2562,10 @@ capabilities = [{capability_values}]
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    struct WebFailClearEventStore {
-        inner: meerkat_mob::store::InMemoryMobEventStore,
-        fail_clear: AtomicBool,
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    impl WebFailClearEventStore {
-        fn new() -> Self {
-            Self {
-                inner: meerkat_mob::store::InMemoryMobEventStore::new(),
-                fail_clear: AtomicBool::new(true),
-            }
-        }
-
-        fn allow_clear(&self) {
-            self.fail_clear.store(false, Ordering::Relaxed);
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[async_trait::async_trait]
-    impl meerkat_mob::store::MobEventStore for WebFailClearEventStore {
-        async fn append(
-            &self,
-            event: meerkat_mob::NewMobEvent,
-        ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
-            self.inner.append(event).await
-        }
-
-        async fn append_terminal_event_if_absent(
-            &self,
-            event: meerkat_mob::NewMobEvent,
-        ) -> Result<Option<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.append_terminal_event_if_absent(event).await
-        }
-
-        async fn append_batch(
-            &self,
-            events: Vec<meerkat_mob::NewMobEvent>,
-        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.append_batch(events).await
-        }
-
-        async fn poll(
-            &self,
-            after_cursor: u64,
-            limit: usize,
-        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.poll(after_cursor, limit).await
-        }
-
-        async fn replay_all(
-            &self,
-        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.replay_all().await
-        }
-
-        async fn latest_cursor(&self) -> Result<u64, meerkat_mob::store::MobStoreError> {
-            self.inner.latest_cursor().await
-        }
-
-        fn subscribe(
-            &self,
-        ) -> Result<meerkat_mob::store::MobEventReceiver, meerkat_mob::store::MobStoreError>
-        {
-            self.inner.subscribe()
-        }
-
-        async fn clear(&self) -> Result<(), meerkat_mob::store::MobStoreError> {
-            if self.fail_clear.load(Ordering::Relaxed) {
-                return Err(meerkat_mob::store::MobStoreError::Internal(
-                    "forced web destroy mob cleanup clear failure".to_string(),
-                ));
-            }
-            self.inner.clear().await
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
     async fn insert_web_partial_destroy_mob(
         mob_state: &Arc<meerkat_mob_mcp::MobMcpState>,
         owner_session_id: &str,
-        events: Arc<WebFailClearEventStore>,
+        events: Arc<meerkat_mob::store::InMemoryMobEventStore>,
     ) -> MobId {
         let mob_id = MobId::from("web-session-destroy-partial");
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
@@ -3157,7 +3076,8 @@ capabilities = [{capability_values}]
             .await
             .expect("create deferred web session");
         let session_id = created.session_id;
-        let events = Arc::new(WebFailClearEventStore::new());
+        let events = Arc::new(meerkat_mob::store::InMemoryMobEventStore::new());
+        events.fail_clear_until_allowed();
         let mob_id =
             insert_web_partial_destroy_mob(&mob_state, &session_id.to_string(), events.clone())
                 .await;

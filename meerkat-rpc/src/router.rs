@@ -2823,7 +2823,6 @@ mod tests {
 
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -2879,98 +2878,6 @@ mod tests {
 
         async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             Err(ToolError::not_found(call.name))
-        }
-    }
-
-    #[cfg(feature = "mob")]
-    struct RouterFailClearEventStore {
-        inner: meerkat_mob::store::InMemoryMobEventStore,
-        fail_clear: AtomicBool,
-        fail_member_retired: AtomicBool,
-    }
-
-    #[cfg(feature = "mob")]
-    impl RouterFailClearEventStore {
-        fn new() -> Self {
-            Self {
-                inner: meerkat_mob::store::InMemoryMobEventStore::new(),
-                fail_clear: AtomicBool::new(true),
-                fail_member_retired: AtomicBool::new(false),
-            }
-        }
-
-        fn allow_clear(&self) {
-            self.fail_clear.store(false, Ordering::Relaxed);
-        }
-
-        fn fail_member_retired_appends(&self) {
-            self.fail_member_retired.store(true, Ordering::Relaxed);
-        }
-    }
-
-    #[cfg(feature = "mob")]
-    #[async_trait]
-    impl meerkat_mob::store::MobEventStore for RouterFailClearEventStore {
-        async fn append(
-            &self,
-            event: meerkat_mob::NewMobEvent,
-        ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
-            if self.fail_member_retired.load(Ordering::Relaxed)
-                && matches!(event.kind, meerkat_mob::MobEventKind::MemberRetired { .. })
-            {
-                return Err(meerkat_mob::store::MobStoreError::Internal(
-                    "forced router mob retire event failure".to_string(),
-                ));
-            }
-            self.inner.append(event).await
-        }
-
-        async fn append_terminal_event_if_absent(
-            &self,
-            event: meerkat_mob::NewMobEvent,
-        ) -> Result<Option<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.append_terminal_event_if_absent(event).await
-        }
-
-        async fn append_batch(
-            &self,
-            events: Vec<meerkat_mob::NewMobEvent>,
-        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.append_batch(events).await
-        }
-
-        async fn poll(
-            &self,
-            after_cursor: u64,
-            limit: usize,
-        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.poll(after_cursor, limit).await
-        }
-
-        async fn replay_all(
-            &self,
-        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.replay_all().await
-        }
-
-        async fn latest_cursor(&self) -> Result<u64, meerkat_mob::store::MobStoreError> {
-            self.inner.latest_cursor().await
-        }
-
-        fn subscribe(
-            &self,
-        ) -> Result<meerkat_mob::store::MobEventReceiver, meerkat_mob::store::MobStoreError>
-        {
-            self.inner.subscribe()
-        }
-
-        async fn clear(&self) -> Result<(), meerkat_mob::store::MobStoreError> {
-            if self.fail_clear.load(Ordering::Relaxed) {
-                return Err(meerkat_mob::store::MobStoreError::Internal(
-                    "forced router archive mob destroy clear failure".to_string(),
-                ));
-            }
-            self.inner.clear().await
         }
     }
 
@@ -3771,7 +3678,10 @@ args = [{}]
     async fn insert_router_archive_partial_destroy_mob(
         mob_state: &Arc<meerkat_mob_mcp::MobMcpState>,
         owner_session_id: &str,
-    ) -> (meerkat_mob::MobId, Arc<RouterFailClearEventStore>) {
+    ) -> (
+        meerkat_mob::MobId,
+        Arc<meerkat_mob::store::InMemoryMobEventStore>,
+    ) {
         let mob_id = meerkat_mob::MobId::from("router-session-archive-partial-destroy");
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
@@ -3795,7 +3705,8 @@ args = [{}]
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles = profiles;
         definition.mark_owner_bridge_session_indexed(owner_session_id);
-        let events = Arc::new(RouterFailClearEventStore::new());
+        let events = Arc::new(meerkat_mob::store::InMemoryMobEventStore::new());
+        events.fail_clear_until_allowed();
         let storage = meerkat_mob::MobStorage::with_events(events.clone());
         let handle = meerkat_mob::MobBuilder::new(definition, storage)
             .with_session_service(mob_state.session_service())
@@ -3814,7 +3725,7 @@ args = [{}]
     ) -> (
         meerkat_mob::MobId,
         SessionId,
-        Arc<RouterFailClearEventStore>,
+        Arc<meerkat_mob::store::InMemoryMobEventStore>,
     ) {
         let mob_id = meerkat_mob::MobId::from("router-session-archive-live-retire-failure");
         let mut profiles = std::collections::BTreeMap::new();
@@ -3838,8 +3749,7 @@ args = [{}]
         );
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles = profiles;
-        let events = Arc::new(RouterFailClearEventStore::new());
-        events.allow_clear();
+        let events = Arc::new(meerkat_mob::store::InMemoryMobEventStore::new());
         let storage = meerkat_mob::MobStorage::with_events(events.clone());
         let handle = meerkat_mob::MobBuilder::new(definition, storage)
             .with_session_service(mob_state.session_service())
@@ -7929,7 +7839,7 @@ args = [{}]
         assert!(
             error
                 .message
-                .contains("forced router mob retire event failure"),
+                .contains("forced mob event store member retired append failure"),
             "archive should surface the live mob retire failure: {error:?}"
         );
         assert!(

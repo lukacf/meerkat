@@ -55,6 +55,7 @@ ignored = ["dirs", "meerkat-client", "meerkat-comms", "meerkat-mcp", "meerkat-mo
 
 [dev-dependencies]
 tempfile = { workspace = true }
+meerkat-mob = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

@@ -82,6 +82,7 @@ hyper = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }
 http-body-util = { workspace = true }
+meerkat-mob = { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-machete]
 ignored = [

@@ -3,9 +3,11 @@
 use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
 use super::{
     ExternalBindingOverlayRecord, MobEventStore, MobRunStore, MobRuntimeMetadataStore,
-    MobSpecStore, MobStoreError, SupervisorAuthorityRecord, terminal_event_identity,
+    MobSpecStore, MobStoreError, SupervisorAuthorityRecord, private, terminal_event_identity,
 };
 use crate::definition::MobDefinition;
+#[cfg(any(test, feature = "test-support"))]
+use crate::event::MobEventKind;
 use crate::event::{MobEvent, NewMobEvent};
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
@@ -24,6 +26,8 @@ use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{RwLock, broadcast};
 
 const EVENT_SUBSCRIPTION_CHANNEL_CAPACITY: usize = 4096;
@@ -78,6 +82,10 @@ where
 pub struct InMemoryMobEventStore {
     events: Arc<RwLock<Vec<MobEvent>>>,
     event_tx: broadcast::Sender<MobEvent>,
+    #[cfg(any(test, feature = "test-support"))]
+    fail_clear: AtomicBool,
+    #[cfg(any(test, feature = "test-support"))]
+    fail_member_retired_appends: AtomicBool,
 }
 
 impl Default for InMemoryMobEventStore {
@@ -86,6 +94,10 @@ impl Default for InMemoryMobEventStore {
         Self {
             events: Arc::new(RwLock::new(Vec::new())),
             event_tx,
+            #[cfg(any(test, feature = "test-support"))]
+            fail_clear: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            fail_member_retired_appends: AtomicBool::new(false),
         }
     }
 }
@@ -94,7 +106,38 @@ impl InMemoryMobEventStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_clear_until_allowed(&self) {
+        self.fail_clear.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn allow_clear(&self) {
+        self.fail_clear.store(false, Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_member_retired_appends(&self) {
+        self.fail_member_retired_appends
+            .store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn forced_append_error(&self, event: &NewMobEvent) -> Option<MobStoreError> {
+        if self.fail_member_retired_appends.load(Ordering::Relaxed)
+            && matches!(event.kind, MobEventKind::MemberRetired { .. })
+        {
+            Some(MobStoreError::Internal(
+                "forced mob event store member retired append failure".to_string(),
+            ))
+        } else {
+            None
+        }
+    }
 }
+
+impl private::MobEventStoreSealed for InMemoryMobEventStore {}
 
 type ExternalBindingOverlayMap = BTreeMap<
     (MobId, crate::ids::AgentIdentity, crate::ids::Generation),
@@ -244,6 +287,11 @@ impl MobRuntimeMetadataStore for InMemoryMobRuntimeMetadataStore {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobEventStore for InMemoryMobEventStore {
     async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(error) = self.forced_append_error(&event) {
+            return Err(error);
+        }
+
         let mut events = self.events.write().await;
         let cursor = events.last().map_or(1, |existing| existing.cursor + 1);
         let stored = MobEvent {
@@ -297,6 +345,14 @@ impl MobEventStore for InMemoryMobEventStore {
     }
 
     async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(error) = batch
+            .iter()
+            .find_map(|event| self.forced_append_error(event))
+        {
+            return Err(error);
+        }
+
         let mut events = self.events.write().await;
         let mut results = Vec::with_capacity(batch.len());
         for event in batch {
@@ -345,6 +401,13 @@ impl MobEventStore for InMemoryMobEventStore {
     }
 
     async fn clear(&self) -> Result<(), MobStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self.fail_clear.load(Ordering::Relaxed) {
+            return Err(MobStoreError::Internal(
+                "forced mob event store clear failure".to_string(),
+            ));
+        }
+
         self.events.write().await.clear();
         Ok(())
     }
@@ -1018,7 +1081,7 @@ mod tests {
     use super::*;
     use crate::definition::{BackendConfig, MobDefinition, WiringRules};
     use crate::event::MobEventKind;
-    use crate::ids::{AgentIdentity, ProfileName};
+    use crate::ids::{AgentIdentity, Generation, ProfileName};
     use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use crate::run::StepRunStatus;
     use futures::future::join_all;
@@ -1128,6 +1191,50 @@ mod tests {
 
         assert_eq!(observed.cursor, stored.cursor);
         assert!(matches!(observed.kind, MobEventKind::MobCompleted));
+    }
+
+    #[tokio::test]
+    async fn test_event_store_test_support_failures_fail_closed() {
+        let store = InMemoryMobEventStore::new();
+
+        store.fail_clear_until_allowed();
+        let clear_error = store.clear().await.expect_err("clear should fail closed");
+        assert!(
+            clear_error
+                .to_string()
+                .contains("forced mob event store clear failure")
+        );
+        store.allow_clear();
+        store.clear().await.expect("clear recovery should succeed");
+
+        store.fail_member_retired_appends();
+        let append_error = store
+            .append(NewMobEvent {
+                mob_id: MobId::from("mob"),
+                timestamp: None,
+                kind: MobEventKind::MemberRetired {
+                    agent_identity: AgentIdentity::from("worker-1"),
+                    generation: Generation::new(1),
+                    role: ProfileName::from("worker"),
+                },
+            })
+            .await
+            .expect_err("member-retired append should fail closed");
+        assert!(
+            append_error
+                .to_string()
+                .contains("forced mob event store member retired append failure")
+        );
+
+        let stored = store
+            .append(NewMobEvent {
+                mob_id: MobId::from("mob"),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .expect("unrelated append should still succeed");
+        assert!(matches!(stored.kind, MobEventKind::MobCompleted));
     }
 
     #[tokio::test]

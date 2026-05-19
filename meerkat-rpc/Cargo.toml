@@ -68,6 +68,7 @@ async-stream = { workspace = true }
 tempfile = { workspace = true }
 tokio-tungstenite = "0.28"
 meerkat-comms = { workspace = true }
+meerkat-mob = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

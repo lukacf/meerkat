@@ -216,7 +216,8 @@ mod tests {
     use crate::ids::{FlowId, LoopId, MobId, RunId, StepId};
     use crate::run::{MobRun, MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry};
     use crate::store::{
-        InMemoryMobRunStore, MobEventStore, MobRunStore, MobStoreError, terminal_event_identity,
+        InMemoryMobRunStore, MobEventStore, MobRunStore, MobStoreError, private,
+        terminal_event_identity,
     };
     use async_trait::async_trait;
     use chrono::Utc;
@@ -561,6 +562,8 @@ mod tests {
             }
         }
     }
+
+    impl private::MobEventStoreSealed for FaultInjectedEventStore {}
 
     #[async_trait]
     impl MobEventStore for FaultInjectedEventStore {

@@ -2,6 +2,9 @@
 //!
 //! Groups the event store with a session store for a mob's isolated storage.
 
+use crate::definition::MobDefinition;
+use crate::event::{MobEvent, MobEventKind, NewMobEvent};
+use crate::run::MobRun;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::SqliteMobStores;
 use crate::store::{
@@ -19,15 +22,15 @@ use std::sync::Arc;
 /// store (for meerkat sessions). Each mob has its own isolated storage.
 pub struct MobStorage {
     /// Event store for mob structural events.
-    pub events: Arc<dyn MobEventStore>,
+    pub(crate) events: Arc<dyn MobEventStore>,
     /// Flow run persistence store.
-    pub runs: Arc<dyn MobRunStore>,
+    pub(crate) runs: Arc<dyn MobRunStore>,
     /// Flow spec persistence store.
-    pub specs: Arc<dyn MobSpecStore>,
+    pub(crate) specs: Arc<dyn MobSpecStore>,
     /// Runtime metadata store for supervisor authority and compatibility projections.
-    pub runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
+    pub(crate) runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
     /// Realm-scoped reusable profile store.
-    pub realm_profiles: Option<Arc<dyn RealmProfileStore>>,
+    pub(crate) realm_profiles: Option<Arc<dyn RealmProfileStore>>,
 }
 
 impl MobStorage {
@@ -106,6 +109,49 @@ impl MobStorage {
             runtime_metadata,
             realm_profiles: None,
         }
+    }
+
+    /// Import a legacy registry definition into this storage bundle.
+    pub async fn import_legacy_registry_definition(
+        &self,
+        definition: MobDefinition,
+    ) -> Result<MobEvent, crate::store::MobStoreError> {
+        self.events
+            .append(NewMobEvent {
+                mob_id: definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobCreated {
+                    definition: Box::new(definition),
+                },
+            })
+            .await
+    }
+
+    /// Replay a legacy registry event into this storage bundle.
+    pub async fn import_legacy_registry_event(
+        &self,
+        event: &MobEvent,
+    ) -> Result<MobEvent, crate::store::MobStoreError> {
+        self.events
+            .append(NewMobEvent {
+                mob_id: event.mob_id.clone(),
+                timestamp: Some(event.timestamp),
+                kind: event.kind.clone(),
+            })
+            .await
+    }
+
+    /// Replay a legacy terminal flow run into this storage bundle.
+    pub async fn import_legacy_registry_run(
+        &self,
+        run: &MobRun,
+    ) -> Result<(), crate::store::MobStoreError> {
+        self.runs.create_run(run.clone()).await
+    }
+
+    /// Return whether the structural event log is empty.
+    pub async fn is_event_log_empty(&self) -> Result<bool, crate::store::MobStoreError> {
+        Ok(self.events.latest_cursor().await? == 0)
     }
 
     /// Create a storage bundle backed by a single SQLite database file.

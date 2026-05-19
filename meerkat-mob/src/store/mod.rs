@@ -38,6 +38,10 @@ use tokio::sync::broadcast;
 /// Receiver for append-driven structural mob events.
 pub type MobEventReceiver = broadcast::Receiver<MobEvent>;
 
+pub(crate) mod private {
+    pub trait MobEventStoreSealed {}
+}
+
 pub(crate) fn terminal_event_identity(kind: &MobEventKind) -> Option<(&RunId, &FlowId)> {
     match kind {
         MobEventKind::FlowCompleted {
@@ -307,7 +311,7 @@ pub struct ExternalBindingOverlayRecord {
 /// Trait for persisting and querying mob events.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-pub trait MobEventStore: Send + Sync {
+pub trait MobEventStore: private::MobEventStoreSealed + Send + Sync {
     /// Append a new event to the store.
     async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError>;
 

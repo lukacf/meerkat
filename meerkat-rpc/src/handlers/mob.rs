@@ -2252,74 +2252,11 @@ pub async fn handle_list_members_matching(
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use meerkat_mob::store::{
-        InMemoryMobEventStore, MobEventReceiver, MobEventStore, MobStoreError,
-    };
+    use meerkat_mob::store::InMemoryMobEventStore;
     use meerkat_mob::{
-        AgentIdentity, AgentRuntimeId, FenceToken, MobBuilder, MobDefinition, MobEvent, MobStorage,
-        NewMobEvent,
+        AgentIdentity, AgentRuntimeId, FenceToken, MobBuilder, MobDefinition, MobStorage,
     };
     use std::sync::Arc;
-
-    struct FailClearEventStore {
-        inner: InMemoryMobEventStore,
-    }
-
-    impl FailClearEventStore {
-        fn new() -> Self {
-            Self {
-                inner: InMemoryMobEventStore::new(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl MobEventStore for FailClearEventStore {
-        async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
-            self.inner.append(event).await
-        }
-
-        async fn append_terminal_event_if_absent(
-            &self,
-            event: NewMobEvent,
-        ) -> Result<Option<MobEvent>, MobStoreError> {
-            self.inner.append_terminal_event_if_absent(event).await
-        }
-
-        async fn append_batch(
-            &self,
-            events: Vec<NewMobEvent>,
-        ) -> Result<Vec<MobEvent>, MobStoreError> {
-            self.inner.append_batch(events).await
-        }
-
-        async fn poll(
-            &self,
-            after_cursor: u64,
-            limit: usize,
-        ) -> Result<Vec<MobEvent>, MobStoreError> {
-            self.inner.poll(after_cursor, limit).await
-        }
-
-        async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
-            self.inner.replay_all().await
-        }
-
-        async fn latest_cursor(&self) -> Result<u64, MobStoreError> {
-            self.inner.latest_cursor().await
-        }
-
-        fn subscribe(&self) -> Result<MobEventReceiver, MobStoreError> {
-            self.inner.subscribe()
-        }
-
-        async fn clear(&self) -> Result<(), MobStoreError> {
-            Err(MobStoreError::Internal(
-                "forced destroy event clear failure".to_string(),
-            ))
-        }
-    }
 
     fn rpc_destroy_test_definition(mob_id: &MobId) -> MobDefinition {
         let mut profiles = BTreeMap::new();
@@ -2345,7 +2282,9 @@ mod tests {
 
     async fn state_with_incomplete_destroy(mob_id: &MobId) -> Arc<MobMcpState> {
         let state = MobMcpState::new_in_memory();
-        let storage = MobStorage::with_events(Arc::new(FailClearEventStore::new()));
+        let events = Arc::new(InMemoryMobEventStore::new());
+        events.fail_clear_until_allowed();
+        let storage = MobStorage::with_events(events);
         let handle = MobBuilder::new(rpc_destroy_test_definition(mob_id), storage)
             .with_session_service(state.session_service())
             .allow_ephemeral_sessions(true)
@@ -2382,7 +2321,7 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("destroy report first error");
         assert!(
-            first_error.contains("forced destroy event clear failure"),
+            first_error.contains("forced mob event store clear failure"),
             "unexpected destroy report error: {first_error}"
         );
     }

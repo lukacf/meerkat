@@ -6,7 +6,7 @@
 use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
 use super::{
     ExternalBindingOverlayRecord, MobEventStore, MobRunStore, MobRuntimeMetadataStore,
-    MobSpecStore, MobStoreError, SupervisorAuthorityRecord, terminal_event_identity,
+    MobSpecStore, MobStoreError, SupervisorAuthorityRecord, private, terminal_event_identity,
 };
 use crate::definition::MobDefinition;
 use crate::error::MobError;
@@ -802,6 +802,8 @@ impl std::fmt::Debug for SqliteMobEventStore {
 }
 
 const EVENT_CURSOR_KEY: &str = "next_cursor";
+
+impl private::MobEventStoreSealed for SqliteMobEventStore {}
 
 #[async_trait]
 impl MobEventStore for SqliteMobEventStore {

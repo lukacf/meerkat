@@ -10913,25 +10913,13 @@ async fn hydrate_mob_state(
                 )
             })?;
             storage
-                .events
-                .append(meerkat_mob::NewMobEvent {
-                    mob_id: definition.id.clone(),
-                    timestamp: None,
-                    kind: meerkat_mob::MobEventKind::MobCreated {
-                        definition: Box::new(definition),
-                    },
-                })
+                .import_legacy_registry_definition(definition)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
         } else {
             for event in &persisted.events {
                 storage
-                    .events
-                    .append(meerkat_mob::NewMobEvent {
-                        mob_id: event.mob_id.clone(),
-                        timestamp: Some(event.timestamp),
-                        kind: event.kind.clone(),
-                    })
+                    .import_legacy_registry_event(event)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
@@ -10942,8 +10930,7 @@ async fn hydrate_mob_state(
                 continue;
             }
             storage
-                .runs
-                .create_run(run.clone())
+                .import_legacy_registry_run(run)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
         }

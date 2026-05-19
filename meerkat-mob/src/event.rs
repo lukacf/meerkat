@@ -64,11 +64,11 @@ impl<'de> Deserialize<'de> for MobEvent {
 #[derive(Debug, Clone)]
 pub struct NewMobEvent {
     /// Mob this event belongs to.
-    pub mob_id: MobId,
+    pub(crate) mob_id: MobId,
     /// Optional timestamp override (primarily for deterministic/backdated tests).
-    pub timestamp: Option<DateTime<Utc>>,
+    pub(crate) timestamp: Option<DateTime<Utc>>,
     /// Event payload.
-    pub kind: MobEventKind,
+    pub(crate) kind: MobEventKind,
 }
 
 /// Backend-neutral reference to a mob member.

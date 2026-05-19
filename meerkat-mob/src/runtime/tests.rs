@@ -15,7 +15,7 @@ use crate::store::{
     ExternalBindingOverlayRecord, ExternalBindingOverlayStatus, InMemoryMobEventStore,
     InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore, MobEventStore,
     MobRunStore, MobRuntimeMetadataStore, MobStoreError, RealmProfileStore,
-    SupervisorAuthorityRecord, terminal_event_identity,
+    SupervisorAuthorityRecord, private, terminal_event_identity,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -2113,6 +2113,8 @@ impl FaultInjectedMobEventStore {
         }
     }
 }
+
+impl private::MobEventStoreSealed for FaultInjectedMobEventStore {}
 
 #[async_trait]
 impl MobEventStore for FaultInjectedMobEventStore {

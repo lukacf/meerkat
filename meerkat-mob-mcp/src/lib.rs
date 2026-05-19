@@ -470,7 +470,7 @@ impl MobMcpState {
                 }
 
                 let storage = MobStorage::persistent(&path)?;
-                if storage.events.replay_all().await?.is_empty() {
+                if storage.is_event_log_empty().await? {
                     Self::maybe_remove_storage_file(Some(path.as_path())).await;
                     continue;
                 }

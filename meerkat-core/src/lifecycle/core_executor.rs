@@ -436,6 +436,19 @@ pub trait CoreExecutor: Send + Sync {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError>;
 
+    /// Persist or project the committed session snapshot after the runtime
+    /// control plane has durably committed the machine boundary.
+    ///
+    /// RuntimeStore remains the authority for runtime-backed turns; this hook
+    /// is for compatibility projections such as `SessionStore` snapshots that
+    /// must not be written before the machine commit succeeds.
+    async fn checkpoint_committed_session_snapshot(
+        &mut self,
+        _session_snapshot: &[u8],
+    ) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
     /// Request cancellation at the next cooperative boundary.
     async fn cancel_after_boundary(&mut self, reason: String) -> Result<(), CoreExecutorError>;
 

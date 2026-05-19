@@ -319,6 +319,14 @@ pub trait MobSessionService:
         ))
     }
 
+    async fn checkpoint_committed_runtime_session_snapshot(
+        &self,
+        _session_id: &SessionId,
+        _session_snapshot: &[u8],
+    ) -> Result<(), SessionError> {
+        Ok(())
+    }
+
     async fn discard_live_session(&self, _session_id: &SessionId) -> Result<(), SessionError> {
         Ok(())
     }
@@ -712,6 +720,19 @@ where
     ) -> Result<(), SessionError> {
         meerkat_session::PersistentSessionService::<B>::apply_runtime_system_context_for_turn(
             self, session_id, appends,
+        )
+        .await
+    }
+
+    async fn checkpoint_committed_runtime_session_snapshot(
+        &self,
+        session_id: &SessionId,
+        session_snapshot: &[u8],
+    ) -> Result<(), SessionError> {
+        meerkat_session::PersistentSessionService::<B>::checkpoint_committed_runtime_session_snapshot(
+            self,
+            session_id,
+            session_snapshot,
         )
         .await
     }

@@ -1831,6 +1831,43 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(session)
     }
 
+    pub async fn checkpoint_committed_runtime_session_snapshot(
+        &self,
+        id: &SessionId,
+        session_snapshot: &[u8],
+    ) -> Result<(), SessionError> {
+        if self.runtime_store.is_none() {
+            return Ok(());
+        }
+
+        let session: Session = serde_json::from_slice(session_snapshot).map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to deserialize committed runtime session snapshot: {err}"
+            )))
+        })?;
+        if session.id() != id {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "committed runtime session snapshot id mismatch: expected {id}, got {}",
+                    session.id()
+                )),
+            ));
+        }
+
+        let gate = self.gate_for_session(id).await;
+        let guard = gate.cancelled.lock().await;
+        if *guard {
+            return Ok(());
+        }
+        if let Err(error) = self.store.save(&session).await {
+            drop(guard);
+            return Err(self
+                .fail_closed_runtime_projection_update(session.id(), error)
+                .await);
+        }
+        Ok(())
+    }
+
     async fn fail_closed_runtime_projection_update(
         &self,
         id: &SessionId,
@@ -7178,6 +7215,57 @@ mod tests {
                 .as_ref()
                 .map(|session| session.messages().len() + 1),
             "runtime-backed sessions must checkpoint changed turns into the SessionStore projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_committed_runtime_session_checkpoint_updates_session_store_projection() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+        let original = store
+            .load(&result.session_id)
+            .await
+            .expect("raw store load should succeed")
+            .expect("create_session should persist a projection");
+
+        let mut committed = original.clone();
+        committed.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text(
+                "runtime machine committed this turn first".to_string(),
+            ),
+        ));
+        let session_snapshot =
+            serde_json::to_vec(&committed).expect("committed snapshot should serialize");
+
+        service
+            .checkpoint_committed_runtime_session_snapshot(&result.session_id, &session_snapshot)
+            .await
+            .expect("committed runtime snapshot should update SessionStore projection");
+
+        let raw_after = store
+            .load(&result.session_id)
+            .await
+            .expect("raw store load should succeed")
+            .expect("projection should remain present");
+        assert_eq!(
+            raw_after.messages().len(),
+            original.messages().len() + 1,
+            "post-commit runtime checkpoint must make the SessionStore projection current"
         );
     }
 

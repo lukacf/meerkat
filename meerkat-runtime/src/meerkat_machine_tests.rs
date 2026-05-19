@@ -1698,6 +1698,234 @@ async fn completion_preserves_structured_output_when_runtime_finalization_fails(
 }
 
 #[tokio::test]
+async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
+    struct SnapshotCheckpointExecutor {
+        session_id: SessionId,
+        runtime_store: std::sync::Arc<crate::store::InMemoryRuntimeStore>,
+        checkpoint_calls: std::sync::Arc<AtomicUsize>,
+        observed_committed_snapshot: std::sync::Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for SnapshotCheckpointExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            let receipt = RunBoundaryReceipt {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            };
+            let session = meerkat_core::Session::with_id(self.session_id.clone());
+            let session_snapshot = serde_json::to_vec(&session)
+                .map_err(|err| CoreExecutorError::Internal(err.to_string()))?;
+            Ok(CoreApplyOutput::with_run_result(
+                receipt,
+                Some(session_snapshot),
+                meerkat_core::RunResult {
+                    text: "done".to_string(),
+                    session_id: self.session_id.clone(),
+                    usage: Default::default(),
+                    turns: 1,
+                    tool_calls: 0,
+                    terminal_cause_kind: None,
+                    structured_output: None,
+                    extraction_error: None,
+                    schema_warnings: None,
+                    skill_diagnostics: None,
+                },
+            ))
+        }
+
+        async fn checkpoint_committed_session_snapshot(
+            &mut self,
+            session_snapshot: &[u8],
+        ) -> Result<(), CoreExecutorError> {
+            self.checkpoint_calls.fetch_add(1, Ordering::SeqCst);
+            let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&self.session_id);
+            let committed = crate::store::RuntimeStore::load_session_snapshot(
+                self.runtime_store.as_ref(),
+                &runtime_id,
+            )
+            .await
+            .map_err(|err| CoreExecutorError::Internal(err.to_string()))?;
+            if committed.as_deref() == Some(session_snapshot) {
+                self.observed_committed_snapshot
+                    .store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let runtime_store = std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let checkpoint_calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let observed_committed_snapshot = std::sync::Arc::new(AtomicBool::new(false));
+    let adapter = std::sync::Arc::new(MeerkatMachine::persistent(
+        runtime_store.clone(),
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(SnapshotCheckpointExecutor {
+                session_id: session_id.clone(),
+                runtime_store,
+                checkpoint_calls: checkpoint_calls.clone(),
+                observed_committed_snapshot: observed_committed_snapshot.clone(),
+            }),
+        )
+        .await;
+
+    let (_accept_outcome, completion_handle) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("checkpoint after commit"))
+        .await
+        .expect("input should be accepted");
+    let completion = tokio::time::timeout(
+        Duration::from_secs(1),
+        completion_handle
+            .expect("accepted input should register a completion waiter")
+            .wait(),
+    )
+    .await
+    .expect("completion waiter should resolve");
+
+    assert!(matches!(completion, CompletionOutcome::Completed(_)));
+    assert_eq!(checkpoint_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        observed_committed_snapshot.load(Ordering::SeqCst),
+        "checkpoint hook must run after the RuntimeStore session snapshot commit is visible"
+    );
+}
+
+#[tokio::test]
+async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
+    struct FailingCheckpointExecutor {
+        session_id: SessionId,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for FailingCheckpointExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            let receipt = RunBoundaryReceipt {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            };
+            let session = meerkat_core::Session::with_id(self.session_id.clone());
+            let session_snapshot = serde_json::to_vec(&session)
+                .map_err(|err| CoreExecutorError::Internal(err.to_string()))?;
+            Ok(CoreApplyOutput::with_run_result(
+                receipt,
+                Some(session_snapshot),
+                meerkat_core::RunResult {
+                    text: "checkpoint-fails-after-output".to_string(),
+                    session_id: self.session_id.clone(),
+                    usage: Default::default(),
+                    turns: 1,
+                    tool_calls: 0,
+                    terminal_cause_kind: None,
+                    structured_output: None,
+                    extraction_error: None,
+                    schema_warnings: None,
+                    skill_diagnostics: None,
+                },
+            ))
+        }
+
+        async fn checkpoint_committed_session_snapshot(
+            &mut self,
+            _session_snapshot: &[u8],
+        ) -> Result<(), CoreExecutorError> {
+            Err(CoreExecutorError::apply_failed_unknown(
+                "synthetic checkpoint projection failure",
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = std::sync::Arc::new(MeerkatMachine::persistent(
+        std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new()),
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(FailingCheckpointExecutor {
+                session_id: session_id.clone(),
+            }),
+        )
+        .await;
+
+    let (_accept_outcome, completion_handle) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("checkpoint failure"))
+        .await
+        .expect("input should be accepted");
+    let completion = tokio::time::timeout(
+        Duration::from_secs(1),
+        completion_handle
+            .expect("accepted input should register a completion waiter")
+            .wait(),
+    )
+    .await
+    .expect("completion waiter should resolve");
+
+    match completion {
+        CompletionOutcome::CompletedWithFinalizationFailure { result, error } => {
+            assert_eq!(result.text, "checkpoint-fails-after-output");
+            assert!(
+                error
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("checkpoint projection failure")),
+                "checkpoint failure detail should remain available: {error:?}"
+            );
+        }
+        other => panic!("expected completed output with finalization failure, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn hook_denial_terminalizes_with_typed_machine_apply_failure_cause() {
     use meerkat_core::lifecycle::core_executor::CoreApplyFailureCause;
 

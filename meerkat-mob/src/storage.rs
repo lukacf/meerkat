@@ -25,7 +25,7 @@ use std::sync::Arc;
 /// event payloads can be written to a store.
 pub struct MobLegacyRegistryHandoff {
     mob_id: MobId,
-    events: Vec<MobEvent>,
+    events: Vec<NewMobEvent>,
     terminal_runs: Vec<MobRun>,
     generated_recovery_phase: crate::runtime::MobState,
 }
@@ -40,7 +40,7 @@ impl MobLegacyRegistryHandoff {
         events: Vec<MobEvent>,
         terminal_runs: Vec<MobRun>,
     ) -> Result<Self, MobError> {
-        let events = if events.is_empty() {
+        let (events, generated_recovery_phase) = if events.is_empty() {
             let definition = legacy_definition.ok_or_else(|| {
                 MobError::Internal(format!(
                     "legacy mob registry entry '{mob_id}' has no events and no definition"
@@ -52,16 +52,61 @@ impl MobLegacyRegistryHandoff {
                     definition.id
                 )));
             }
-            vec![MobEvent {
-                cursor: 0,
-                timestamp: chrono::Utc::now(),
-                mob_id: mob_id.clone(),
-                kind: MobEventKind::MobCreated {
-                    definition: Box::new(definition),
-                },
-            }]
+            let generated_recovery_phase =
+                crate::runtime::validate_mob_events_with_generated_recovery(&[], &definition)?;
+            (
+                vec![NewMobEvent {
+                    mob_id: mob_id.clone(),
+                    timestamp: None,
+                    kind: MobEventKind::MobCreated {
+                        definition: Box::new(definition),
+                    },
+                }],
+                generated_recovery_phase,
+            )
         } else {
-            events
+            let epoch_events = Self::current_epoch_events(&mob_id, &events)?;
+            for event in &epoch_events {
+                if !crate::runtime::mob_event_kind_is_replayed_by_generated_recovery(&event.kind) {
+                    return Err(MobError::Internal(format!(
+                        "legacy mob registry event at cursor {} is not admitted by generated MobMachine recovery: {:?}",
+                        event.cursor, event.kind
+                    )));
+                }
+            }
+            let definition = epoch_events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    MobEventKind::MobCreated { definition } => Some(definition.as_ref().clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "legacy mob registry entry '{mob_id}' has no current-epoch MobCreated event"
+                    ))
+                })?;
+            if definition.id != mob_id {
+                return Err(MobError::Internal(format!(
+                    "legacy mob registry MobCreated id mismatch: key='{mob_id}' definition='{}'",
+                    definition.id
+                )));
+            }
+            let generated_recovery_phase =
+                crate::runtime::validate_mob_events_with_generated_recovery(
+                    &epoch_events,
+                    &definition,
+                )?;
+            (
+                epoch_events
+                    .into_iter()
+                    .map(|event| NewMobEvent {
+                        mob_id: event.mob_id,
+                        timestamp: Some(event.timestamp),
+                        kind: event.kind,
+                    })
+                    .collect(),
+                generated_recovery_phase,
+            )
         };
 
         for event in &events {
@@ -72,34 +117,6 @@ impl MobLegacyRegistryHandoff {
                 )));
             }
         }
-
-        let definition = events
-            .iter()
-            .rev()
-            .find_map(|event| match &event.kind {
-                MobEventKind::MobCreated { definition } => Some(definition.as_ref().clone()),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                MobError::Internal(format!(
-                    "legacy mob registry entry '{mob_id}' has no MobCreated event"
-                ))
-            })?;
-        if definition.id != mob_id {
-            return Err(MobError::Internal(format!(
-                "legacy mob registry MobCreated id mismatch: key='{mob_id}' definition='{}'",
-                definition.id
-            )));
-        }
-
-        let epoch_start = events
-            .iter()
-            .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
-            .map_or(0, |pos| pos + 1);
-        let generated_recovery_phase = crate::runtime::validate_mob_events_with_generated_recovery(
-            &events[epoch_start..],
-            &definition,
-        )?;
 
         let mut validated_terminal_runs = Vec::with_capacity(terminal_runs.len());
         for mut run in terminal_runs {
@@ -130,6 +147,45 @@ impl MobLegacyRegistryHandoff {
             terminal_runs: validated_terminal_runs,
             generated_recovery_phase,
         })
+    }
+
+    fn current_epoch_events(
+        mob_id: &MobId,
+        events: &[MobEvent],
+    ) -> Result<Vec<MobEvent>, MobError> {
+        for event in events {
+            if &event.mob_id != mob_id {
+                return Err(MobError::Internal(format!(
+                    "legacy mob registry event mob_id mismatch: key='{mob_id}' event='{}'",
+                    event.mob_id
+                )));
+            }
+        }
+        let latest_created_index = events
+            .iter()
+            .rposition(|event| matches!(event.kind, MobEventKind::MobCreated { .. }))
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "legacy mob registry entry '{mob_id}' has no MobCreated event"
+                ))
+            })?;
+        let epoch_start = events
+            .iter()
+            .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
+            .map_or(0, |pos| pos + 1);
+        if epoch_start == 0 {
+            return Ok(events.to_vec());
+        }
+
+        let mut epoch_events = vec![events[latest_created_index].clone()];
+        epoch_events.extend(
+            events[epoch_start..]
+                .iter()
+                .enumerate()
+                .filter(|(offset, _)| epoch_start + *offset != latest_created_index)
+                .map(|(_, event)| event.clone()),
+        );
+        Ok(epoch_events)
     }
 }
 
@@ -239,14 +295,6 @@ impl MobStorage {
             terminal_runs,
             generated_recovery_phase: _generated_recovery_phase,
         } = handoff;
-        let events = events
-            .into_iter()
-            .map(|event| NewMobEvent {
-                mob_id: event.mob_id,
-                timestamp: Some(event.timestamp),
-                kind: event.kind,
-            })
-            .collect();
         self.events.append_batch(events).await?;
 
         for run in terminal_runs {
@@ -299,7 +347,7 @@ impl std::fmt::Debug for MobStorage {
 mod tests {
     use super::*;
     use crate::event::{MobEventKind, NewMobEvent};
-    use crate::ids::{MobId, RunId, StepId};
+    use crate::ids::{FlowId, MobId, RunId, StepId};
     use crate::run::{MobRun, MobRunStatus};
 
     #[tokio::test]
@@ -401,6 +449,124 @@ model = "test"
             error.to_string().contains("MobMachine seeded authority"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn test_legacy_registry_handoff_rejects_recovery_ignored_event_kinds() {
+        let definition = crate::definition::MobDefinition::from_toml(
+            r#"
+[mob]
+id = "mob"
+[profiles.worker]
+model = "test"
+"#,
+        )
+        .unwrap();
+        let mob_id = definition.id.clone();
+        let created = MobEvent {
+            cursor: 1,
+            timestamp: chrono::Utc::now(),
+            mob_id: mob_id.clone(),
+            kind: MobEventKind::MobCreated {
+                definition: Box::new(definition.clone()),
+            },
+        };
+        let flow_completed = MobEvent {
+            cursor: 2,
+            timestamp: chrono::Utc::now(),
+            mob_id: mob_id.clone(),
+            kind: MobEventKind::FlowCompleted {
+                run_id: RunId::new(),
+                flow_id: FlowId::from("flow"),
+                structured_output: None,
+            },
+        };
+
+        let error = match MobLegacyRegistryHandoff::try_from_legacy_registry_snapshot(
+            mob_id,
+            Some(definition),
+            vec![created, flow_completed],
+            Vec::new(),
+        ) {
+            Ok(_) => panic!("flow result events should be rejected by legacy handoff"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("not admitted by generated MobMachine recovery"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_legacy_registry_handoff_imports_only_current_epoch() {
+        let original_definition = crate::definition::MobDefinition::from_toml(
+            r#"
+[mob]
+id = "mob"
+[profiles.worker]
+model = "test"
+"#,
+        )
+        .unwrap();
+        let reset_definition = original_definition.clone();
+        let mob_id = original_definition.id.clone();
+        let original_created = MobEvent {
+            cursor: 1,
+            timestamp: chrono::Utc::now(),
+            mob_id: mob_id.clone(),
+            kind: MobEventKind::MobCreated {
+                definition: Box::new(original_definition.clone()),
+            },
+        };
+        let pre_reset_flow_completed = MobEvent {
+            cursor: 2,
+            timestamp: chrono::Utc::now(),
+            mob_id: mob_id.clone(),
+            kind: MobEventKind::FlowCompleted {
+                run_id: RunId::new(),
+                flow_id: FlowId::from("flow"),
+                structured_output: None,
+            },
+        };
+        let reset_created = MobEvent {
+            cursor: 3,
+            timestamp: chrono::Utc::now(),
+            mob_id: mob_id.clone(),
+            kind: MobEventKind::MobCreated {
+                definition: Box::new(reset_definition.clone()),
+            },
+        };
+        let reset_marker = MobEvent {
+            cursor: 4,
+            timestamp: chrono::Utc::now(),
+            mob_id: mob_id.clone(),
+            kind: MobEventKind::MobReset,
+        };
+
+        let handoff = MobLegacyRegistryHandoff::try_from_legacy_registry_snapshot(
+            mob_id.clone(),
+            Some(reset_definition),
+            vec![
+                original_created,
+                pre_reset_flow_completed,
+                reset_created,
+                reset_marker,
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+
+        let storage = MobStorage::in_memory();
+        storage
+            .import_validated_legacy_registry(handoff)
+            .await
+            .unwrap();
+        let events = storage.events.replay_all().await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].mob_id, mob_id);
+        assert!(matches!(events[0].kind, MobEventKind::MobCreated { .. }));
     }
 
     #[tokio::test]

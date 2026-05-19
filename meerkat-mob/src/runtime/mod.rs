@@ -111,7 +111,9 @@ use tools::compose_external_tools_for_profile;
 
 pub use crate::roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use builder::MobBuilder;
-pub(crate) use builder::validate_mob_events_with_generated_recovery;
+pub(crate) use builder::{
+    mob_event_kind_is_replayed_by_generated_recovery, validate_mob_events_with_generated_recovery,
+};
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_frame_engine::{FlowFrameKernel, FlowFrameMutator};
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};

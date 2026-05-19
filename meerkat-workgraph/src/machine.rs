@@ -532,6 +532,12 @@ fn sync_item_from_machine_state(item: &mut WorkItem) -> Result<(), WorkGraphErro
 }
 
 fn validate_item_machine_projection(item: &WorkItem) -> Result<(), WorkGraphError> {
+    wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(item.machine_state.clone())
+        .map_err(|error| {
+            WorkGraphError::Store(format!(
+                "generated WorkGraphLifecycleMachine rejected recovered machine_state: {error:?}"
+            ))
+        })?;
     let status = work_status_from_dsl(item.machine_state.lifecycle_phase)?;
     if item.status != status {
         return Err(WorkGraphError::Store(format!(

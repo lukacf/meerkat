@@ -263,6 +263,7 @@ pub struct WorkItem {
     pub owner: Option<WorkOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<WorkClaim>,
+    #[serde(serialize_with = "serialize_workgraph_machine_state")]
     pub machine_state: WorkGraphMachineState,
     pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -298,7 +299,7 @@ struct WorkItemWire {
     #[serde(default)]
     claim: Option<WorkClaim>,
     #[serde(default)]
-    machine_state: Option<WorkGraphMachineState>,
+    machine_state: Option<WorkGraphMachineStateWire>,
     revision: u64,
     #[serde(default)]
     due_at: Option<DateTime<Utc>>,
@@ -325,7 +326,9 @@ impl<'de> Deserialize<'de> for WorkItem {
         let machine_state = wire
             .machine_state
             .take()
-            .ok_or_else(|| serde::de::Error::missing_field("machine_state"))?;
+            .ok_or_else(|| serde::de::Error::missing_field("machine_state"))?
+            .try_into()
+            .map_err(serde::de::Error::custom)?;
         validate_work_item_machine_projection(&wire, &machine_state)
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
@@ -351,6 +354,45 @@ impl<'de> Deserialize<'de> for WorkItem {
             evidence_refs: wire.evidence_refs,
         })
     }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct WorkGraphMachineStateWire {
+    machine: String,
+    schema_version: u32,
+    #[serde(flatten)]
+    state: WorkGraphMachineState,
+}
+
+impl From<&WorkGraphMachineState> for WorkGraphMachineStateWire {
+    fn from(state: &WorkGraphMachineState) -> Self {
+        let (machine, schema_version) = workgraph_machine_schema_identity();
+        Self {
+            machine,
+            schema_version,
+            state: state.clone(),
+        }
+    }
+}
+
+impl TryFrom<WorkGraphMachineStateWire> for WorkGraphMachineState {
+    type Error = String;
+
+    fn try_from(wire: WorkGraphMachineStateWire) -> Result<Self, Self::Error> {
+        validate_workgraph_machine_wire_header(&wire.machine, wire.schema_version)?;
+        validate_workgraph_machine_recovery(&wire.state)?;
+        Ok(wire.state)
+    }
+}
+
+fn serialize_workgraph_machine_state<S>(
+    state: &WorkGraphMachineState,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    WorkGraphMachineStateWire::from(state).serialize(serializer)
 }
 
 #[cfg(feature = "schema")]
@@ -432,7 +474,8 @@ impl schemars::JsonSchema for WorkItem {
                 },
                 "machine_state": {
                     "type": "object",
-                    "description": "Catalog-generated WorkGraphLifecycleMachine state projection."
+                    "required": ["machine", "schema_version"],
+                    "description": "Catalog-generated WorkGraphLifecycleMachine state projection with generated machine identity and schema version."
                 },
                 "revision": { "type": "integer", "format": "uint64", "minimum": 0 },
                 "due_at": { "type": ["string", "null"], "format": "date-time" },
@@ -471,10 +514,46 @@ impl schemars::JsonSchema for WorkItem {
     }
 }
 
+fn workgraph_machine_schema_identity() -> (String, u32) {
+    let schema = wg_dsl::WorkGraphLifecycleMachineState::schema();
+    (schema.machine.to_string(), schema.version)
+}
+
+fn validate_workgraph_machine_wire_header(
+    machine: &str,
+    schema_version: u32,
+) -> Result<(), String> {
+    let (expected_machine, expected_version) = workgraph_machine_schema_identity();
+    if machine != expected_machine {
+        return Err(format!(
+            "work graph machine_state machine `{machine}` does not match generated schema `{expected_machine}`"
+        ));
+    }
+    if schema_version != expected_version {
+        return Err(format!(
+            "work graph machine_state schema_version `{schema_version}` does not match generated schema version `{expected_version}`"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_workgraph_machine_recovery(
+    machine_state: &WorkGraphMachineState,
+) -> Result<(), String> {
+    wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(machine_state.clone())
+        .map(|_| ())
+        .map_err(|source| {
+            format!(
+                "generated WorkGraphLifecycleMachine rejected recovered machine_state: {source:?}"
+            )
+        })
+}
+
 fn validate_work_item_machine_projection(
     wire: &WorkItemWire,
     machine_state: &WorkGraphMachineState,
 ) -> Result<(), String> {
+    validate_workgraph_machine_recovery(machine_state)?;
     if work_lifecycle_state_from_status(wire.status) != machine_state.lifecycle_phase {
         return Err(format!(
             "work item {} status projection does not match machine_state",

@@ -900,8 +900,9 @@ mod tests {
     use crate::{
         CreateWorkItemRequest, LinkWorkItemsRequest, MemoryWorkGraphStore, WorkEdgeKind,
         WorkGraphError, WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind, WorkGraphService,
-        WorkGraphStore, WorkItemFilter, WorkItemId, WorkNamespace,
+        WorkGraphStore, WorkItem, WorkItemFilter, WorkItemId, WorkNamespace,
     };
+    use crate::{WorkGraphMachine, machines::workgraph_lifecycle as wg_dsl};
 
     fn test_edge() -> WorkEdge {
         WorkEdge {
@@ -922,6 +923,86 @@ mod tests {
             edge.created_at,
             json!({ "edge": edge }),
         )
+    }
+
+    fn create_request(title: &str) -> CreateWorkItemRequest {
+        CreateWorkItemRequest {
+            realm_id: None,
+            namespace: None,
+            title: title.to_string(),
+            description: None,
+            priority: Default::default(),
+            labels: BTreeSet::new(),
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+            evidence_refs: Vec::new(),
+            status: None,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn corrupt_sqlite_item_json(
+        store: &crate::SqliteWorkGraphStore,
+        item: &WorkItem,
+        mutate: impl FnOnce(&mut serde_json::Value),
+    ) {
+        store
+            .with_connection(|conn| {
+                let json: String = conn
+                    .query_row(
+                        "SELECT item_json FROM workgraph_items
+                         WHERE realm_id = ?1 AND namespace = ?2 AND item_id = ?3",
+                        rusqlite::params![
+                            &item.realm_id,
+                            item.namespace.as_str(),
+                            item.id.as_str()
+                        ],
+                        |row| row.get(0),
+                    )
+                    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+                let mut value = serde_json::from_str::<serde_json::Value>(&json)
+                    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+                mutate(&mut value);
+                conn.execute(
+                    "UPDATE workgraph_items
+                        SET item_json = ?4
+                      WHERE realm_id = ?1 AND namespace = ?2 AND item_id = ?3",
+                    rusqlite::params![
+                        &item.realm_id,
+                        item.namespace.as_str(),
+                        item.id.as_str(),
+                        serde_json::to_string(&value)
+                            .map_err(|err| WorkGraphError::Store(err.to_string()))?
+                    ],
+                )
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+                Ok(())
+            })
+            .expect("corrupt item json");
+    }
+
+    #[tokio::test]
+    async fn memory_store_rejects_unrecoverable_work_item_machine_state() {
+        let now = Utc::now();
+        let (mut item, event) = WorkGraphMachine::create_item(
+            create_request("invalid machine state"),
+            "realm".to_string(),
+            WorkNamespace::default(),
+            now,
+        )
+        .expect("create item");
+        item.status = crate::WorkStatus::Completed;
+        item.machine_state.lifecycle_phase = wg_dsl::WorkLifecycleState::Completed;
+
+        let error = MemoryWorkGraphStore::new()
+            .insert_item(item, event)
+            .await
+            .expect_err("store must reject invalid recovered machine state");
+        assert!(
+            matches!(error, WorkGraphError::Store(message) if message.contains("generated WorkGraphLifecycleMachine rejected"))
+        );
     }
 
     #[tokio::test]
@@ -1185,6 +1266,77 @@ mod tests {
             .expect_err("compatibility status must not override machine_state");
         assert!(
             matches!(error, WorkGraphError::Store(message) if message.contains("status projection"))
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_item_machine_schema_version_mismatch_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let item = service
+            .create(create_request("schema version mismatch"))
+            .await
+            .expect("create");
+
+        corrupt_sqlite_item_json(store.as_ref(), &item, |value| {
+            value
+                .as_object_mut()
+                .expect("item json object")
+                .get_mut("machine_state")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("machine_state object")
+                .insert("schema_version".to_string(), serde_json::json!(0));
+        });
+
+        let reopened = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service = WorkGraphService::with_scope(reopened, "realm", WorkNamespace::default());
+        let error = service
+            .get(None, None, item.id)
+            .await
+            .expect_err("schema version mismatch must fail closed");
+        assert!(
+            matches!(error, WorkGraphError::Store(message) if message.contains("schema_version"))
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_item_with_unrecoverable_machine_state_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let item = service
+            .create(create_request("unrecoverable machine state"))
+            .await
+            .expect("create");
+
+        corrupt_sqlite_item_json(store.as_ref(), &item, |value| {
+            let object = value.as_object_mut().expect("item json object");
+            object.insert("status".to_string(), serde_json::json!("completed"));
+            let machine = object
+                .get_mut("machine_state")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("machine_state object");
+            machine.insert(
+                "lifecycle_phase".to_string(),
+                serde_json::json!("completed"),
+            );
+        });
+
+        let reopened = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service = WorkGraphService::with_scope(reopened, "realm", WorkNamespace::default());
+        let error = service
+            .get(None, None, item.id)
+            .await
+            .expect_err("generated recovery invariants must fail closed");
+        assert!(
+            matches!(error, WorkGraphError::Store(message) if message.contains("generated WorkGraphLifecycleMachine rejected"))
         );
     }
 

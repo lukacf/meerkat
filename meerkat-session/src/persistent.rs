@@ -275,15 +275,11 @@ struct StoreCheckpointer {
     blob_store: Arc<dyn BlobStore>,
     gate: Arc<CheckpointerGate>,
     last_saved_len: std::sync::atomic::AtomicUsize,
-    enabled: bool,
 }
 
 #[async_trait]
 impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
     async fn checkpoint(&self, session: &Session) {
-        if !self.enabled {
-            return;
-        }
         let guard = self.gate.cancelled.lock().await;
         if *guard {
             return;
@@ -2568,8 +2564,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.reject_runtime_backed_eager_create_session(&req)?;
 
         // Inject a checkpointer for all sessions. The keep-alive attached loop
-        // calls it after each interaction; runtime-backed sessions keep it
-        // disabled so they do not bypass runtime boundary persistence.
+        // calls it after each interaction to keep the SessionStore projection
+        // current. Runtime-backed sessions still commit runtime boundary
+        // authority through RuntimeStore; this checkpointer writes only the
+        // compatibility/session snapshot projection.
         let gate = Arc::new(CheckpointerGate {
             cancelled: Mutex::new(false),
         });
@@ -2578,7 +2576,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             blob_store: Arc::clone(&self.blob_store),
             gate: Arc::clone(&gate),
             last_saved_len: std::sync::atomic::AtomicUsize::new(0),
-            enabled: self.runtime_store.is_none(),
         });
         let (resume_session_id, resume_session) = {
             let build = req.build.get_or_insert_with(Default::default);
@@ -5741,7 +5738,6 @@ mod tests {
             blob_store: memory_blob_store(),
             gate,
             last_saved_len: std::sync::atomic::AtomicUsize::new(0),
-            enabled: true,
         };
 
         let mut session = Session::new();
@@ -5775,7 +5771,6 @@ mod tests {
             blob_store: memory_blob_store(),
             gate: Arc::clone(&gate),
             last_saved_len: std::sync::atomic::AtomicUsize::new(0),
-            enabled: true,
         };
 
         let mut session = Session::new();
@@ -5816,7 +5811,6 @@ mod tests {
             blob_store: memory_blob_store(),
             gate,
             last_saved_len: std::sync::atomic::AtomicUsize::new(0),
-            enabled: true,
         };
 
         let mut session = Session::new();
@@ -5846,6 +5840,118 @@ mod tests {
         assert!(
             store.load(session.id()).await.unwrap().is_some(),
             "changed session should be saved"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_service_installed_store_checkpointer_saves_with_and_without_runtime_store() {
+        for runtime_backed in [false, true] {
+            let mode = if runtime_backed {
+                "runtime-backed"
+            } else {
+                "runtime-less"
+            };
+            let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+            let runtime_store = runtime_backed.then(|| Arc::new(InMemoryRuntimeStore::new()));
+            let service_runtime_store = runtime_store
+                .as_ref()
+                .map(|store| Arc::clone(store) as Arc<dyn RuntimeStore>);
+            let builder = CapturingCheckpointerBuilder::new();
+            let captured = Arc::clone(&builder.captured);
+            let service = PersistentSessionService::new(
+                builder,
+                4,
+                Arc::clone(&store),
+                service_runtime_store,
+                memory_blob_store(),
+            );
+
+            let result = service
+                .create_session(create_request(
+                    &format!("{mode} deferred create"),
+                    InitialTurnPolicy::Defer,
+                ))
+                .await
+                .unwrap_or_else(|err| panic!("{mode} deferred create should succeed: {err:?}"));
+            let checkpointer = captured
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(|| panic!("{mode} create should install a checkpointer"));
+            let mut session = store
+                .load(&result.session_id)
+                .await
+                .expect("store load should succeed")
+                .unwrap_or_else(|| panic!("{mode} create should persist an initial projection"));
+            let baseline_len = session.messages().len();
+            session.push(Message::User(UserMessage::text(format!(
+                "{mode} checkpointed turn"
+            ))));
+
+            checkpointer.checkpoint(&session).await;
+
+            let persisted = store
+                .load(&result.session_id)
+                .await
+                .expect("store load should succeed")
+                .unwrap_or_else(|| panic!("{mode} checkpoint should persist projection"));
+            assert_eq!(
+                persisted.messages().len(),
+                baseline_len + 1,
+                "{mode} installed checkpointer should save changed sessions"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_runtime_store_backed_service_checkpointer_respects_cancellation() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let builder = CapturingCheckpointerBuilder::new();
+        let captured = Arc::clone(&builder.captured);
+        let service = PersistentSessionService::new(
+            builder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "runtime-backed deferred create",
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("runtime-backed deferred create should succeed");
+        let checkpointer = captured
+            .lock()
+            .await
+            .clone()
+            .expect("runtime-backed create should install a checkpointer");
+        let mut session = store
+            .load(&result.session_id)
+            .await
+            .expect("store load should succeed")
+            .expect("create should persist an initial projection");
+        let baseline_len = session.messages().len();
+
+        service.cancel_all_checkpointers().await;
+        session.push(Message::User(UserMessage::text(
+            "checkpoint after cancellation must not save".to_string(),
+        )));
+
+        checkpointer.checkpoint(&session).await;
+
+        let persisted = store
+            .load(&result.session_id)
+            .await
+            .expect("store load should succeed")
+            .expect("cancelled checkpoint should leave initial projection present");
+        assert_eq!(
+            persisted.messages().len(),
+            baseline_len,
+            "cancelled runtime-backed checkpointer must not write a later projection"
         );
     }
 
@@ -7018,7 +7124,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_backed_create_session_installs_disabled_store_checkpointer() {
+    async fn test_runtime_backed_create_session_installs_active_store_checkpointer() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let builder = CapturingCheckpointerBuilder::new();
@@ -7057,7 +7163,7 @@ mod tests {
         let mut mutated = original.clone();
         mutated.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text(
-                "checkpoint should not bypass runtime boundary".to_string(),
+                "checkpoint should update the session store projection".to_string(),
             ),
         ));
         checkpointer.checkpoint(&mutated).await;
@@ -7068,8 +7174,10 @@ mod tests {
             .expect("raw store load should succeed");
         assert_eq!(
             raw_after.as_ref().map(|session| session.messages().len()),
-            raw_before.as_ref().map(|session| session.messages().len()),
-            "runtime-backed sessions must not checkpoint directly into the session store before the runtime boundary commits"
+            raw_before
+                .as_ref()
+                .map(|session| session.messages().len() + 1),
+            "runtime-backed sessions must checkpoint changed turns into the SessionStore projection"
         );
     }
 

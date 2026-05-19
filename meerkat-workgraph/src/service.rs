@@ -598,6 +598,8 @@ mod tests {
         }
     }
 
+    impl crate::store::private::Sealed for RefreshConflictStore {}
+
     #[async_trait]
     impl WorkGraphStore for RefreshConflictStore {
         fn kind(&self) -> WorkGraphStoreKind {

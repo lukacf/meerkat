@@ -15,6 +15,10 @@ use crate::types::{
 };
 use crate::{WorkGraphEdgeCommit, WorkGraphItemCommit, WorkGraphMachine};
 
+pub(crate) mod private {
+    pub trait Sealed {}
+}
+
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::sync::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
@@ -57,7 +61,7 @@ pub struct WorkGraphEventFilter {
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-pub trait WorkGraphStore: Send + Sync {
+pub trait WorkGraphStore: private::Sealed + Send + Sync {
     fn kind(&self) -> WorkGraphStoreKind;
 
     async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, WorkGraphError>;
@@ -94,6 +98,8 @@ pub trait WorkGraphStore: Send + Sync {
 
 #[derive(Default)]
 pub struct DisabledWorkGraphStore;
+
+impl private::Sealed for DisabledWorkGraphStore {}
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -158,6 +164,8 @@ fn unsupported(kind: WorkGraphStoreKind) -> WorkGraphError {
 pub struct MemoryWorkGraphStore {
     inner: Arc<RwLock<MemoryWorkGraphState>>,
 }
+
+impl private::Sealed for MemoryWorkGraphStore {}
 
 #[derive(Default)]
 struct MemoryWorkGraphState {
@@ -395,6 +403,9 @@ fn event_matches_filter(event: &WorkGraphEvent, filter: &WorkGraphEventFilter) -
 pub struct SqliteWorkGraphStore {
     path: PathBuf,
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+impl private::Sealed for SqliteWorkGraphStore {}
 
 #[cfg(not(target_arch = "wasm32"))]
 impl SqliteWorkGraphStore {

@@ -10467,6 +10467,7 @@ impl MobActor {
     async fn destroy_remote_member_for_destroy(
         &mut self,
         entry: RosterEntry,
+        trust_unwire_authority_by_peer: BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
     ) -> RemoteDestroyOutcome {
         let identity = entry.agent_identity.clone();
         let agent_identity = entry.agent_identity.clone();
@@ -10485,7 +10486,7 @@ impl MobActor {
         };
 
         let ctx = self
-            .disposal_context_from_entry(&agent_identity, &entry, BTreeMap::new())
+            .disposal_context_from_entry(&agent_identity, &entry, trust_unwire_authority_by_peer)
             .await;
         let disposal = self.dispose_member_for_destroy(&ctx).await;
 
@@ -10577,6 +10578,10 @@ impl MobActor {
     async fn destroy_remote_members_for_destroy(
         &mut self,
         remote_entries: Vec<RosterEntry>,
+        trust_unwire_authority_by_member: &mut BTreeMap<
+            MeerkatId,
+            BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
+        >,
         report: &mut super::handle::MobDestroyReport,
     ) {
         if remote_entries.is_empty() {
@@ -10594,9 +10599,14 @@ impl MobActor {
 
         while let Some(entry) = remaining.pop_front() {
             let identity = entry.agent_identity.clone();
-            let next =
-                tokio::time::timeout_at(deadline_at, self.destroy_remote_member_for_destroy(entry))
-                    .await;
+            let trust_unwire_authority_by_peer = trust_unwire_authority_by_member
+                .remove(&identity)
+                .unwrap_or_default();
+            let next = tokio::time::timeout_at(
+                deadline_at,
+                self.destroy_remote_member_for_destroy(entry, trust_unwire_authority_by_peer),
+            )
+            .await;
             let outcome = match next {
                 Ok(outcome) => outcome,
                 Err(_) => {
@@ -10634,6 +10644,10 @@ impl MobActor {
     async fn destroy_remote_members_for_destroy(
         &self,
         remote_entries: Vec<RosterEntry>,
+        _trust_unwire_authority_by_member: &mut BTreeMap<
+            MeerkatId,
+            BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
+        >,
         report: &mut super::handle::MobDestroyReport,
     ) {
         for entry in remote_entries {
@@ -10647,10 +10661,15 @@ impl MobActor {
     async fn dispose_local_member_after_destroy_admission(
         &mut self,
         entry: RosterEntry,
+        trust_unwire_authority_by_peer: BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
         report: &mut super::handle::MobDestroyReport,
     ) -> Result<(), super::handle::MobDestroyError> {
         let ctx = self
-            .disposal_context_from_entry(&entry.agent_identity, &entry, BTreeMap::new())
+            .disposal_context_from_entry(
+                &entry.agent_identity,
+                &entry,
+                trust_unwire_authority_by_peer,
+            )
             .await;
         let disposal_report = self.dispose_member_for_destroy(&ctx).await;
         if let Some(error) = Self::destroy_disposal_failure(&disposal_report) {
@@ -10729,6 +10748,31 @@ impl MobActor {
             let roster = self.roster.read().await;
             roster.list_all().cloned().collect::<Vec<_>>()
         };
+        let mut trust_unwire_authority_by_member: BTreeMap<
+            MeerkatId,
+            BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
+        > = BTreeMap::new();
+        if destroy_input_needed {
+            for entry in &entries {
+                let authorities = match self
+                    .member_retire_trust_unwire_authorities(&entry.agent_identity, entry)
+                    .await
+                {
+                    Ok(authorities) => authorities,
+                    Err(error) => {
+                        report.push_error(format!(
+                            "{}: destroy retire trust authority failed: {error}",
+                            entry.agent_identity
+                        ));
+                        return Err(MobDestroyError::Incomplete { report });
+                    }
+                };
+                if !authorities.is_empty() {
+                    trust_unwire_authority_by_member
+                        .insert(entry.agent_identity.clone(), authorities);
+                }
+            }
+        }
         if !self.destroy_admitted()
             && destroy_input_needed
             && let Err(error) = self.record_destroying_event().await
@@ -10810,11 +10854,18 @@ impl MobActor {
             .partition(|entry| Self::runtime_binding_for_entry(entry).is_some());
 
         for entry in local_entries {
-            self.dispose_local_member_after_destroy_admission(entry, &mut report)
+            let authorities = trust_unwire_authority_by_member
+                .remove(&entry.agent_identity)
+                .unwrap_or_default();
+            self.dispose_local_member_after_destroy_admission(entry, authorities, &mut report)
                 .await?;
         }
-        self.destroy_remote_members_for_destroy(remote_entries, &mut report)
-            .await;
+        self.destroy_remote_members_for_destroy(
+            remote_entries,
+            &mut trust_unwire_authority_by_member,
+            &mut report,
+        )
+        .await;
         if report.remote_cleanup_deadline_exceeded
             || !report.orphaned_remote_members.is_empty()
             || !report.errors.is_empty()

@@ -2,7 +2,6 @@
 
 use super::comms_config::CoreCommsConfig;
 use super::comms_runtime::CommsRuntime;
-use crate::{PubKey, TrustedPeer};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use thiserror::Error;
@@ -73,7 +72,7 @@ impl CommsBootstrap {
                 }))
             }
             CommsBootstrapMode::ChildInproc => {
-                let parent = self.parent_context.ok_or_else(|| {
+                let _parent = self.parent_context.ok_or_else(|| {
                     CommsBootstrapError::RuntimeError(
                         "ChildInproc mode requires parent_context".to_string(),
                     )
@@ -83,17 +82,6 @@ impl CommsBootstrap {
                     self.config.inproc_namespace.clone(),
                 )
                 .map_err(|e| CommsBootstrapError::RuntimeError(e.to_string()))?;
-
-                let parent_peer = TrustedPeer {
-                    name: parent.parent_name,
-                    pubkey: PubKey::new(parent.parent_pubkey),
-                    addr: parent.parent_addr,
-                    meta: crate::PeerMeta::default(),
-                };
-                runtime
-                    .register_trusted_peer(parent_peer)
-                    .await
-                    .map_err(|err| CommsBootstrapError::RuntimeError(err.to_string()))?;
 
                 let advertise = CommsAdvertise {
                     name: self.config.name,

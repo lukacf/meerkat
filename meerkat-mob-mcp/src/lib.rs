@@ -3370,7 +3370,8 @@ mod tests {
     use meerkat_core::PlainEventSource;
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
     use meerkat_core::comms::{
-        CommsCommand, CommsTrustMutation, CommsTrustMutationResult, SendError, SendReceipt,
+        CommsCommand, CommsTrustMutation, CommsTrustMutationResult,
+        GeneratedCommsTrustAuthoritySourceKind, PeerId, SendError, SendReceipt,
         TrustedPeerDescriptor,
     };
     use meerkat_core::event::AgentEvent;
@@ -3388,7 +3389,7 @@ mod tests {
     use meerkat_core::{
         PeerMeta, Provider, Session, SessionMetadata, SessionTooling, ToolCategoryOverride,
     };
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeSet, HashMap, HashSet};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
     use tokio::sync::Notify;
@@ -3752,11 +3753,12 @@ mod tests {
     }
 
     struct MockComms {
+        name: String,
         peer_id: meerkat_core::comms::PeerId,
         public_key_bytes: [u8; 32],
         address: String,
         key: String,
-        trusted: RwLock<HashSet<String>>,
+        trusted: RwLock<HashMap<String, BTreeSet<GeneratedCommsTrustAuthoritySourceKind>>>,
         notify: Arc<Notify>,
     }
 
@@ -3816,11 +3818,12 @@ mod tests {
             }
             let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&public_key_bytes);
             Self {
+                name: name.to_string(),
                 peer_id,
                 public_key_bytes,
                 address: format!("inproc://{name}"),
                 key: super::encode_ed25519_public_key(&public_key_bytes),
-                trusted: RwLock::new(HashSet::new()),
+                trusted: RwLock::new(HashMap::new()),
                 notify: Arc::new(Notify::new()),
             }
         }
@@ -3840,6 +3843,10 @@ mod tests {
             Some(self.public_key_bytes)
         }
 
+        fn comms_name(&self) -> Option<String> {
+            Some(self.name.clone())
+        }
+
         fn advertised_address(&self) -> Option<String> {
             Some(self.address.clone())
         }
@@ -3849,67 +3856,81 @@ mod tests {
             mutation: CommsTrustMutation,
         ) -> Result<CommsTrustMutationResult, SendError> {
             match mutation {
-                CommsTrustMutation::AddTrustedPeer {
-                    peer,
-                    authority: _authority,
-                } => {
-                    self.add_trusted_peer(peer).await?;
+                CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                    authority
+                        .validate_public_add(self.peer_id(), &peer)
+                        .map_err(SendError::Validation)?;
+                    meerkat_core::comms::TrustedPeerDescriptor::validate_pubkey_for_peer_id(
+                        peer.peer_id,
+                        &peer.pubkey,
+                    )
+                    .map_err(SendError::Validation)?;
+                    self.trusted
+                        .write()
+                        .await
+                        .entry(peer.peer_id.as_str().to_string())
+                        .or_default()
+                        .insert(authority.trust_row_owner_kind());
                     Ok(CommsTrustMutationResult::Added)
                 }
-                CommsTrustMutation::RemoveTrustedPeer {
-                    peer_id,
-                    authority: _authority,
-                } => {
-                    let removed = self.remove_trusted_peer(&peer_id).await?;
+                CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
+                    authority
+                        .validate_public_remove(self.peer_id(), parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    let mut trusted = self.trusted.write().await;
+                    let removed = remove_trust_source(
+                        &mut trusted,
+                        &peer_id,
+                        authority.trust_row_owner_kind(),
+                    );
                     Ok(CommsTrustMutationResult::Removed { removed })
                 }
-                CommsTrustMutation::AddPrivateTrustedPeer {
-                    peer,
-                    authority: _authority,
-                } => {
-                    self.add_private_trusted_peer(peer).await?;
+                CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                    authority
+                        .validate_private_add(self.peer_id(), &peer)
+                        .map_err(SendError::Validation)?;
+                    meerkat_core::comms::TrustedPeerDescriptor::validate_pubkey_for_peer_id(
+                        peer.peer_id,
+                        &peer.pubkey,
+                    )
+                    .map_err(SendError::Validation)?;
                     Ok(CommsTrustMutationResult::Added)
                 }
-                CommsTrustMutation::RemovePrivateTrustedPeer {
-                    peer_id,
-                    authority: _authority,
-                } => {
-                    let removed = self.remove_trusted_peer(&peer_id).await?;
-                    Ok(CommsTrustMutationResult::Removed { removed })
+                CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
+                    authority
+                        .validate_private_remove(self.peer_id(), parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    Ok(CommsTrustMutationResult::Removed { removed: false })
                 }
             }
         }
 
         async fn add_trusted_peer(
             &self,
-            peer: meerkat_core::comms::TrustedPeerDescriptor,
+            _peer: meerkat_core::comms::TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
-            meerkat_core::comms::TrustedPeerDescriptor::validate_pubkey_for_peer_id(
-                peer.peer_id,
-                &peer.pubkey,
-            )
-            .map_err(SendError::Validation)?;
-            self.trusted
-                .write()
-                .await
-                .insert(peer.peer_id.as_str().to_string());
-            Ok(())
+            Err(SendError::Unsupported(
+                "add_trusted_peer requires apply_trust_mutation authority".to_string(),
+            ))
         }
 
         async fn add_private_trusted_peer(
             &self,
-            peer: meerkat_core::comms::TrustedPeerDescriptor,
+            _peer: meerkat_core::comms::TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
-            meerkat_core::comms::TrustedPeerDescriptor::validate_pubkey_for_peer_id(
-                peer.peer_id,
-                &peer.pubkey,
-            )
-            .map_err(SendError::Validation)?;
-            Ok(())
+            Err(SendError::Unsupported(
+                "add_private_trusted_peer requires apply_trust_mutation authority".to_string(),
+            ))
         }
 
-        async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-            Ok(self.trusted.write().await.remove(peer_id))
+        async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
+            Err(SendError::Unsupported(
+                "remove_trusted_peer requires apply_trust_mutation authority".to_string(),
+            ))
         }
 
         async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {

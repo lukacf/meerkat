@@ -12307,7 +12307,10 @@ mod tests {
     use futures::stream;
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-    use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerDescriptor};
+    use meerkat_core::comms::{
+        CommsCommand, CommsTrustMutation, CommsTrustMutationResult, PeerId, SendError, SendReceipt,
+        TrustedPeerDescriptor,
+    };
     use meerkat_core::error::ToolError;
     use meerkat_core::interaction::{InteractionId, PeerInputCandidate};
     use meerkat_core::service::{
@@ -13716,20 +13719,68 @@ default_model = "gemma"
             Some(self.key.clone())
         }
 
-        async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-            self.trusted.write().await.insert(peer.peer_id.to_string());
-            Ok(())
+        async fn apply_trust_mutation(
+            &self,
+            mutation: CommsTrustMutation,
+        ) -> Result<CommsTrustMutationResult, SendError> {
+            match mutation {
+                CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                    authority
+                        .validate_public_add(self.peer_id(), &peer)
+                        .map_err(SendError::Validation)?;
+                    TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                        .map_err(SendError::Validation)?;
+                    self.trusted.write().await.insert(peer.peer_id.to_string());
+                    Ok(CommsTrustMutationResult::Added)
+                }
+                CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
+                    authority
+                        .validate_public_remove(self.peer_id(), parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    Ok(CommsTrustMutationResult::Removed {
+                        removed: self.trusted.write().await.remove(&peer_id),
+                    })
+                }
+                CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                    authority
+                        .validate_private_add(self.peer_id(), &peer)
+                        .map_err(SendError::Validation)?;
+                    TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                        .map_err(SendError::Validation)?;
+                    Ok(CommsTrustMutationResult::Added)
+                }
+                CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
+                    authority
+                        .validate_private_remove(self.peer_id(), parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    Ok(CommsTrustMutationResult::Removed { removed: false })
+                }
+            }
+        }
+
+        async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+            Err(SendError::Unsupported(
+                "add_trusted_peer requires apply_trust_mutation authority".to_string(),
+            ))
         }
 
         async fn add_private_trusted_peer(
             &self,
             _peer: TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
-            Ok(())
+            Err(SendError::Unsupported(
+                "add_private_trusted_peer requires apply_trust_mutation authority".to_string(),
+            ))
         }
 
-        async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-            Ok(self.trusted.write().await.remove(peer_id))
+        async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
+            Err(SendError::Unsupported(
+                "remove_trusted_peer requires apply_trust_mutation authority".to_string(),
+            ))
         }
 
         async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
@@ -18288,20 +18339,18 @@ supports_reasoning = true
         use meerkat_comms::agent::CommsToolDispatcher;
         use meerkat_comms::{CommsConfig, Keypair, TrustedPeers};
         use meerkat_core::AgentToolDispatcher;
-        use parking_lot::RwLock;
 
         // Create mock comms infrastructure
         let keypair = Keypair::generate();
-        let trusted_peers = TrustedPeers::new();
-        let trusted_peers = std::sync::Arc::new(RwLock::new(trusted_peers));
         let (_inbox, inbox_sender) = Inbox::new();
-        let router = std::sync::Arc::new(meerkat_comms::Router::with_shared_peers(
+        let router = std::sync::Arc::new(meerkat_comms::Router::new(
             keypair,
-            trusted_peers.clone(),
+            TrustedPeers::new(),
             CommsConfig::default(),
             inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
 
         // Create CommsToolDispatcher with no inner dispatcher
         let dispatcher = CommsToolDispatcher::new(router, trusted_peers);

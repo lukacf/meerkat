@@ -67,7 +67,6 @@ pub trait WorkGraphStore: Send + Sync {
     async fn update_item_cas(
         &self,
         commit: WorkGraphItemCommit,
-        expected_previous_revision: u64,
     ) -> Result<WorkItem, WorkGraphError>;
 
     async fn get_item(
@@ -114,7 +113,6 @@ impl WorkGraphStore for DisabledWorkGraphStore {
     async fn update_item_cas(
         &self,
         _commit: WorkGraphItemCommit,
-        _expected_previous_revision: u64,
     ) -> Result<WorkItem, WorkGraphError> {
         Err(unsupported(self.kind()))
     }
@@ -187,7 +185,7 @@ impl WorkGraphStore for MemoryWorkGraphStore {
     }
 
     async fn insert_item(&self, commit: WorkGraphItemCommit) -> Result<WorkItem, WorkGraphError> {
-        let (item, event) = commit.into_parts();
+        let (item, event) = commit.into_insert_parts()?;
         WorkGraphMachine::validate_item_projection(&item)?;
         let mut guard = self.inner.write().await;
         let key = item_key(&item.realm_id, &item.namespace, &item.id);
@@ -205,9 +203,9 @@ impl WorkGraphStore for MemoryWorkGraphStore {
     async fn update_item_cas(
         &self,
         commit: WorkGraphItemCommit,
-        expected_previous_revision: u64,
     ) -> Result<WorkItem, WorkGraphError> {
-        let (item, event) = commit.into_parts();
+        let (item, event, previous) = commit.into_update_parts()?;
+        WorkGraphMachine::validate_item_projection(&previous)?;
         WorkGraphMachine::validate_item_projection(&item)?;
         let mut guard = self.inner.write().await;
         let key = item_key(&item.realm_id, &item.namespace, &item.id);
@@ -218,12 +216,18 @@ impl WorkGraphStore for MemoryWorkGraphStore {
                 item.id.clone(),
             ));
         };
-        if current.revision != expected_previous_revision {
+        if current.revision != previous.revision {
             return Err(WorkGraphError::StaleRevision {
                 id: item.id.clone(),
-                expected: expected_previous_revision,
+                expected: previous.revision,
                 actual: current.revision,
             });
+        }
+        if current != &previous {
+            return Err(WorkGraphError::Conflict(format!(
+                "current work item {} differs from generated commit source",
+                item.id
+            )));
         }
         guard.items.insert(key, item.clone());
         guard.append_event(event);
@@ -260,9 +264,33 @@ impl WorkGraphStore for MemoryWorkGraphStore {
     }
 
     async fn insert_edge(&self, commit: WorkGraphEdgeCommit) -> Result<WorkEdge, WorkGraphError> {
-        let (edge, event) = commit.into_parts();
+        let edge_scope = commit.edge().clone();
         let mut guard = self.inner.write().await;
-        if guard.edges.iter().any(|existing| existing == &edge) {
+        let current_items = guard
+            .items
+            .values()
+            .filter(|item| {
+                item.realm_id == edge_scope.realm_id && item.namespace == edge_scope.namespace
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let current_edges = guard
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.realm_id == edge_scope.realm_id && edge.namespace == edge_scope.namespace
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        commit.validate_topology(&current_items, &current_edges)?;
+        let (edge, event) = commit.into_parts();
+        if guard.edges.iter().any(|existing| {
+            existing.realm_id == edge.realm_id
+                && existing.namespace == edge.namespace
+                && existing.kind == edge.kind
+                && existing.from_id == edge.from_id
+                && existing.to_id == edge.to_id
+        }) {
             return Err(duplicate_edge_error(&edge));
         }
         guard.edges.push(edge.clone());
@@ -443,7 +471,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
     }
 
     async fn insert_item(&self, commit: WorkGraphItemCommit) -> Result<WorkItem, WorkGraphError> {
-        let (item, event) = commit.into_parts();
+        let (item, event) = commit.into_insert_parts()?;
         WorkGraphMachine::validate_item_projection(&item)?;
         self.with_connection(|conn| {
             let tx = conn
@@ -460,21 +488,42 @@ impl WorkGraphStore for SqliteWorkGraphStore {
     async fn update_item_cas(
         &self,
         commit: WorkGraphItemCommit,
-        expected_previous_revision: u64,
     ) -> Result<WorkItem, WorkGraphError> {
-        let (item, event) = commit.into_parts();
+        let (item, event, previous) = commit.into_update_parts()?;
+        WorkGraphMachine::validate_item_projection(&previous)?;
         WorkGraphMachine::validate_item_projection(&item)?;
         self.with_connection(|conn| {
             let tx = conn
                 .transaction()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-            let changed = update_item_tx(&tx, &item, expected_previous_revision)?;
+            let current = select_item(&tx, &item.realm_id, &item.namespace, &item.id)?;
+            let Some(current) = current else {
+                return Err(WorkGraphError::not_found(
+                    item.realm_id.clone(),
+                    item.namespace.clone(),
+                    item.id.clone(),
+                ));
+            };
+            if current.revision != previous.revision {
+                return Err(WorkGraphError::StaleRevision {
+                    id: item.id.clone(),
+                    expected: previous.revision,
+                    actual: current.revision,
+                });
+            }
+            if current != previous {
+                return Err(WorkGraphError::Conflict(format!(
+                    "current work item {} differs from generated commit source",
+                    item.id
+                )));
+            }
+            let changed = update_item_tx(&tx, &item, previous.revision)?;
             if changed == 0 {
                 let actual = current_revision_tx(&tx, &item.realm_id, &item.namespace, &item.id)?;
                 return match actual {
                     Some(actual) => Err(WorkGraphError::StaleRevision {
                         id: item.id,
-                        expected: expected_previous_revision,
+                        expected: previous.revision,
                         actual,
                     }),
                     None => Err(WorkGraphError::not_found(
@@ -505,11 +554,24 @@ impl WorkGraphStore for SqliteWorkGraphStore {
     }
 
     async fn insert_edge(&self, commit: WorkGraphEdgeCommit) -> Result<WorkEdge, WorkGraphError> {
-        let (edge, event) = commit.into_parts();
+        let edge_scope = commit.edge().clone();
         self.with_connection(|conn| {
             let tx = conn
                 .transaction()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            let current_items = list_sqlite_items(
+                &tx,
+                &WorkItemFilter {
+                    realm_id: Some(edge_scope.realm_id.clone()),
+                    namespace: Some(edge_scope.namespace.clone()),
+                    include_terminal: true,
+                    ..WorkItemFilter::default()
+                },
+            )?;
+            let current_edges =
+                list_sqlite_edges(&tx, &edge_scope.realm_id, &edge_scope.namespace)?;
+            commit.validate_topology(&current_items, &current_edges)?;
+            let (edge, event) = commit.into_parts();
             insert_edge_tx(&tx, &edge)?;
             insert_event_tx(&tx, &event)?;
             tx.commit()
@@ -868,41 +930,30 @@ mod tests {
     use crate::WorkGraphMachine;
     use crate::types::WorkEdge;
     use crate::{
-        CreateWorkItemRequest, LinkWorkItemsRequest, MemoryWorkGraphStore, WorkEdgeKind,
-        WorkGraphEdgeCommit, WorkGraphError, WorkGraphEventFilter, WorkGraphService,
-        WorkGraphStore, WorkItem, WorkItemFilter, WorkNamespace,
+        ClaimWorkItemRequest, CreateWorkItemRequest, LinkWorkItemsRequest, MemoryWorkGraphStore,
+        ReleaseWorkItemRequest, WorkEdgeKind, WorkGraphEdgeCommit, WorkGraphError,
+        WorkGraphEventFilter, WorkGraphService, WorkGraphStore, WorkItem, WorkItemFilter,
+        WorkNamespace, WorkOwner, WorkOwnerKey,
     };
 
-    fn test_edge_with_items() -> (WorkEdge, Vec<WorkItem>) {
-        let now = Utc::now();
-        let from = test_item("from", now);
-        let to = test_item("to", now);
-        let edge = WorkEdge {
+    fn test_edge(from: &WorkItem, to: &WorkItem, now: chrono::DateTime<Utc>) -> WorkEdge {
+        WorkEdge {
             realm_id: "realm".to_string(),
             namespace: WorkNamespace::default(),
             kind: WorkEdgeKind::Blocks,
             from_id: from.id.clone(),
             to_id: to.id.clone(),
             created_at: now,
-        };
-        (edge, vec![from, to])
-    }
-
-    fn test_item(title: &str, now: chrono::DateTime<Utc>) -> WorkItem {
-        WorkGraphMachine::create_item(
-            create_request(title),
-            "realm".to_string(),
-            WorkNamespace::default(),
-            now,
-        )
-        .expect("create item")
-        .into_parts()
-        .0
+        }
     }
 
     fn link_commit(edge: &WorkEdge, items: &[WorkItem]) -> WorkGraphEdgeCommit {
         WorkGraphMachine::link_edge(edge.clone(), items, &[], edge.created_at)
             .expect("generated link commit")
+    }
+
+    fn owner(id: &str) -> WorkOwner {
+        WorkOwner::new(WorkOwnerKey::label(id).expect("owner key"))
     }
 
     fn create_request(title: &str) -> CreateWorkItemRequest {
@@ -982,6 +1033,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_store_rejects_item_commit_from_unpersisted_source() {
+        let now = Utc::now();
+        let store = MemoryWorkGraphStore::new();
+        let stored = store
+            .insert_item(
+                WorkGraphMachine::create_item(
+                    create_request("source binding"),
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    now,
+                )
+                .expect("create item"),
+            )
+            .await
+            .expect("insert item");
+        let claimed = WorkGraphMachine::claim_item(
+            stored,
+            ClaimWorkItemRequest {
+                id: crate::WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                owner: owner("worker"),
+                lease_seconds: Some(60),
+                lease_expires_at: None,
+            },
+            now,
+        )
+        .expect("claim")
+        .into_update_parts()
+        .expect("claim parts")
+        .0;
+        let release_commit = WorkGraphMachine::release_item(
+            claimed,
+            ReleaseWorkItemRequest {
+                id: crate::WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 2,
+            },
+            now,
+        )
+        .expect("release from unpersisted source");
+
+        let error = store
+            .update_item_cas(release_commit)
+            .await
+            .expect_err("store must reject generated commit from non-current source");
+        assert!(matches!(
+            error,
+            WorkGraphError::StaleRevision { .. } | WorkGraphError::Conflict(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_store_rejects_edge_commit_from_stale_topology() {
+        let store = MemoryWorkGraphStore::new();
+        let now = Utc::now();
+        let from = store
+            .insert_item(
+                WorkGraphMachine::create_item(
+                    create_request("from"),
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    now,
+                )
+                .expect("create from"),
+            )
+            .await
+            .expect("insert from");
+        let to = store
+            .insert_item(
+                WorkGraphMachine::create_item(
+                    create_request("to"),
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    now,
+                )
+                .expect("create to"),
+            )
+            .await
+            .expect("insert to");
+        let items = vec![from.clone(), to.clone()];
+        let first_edge = test_edge(&from, &to, now);
+        let second_edge = test_edge(&to, &from, now);
+        let first_commit =
+            WorkGraphMachine::link_edge(first_edge, &items, &[], now).expect("first edge commit");
+        let stale_second_commit = WorkGraphMachine::link_edge(second_edge, &items, &[], now)
+            .expect("second edge commit from stale empty topology");
+
+        store
+            .insert_edge(first_commit)
+            .await
+            .expect("first edge insert");
+        let error = store
+            .insert_edge(stale_second_commit)
+            .await
+            .expect_err("store must reject stale topology commit");
+        assert!(matches!(error, WorkGraphError::Conflict(_)));
+    }
+
+    #[tokio::test]
     async fn memory_store_namespace_filters_do_not_leak() {
         let store = std::sync::Arc::new(MemoryWorkGraphStore::new());
         let default_service =
@@ -1041,12 +1194,48 @@ mod tests {
     #[tokio::test]
     async fn memory_store_duplicate_edge_does_not_append_event() {
         let store = MemoryWorkGraphStore::new();
-        let (edge, items) = test_edge_with_items();
+        let now = Utc::now();
+        let from = store
+            .insert_item(
+                WorkGraphMachine::create_item(
+                    create_request("from"),
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    now,
+                )
+                .expect("create from"),
+            )
+            .await
+            .expect("insert from");
+        let to = store
+            .insert_item(
+                WorkGraphMachine::create_item(
+                    create_request("to"),
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    now,
+                )
+                .expect("create to"),
+            )
+            .await
+            .expect("insert to");
+        let items = vec![from.clone(), to.clone()];
+        let edge = test_edge(&from, &to, now);
         let commit = link_commit(&edge, &items);
         store
             .insert_edge(commit.clone())
             .await
             .expect("insert edge");
+        let events_before_duplicate = store
+            .list_events(WorkGraphEventFilter {
+                realm_id: Some(edge.realm_id.clone()),
+                namespace: Some(edge.namespace.clone()),
+                all_namespaces: false,
+                after_seq: None,
+                limit: None,
+            })
+            .await
+            .expect("events before duplicate");
 
         let error = store
             .insert_edge(commit)
@@ -1064,7 +1253,7 @@ mod tests {
             })
             .await
             .expect("events");
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), events_before_duplicate.len());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1416,12 +1605,48 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("workgraph.sqlite3");
         let store = crate::SqliteWorkGraphStore::open(&path).expect("open");
-        let (edge, items) = test_edge_with_items();
+        let now = Utc::now();
+        let from = store
+            .insert_item(
+                WorkGraphMachine::create_item(
+                    create_request("from"),
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    now,
+                )
+                .expect("create from"),
+            )
+            .await
+            .expect("insert from");
+        let to = store
+            .insert_item(
+                WorkGraphMachine::create_item(
+                    create_request("to"),
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    now,
+                )
+                .expect("create to"),
+            )
+            .await
+            .expect("insert to");
+        let items = vec![from.clone(), to.clone()];
+        let edge = test_edge(&from, &to, now);
         let commit = link_commit(&edge, &items);
         store
             .insert_edge(commit.clone())
             .await
             .expect("insert edge");
+        let events_before_duplicate = store
+            .list_events(WorkGraphEventFilter {
+                realm_id: Some(edge.realm_id.clone()),
+                namespace: Some(edge.namespace.clone()),
+                all_namespaces: false,
+                after_seq: None,
+                limit: None,
+            })
+            .await
+            .expect("events before duplicate");
 
         let error = store
             .insert_edge(commit)
@@ -1439,6 +1664,6 @@ mod tests {
             })
             .await
             .expect("events");
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), events_before_duplicate.len());
     }
 }

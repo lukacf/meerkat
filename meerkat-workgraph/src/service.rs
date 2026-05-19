@@ -177,7 +177,6 @@ impl WorkGraphService {
             .ok_or_else(|| {
                 WorkGraphError::not_found(realm_id.clone(), namespace.clone(), request.id.clone())
             })?;
-        let expected_previous_revision = item.revision;
         let unresolved_blockers = self
             .unresolved_blocker_count_for_item(&realm_id, &namespace, &item)
             .await?;
@@ -187,9 +186,7 @@ impl WorkGraphService {
             request,
             now,
         )?;
-        self.store
-            .update_item_cas(commit, expected_previous_revision)
-            .await
+        self.store.update_item_cas(commit).await
     }
 
     pub async fn release(
@@ -204,11 +201,8 @@ impl WorkGraphService {
                 request.id.clone(),
             )
             .await?;
-        let expected_previous_revision = item.revision;
         let commit = WorkGraphMachine::release_item(item, request, now)?;
-        self.store
-            .update_item_cas(commit, expected_previous_revision)
-            .await
+        self.store.update_item_cas(commit).await
     }
 
     pub async fn update(&self, request: UpdateWorkItemRequest) -> Result<WorkItem, WorkGraphError> {
@@ -220,11 +214,8 @@ impl WorkGraphService {
                 request.id.clone(),
             )
             .await?;
-        let expected_previous_revision = item.revision;
         let commit = WorkGraphMachine::update_item(item, request, now)?;
-        self.store
-            .update_item_cas(commit, expected_previous_revision)
-            .await
+        self.store.update_item_cas(commit).await
     }
 
     pub async fn block(
@@ -236,11 +227,8 @@ impl WorkGraphService {
     ) -> Result<WorkItem, WorkGraphError> {
         let now = self.store.get_store_time_utc().await?;
         let item = self.get(realm_id, namespace, id).await?;
-        let expected_previous_revision = item.revision;
         let commit = WorkGraphMachine::block_item(item, expected_revision, now)?;
-        self.store
-            .update_item_cas(commit, expected_previous_revision)
-            .await
+        self.store.update_item_cas(commit).await
     }
 
     pub async fn close(&self, request: CloseWorkItemRequest) -> Result<WorkItem, WorkGraphError> {
@@ -252,12 +240,8 @@ impl WorkGraphService {
                 request.id.clone(),
             )
             .await?;
-        let expected_previous_revision = item.revision;
         let commit = WorkGraphMachine::close_item(item, request, now)?;
-        let closed = self
-            .store
-            .update_item_cas(commit, expected_previous_revision)
-            .await?;
+        let closed = self.store.update_item_cas(commit).await?;
         self.best_effort_refresh_dependents_after_blocker_change(&closed, now)
             .await;
         Ok(closed)
@@ -313,11 +297,8 @@ impl WorkGraphService {
                 request.id.clone(),
             )
             .await?;
-        let expected_previous_revision = item.revision;
         let commit = WorkGraphMachine::add_evidence(item, request, now)?;
-        self.store
-            .update_item_cas(commit, expected_previous_revision)
-            .await
+        self.store.update_item_cas(commit).await
     }
 
     pub async fn events(
@@ -513,10 +494,7 @@ impl WorkGraphService {
         let unresolved_blockers = unresolved_blocker_count(&item, &all_items, &edges)?;
         if let Some(commit) = WorkGraphMachine::refresh_eligibility(item, unresolved_blockers, now)?
         {
-            let expected_previous_revision = commit.item().revision;
-            self.store
-                .update_item_cas(commit, expected_previous_revision)
-                .await?;
+            self.store.update_item_cas(commit).await?;
         }
         Ok(())
     }
@@ -640,7 +618,6 @@ mod tests {
         async fn update_item_cas(
             &self,
             commit: WorkGraphItemCommit,
-            expected_previous_revision: u64,
         ) -> Result<WorkItem, crate::WorkGraphError> {
             if commit.event().kind == WorkGraphEventKind::Updated
                 && self
@@ -650,15 +627,14 @@ mod tests {
                     })
                     .is_ok()
             {
+                let expected = commit.previous_revision().unwrap_or(commit.item().revision);
                 return Err(crate::WorkGraphError::StaleRevision {
                     id: commit.item().id.clone(),
-                    expected: expected_previous_revision,
-                    actual: expected_previous_revision.saturating_add(1),
+                    expected,
+                    actual: expected.saturating_add(1),
                 });
             }
-            self.inner
-                .update_item_cas(commit, expected_previous_revision)
-                .await
+            self.inner.update_item_cas(commit).await
         }
 
         async fn get_item(

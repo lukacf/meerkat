@@ -28,6 +28,7 @@ struct AppliedWorkGraphDsl {
 
 #[derive(Debug, Clone)]
 pub struct WorkGraphItemCommit {
+    previous: Option<WorkItem>,
     item: WorkItem,
     event: WorkGraphEvent,
 }
@@ -41,13 +42,34 @@ impl WorkGraphItemCommit {
         &self.event
     }
 
-    pub(crate) fn into_parts(self) -> (WorkItem, WorkGraphEvent) {
-        (self.item, self.event)
+    pub fn previous_revision(&self) -> Option<u64> {
+        self.previous.as_ref().map(|item| item.revision)
+    }
+
+    pub(crate) fn into_insert_parts(self) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
+        if self.previous.is_some() {
+            return Err(WorkGraphError::Store(
+                "generated WorkGraph item insert commit carried update source".to_string(),
+            ));
+        }
+        Ok((self.item, self.event))
+    }
+
+    pub(crate) fn into_update_parts(
+        self,
+    ) -> Result<(WorkItem, WorkGraphEvent, WorkItem), WorkGraphError> {
+        let previous = self.previous.ok_or_else(|| {
+            WorkGraphError::Store(
+                "generated WorkGraph item update commit missing source item".to_string(),
+            )
+        })?;
+        Ok((self.item, self.event, previous))
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct WorkGraphEdgeCommit {
+    topology: WorkGraphTopologyBasis,
     edge: WorkEdge,
     event: WorkGraphEvent,
 }
@@ -64,6 +86,34 @@ impl WorkGraphEdgeCommit {
     pub(crate) fn into_parts(self) -> (WorkEdge, WorkGraphEvent) {
         (self.edge, self.event)
     }
+
+    pub(crate) fn validate_topology(
+        &self,
+        current_items: &[WorkItem],
+        current_edges: &[WorkEdge],
+    ) -> Result<(), WorkGraphError> {
+        let current = topology_basis(current_items, current_edges);
+        if current != self.topology {
+            return Err(WorkGraphError::Conflict(
+                "current WorkGraph topology differs from generated link authority snapshot"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkGraphTopologyBasis {
+    item_ids: BTreeSet<WorkItemId>,
+    edge_keys: BTreeSet<WorkGraphEdgeIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct WorkGraphEdgeIdentity {
+    kind: WorkEdgeKind,
+    from_id: WorkItemId,
+    to_id: WorkItemId,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -136,7 +186,7 @@ impl WorkGraphMachine {
             evidence_refs: request.evidence_refs,
         };
         sync_item_from_machine_state(&mut item)?;
-        item_commit_from_effects(item, &applied.effects, now)
+        item_commit_from_effects(item, &applied.effects, now, None)
     }
 
     pub fn update_item(
@@ -147,6 +197,7 @@ impl WorkGraphMachine {
         let due_at = request.due_at.or(item.due_at);
         let not_before = request.not_before.or(item.not_before);
         let snoozed_until = request.snoozed_until.or(item.snoozed_until);
+        let previous = item.clone();
         let applied = apply_item_dsl(
             &item,
             wg_dsl::WorkGraphLifecycleInput::Update {
@@ -177,7 +228,7 @@ impl WorkGraphMachine {
             item.external_refs = request.external_refs;
         }
         item.updated_at = now;
-        item_commit_from_effects(item, &applied.effects, now)
+        item_commit_from_effects(item, &applied.effects, now, Some(previous))
     }
 
     pub fn claim_item(
@@ -209,6 +260,7 @@ impl WorkGraphMachine {
         if item.machine_state.unresolved_blocker_count == unresolved_blocker_count {
             return Ok(None);
         }
+        let previous = item.clone();
         let applied = apply_item_dsl(
             &item,
             wg_dsl::WorkGraphLifecycleInput::RefreshEligibility {
@@ -219,7 +271,12 @@ impl WorkGraphMachine {
         item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
-        Ok(Some(item_commit_from_effects(item, &applied.effects, now)?))
+        Ok(Some(item_commit_from_effects(
+            item,
+            &applied.effects,
+            now,
+            Some(previous),
+        )?))
     }
 
     pub(crate) fn claim_item_with_unresolved_blockers(
@@ -228,6 +285,7 @@ impl WorkGraphMachine {
         request: ClaimWorkItemRequest,
         now: DateTime<Utc>,
     ) -> Result<WorkGraphItemCommit, WorkGraphError> {
+        let previous = item.clone();
         let lease_expires_at = request.lease_expires_at.or_else(|| {
             request
                 .lease_seconds
@@ -264,7 +322,7 @@ impl WorkGraphMachine {
         item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
-        item_commit_from_effects(item, &applied.effects, now)
+        item_commit_from_effects(item, &applied.effects, now, Some(previous))
     }
 
     pub fn release_item(
@@ -272,6 +330,7 @@ impl WorkGraphMachine {
         request: ReleaseWorkItemRequest,
         now: DateTime<Utc>,
     ) -> Result<WorkGraphItemCommit, WorkGraphError> {
+        let previous = item.clone();
         let applied = apply_item_dsl(
             &item,
             wg_dsl::WorkGraphLifecycleInput::Release {
@@ -284,7 +343,7 @@ impl WorkGraphMachine {
         item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
-        item_commit_from_effects(item, &applied.effects, now)
+        item_commit_from_effects(item, &applied.effects, now, Some(previous))
     }
 
     pub fn block_item(
@@ -292,6 +351,7 @@ impl WorkGraphMachine {
         expected_revision: u64,
         now: DateTime<Utc>,
     ) -> Result<WorkGraphItemCommit, WorkGraphError> {
+        let previous = item.clone();
         let applied = apply_item_dsl(
             &item,
             wg_dsl::WorkGraphLifecycleInput::Block { expected_revision },
@@ -302,7 +362,7 @@ impl WorkGraphMachine {
         item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
-        item_commit_from_effects(item, &applied.effects, now)
+        item_commit_from_effects(item, &applied.effects, now, Some(previous))
     }
 
     pub fn close_item(
@@ -310,6 +370,7 @@ impl WorkGraphMachine {
         request: CloseWorkItemRequest,
         now: DateTime<Utc>,
     ) -> Result<WorkGraphItemCommit, WorkGraphError> {
+        let previous = item.clone();
         let dsl_input = wg_dsl::WorkGraphLifecycleInput::Close {
             expected_revision: request.expected_revision,
             at_utc_ms: datetime_to_millis(now, "now")?,
@@ -321,7 +382,7 @@ impl WorkGraphMachine {
         item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
-        item_commit_from_effects(item, &applied.effects, now)
+        item_commit_from_effects(item, &applied.effects, now, Some(previous))
     }
 
     pub fn add_evidence(
@@ -329,6 +390,7 @@ impl WorkGraphMachine {
         request: AddEvidenceRequest,
         now: DateTime<Utc>,
     ) -> Result<WorkGraphItemCommit, WorkGraphError> {
+        let previous = item.clone();
         let applied = apply_item_dsl(
             &item,
             wg_dsl::WorkGraphLifecycleInput::AddEvidence {
@@ -340,7 +402,7 @@ impl WorkGraphMachine {
         item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
-        item_commit_from_effects(item, &applied.effects, now)
+        item_commit_from_effects(item, &applied.effects, now, Some(previous))
     }
 
     pub fn is_ready(item: &WorkItem, now: DateTime<Utc>) -> Result<bool, WorkGraphError> {
@@ -426,7 +488,8 @@ impl WorkGraphMachine {
         now: DateTime<Utc>,
     ) -> Result<WorkGraphEdgeCommit, WorkGraphError> {
         let event_authority = Self::validate_link(&edge, existing_items, existing_edges)?;
-        edge_commit_from_authority(edge, &event_authority, now)
+        let topology = topology_basis(existing_items, existing_edges);
+        edge_commit_from_authority(edge, topology, &event_authority, now)
     }
 }
 
@@ -692,6 +755,23 @@ fn topology_state(
     }
 }
 
+fn topology_basis(
+    existing_items: &[WorkItem],
+    existing_edges: &[WorkEdge],
+) -> WorkGraphTopologyBasis {
+    WorkGraphTopologyBasis {
+        item_ids: existing_items.iter().map(|item| item.id.clone()).collect(),
+        edge_keys: existing_edges
+            .iter()
+            .map(|edge| WorkGraphEdgeIdentity {
+                kind: edge.kind,
+                from_id: edge.from_id.clone(),
+                to_id: edge.to_id.clone(),
+            })
+            .collect(),
+    }
+}
+
 fn dependency_reachability(
     edges: &[WorkEdge],
     kind: WorkEdgeKind,
@@ -825,10 +905,18 @@ fn item_commit_from_effects(
     item: WorkItem,
     effects: &[wg_dsl::WorkGraphLifecycleEffect],
     at: DateTime<Utc>,
+    previous: Option<WorkItem>,
 ) -> Result<WorkGraphItemCommit, WorkGraphError> {
+    if let Some(previous) = &previous {
+        validate_item_machine_projection(previous)?;
+    }
     validate_item_machine_projection(&item)?;
     let event = item_event_from_effects(&item, effects, at)?;
-    Ok(WorkGraphItemCommit { item, event })
+    Ok(WorkGraphItemCommit {
+        previous,
+        item,
+        event,
+    })
 }
 
 fn edge_event_from_authority(
@@ -847,11 +935,16 @@ fn edge_event_from_authority(
 
 fn edge_commit_from_authority(
     edge: WorkEdge,
+    topology: WorkGraphTopologyBasis,
     authority: &WorkGraphEventAuthority,
     at: DateTime<Utc>,
 ) -> Result<WorkGraphEdgeCommit, WorkGraphError> {
     let event = edge_event_from_authority(&edge, authority, at)?;
-    Ok(WorkGraphEdgeCommit { edge, event })
+    Ok(WorkGraphEdgeCommit {
+        topology,
+        edge,
+        event,
+    })
 }
 
 fn event_kind_from_effects(
@@ -1018,7 +1111,8 @@ mod tests {
             now,
         )
         .expect("create")
-        .into_parts()
+        .into_insert_parts()
+        .expect("insert parts")
         .0
     }
 
@@ -1056,7 +1150,8 @@ mod tests {
             now,
         )
         .expect("create")
-        .into_parts();
+        .into_insert_parts()
+        .expect("insert parts");
 
         assert_eq!(item.status, WorkStatus::Open);
         assert_eq!(
@@ -1131,7 +1226,7 @@ mod tests {
     fn close_default_completed_comes_from_generated_machine() {
         let now = Utc::now();
         let item = create("default close", now);
-        let (item, event) = WorkGraphMachine::close_item(
+        let (item, event, _) = WorkGraphMachine::close_item(
             item,
             CloseWorkItemRequest {
                 id: WorkItemId::generated(),
@@ -1143,7 +1238,8 @@ mod tests {
             now,
         )
         .expect("close")
-        .into_parts();
+        .into_update_parts()
+        .expect("update parts");
 
         assert_eq!(item.status, WorkStatus::Completed);
         assert_eq!(
@@ -1181,9 +1277,10 @@ mod tests {
     fn blocked_items_are_never_ready() {
         let now = Utc::now();
         let item = create("blocked", now);
-        let (item, _) = WorkGraphMachine::block_item(item, 1, now)
+        let (item, _, _) = WorkGraphMachine::block_item(item, 1, now)
             .expect("block")
-            .into_parts();
+            .into_update_parts()
+            .expect("update parts");
         assert!(
             WorkGraphMachine::ready_items(vec![item], now)
                 .expect("ready classification should pass")
@@ -1195,7 +1292,7 @@ mod tests {
     fn future_due_items_are_not_ready() {
         let now = Utc::now();
         let item = create("future", now);
-        let (item, _) = WorkGraphMachine::update_item(
+        let (item, _, _) = WorkGraphMachine::update_item(
             item,
             UpdateWorkItemRequest {
                 id: WorkItemId::generated(),
@@ -1214,7 +1311,8 @@ mod tests {
             now,
         )
         .expect("update due")
-        .into_parts();
+        .into_update_parts()
+        .expect("update parts");
 
         assert!(
             WorkGraphMachine::ready_items(vec![item], now)
@@ -1227,7 +1325,7 @@ mod tests {
     fn terminal_items_cannot_be_claimed() {
         let now = Utc::now();
         let item = create("done", now);
-        let (item, _) = WorkGraphMachine::close_item(
+        let (item, _, _) = WorkGraphMachine::close_item(
             item,
             CloseWorkItemRequest {
                 id: WorkItemId::generated(),
@@ -1239,7 +1337,8 @@ mod tests {
             now,
         )
         .expect("close")
-        .into_parts();
+        .into_update_parts()
+        .expect("update parts");
         let error = WorkGraphMachine::claim_item(
             item,
             ClaimWorkItemRequest {
@@ -1270,7 +1369,7 @@ mod tests {
     fn only_one_active_claim_can_exist() {
         let now = Utc::now();
         let item = create("claim", now);
-        let (claimed, _) = WorkGraphMachine::claim_item(
+        let (claimed, _, _) = WorkGraphMachine::claim_item(
             item,
             ClaimWorkItemRequest {
                 id: WorkItemId::generated(),
@@ -1284,7 +1383,8 @@ mod tests {
             now,
         )
         .expect("claim")
-        .into_parts();
+        .into_update_parts()
+        .expect("update parts");
         let error = WorkGraphMachine::claim_item(
             claimed,
             ClaimWorkItemRequest {
@@ -1306,10 +1406,11 @@ mod tests {
     fn refresh_event_kind_comes_from_generated_effect() {
         let now = Utc::now();
         let item = create("refresh", now);
-        let (_, event) = WorkGraphMachine::refresh_eligibility(item, 1, now)
+        let (_, event, _) = WorkGraphMachine::refresh_eligibility(item, 1, now)
             .expect("refresh transition")
             .expect("changed")
-            .into_parts();
+            .into_update_parts()
+            .expect("update parts");
 
         assert_eq!(event.kind, WorkGraphEventKind::Updated);
         assert_eq!(
@@ -1322,11 +1423,12 @@ mod tests {
     fn claim_event_kind_uses_generated_claim_effect_after_refresh() {
         let now = Utc::now();
         let item = create("claim after refresh", now);
-        let (blocked_projection, _) = WorkGraphMachine::refresh_eligibility(item, 1, now)
+        let (blocked_projection, _, _) = WorkGraphMachine::refresh_eligibility(item, 1, now)
             .expect("refresh transition")
             .expect("changed")
-            .into_parts();
-        let (_, event) = WorkGraphMachine::claim_item_with_unresolved_blockers(
+            .into_update_parts()
+            .expect("update parts");
+        let (_, event, _) = WorkGraphMachine::claim_item_with_unresolved_blockers(
             blocked_projection,
             0,
             ClaimWorkItemRequest {
@@ -1341,7 +1443,8 @@ mod tests {
             now,
         )
         .expect("claim")
-        .into_parts();
+        .into_update_parts()
+        .expect("update parts");
 
         assert_eq!(event.kind, WorkGraphEventKind::Claimed);
         assert_eq!(
@@ -1358,7 +1461,7 @@ mod tests {
             !WorkGraphMachine::blocker_satisfies_dependency(&item)
                 .expect("open blocker classification")
         );
-        let (completed, _) = WorkGraphMachine::close_item(
+        let (completed, _, _) = WorkGraphMachine::close_item(
             item,
             CloseWorkItemRequest {
                 id: WorkItemId::generated(),
@@ -1370,7 +1473,8 @@ mod tests {
             now,
         )
         .expect("complete blocker")
-        .into_parts();
+        .into_update_parts()
+        .expect("update parts");
         assert!(
             WorkGraphMachine::blocker_satisfies_dependency(&completed)
                 .expect("completed blocker classification")

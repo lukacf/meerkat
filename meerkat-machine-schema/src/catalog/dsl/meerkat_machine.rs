@@ -2131,6 +2131,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             StopRuntimeExecutor { reason: String },
             RuntimeExecutorExited,
             Destroy { session_id: SessionId },
+            RecoverRuntimeAuthority {
+                session_id: SessionId,
+                state: Enum<RuntimeLifecycleObservedState>,
+                agent_runtime_id: Option<AgentRuntimeId>,
+                fence_token: Option<FenceToken>,
+                current_run_id: Option<RunId>,
+                pre_run_phase: Option<Enum<PreRunPhase>>,
+                silent_intent_overrides: Set<String>,
+            },
             // Absorbed inputs
             EnsureSessionWithExecutor { session_id: SessionId },
             SetSilentIntents { session_id: SessionId, intents: Set<String> },
@@ -3049,6 +3058,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             self.current_run_id == None
             || self.lifecycle_phase == Phase::Running
             || self.lifecycle_phase == Phase::Retired
+        }
+
+        invariant current_run_has_pre_run_phase {
+            (self.current_run_id == None && self.pre_run_phase == None)
+            || (self.current_run_id != None && self.pre_run_phase != None)
         }
 
         invariant staged_surface_ops_are_known_and_sequenced {
@@ -4544,6 +4558,148 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {}
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "runtime recovered" }
+        }
+
+        // 18b. RecoverRuntimeAuthority: seed runtime-observed lifecycle facts
+        // through generated authority during registration/recovery. The shell
+        // may supply only typed observations; the machine owns the resulting
+        // lifecycle, session, runtime binding, run binding, and silent-intent
+        // facts.
+        transition RecoverRuntimeAuthorityInitializing {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_initializing" { state == RuntimeLifecycleObservedState::Initializing }
+            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Initializing
+        }
+        transition RecoverRuntimeAuthorityIdle {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_idle" { state == RuntimeLifecycleObservedState::Idle }
+            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Idle
+        }
+        transition RecoverRuntimeAuthorityAttached {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_attached" { state == RuntimeLifecycleObservedState::Attached }
+            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Attached
+        }
+        transition RecoverRuntimeAuthorityRunning {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_running" { state == RuntimeLifecycleObservedState::Running }
+            guard "run_binding_complete" { current_run_id != None && pre_run_phase != None }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Running
+        }
+        transition RecoverRuntimeAuthorityRetired {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_retired" { state == RuntimeLifecycleObservedState::Retired }
+            guard "run_binding_pair" {
+                (current_run_id == None && pre_run_phase == None)
+                || (current_run_id != None && pre_run_phase != None)
+            }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Retired
+        }
+        transition RecoverRuntimeAuthorityStopped {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_stopped" { state == RuntimeLifecycleObservedState::Stopped }
+            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Stopped
+        }
+        transition RecoverRuntimeAuthorityDestroyed {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_destroyed" { state == RuntimeLifecycleObservedState::Destroyed }
+            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Destroyed
         }
 
         // =====================================================================

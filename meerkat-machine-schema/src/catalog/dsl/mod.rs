@@ -965,6 +965,7 @@ runtime_internal_inputs!(
         PublishLocalEndpoint,
         RecoverableFailure,
         RecoverInputLifecycle,
+        RecoverRuntimeAuthority,
         RegisterOp,
         RegisterPendingOps,
         RemoveDirectPeerEndpoint,

@@ -783,6 +783,7 @@ meerkat_machine_runtime_internal_inputs!(
     FailureRecoveryLifecycle => [
         FatalFailure,
         RecoverableFailure,
+        RecoverRuntimeAuthority,
     ],
     UserInterruptDispatch => [
         InterruptCurrentRun,

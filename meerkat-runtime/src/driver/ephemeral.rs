@@ -201,11 +201,11 @@ impl DslAuthority {
 }
 
 pub(crate) fn new_ingress_dsl_authority() -> SharedIngressDslAuthority {
-    let state = mm_dsl::MeerkatMachineState {
-        lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
-        ..mm_dsl::MeerkatMachineState::default()
-    };
-    Arc::new(Mutex::new(recover_ingress_dsl_authority(state)))
+    Arc::new(Mutex::new(
+        crate::meerkat_machine::dsl_authority::new_initialized_authority(
+            "ingress DSL authority must initialize",
+        ),
+    ))
 }
 
 fn recover_ingress_dsl_authority(
@@ -1439,8 +1439,8 @@ impl EphemeralRuntimeDriver {
                         .map(SessionId::from_uuid)
                 });
             let silent_intent_overrides = authority.state().silent_intent_overrides.clone();
-            *authority = recover_ingress_dsl_authority(
-                crate::meerkat_machine::dsl_authority::project_state(
+            *authority =
+                crate::meerkat_machine::dsl_authority::recover_authority_from_runtime_observation(
                     &session_id.unwrap_or_default(),
                     next_phase,
                     Some(&self.runtime_id),
@@ -1448,8 +1448,8 @@ impl EphemeralRuntimeDriver {
                     pre_run_phase,
                     silent_intent_overrides,
                     None,
-                ),
-            );
+                )
+                .expect("contract runtime authority observation must recover");
         }
         self.set_control_projection(next_phase, current_run_id, pre_run_phase);
     }

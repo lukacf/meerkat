@@ -149,7 +149,7 @@ impl RuntimeLoopQueueAdmissionPlan {
 pub fn classify_runtime_lifecycle_state(
     state: RuntimeState,
 ) -> Result<RuntimeLifecycleFacts, String> {
-    let observed_state = observed_runtime_lifecycle_state(state);
+    let observed_state = dsl_authority::observed_runtime_lifecycle_state(state);
     let mut authority = projection_authority();
     let transition = dsl::MeerkatMachineMutator::apply(
         &mut authority,
@@ -194,7 +194,7 @@ pub fn classify_runtime_loop_queue_admission(
     state: RuntimeState,
     current_run_bound: bool,
 ) -> Result<RuntimeLoopQueueAdmissionPlan, String> {
-    let observed_state = observed_runtime_lifecycle_state(state);
+    let observed_state = dsl_authority::observed_runtime_lifecycle_state(state);
     let mut authority = projection_authority();
     let transition = dsl::MeerkatMachineMutator::apply(
         &mut authority,
@@ -373,25 +373,7 @@ fn resolve_input_public_terminal_projection(
 }
 
 fn projection_authority() -> dsl::MeerkatMachineAuthority {
-    recover_projected_authority(
-        dsl::MeerkatMachineState {
-            lifecycle_phase: dsl::MeerkatPhase::Idle,
-            ..dsl::MeerkatMachineState::default()
-        },
-        "projected MeerkatMachine state must be recoverable",
-    )
-}
-
-fn observed_runtime_lifecycle_state(state: RuntimeState) -> dsl::RuntimeLifecycleObservedState {
-    match state {
-        RuntimeState::Initializing => dsl::RuntimeLifecycleObservedState::Initializing,
-        RuntimeState::Idle => dsl::RuntimeLifecycleObservedState::Idle,
-        RuntimeState::Attached => dsl::RuntimeLifecycleObservedState::Attached,
-        RuntimeState::Running => dsl::RuntimeLifecycleObservedState::Running,
-        RuntimeState::Retired => dsl::RuntimeLifecycleObservedState::Retired,
-        RuntimeState::Stopped => dsl::RuntimeLifecycleObservedState::Stopped,
-        RuntimeState::Destroyed => dsl::RuntimeLifecycleObservedState::Destroyed,
-    }
+    dsl_authority::new_initialized_authority("projection authority must initialize")
 }
 
 fn observed_input_phase(phase: InputLifecycleState) -> dsl::RecoveredInputObservedPhase {

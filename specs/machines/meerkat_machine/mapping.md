@@ -601,6 +601,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverStopped`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `RecoverRuntimeAuthorityInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
+- `RecoverRuntimeAuthorityIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+- `RecoverRuntimeAuthorityAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
+- `RecoverRuntimeAuthorityRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`
+- `RecoverRuntimeAuthorityRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
+- `RecoverRuntimeAuthorityStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
+- `RecoverRuntimeAuthorityDestroyed`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
 - `EnsureSessionWithExecutorIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
@@ -3245,6 +3266,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `current_run_only_while_running_or_retired`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `recycle_and_compaction`
+- `current_run_has_pre_run_phase`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
 - `staged_surface_ops_are_known_and_sequenced`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`

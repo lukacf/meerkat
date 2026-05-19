@@ -6612,6 +6612,16 @@ pub mod inputs {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRuntimeAuthority {
+        pub session_id: SessionId,
+        pub state: RuntimeLifecycleObservedState,
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub current_run_id: Option<RunId>,
+        pub pre_run_phase: Option<PreRunPhase>,
+        pub silent_intent_overrides: std::collections::BTreeSet<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnsureSessionWithExecutor {
         pub session_id: SessionId,
     }
@@ -7453,6 +7463,7 @@ pub enum Input {
     StopRuntimeExecutor(inputs::StopRuntimeExecutor),
     RuntimeExecutorExited(inputs::RuntimeExecutorExited),
     Destroy(inputs::Destroy),
+    RecoverRuntimeAuthority(inputs::RecoverRuntimeAuthority),
     EnsureSessionWithExecutor(inputs::EnsureSessionWithExecutor),
     SetSilentIntents(inputs::SetSilentIntents),
     ContainsSession(inputs::ContainsSession),
@@ -7645,6 +7656,7 @@ impl Input {
             Self::StopRuntimeExecutor(_) => InputKind::StopRuntimeExecutor,
             Self::RuntimeExecutorExited(_) => InputKind::RuntimeExecutorExited,
             Self::Destroy(_) => InputKind::Destroy,
+            Self::RecoverRuntimeAuthority(_) => InputKind::RecoverRuntimeAuthority,
             Self::EnsureSessionWithExecutor(_) => InputKind::EnsureSessionWithExecutor,
             Self::SetSilentIntents(_) => InputKind::SetSilentIntents,
             Self::ContainsSession(_) => InputKind::ContainsSession,
@@ -7854,6 +7866,7 @@ pub enum InputKind {
     StopRuntimeExecutor,
     RuntimeExecutorExited,
     Destroy,
+    RecoverRuntimeAuthority,
     EnsureSessionWithExecutor,
     SetSilentIntents,
     ContainsSession,
@@ -8877,6 +8890,13 @@ pub enum TransitionId {
     RecoverAttached,
     RecoverRetired,
     RecoverStopped,
+    RecoverRuntimeAuthorityInitializing,
+    RecoverRuntimeAuthorityIdle,
+    RecoverRuntimeAuthorityAttached,
+    RecoverRuntimeAuthorityRunning,
+    RecoverRuntimeAuthorityRetired,
+    RecoverRuntimeAuthorityStopped,
+    RecoverRuntimeAuthorityDestroyed,
     EnsureSessionWithExecutorIdle,
     EnsureSessionWithExecutorAttached,
     EnsureSessionWithExecutorRunning,

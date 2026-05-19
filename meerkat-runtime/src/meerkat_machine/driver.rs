@@ -2899,7 +2899,11 @@ mod run_failed_cause_tests {
         let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(
             LogicalRuntimeId::new("run-failed-cause-test"),
         );
-        driver.contract_force_runtime_authority(RuntimeState::Running, Some(run_id.clone()), None);
+        driver.contract_force_runtime_authority(
+            RuntimeState::Running,
+            Some(run_id.clone()),
+            Some(RuntimeState::Attached),
+        );
         DriverEntry::Ephemeral(driver)
     }
 

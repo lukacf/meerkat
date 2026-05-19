@@ -182,6 +182,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `StopRuntimeExecutor`(reason: String)
 - `RuntimeExecutorExited`
 - `Destroy`(session_id: SessionId)
+- `RecoverRuntimeAuthority`(session_id: SessionId, state: RuntimeLifecycleObservedState, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, silent_intent_overrides: Set<String>)
 - `EnsureSessionWithExecutor`(session_id: SessionId)
 - `SetSilentIntents`(session_id: SessionId, intents: Set<String>)
 - `ContainsSession`(session_id: SessionId)
@@ -471,6 +472,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `fence_requires_bound_runtime`
 - `running_has_current_run`
 - `current_run_only_while_running_or_retired`
+- `current_run_has_pre_run_phase`
 - `staged_surface_ops_are_known_and_sequenced`
 - `staged_reload_surfaces_are_active`
 - `peer_ingress_owner_consistency`
@@ -2214,6 +2216,69 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `Recover`()
 - Emits: `RuntimeNotice`
 - To: `Stopped`
+
+### `RecoverRuntimeAuthorityInitializing`
+- From: `Initializing`
+- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, current_run_id, pre_run_phase, silent_intent_overrides)
+- Guards:
+  - `observed_initializing`
+  - `no_run_binding`
+  - `fence_requires_runtime`
+- To: `Initializing`
+
+### `RecoverRuntimeAuthorityIdle`
+- From: `Initializing`
+- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, current_run_id, pre_run_phase, silent_intent_overrides)
+- Guards:
+  - `observed_idle`
+  - `no_run_binding`
+  - `fence_requires_runtime`
+- To: `Idle`
+
+### `RecoverRuntimeAuthorityAttached`
+- From: `Initializing`
+- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, current_run_id, pre_run_phase, silent_intent_overrides)
+- Guards:
+  - `observed_attached`
+  - `no_run_binding`
+  - `fence_requires_runtime`
+- To: `Attached`
+
+### `RecoverRuntimeAuthorityRunning`
+- From: `Initializing`
+- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, current_run_id, pre_run_phase, silent_intent_overrides)
+- Guards:
+  - `observed_running`
+  - `run_binding_complete`
+  - `fence_requires_runtime`
+- To: `Running`
+
+### `RecoverRuntimeAuthorityRetired`
+- From: `Initializing`
+- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, current_run_id, pre_run_phase, silent_intent_overrides)
+- Guards:
+  - `observed_retired`
+  - `run_binding_pair`
+  - `fence_requires_runtime`
+- To: `Retired`
+
+### `RecoverRuntimeAuthorityStopped`
+- From: `Initializing`
+- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, current_run_id, pre_run_phase, silent_intent_overrides)
+- Guards:
+  - `observed_stopped`
+  - `no_run_binding`
+  - `fence_requires_runtime`
+- To: `Stopped`
+
+### `RecoverRuntimeAuthorityDestroyed`
+- From: `Initializing`
+- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, current_run_id, pre_run_phase, silent_intent_overrides)
+- Guards:
+  - `observed_destroyed`
+  - `no_run_binding`
+  - `fence_requires_runtime`
+- To: `Destroyed`
 
 ### `EnsureSessionWithExecutorIdle`
 - From: `Idle`

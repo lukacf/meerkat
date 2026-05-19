@@ -169,8 +169,8 @@ impl MobSupervisorBridge {
         {
             return Ok(());
         }
-        let effects = dsl
-            .apply_input_with_effects(
+        let transition = dsl
+            .apply_input_with_transition(
                 mm_dsl::MeerkatMachineInput::AddDirectPeerEndpoint { endpoint },
                 "mob_supervisor_bridge::trust_recipient",
             )
@@ -180,7 +180,7 @@ impl MobSupervisorBridge {
                 ))
             })?;
         let obligations =
-            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&effects);
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition);
         let obligation = match obligations.as_slice() {
             [obligation] => obligation.clone(),
             [] => {

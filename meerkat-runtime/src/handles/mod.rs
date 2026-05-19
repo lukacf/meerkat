@@ -151,6 +151,15 @@ impl HandleDslAuthority {
         input: mm_dsl::MeerkatMachineInput,
         context: &'static str,
     ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, DslTransitionError> {
+        self.apply_input_with_transition(input, context)
+            .map(|transition| transition.effects)
+    }
+
+    pub fn apply_input_with_transition(
+        &self,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &'static str,
+    ) -> Result<mm_dsl::MeerkatMachineTransition, DslTransitionError> {
         MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(&input)
             .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
         let mut guard = self
@@ -158,7 +167,6 @@ impl HandleDslAuthority {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
-            .map(|transition| transition.effects)
             .map_err(|err| map_kernel_error(err, context))
     }
 

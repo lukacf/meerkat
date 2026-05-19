@@ -74,15 +74,29 @@ use uuid::Uuid;
 fn test_comms_reconcile_obligation(
     direct_peer_endpoints: BTreeSet<meerkat_runtime::meerkat_machine::dsl::PeerEndpoint>,
 ) -> meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
-    let effects = vec![
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
-            peer_projection_epoch: 0,
-            direct_peer_endpoints,
-            mob_overlay_peer_endpoints: BTreeSet::new(),
+    let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+    authority
+        .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
+        .expect("Initialize signal");
+    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+            session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                "mob-runtime-test-comms-reconcile",
+            ),
         },
-    ];
+    )
+    .expect("RegisterSession input");
+    let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+            epoch: 1,
+            endpoints: direct_peer_endpoints,
+        },
+    )
+    .expect("ApplyMobPeerOverlay input");
     let mut obligations =
-        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&effects);
+        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition);
     assert_eq!(
         obligations.len(),
         1,
@@ -26618,6 +26632,10 @@ async fn test_unwire_fails_closed_on_stale_local_trust_when_machine_edge_absent(
         .wire(AgentIdentity::from("l-1"), MeerkatId::from("w-1"))
         .await
         .expect("wire");
+    let stale_machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query stale machine state after wire");
     handle
         .unwire(AgentIdentity::from("l-1"), MeerkatId::from("w-1"))
         .await
@@ -26635,16 +26653,20 @@ async fn test_unwire_fails_closed_on_stale_local_trust_when_machine_edge_absent(
         crate::machines::mob_machine::AgentIdentity("l-1".to_string()),
         crate::machines::mob_machine::AgentIdentity("w-1".to_string()),
     );
-    let stale_effects = vec![
-        crate::machines::mob_machine::MobMachineEffect::MemberTrustWiringRequested {
-            edge: stale_edge,
-            a_peer_id: crate::machines::mob_machine::PeerId(peer_id_a.clone()),
-            b_peer_id: crate::machines::mob_machine::PeerId(peer_id_b.clone()),
-            epoch: 3,
+    let mut stale_authority =
+        crate::machines::mob_machine::MobMachineAuthority::recover_from_state(stale_machine_state)
+            .expect("recover stale wired machine state");
+    let stale_transition = crate::machines::mob_machine::MobMachineMutator::apply(
+        &mut stale_authority,
+        crate::machines::mob_machine::MobMachineInput::AuthorizeMemberTrustWiring {
+            edge: stale_edge.clone(),
+            a_identity: stale_edge.a.clone(),
+            b_identity: stale_edge.b.clone(),
         },
-    ];
+    )
+    .expect("authorize stale member trust wiring");
     let stale_obligation =
-        crate::generated::protocol_mob_member_trust_wiring::extract_obligations(&stale_effects)
+        crate::generated::protocol_mob_member_trust_wiring::extract_obligations(&stale_transition)
             .pop()
             .expect("generated member wiring obligation");
     comms_a
@@ -26750,16 +26772,22 @@ async fn test_unwire_external_fails_closed_on_stale_trust_when_machine_edge_abse
         crate::machines::mob_machine::AgentIdentity("l-1".to_string()),
         crate::machines::mob_machine::ExternalPeerEndpoint::from(&spec),
     );
-    let stale_effects = vec![
-        crate::machines::mob_machine::MobMachineEffect::ExternalPeerTrustWiringRequested {
-            edge: stale_edge,
-            peer_id: crate::machines::mob_machine::PeerId(peer_id.clone()),
-            epoch: 3,
+    let stale_key = crate::machines::mob_machine::ExternalPeerKey::new(
+        stale_edge.local.clone(),
+        stale_edge.endpoint.name.clone(),
+    );
+    let mut stale_authority = crate::machines::mob_machine::MobMachineAuthority::new();
+    let stale_transition = crate::machines::mob_machine::MobMachineMutator::apply(
+        &mut stale_authority,
+        crate::machines::mob_machine::MobMachineInput::WireExternalPeer {
+            key: stale_key,
+            edge: stale_edge.clone(),
         },
-    ];
+    )
+    .expect("wire stale external peer");
     let stale_obligation =
         crate::generated::protocol_mob_external_peer_trust_wiring::extract_obligations(
-            &stale_effects,
+            &stale_transition,
         )
         .pop()
         .expect("generated external wiring obligation");

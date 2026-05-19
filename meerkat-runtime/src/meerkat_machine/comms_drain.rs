@@ -671,7 +671,7 @@ impl MeerkatMachine {
         address: String,
         signing_public_key: String,
         epoch: u64,
-    ) -> Result<Vec<crate::meerkat_machine::dsl::MeerkatMachineEffect>, SupervisorBindingStageError>
+    ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
     {
         let mut sessions = self.sessions.write().await;
         let entry = sessions
@@ -692,7 +692,7 @@ impl MeerkatMachine {
             },
         )
         .map_err(SupervisorBindingStageError::Dsl)?;
-        Ok(transition.effects)
+        Ok(transition)
     }
 
     /// Stage a DSL `AuthorizeSupervisor` input (Wave 3 D Row 21).
@@ -708,7 +708,7 @@ impl MeerkatMachine {
         address: String,
         signing_public_key: String,
         epoch: u64,
-    ) -> Result<Vec<crate::meerkat_machine::dsl::MeerkatMachineEffect>, SupervisorBindingStageError>
+    ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
     {
         let mut sessions = self.sessions.write().await;
         let entry = sessions
@@ -729,7 +729,7 @@ impl MeerkatMachine {
             },
         )
         .map_err(SupervisorBindingStageError::Dsl)?;
-        Ok(transition.effects)
+        Ok(transition)
     }
 
     /// Stage a DSL `RequestSupervisorTrustPublish` input.
@@ -745,7 +745,7 @@ impl MeerkatMachine {
         address: String,
         signing_public_key: String,
         epoch: u64,
-    ) -> Result<Vec<crate::meerkat_machine::dsl::MeerkatMachineEffect>, SupervisorBindingStageError>
+    ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
     {
         let mut sessions = self.sessions.write().await;
         let entry = sessions
@@ -766,7 +766,7 @@ impl MeerkatMachine {
             },
         )
         .map_err(SupervisorBindingStageError::Dsl)?;
-        Ok(transition.effects)
+        Ok(transition)
     }
 
     /// Stage a DSL `RevokeSupervisor` input (Wave 3 D Row 21).
@@ -779,7 +779,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         peer_id: String,
         epoch: u64,
-    ) -> Result<Vec<crate::meerkat_machine::dsl::MeerkatMachineEffect>, SupervisorBindingStageError>
+    ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
     {
         let mut sessions = self.sessions.write().await;
         let entry = sessions
@@ -794,7 +794,7 @@ impl MeerkatMachine {
             crate::meerkat_machine::dsl::MeerkatMachineInput::RevokeSupervisor { peer_id, epoch },
         )
         .map_err(SupervisorBindingStageError::Dsl)?;
-        Ok(transition.effects)
+        Ok(transition)
     }
 
     /// Stage a DSL `SupervisorTrustEdgePublished` feedback input (C-F2 /
@@ -1069,7 +1069,7 @@ impl MeerkatMachine {
             let transition =
                 crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
                     .map_err(PeerEndpointStageError::Dsl)?;
-            crate::protocol_comms_trust_reconcile::extract_obligations(&transition.effects)
+            crate::protocol_comms_trust_reconcile::extract_obligations(&transition)
                 .into_iter()
                 .next()
                 .ok_or(PeerEndpointStageError::MissingReconcileEffect)?

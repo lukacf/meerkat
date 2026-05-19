@@ -370,11 +370,13 @@ enum CommsTrustMutationAuthorityKind {
 
 impl CommsTrustMutationAuthority {
     #[doc(hidden)]
-    #[track_caller]
+    ///
+    /// Call only from generated protocol helpers after extracting an
+    /// obligation from an unforgeable generated machine transition.
     pub fn from_generated_meerkat_machine_peer_projection(
         peer_id: impl Into<String>,
         epoch: u64,
-    ) -> Result<Self, String> {
+    ) -> Self {
         Self::from_generated(
             CommsTrustMutationAuthorityKind::MeerkatMachinePeerProjection,
             peer_id,
@@ -383,11 +385,13 @@ impl CommsTrustMutationAuthority {
     }
 
     #[doc(hidden)]
-    #[track_caller]
+    ///
+    /// Call only from generated protocol helpers after extracting an
+    /// obligation from an unforgeable generated machine transition.
     pub fn from_generated_meerkat_machine_supervisor_publish(
         peer_id: impl Into<String>,
         epoch: u64,
-    ) -> Result<Self, String> {
+    ) -> Self {
         Self::from_generated(
             CommsTrustMutationAuthorityKind::MeerkatMachineSupervisorPublish,
             peer_id,
@@ -396,11 +400,13 @@ impl CommsTrustMutationAuthority {
     }
 
     #[doc(hidden)]
-    #[track_caller]
+    ///
+    /// Call only from generated protocol helpers after extracting an
+    /// obligation from an unforgeable generated machine transition.
     pub fn from_generated_meerkat_machine_supervisor_revoke(
         peer_id: impl Into<String>,
         epoch: u64,
-    ) -> Result<Self, String> {
+    ) -> Self {
         Self::from_generated(
             CommsTrustMutationAuthorityKind::MeerkatMachineSupervisorRevoke,
             peer_id,
@@ -409,11 +415,10 @@ impl CommsTrustMutationAuthority {
     }
 
     #[doc(hidden)]
-    #[track_caller]
-    pub fn from_generated_mob_machine_peer_wiring(
-        peer_id: impl Into<String>,
-        epoch: u64,
-    ) -> Result<Self, String> {
+    ///
+    /// Call only from generated protocol helpers after extracting an
+    /// obligation from an unforgeable generated machine transition.
+    pub fn from_generated_mob_machine_peer_wiring(peer_id: impl Into<String>, epoch: u64) -> Self {
         Self::from_generated(
             CommsTrustMutationAuthorityKind::MobMachinePeerWiring,
             peer_id,
@@ -422,11 +427,13 @@ impl CommsTrustMutationAuthority {
     }
 
     #[doc(hidden)]
-    #[track_caller]
+    ///
+    /// Call only from generated protocol helpers after extracting an
+    /// obligation from an unforgeable generated machine transition.
     pub fn from_generated_mob_machine_peer_unwiring(
         peer_id: impl Into<String>,
         epoch: u64,
-    ) -> Result<Self, String> {
+    ) -> Self {
         Self::from_generated(
             CommsTrustMutationAuthorityKind::MobMachinePeerUnwiring,
             peer_id,
@@ -435,11 +442,10 @@ impl CommsTrustMutationAuthority {
     }
 
     #[doc(hidden)]
-    #[track_caller]
-    pub fn from_generated_mob_machine_peer_repair(
-        peer_id: impl Into<String>,
-        epoch: u64,
-    ) -> Result<Self, String> {
+    ///
+    /// Call only from generated protocol helpers after extracting an
+    /// obligation from an unforgeable generated machine transition.
+    pub fn from_generated_mob_machine_peer_repair(peer_id: impl Into<String>, epoch: u64) -> Self {
         Self::from_generated(
             CommsTrustMutationAuthorityKind::MobMachinePeerRepair,
             peer_id,
@@ -447,25 +453,16 @@ impl CommsTrustMutationAuthority {
         )
     }
 
-    #[track_caller]
     fn from_generated(
         kind: CommsTrustMutationAuthorityKind,
         peer_id: impl Into<String>,
         epoch: u64,
-    ) -> Result<Self, String> {
-        let caller = std::panic::Location::caller();
-        let file = caller.file();
-        if !(file.contains("/generated/protocol_") || file.contains("\\generated\\protocol_")) {
-            return Err(format!(
-                "generated comms trust authority can only be minted by generated protocol helpers; caller was {file}:{}",
-                caller.line(),
-            ));
-        }
-        Ok(Self {
+    ) -> Self {
+        Self {
             kind,
             peer_id: peer_id.into(),
             epoch,
-        })
+        }
     }
 
     pub fn validate_public_add(&self, peer_id: PeerId) -> Result<(), String> {

@@ -3,7 +3,7 @@
 // Closure policy: AckRequired
 // Liveness: projection mutation is applied by the owning runtime after consuming this typed obligation
 
-use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerEndpoint};
+use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};
 
 #[derive(Debug, Clone)]
 pub struct CommsTrustReconcileObligation {
@@ -26,8 +26,11 @@ impl CommsTrustReconcileObligation {
     }
 }
 
-pub fn extract_obligations(effects: &[MeerkatMachineEffect]) -> Vec<CommsTrustReconcileObligation> {
-    effects
+pub fn extract_obligations(
+    transition: &MeerkatMachineTransition,
+) -> Vec<CommsTrustReconcileObligation> {
+    transition
+        .effects
         .iter()
         .filter_map(|effect| match effect {
             MeerkatMachineEffect::CommsTrustReconcileRequested {
@@ -69,10 +72,10 @@ pub fn authority_for_endpoint(
             endpoint.peer_id.0
         ));
     }
-    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection(
+    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection(
         endpoint.peer_id.0.clone(),
         obligation.peer_projection_epoch,
-    )
+    ))
 }
 
 pub fn removal_authority_for_peer_id(
@@ -87,8 +90,8 @@ pub fn removal_authority_for_peer_id(
             "MeerkatMachine peer projection still requests trust for peer '{peer_id}'"
         ));
     }
-    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection(
+    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection(
         peer_id.to_string(),
         obligation.peer_projection_epoch,
-    )
+    ))
 }

@@ -2959,18 +2959,31 @@ mod tests {
 
     fn test_projection_authority(
         peer: &TrustedPeerDescriptor,
-        epoch: u64,
+        _epoch: u64,
     ) -> meerkat_core::comms::CommsTrustMutationAuthority {
         let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
-        let effects = vec![
-            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
-                peer_projection_epoch: epoch,
-                direct_peer_endpoints: std::collections::BTreeSet::from([endpoint.clone()]),
-                mob_overlay_peer_endpoints: std::collections::BTreeSet::new(),
+        let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+        authority
+            .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
+            .expect("Initialize signal");
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                    "meerkat-comms-runtime-test-projection",
+                ),
             },
-        ];
+        )
+        .expect("RegisterSession input");
+        let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
+                endpoint: endpoint.clone(),
+            },
+        )
+        .expect("AddDirectPeerEndpoint input");
         let mut obligations =
-            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&effects);
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition);
         let obligation = obligations.pop().expect("generated reconcile obligation");
         meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
             &obligation,

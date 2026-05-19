@@ -97,11 +97,11 @@ fn register_seeded_member_peer(
     )
 }
 
-fn apply_seeded_mob_input_collect_effects(
+fn apply_seeded_mob_input_collect_transition(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     input: crate::machines::mob_machine::MobMachineInput,
     context: &'static str,
-) -> Result<Vec<crate::machines::mob_machine::MobMachineEffect>, MobError> {
+) -> Result<crate::machines::mob_machine::MobMachineTransition, MobError> {
     use crate::machines::mob_machine as mob_dsl;
 
     let input_debug = format!("{input:?}");
@@ -110,7 +110,7 @@ fn apply_seeded_mob_input_collect_effects(
             "MobMachine seeded authority ({context}) rejected {input_debug}: {error}"
         ))
     })?;
-    Ok(transition.effects)
+    Ok(transition)
 }
 
 fn apply_seeded_mob_signal(
@@ -139,13 +139,14 @@ fn seeded_effects_include_wiring_graph_change(
     })
 }
 
-fn resume_member_repair_authority_from_effects(
+fn resume_member_repair_authority_from_transition(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
-    effects: &[crate::machines::mob_machine::MobMachineEffect],
+    transition: &crate::machines::mob_machine::MobMachineTransition,
     edge: &crate::machines::mob_machine::WiringEdge,
     peer_id: &str,
     context: &'static str,
 ) -> Result<CommsTrustMutationAuthority, MobError> {
+    let effects = &transition.effects;
     let graph_changed = seeded_effects_include_wiring_graph_change(effects);
     let repair_requested = effects.iter().any(|effect| {
         matches!(
@@ -161,7 +162,7 @@ fn resume_member_repair_authority_from_effects(
         )));
     }
 
-    let handoff_effects = apply_seeded_mob_input_collect_effects(
+    let handoff_transition = apply_seeded_mob_input_collect_transition(
         authority,
         crate::machines::mob_machine::MobMachineInput::AuthorizeMemberTrustWiring {
             edge: edge.clone(),
@@ -170,7 +171,7 @@ fn resume_member_repair_authority_from_effects(
         },
         context,
     )?;
-    crate::generated::protocol_mob_member_trust_wiring::extract_obligations(&handoff_effects)
+    crate::generated::protocol_mob_member_trust_wiring::extract_obligations(&handoff_transition)
         .into_iter()
         .find_map(|obligation| {
             if obligation.edge() != edge
@@ -197,15 +198,16 @@ fn resume_member_repair_authority_from_effects(
         })
 }
 
-fn resume_external_repair_authority_from_effects(
-    effects: &[crate::machines::mob_machine::MobMachineEffect],
+fn resume_external_repair_authority_from_transition(
+    transition: &crate::machines::mob_machine::MobMachineTransition,
     edge: &crate::machines::mob_machine::ExternalPeerEdge,
     peer_id: &str,
     context: &'static str,
 ) -> Result<CommsTrustMutationAuthority, MobError> {
+    let effects = &transition.effects;
     let graph_changed = seeded_effects_include_wiring_graph_change(effects);
     let repair_obligation =
-        crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations(effects)
+        crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations(transition)
             .into_iter()
             .find(|obligation| obligation.edge() == edge);
     if let Some(obligation) = repair_obligation
@@ -1853,23 +1855,23 @@ impl MobBuilder {
                 }
                 let repair_authority = match &desired.source {
                     ResumeTrustSource::Member(edge) => {
-                        let effects = apply_seeded_mob_input_collect_effects(
+                        let transition = apply_seeded_mob_input_collect_transition(
                             dsl_authority,
                             crate::machines::mob_machine::MobMachineInput::WireMembers {
                                 edge: edge.clone(),
                             },
                             "resume_member_trust_repair",
                         )?;
-                        resume_member_repair_authority_from_effects(
+                        resume_member_repair_authority_from_transition(
                             dsl_authority,
-                            &effects,
+                            &transition,
                             edge,
                             &spec_peer_id,
                             "resume_member_trust_repair",
                         )?
                     }
                     ResumeTrustSource::External { key, edge } => {
-                        let effects = apply_seeded_mob_input_collect_effects(
+                        let transition = apply_seeded_mob_input_collect_transition(
                             dsl_authority,
                             crate::machines::mob_machine::MobMachineInput::WireExternalPeer {
                                 key: key.clone(),
@@ -1877,8 +1879,8 @@ impl MobBuilder {
                             },
                             "resume_external_trust_repair",
                         )?;
-                        resume_external_repair_authority_from_effects(
-                            &effects,
+                        resume_external_repair_authority_from_transition(
+                            &transition,
                             edge,
                             &spec_peer_id,
                             "resume_external_trust_repair",

@@ -695,6 +695,7 @@ fn effect_extractor_rust_binding(
     module_path: &str,
     required_imports: &[&str],
     effect_enum_path: &str,
+    transition_type_path: &str,
 ) -> ProtocolRustBinding {
     ProtocolRustBinding {
         module_path: module_path.into(),
@@ -707,7 +708,7 @@ fn effect_extractor_rust_binding(
         mutator_trait_path: None,
         input_enum_path: None,
         effect_enum_path: Some(effect_enum_path.into()),
-        transition_type_path: None,
+        transition_type_path: Some(transition_type_path.into()),
         error_type_path: None,
         executor_trigger_input_variant: None,
         bridge_source_type_path: None,
@@ -728,6 +729,7 @@ struct TrustHandoffProtocolSpec<'a> {
     module_path: &'a str,
     required_imports: &'a [&'a str],
     effect_enum_path: &'a str,
+    transition_type_path: &'a str,
 }
 
 fn trust_handoff_protocol(spec: TrustHandoffProtocolSpec<'_>) -> EffectHandoffProtocol {
@@ -756,6 +758,7 @@ fn trust_handoff_protocol(spec: TrustHandoffProtocolSpec<'_>) -> EffectHandoffPr
             spec.module_path,
             spec.required_imports,
             spec.effect_enum_path,
+            spec.transition_type_path,
         ),
     }
 }
@@ -1180,12 +1183,14 @@ fn owner_actor(name: &str) -> ActorSchema {
 /// runtime/mob comms owners; the owners may only mutate the comms projection by
 /// carrying one of these obligations through generated protocol helpers.
 fn comms_trust_bundle_composition() -> CompositionSchema {
-    let member_imports =
-        ["use crate::machines::mob_machine::{MobMachineEffect, PeerId, WiringEdge};"];
-    let external_imports =
-        ["use crate::machines::mob_machine::{ExternalPeerEdge, MobMachineEffect, PeerId};"];
+    let member_imports = [
+        "use crate::machines::mob_machine::{MobMachineEffect, MobMachineTransition, PeerId, WiringEdge};",
+    ];
+    let external_imports = [
+        "use crate::machines::mob_machine::{ExternalPeerEdge, MobMachineEffect, MobMachineTransition, PeerId};",
+    ];
     let reciprocal_imports = [
-        "use crate::machines::mob_machine::{ExternalPeerEdge, ExternalPeerKey, MobMachineEffect, PeerId};",
+        "use crate::machines::mob_machine::{ExternalPeerEdge, ExternalPeerKey, MobMachineEffect, MobMachineTransition, PeerId};",
     ];
     CompositionSchema {
         name: comp_id("comms_trust_bundle"),
@@ -1220,9 +1225,10 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 ],
                 module_path: "meerkat-runtime/src/generated/protocol_comms_trust_reconcile.rs",
                 required_imports: &[
-                    "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerEndpoint};",
+                    "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};",
                 ],
                 effect_enum_path: "crate::meerkat_machine::dsl::MeerkatMachineEffect",
+                transition_type_path: "crate::meerkat_machine::dsl::MeerkatMachineTransition",
             }),
             trust_handoff_protocol(TrustHandoffProtocolSpec {
                 name: "mob_member_trust_wiring",
@@ -1233,6 +1239,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 module_path: "meerkat-mob/src/generated/protocol_mob_member_trust_wiring.rs",
                 required_imports: &member_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+                transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
             }),
             trust_handoff_protocol(TrustHandoffProtocolSpec {
                 name: "mob_member_trust_unwiring",
@@ -1243,6 +1250,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 module_path: "meerkat-mob/src/generated/protocol_mob_member_trust_unwiring.rs",
                 required_imports: &member_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+                transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
             }),
             trust_handoff_protocol(TrustHandoffProtocolSpec {
                 name: "mob_external_peer_trust_wiring",
@@ -1253,6 +1261,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_wiring.rs",
                 required_imports: &external_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+                transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
             }),
             trust_handoff_protocol(TrustHandoffProtocolSpec {
                 name: "mob_external_peer_trust_unwiring",
@@ -1263,6 +1272,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_unwiring.rs",
                 required_imports: &external_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+                transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
             }),
             trust_handoff_protocol(TrustHandoffProtocolSpec {
                 name: "mob_external_peer_trust_repair",
@@ -1273,6 +1283,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_repair.rs",
                 required_imports: &external_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+                transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
             }),
             trust_handoff_protocol(TrustHandoffProtocolSpec {
                 name: "mob_external_peer_reciprocal_trust",
@@ -1283,6 +1294,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_reciprocal_trust.rs",
                 required_imports: &reciprocal_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+                transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
             }),
         ],
         entry_inputs: vec![],
@@ -1391,7 +1403,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                         "meerkat-runtime/src/generated/protocol_supervisor_trust_publish.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
-                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerId};".into(),
+                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerId};".into(),
                     ],
                     authority_type_path: Some(
                         "crate::meerkat_machine::dsl::MeerkatMachineAuthority".into(),
@@ -1439,7 +1451,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                         "meerkat-runtime/src/generated/protocol_supervisor_trust_revoke.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
-                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerId};".into(),
+                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerId};".into(),
                     ],
                     authority_type_path: Some(
                         "crate::meerkat_machine::dsl::MeerkatMachineAuthority".into(),

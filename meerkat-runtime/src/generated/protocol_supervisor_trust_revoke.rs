@@ -3,7 +3,7 @@
 // Closure policy: AckRequired
 // Liveness: eventual feedback under comms transport liveness — `send_bridge_response` surfaces the typed outcome
 
-use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerId};
+use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerId};
 
 #[derive(Debug, Clone)]
 pub struct SupervisorTrustRevokeObligation {
@@ -22,9 +22,10 @@ impl SupervisorTrustRevokeObligation {
 }
 
 pub fn extract_obligations(
-    effects: &[MeerkatMachineEffect],
+    transition: &MeerkatMachineTransition,
 ) -> Vec<SupervisorTrustRevokeObligation> {
-    effects
+    transition
+        .effects
         .iter()
         .filter_map(|effect| match effect {
             MeerkatMachineEffect::RevokeSupervisorTrustEdge { peer_id, epoch } => {
@@ -61,8 +62,8 @@ pub fn revoke_authority_for_peer(
         &obligation.peer_id,
         expected_peer_id,
     )?;
-    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke(
+    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke(
         obligation.peer_id.clone(),
         obligation.epoch,
-    )
+    ))
 }

@@ -413,13 +413,35 @@ mod tests {
         epoch: u64,
         direct_peer_endpoints: BTreeSet<PeerEndpoint>,
     ) -> CommsTrustReconcileObligation {
-        let effect =
-            crate::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
-                peer_projection_epoch: epoch,
-                direct_peer_endpoints,
-                mob_overlay_peer_endpoints: BTreeSet::new(),
-            };
-        crate::protocol_comms_trust_reconcile::extract_obligations(&[effect])
+        let mut authority = crate::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+        authority
+            .apply_signal(crate::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
+            .expect("Initialize signal");
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                session_id: crate::meerkat_machine::dsl::SessionId::from(
+                    "comms-trust-reconcile-test",
+                ),
+            },
+        )
+        .expect("RegisterSession input");
+        let projection_epoch = epoch.max(1);
+        let mut transition = None;
+        for overlay_epoch in 1..=projection_epoch {
+            transition = Some(
+                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                    &mut authority,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                        epoch: overlay_epoch,
+                        endpoints: direct_peer_endpoints.clone(),
+                    },
+                )
+                .expect("ApplyMobPeerOverlay input"),
+            );
+        }
+        let transition = transition.expect("projection epoch loop produces transition");
+        crate::protocol_comms_trust_reconcile::extract_obligations(&transition)
             .into_iter()
             .next()
             .expect("generated reconcile obligation")

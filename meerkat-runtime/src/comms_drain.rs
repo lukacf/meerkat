@@ -844,10 +844,10 @@ pub fn trusted_peer_descriptor_from_supervisor_publish_obligation(
 }
 
 fn single_supervisor_publish_obligation(
-    effects: &[crate::meerkat_machine::dsl::MeerkatMachineEffect],
+    transition: &crate::meerkat_machine::dsl::MeerkatMachineTransition,
     context: &str,
 ) -> Result<crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation, String> {
-    let obligations = crate::protocol_supervisor_trust_publish::extract_obligations(effects);
+    let obligations = crate::protocol_supervisor_trust_publish::extract_obligations(transition);
     match obligations.as_slice() {
         [obligation] => Ok(obligation.clone()),
         [] => Err(format!("{context}: generated publish effect was absent")),
@@ -858,12 +858,12 @@ fn single_supervisor_publish_obligation(
 }
 
 fn matching_supervisor_revoke_obligation(
-    effects: &[crate::meerkat_machine::dsl::MeerkatMachineEffect],
+    transition: &crate::meerkat_machine::dsl::MeerkatMachineTransition,
     peer_id: &str,
     epoch: u64,
     context: &str,
 ) -> Result<crate::protocol_supervisor_trust_revoke::SupervisorTrustRevokeObligation, String> {
-    crate::protocol_supervisor_trust_revoke::extract_obligations(effects)
+    crate::protocol_supervisor_trust_revoke::extract_obligations(transition)
         .into_iter()
         .find(|obligation| obligation.peer_id().as_str() == peer_id && obligation.epoch() == epoch)
         .ok_or_else(|| format!("{context}: generated revoke effect was absent"))
@@ -973,7 +973,7 @@ async fn bind_and_publish_supervisor_trust(
     epoch: u64,
     context: &str,
 ) -> Result<(), String> {
-    let effects = adapter
+    let transition = adapter
         .stage_supervisor_bind(
             session_id,
             supervisor.name.as_str().to_owned(),
@@ -984,7 +984,7 @@ async fn bind_and_publish_supervisor_trust(
         )
         .await
         .map_err(|error| format!("{context}: DSL rejected bind: {error}"))?;
-    let obligation = single_supervisor_publish_obligation(&effects, context)?;
+    let obligation = single_supervisor_publish_obligation(&transition, context)?;
     validate_supervisor_publish_obligation(&obligation, supervisor, epoch, context)?;
     publish_supervisor_trust_from_generated_obligation(
         adapter,
@@ -1014,12 +1014,15 @@ async fn rollback_bind_after_trust_publication_failure(
     peer_id: &str,
     epoch: u64,
 ) -> Result<(), SupervisorBindingStageError> {
-    let effects = adapter
+    let transition = adapter
         .stage_supervisor_revoke(session_id, peer_id.to_string(), epoch)
         .await?;
-    if let Some(obligation) = crate::protocol_supervisor_trust_revoke::extract_obligations(&effects)
-        .into_iter()
-        .find(|obligation| obligation.peer_id().as_str() == peer_id && obligation.epoch() == epoch)
+    if let Some(obligation) =
+        crate::protocol_supervisor_trust_revoke::extract_obligations(&transition)
+            .into_iter()
+            .find(|obligation| {
+                obligation.peer_id().as_str() == peer_id && obligation.epoch() == epoch
+            })
     {
         adapter
             .stage_supervisor_trust_revoked(
@@ -1453,7 +1456,7 @@ async fn try_handle_supervisor_bridge_command(
             // `validate_bind_request_against_state` already confirmed the
             // binding is `Unbound`, so this stage should never be
             // rejected; if the DSL rejects anyway, treat as internal.
-            let bind_effects = match adapter
+            let bind_transition = match adapter
                 .stage_supervisor_bind(
                     session_id,
                     supervisor_spec.name.as_str().to_owned(),
@@ -1471,7 +1474,7 @@ async fn try_handle_supervisor_bridge_command(
                 // are preserved everywhere above the DSL boundary.
                 .await
             {
-                Ok(effects) => effects,
+                Ok(transition) => transition,
                 Err(error) => {
                     send_bridge_failure(
                         comms_runtime,
@@ -1484,7 +1487,7 @@ async fn try_handle_supervisor_bridge_command(
                 }
             };
             let publish_obligation =
-                match single_supervisor_publish_obligation(&bind_effects, "bind member") {
+                match single_supervisor_publish_obligation(&bind_transition, "bind member") {
                     Ok(obligation) => obligation,
                     Err(error) => {
                         let _ = rollback_bind_after_trust_publication_failure(
@@ -1689,7 +1692,7 @@ async fn try_handle_supervisor_bridge_command(
             };
             let new_peer_id = supervisor_spec.peer_id.as_str();
             if previous_binding.peer_id == new_peer_id {
-                let authorize_effects = match adapter
+                let authorize_transition = match adapter
                     .stage_supervisor_authorize(
                         session_id,
                         supervisor_spec.name.as_str().to_owned(),
@@ -1700,7 +1703,7 @@ async fn try_handle_supervisor_bridge_command(
                     )
                     .await
                 {
-                    Ok(effects) => effects,
+                    Ok(transition) => transition,
                     Err(error) => {
                         send_bridge_failure(
                             comms_runtime,
@@ -1713,7 +1716,7 @@ async fn try_handle_supervisor_bridge_command(
                     }
                 };
                 let publish_obligation = match single_supervisor_publish_obligation(
-                    &authorize_effects,
+                    &authorize_transition,
                     "authorize supervisor",
                 ) {
                     Ok(obligation) => obligation,
@@ -1796,7 +1799,7 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             } else {
-                let revoke_effects = match adapter
+                let revoke_transition = match adapter
                     .stage_supervisor_revoke(
                         session_id,
                         previous_binding.peer_id.clone(),
@@ -1804,7 +1807,7 @@ async fn try_handle_supervisor_bridge_command(
                     )
                     .await
                 {
-                    Ok(effects) => effects,
+                    Ok(transition) => transition,
                     Err(error) => {
                         send_bridge_failure(
                             comms_runtime,
@@ -1817,7 +1820,7 @@ async fn try_handle_supervisor_bridge_command(
                     }
                 };
                 let revoke_obligation = match matching_supervisor_revoke_obligation(
-                    &revoke_effects,
+                    &revoke_transition,
                     &previous_binding.peer_id,
                     previous_binding.epoch,
                     "authorize supervisor",
@@ -1978,11 +1981,11 @@ async fn try_handle_supervisor_bridge_command(
                     }
                 };
             let supervisor_peer_id = authorized_supervisor.peer_id.as_str();
-            let revoke_effects = match adapter
+            let revoke_transition = match adapter
                 .stage_supervisor_revoke(session_id, supervisor_peer_id.clone(), payload.epoch)
                 .await
             {
-                Ok(effects) => effects,
+                Ok(transition) => transition,
                 Err(error) => {
                     send_bridge_failure(
                         comms_runtime,
@@ -1995,7 +1998,7 @@ async fn try_handle_supervisor_bridge_command(
                 }
             };
             let revoke_obligations =
-                crate::protocol_supervisor_trust_revoke::extract_obligations(&revoke_effects);
+                crate::protocol_supervisor_trust_revoke::extract_obligations(&revoke_transition);
             let Some(revoke_obligation) = revoke_obligations.into_iter().find(|obligation| {
                 obligation.peer_id().as_str() == supervisor_peer_id.as_str()
                     && obligation.epoch() == payload.epoch
@@ -2564,13 +2567,28 @@ mod tests {
         context: &str,
     ) {
         let endpoint = crate::meerkat_machine::dsl::PeerEndpoint::from(&peer);
-        let effect =
-            crate::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
-                peer_projection_epoch: 0,
-                direct_peer_endpoints: std::collections::BTreeSet::from([endpoint.clone()]),
-                mob_overlay_peer_endpoints: std::collections::BTreeSet::new(),
-            };
-        let obligation = crate::protocol_comms_trust_reconcile::extract_obligations(&[effect])
+        let mut authority = crate::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+        authority
+            .apply_signal(crate::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
+            .expect("Initialize signal");
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                session_id: crate::meerkat_machine::dsl::SessionId::from(
+                    "comms-drain-test-projection-trust",
+                ),
+            },
+        )
+        .expect("RegisterSession input");
+        let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                epoch: 1,
+                endpoints: std::collections::BTreeSet::from([endpoint.clone()]),
+            },
+        )
+        .expect("ApplyMobPeerOverlay input");
+        let obligation = crate::protocol_comms_trust_reconcile::extract_obligations(&transition)
             .into_iter()
             .next()
             .expect("generated reconcile obligation");

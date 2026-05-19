@@ -96,7 +96,12 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
                 let to_phase = self.state.phase();
                 #(#invariant_checks)*
-                Ok(#transition_name { from_phase, to_phase, effects })
+                Ok(#transition_name {
+                    from_phase,
+                    to_phase,
+                    effects,
+                    _origin: sealed::TransitionOrigin,
+                })
             }
         }
     } else {
@@ -112,6 +117,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             pub from_phase: #phase_name,
             pub to_phase: #phase_name,
             pub effects: Vec<#effect_name>,
+            _origin: sealed::TransitionOrigin,
         }
 
         #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +155,9 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         impl std::error::Error for #error_name {}
 
         mod sealed {
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            pub struct TransitionOrigin;
+
             pub trait Sealed {}
         }
 
@@ -231,7 +240,12 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
                 let to_phase = self.state.phase();
                 #(#invariant_checks)*
-                Ok(#transition_name { from_phase, to_phase, effects })
+                Ok(#transition_name {
+                    from_phase,
+                    to_phase,
+                    effects,
+                    _origin: sealed::TransitionOrigin,
+                })
             }
         }
     }

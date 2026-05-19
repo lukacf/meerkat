@@ -3411,17 +3411,22 @@ mod tests {
             meerkat_mob::machines::mob_machine::AgentIdentity("local".to_string()),
             meerkat_mob::machines::mob_machine::ExternalPeerEndpoint::from(&peer),
         );
-        let wiring_effects =
-            vec![
-                meerkat_mob::machines::mob_machine::MobMachineEffect::ExternalPeerTrustWiringRequested {
-                    edge: external_edge.clone(),
-                    peer_id: meerkat_mob::machines::mob_machine::PeerId(peer_id.clone()),
-                    epoch: 1,
-                },
-            ];
+        let external_key = meerkat_mob::machines::mob_machine::ExternalPeerKey::new(
+            external_edge.local.clone(),
+            external_edge.endpoint.name.clone(),
+        );
+        let mut mob_authority = meerkat_mob::machines::mob_machine::MobMachineAuthority::new();
+        let wiring_transition = meerkat_mob::machines::mob_machine::MobMachineMutator::apply(
+            &mut mob_authority,
+            meerkat_mob::machines::mob_machine::MobMachineInput::WireExternalPeer {
+                key: external_key.clone(),
+                edge: external_edge.clone(),
+            },
+        )
+        .expect("wire external peer");
         let wiring_obligation =
             meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::extract_obligations(
-                &wiring_effects,
+                &wiring_transition,
             )
             .pop()
             .expect("generated wiring obligation");
@@ -3445,17 +3450,17 @@ mod tests {
             .await
             .expect_err("raw remove must fail closed");
         assert!(matches!(raw_remove, SendError::Unsupported(_)));
-        let unwiring_effects =
-            vec![
-                meerkat_mob::machines::mob_machine::MobMachineEffect::ExternalPeerTrustUnwiringRequested {
-                    edge: external_edge,
-                    peer_id: meerkat_mob::machines::mob_machine::PeerId(peer_id.clone()),
-                    epoch: 2,
-                },
-            ];
+        let unwiring_transition = meerkat_mob::machines::mob_machine::MobMachineMutator::apply(
+            &mut mob_authority,
+            meerkat_mob::machines::mob_machine::MobMachineInput::UnwireExternalPeer {
+                key: external_key,
+                edge: external_edge,
+            },
+        )
+        .expect("unwire external peer");
         let unwiring_obligation =
             meerkat_mob::generated::protocol_mob_external_peer_trust_unwiring::extract_obligations(
-                &unwiring_effects,
+                &unwiring_transition,
             )
             .pop()
             .expect("generated unwiring obligation");

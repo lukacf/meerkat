@@ -866,7 +866,7 @@ impl MobActor {
                     } => (peer_id.clone(), *epoch),
                     _ => unreachable!("previous_peer_is_different only matches Bound"),
                 };
-                let revoke_effects = adapter
+                let revoke_transition = adapter
                     .stage_supervisor_revoke(session_id, previous_peer_id.clone(), previous_epoch)
                     .await
                     .map_err(|error| {
@@ -876,7 +876,7 @@ impl MobActor {
                     })?;
                 let revoke_obligation =
                     meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations(
-                        &revoke_effects,
+                        &revoke_transition,
                     )
                     .into_iter()
                     .find(|obligation| {
@@ -929,7 +929,7 @@ impl MobActor {
                     })?;
             }
 
-            let stage_effects = if already_bound {
+            let stage_transition = if already_bound {
                 adapter
                     .stage_supervisor_trust_publish_request(
                         session_id,
@@ -1005,7 +1005,7 @@ impl MobActor {
                 }
             };
             let obligations =
-                protocol_supervisor_trust_publish::extract_obligations(&stage_effects);
+                protocol_supervisor_trust_publish::extract_obligations(&stage_transition);
             let publish_obligation = match obligations.as_slice() {
                 [obligation] => obligation.clone(),
                 [] => {
@@ -1140,11 +1140,11 @@ impl MobActor {
     ) {
         #[cfg(feature = "runtime-adapter")]
         if let Some(adapter) = self.runtime_adapter.as_ref() {
-            let effects = match adapter
+            let transition = match adapter
                 .stage_supervisor_revoke(session_id, install.peer_id.clone(), install.epoch)
                 .await
             {
-                Ok(effects) => effects,
+                Ok(transition) => transition,
                 Err(error) => {
                     tracing::warn!(
                         %session_id,
@@ -1157,7 +1157,7 @@ impl MobActor {
                 }
             };
             let obligations =
-                meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations(&effects);
+                meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations(&transition);
             let Some(obligation) = obligations.into_iter().find(|obligation| {
                 obligation.peer_id() == &install.peer_id && obligation.epoch() == install.epoch
             }) else {
@@ -1264,17 +1264,19 @@ impl MobActor {
     ) -> Result<(), MobError> {
         match previous {
             meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound => {
-                let effects = adapter
+                let transition = adapter
                     .stage_supervisor_revoke(session_id, current_peer_id.to_string(), current_epoch)
                     .await
                     .map_err(|error| MobError::WiringError(error.to_string()))?;
                 if let Some(obligation) =
-                    meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations(&effects)
-                        .into_iter()
-                        .find(|obligation| {
-                            obligation.peer_id().as_str() == current_peer_id
-                                && obligation.epoch() == current_epoch
-                        })
+                    meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations(
+                        &transition,
+                    )
+                    .into_iter()
+                    .find(|obligation| {
+                        obligation.peer_id().as_str() == current_peer_id
+                            && obligation.epoch() == current_epoch
+                    })
                 {
                     adapter
                         .stage_supervisor_trust_revoked(
@@ -1294,7 +1296,7 @@ impl MobActor {
                 signing_public_key,
                 epoch,
             } => {
-                let effects = adapter
+                let transition = adapter
                     .stage_supervisor_authorize(
                         session_id,
                         name.clone(),
@@ -1307,7 +1309,7 @@ impl MobActor {
                     .map_err(|error| MobError::WiringError(error.to_string()))?;
                 let obligation =
                     meerkat_runtime::protocol_supervisor_trust_publish::extract_obligations(
-                        &effects,
+                        &transition,
                     )
                     .into_iter()
                     .find(|obligation| {
@@ -1905,6 +1907,16 @@ impl MobActor {
         input: mob_dsl::MobMachineInput,
         context: &str,
     ) -> Result<Vec<mob_dsl::MobMachineEffect>, MobError> {
+        Ok(self
+            .apply_dsl_input_collect_transition(input, context)?
+            .effects)
+    }
+
+    fn apply_dsl_input_collect_transition(
+        &mut self,
+        input: mob_dsl::MobMachineInput,
+        context: &str,
+    ) -> Result<mob_dsl::MobMachineTransition, MobError> {
         self.ensure_destroy_mutation_allowed(context)?;
         let input_debug = format!("{input:?}");
         let transition = mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input)
@@ -1913,7 +1925,6 @@ impl MobActor {
                     "DSL authority ({context}) rejected {input_debug}: {e}"
                 ))
             })?;
-        let effects = transition.effects.clone();
         self.queue_routed_effects_from(&transition.effects);
         if transition.from_phase != transition.to_phase {
             // Publish the projected phase for external observers. This is
@@ -1921,7 +1932,7 @@ impl MobActor {
             let _ = self.phase_watch_tx.send(self.state());
         }
         self.publish_machine_state_projection();
-        Ok(effects)
+        Ok(transition)
     }
 
     fn prepare_dsl_input(
@@ -2053,14 +2064,14 @@ impl MobActor {
         }
     }
 
-    fn member_trust_wiring_handoff_from_effects(
-        effects: &[mob_dsl::MobMachineEffect],
+    fn member_trust_wiring_handoff_from_transition(
+        transition: &mob_dsl::MobMachineTransition,
         edge: &mob_dsl::WiringEdge,
         context: &str,
         operation: MemberTrustOperation,
     ) -> Result<MemberTrustHandoff, MobError> {
         let obligation =
-            crate::generated::protocol_mob_member_trust_wiring::extract_obligations(effects)
+            crate::generated::protocol_mob_member_trust_wiring::extract_obligations(transition)
                 .into_iter()
                 .find(|obligation| obligation.edge() == edge)
                 .ok_or_else(|| {
@@ -2084,21 +2095,26 @@ impl MobActor {
         })
     }
 
-    fn wire_external_authority_from_effects(
+    fn wire_external_authority_from_transition(
         &self,
-        effects: &[mob_dsl::MobMachineEffect],
+        transition: &mob_dsl::MobMachineTransition,
         edge: &mob_dsl::ExternalPeerEdge,
         context: &str,
     ) -> Result<WireTrustAuthority, MobError> {
+        let effects = &transition.effects;
         let graph_changed = Self::effects_include_wiring_graph_change(effects);
         let wiring_obligation =
-            crate::generated::protocol_mob_external_peer_trust_wiring::extract_obligations(effects)
-                .into_iter()
-                .find(|obligation| obligation.edge() == edge);
+            crate::generated::protocol_mob_external_peer_trust_wiring::extract_obligations(
+                transition,
+            )
+            .into_iter()
+            .find(|obligation| obligation.edge() == edge);
         let repair_obligation =
-            crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations(effects)
-                .into_iter()
-                .find(|obligation| obligation.edge() == edge);
+            crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations(
+                transition,
+            )
+            .into_iter()
+            .find(|obligation| obligation.edge() == edge);
         let repair_requested = repair_obligation.is_some();
         match (graph_changed, repair_requested) {
             (true, false) => {
@@ -2140,13 +2156,13 @@ impl MobActor {
         }
     }
 
-    fn unwire_members_authority_from_effects(
-        effects: &[mob_dsl::MobMachineEffect],
+    fn unwire_members_authority_from_transition(
+        transition: &mob_dsl::MobMachineTransition,
         edge: &mob_dsl::WiringEdge,
         context: &str,
     ) -> Result<MemberTrustHandoff, MobError> {
         let obligation =
-            crate::generated::protocol_mob_member_trust_unwiring::extract_obligations(effects)
+            crate::generated::protocol_mob_member_trust_unwiring::extract_obligations(transition)
                 .into_iter()
                 .find(|obligation| obligation.edge() == edge)
                 .ok_or_else(|| {
@@ -2167,7 +2183,7 @@ impl MobActor {
         context: &str,
         operation: MemberTrustOperation,
     ) -> Result<MemberTrustHandoff, MobError> {
-        let effects = self.apply_dsl_input_collect_effects(
+        let transition = self.apply_dsl_input_collect_transition(
             mob_dsl::MobMachineInput::AuthorizeMemberTrustWiring {
                 edge: edge.clone(),
                 a_identity: edge.a.clone(),
@@ -2175,7 +2191,7 @@ impl MobActor {
             },
             context,
         )?;
-        Self::member_trust_wiring_handoff_from_effects(&effects, edge, context, operation)
+        Self::member_trust_wiring_handoff_from_transition(&transition, edge, context, operation)
     }
 
     fn authorize_member_trust_unwiring(
@@ -2183,7 +2199,7 @@ impl MobActor {
         edge: &mob_dsl::WiringEdge,
         context: &str,
     ) -> Result<MemberTrustHandoff, MobError> {
-        let effects = self.apply_dsl_input_collect_effects(
+        let transition = self.apply_dsl_input_collect_transition(
             mob_dsl::MobMachineInput::AuthorizeMemberTrustUnwiring {
                 edge: edge.clone(),
                 a_identity: edge.a.clone(),
@@ -2191,7 +2207,7 @@ impl MobActor {
             },
             context,
         )?;
-        Self::unwire_members_authority_from_effects(&effects, edge, context)
+        Self::unwire_members_authority_from_transition(&transition, edge, context)
     }
 
     fn authorize_member_trust_cleanup(
@@ -2199,7 +2215,7 @@ impl MobActor {
         edge: &mob_dsl::WiringEdge,
         context: &str,
     ) -> Result<MemberTrustHandoff, MobError> {
-        let effects = self.apply_dsl_input_collect_effects(
+        let transition = self.apply_dsl_input_collect_transition(
             mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanup {
                 edge: edge.clone(),
                 a_identity: edge.a.clone(),
@@ -2207,7 +2223,7 @@ impl MobActor {
             },
             context,
         )?;
-        Self::unwire_members_authority_from_effects(&effects, edge, context)
+        Self::unwire_members_authority_from_transition(&transition, edge, context)
     }
 
     fn preview_dsl_input(
@@ -8286,14 +8302,14 @@ impl MobActor {
         key: &mob_dsl::ExternalPeerKey,
         edge: &mob_dsl::ExternalPeerEdge,
     ) -> Result<WireTrustAuthority, MobError> {
-        let effects = self.apply_dsl_input_collect_effects(
+        let transition = self.apply_dsl_input_collect_transition(
             mob_dsl::MobMachineInput::WireExternalPeer {
                 key: key.clone(),
                 edge: edge.clone(),
             },
             "wire_external_peer",
         )?;
-        self.wire_external_authority_from_effects(&effects, edge, "wire_external_peer")
+        self.wire_external_authority_from_transition(&transition, edge, "wire_external_peer")
     }
 
     async fn authorize_external_peer_reciprocal_trust(
@@ -8301,7 +8317,7 @@ impl MobActor {
         key: mob_dsl::ExternalPeerKey,
     ) -> Result<CommsTrustMutationAuthority, MobError> {
         let local_identity = AgentIdentity::from(key.local.0.as_str());
-        let effects = self.apply_dsl_input_collect_effects(
+        let transition = self.apply_dsl_input_collect_transition(
             mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrust {
                 key: key.clone(),
                 agent_identity: mob_dsl::AgentIdentity::from_domain(&local_identity),
@@ -8310,7 +8326,7 @@ impl MobActor {
         )?;
         let Some(obligation) =
             crate::generated::protocol_mob_external_peer_reciprocal_trust::extract_obligations(
-                &effects,
+                &transition,
             )
             .into_iter()
             .find(|obligation| obligation.key() == &key)
@@ -8332,19 +8348,20 @@ impl MobActor {
         key: &mob_dsl::ExternalPeerKey,
         edge: &mob_dsl::ExternalPeerEdge,
     ) -> Result<Option<CommsTrustMutationAuthority>, MobError> {
-        let effects = self.apply_dsl_input_collect_effects(
+        let transition = self.apply_dsl_input_collect_transition(
             mob_dsl::MobMachineInput::UnwireExternalPeer {
                 key: key.clone(),
                 edge: edge.clone(),
             },
             "unwire_external_peer",
         )?;
-        if !Self::effects_include_wiring_graph_change(&effects) {
+        let effects = &transition.effects;
+        if !Self::effects_include_wiring_graph_change(effects) {
             return Ok(None);
         }
         let obligation =
             crate::generated::protocol_mob_external_peer_trust_unwiring::extract_obligations(
-                &effects,
+                &transition,
             )
             .into_iter()
             .find(|obligation| obligation.edge() == edge)
@@ -9033,7 +9050,7 @@ impl MobActor {
             .pending_session_ingress_detach_runtime_ids
             .contains(&dsl_runtime_id)
         {
-            let effects = self.apply_dsl_input_collect_effects(
+            let transition = self.apply_dsl_input_collect_transition(
                 mob_dsl::MobMachineInput::RequestPendingSessionIngressDetachForMobDestroy {
                     mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
                     agent_runtime_id: dsl_runtime_id.clone(),
@@ -9042,7 +9059,7 @@ impl MobActor {
             )?;
             let obligations =
                 crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(
-                    &effects,
+                    &transition,
                 );
             let obligation = match obligations.as_slice() {
                 [obligation] => obligation.clone(),
@@ -9081,7 +9098,7 @@ impl MobActor {
         let session_id_for_route = releasing
             .clone()
             .unwrap_or_else(mob_dsl::SessionId::default);
-        let effects = self.apply_dsl_input_collect_effects(
+        let transition = self.apply_dsl_input_collect_transition(
             mob_dsl::MobMachineInput::Retire {
                 mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
@@ -9094,7 +9111,7 @@ impl MobActor {
 
         let mut detach_obligations =
             crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(
-                &effects,
+                &transition,
             );
         if let Some(obligation) = detach_obligations.pop() {
             if let Some(detach_session_id) =
@@ -9192,11 +9209,13 @@ impl MobActor {
             .member_retire_trust_unwire_authorities(agent_identity, &entry)
             .await?;
 
-        let effects = self
-            .apply_dsl_input_collect_effects(retire_input, "handle_retire_inner_mark_retiring")?;
+        let transition = self.apply_dsl_input_collect_transition(
+            retire_input,
+            "handle_retire_inner_mark_retiring",
+        )?;
         let mut detach_obligations =
             crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(
-                &effects,
+                &transition,
             );
         if let (Some(obligation), Some(session_id)) = (detach_obligations.pop(), detach_session_id)
         {

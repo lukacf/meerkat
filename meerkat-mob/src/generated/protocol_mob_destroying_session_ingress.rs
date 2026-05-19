@@ -33,9 +33,10 @@ macro_rules! mob_destroying_session_ingress_feedback_input_patterns {
 }
 
 pub fn extract_obligations(
-    effects: &[MobMachineEffect],
+    transition: &MobMachineTransition,
 ) -> Vec<MobDestroyingSessionIngressObligation> {
-    effects
+    transition
+        .effects
         .iter()
         .filter_map(|effect| match effect {
             MobMachineEffect::RequestSessionIngressDetachForMobDestroy {

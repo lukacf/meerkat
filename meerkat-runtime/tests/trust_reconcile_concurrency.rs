@@ -37,7 +37,8 @@ use meerkat_core::{
 };
 use meerkat_runtime::comms_trust_reconcile::{CommsTrustReconciler, ReconcileReport};
 use meerkat_runtime::meerkat_machine::dsl::{
-    PeerAddress, PeerEndpoint, PeerId, PeerName, PeerSigningKey,
+    MeerkatMachineAuthority, MeerkatMachineInput, MeerkatMachineMutator, MeerkatMachineSignal,
+    PeerAddress, PeerEndpoint, PeerId, PeerName, PeerSigningKey, SessionId,
 };
 use meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation;
 
@@ -57,13 +58,33 @@ fn obligation(
     epoch: u64,
     direct_peer_endpoints: BTreeSet<PeerEndpoint>,
 ) -> CommsTrustReconcileObligation {
-    let effect =
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
-            peer_projection_epoch: epoch,
-            direct_peer_endpoints,
-            mob_overlay_peer_endpoints: BTreeSet::new(),
-        };
-    meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&[effect])
+    let mut authority = MeerkatMachineAuthority::new();
+    authority
+        .apply_signal(MeerkatMachineSignal::Initialize)
+        .expect("Initialize signal");
+    MeerkatMachineMutator::apply(
+        &mut authority,
+        MeerkatMachineInput::RegisterSession {
+            session_id: SessionId::from("trust-reconcile-concurrency-test"),
+        },
+    )
+    .expect("RegisterSession input");
+    let projection_epoch = epoch.max(1);
+    let mut transition = None;
+    for overlay_epoch in 1..=projection_epoch {
+        transition = Some(
+            MeerkatMachineMutator::apply(
+                &mut authority,
+                MeerkatMachineInput::ApplyMobPeerOverlay {
+                    epoch: overlay_epoch,
+                    endpoints: direct_peer_endpoints.clone(),
+                },
+            )
+            .expect("ApplyMobPeerOverlay input"),
+        );
+    }
+    let transition = transition.expect("projection epoch loop produces transition");
+    meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations(&transition)
         .into_iter()
         .next()
         .expect("generated reconcile obligation")

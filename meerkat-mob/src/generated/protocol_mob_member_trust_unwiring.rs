@@ -3,7 +3,7 @@
 // Closure policy: AckRequired
 // Liveness: projection mutation is applied by the owning runtime after consuming this typed obligation
 
-use crate::machines::mob_machine::{MobMachineEffect, PeerId, WiringEdge};
+use crate::machines::mob_machine::{MobMachineEffect, MobMachineTransition, PeerId, WiringEdge};
 
 #[derive(Debug, Clone)]
 pub struct MobMemberTrustUnwiringObligation {
@@ -31,8 +31,11 @@ impl MobMemberTrustUnwiringObligation {
     }
 }
 
-pub fn extract_obligations(effects: &[MobMachineEffect]) -> Vec<MobMemberTrustUnwiringObligation> {
-    effects
+pub fn extract_obligations(
+    transition: &MobMachineTransition,
+) -> Vec<MobMemberTrustUnwiringObligation> {
+    transition
+        .effects
         .iter()
         .filter_map(|effect| match effect {
             MobMachineEffect::MemberTrustUnwiringRequested {
@@ -98,8 +101,10 @@ pub fn unwiring_authority_for_identity(
     expected_peer_id: &str,
 ) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {
     let peer_id = required_peer_id_for_identity(obligation, identity, expected_peer_id)?;
-    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_mob_machine_peer_unwiring(
-        peer_id.to_owned(),
-        obligation.epoch,
+    Ok(
+        meerkat_core::comms::CommsTrustMutationAuthority::from_generated_mob_machine_peer_unwiring(
+            peer_id.to_owned(),
+            obligation.epoch,
+        ),
     )
 }

@@ -524,16 +524,25 @@ fn generate_effect_extractor_helpers(
             .as_deref()
             .context("effect extractor effect enum missing")?,
     );
+    let transition_type = rust.transition_type_path.as_deref().map(short_type);
     let producer_effect = producer_machine
         .effects
         .variant_named(protocol.effect_variant.as_str())
         .context("producer effect missing")?;
 
-    writeln!(
-        out,
-        "pub fn extract_obligations(effects: &[{effect_enum}]) -> Vec<{obligation_type}> {{"
-    )?;
-    writeln!(out, "    effects")?;
+    if let Some(transition_type) = transition_type {
+        writeln!(
+            out,
+            "pub fn extract_obligations(transition: &{transition_type}) -> Vec<{obligation_type}> {{"
+        )?;
+        writeln!(out, "    transition.effects")?;
+    } else {
+        writeln!(
+            out,
+            "pub fn extract_obligations(effects: &[{effect_enum}]) -> Vec<{obligation_type}> {{"
+        )?;
+        writeln!(out, "    effects")?;
+    }
     writeln!(out, "        .iter()")?;
     writeln!(out, "        .filter_map(|effect| match effect {{")?;
     writeln!(
@@ -618,11 +627,11 @@ fn generate_comms_trust_authority_helpers(
             writeln!(out, "    }}")?;
             writeln!(
                 out,
-                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection("
+                "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection("
             )?;
             writeln!(out, "        endpoint.peer_id.0.clone(),")?;
             writeln!(out, "        obligation.peer_projection_epoch,")?;
-            writeln!(out, "    )")?;
+            writeln!(out, "    ))")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
             writeln!(
@@ -640,11 +649,11 @@ fn generate_comms_trust_authority_helpers(
             writeln!(out, "    }}")?;
             writeln!(
                 out,
-                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection("
+                "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_peer_projection("
             )?;
             writeln!(out, "        peer_id.to_string(),")?;
             writeln!(out, "        obligation.peer_projection_epoch,")?;
-            writeln!(out, "    )")?;
+            writeln!(out, "    ))")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
         }
@@ -660,11 +669,11 @@ fn generate_comms_trust_authority_helpers(
             )?;
             writeln!(
                 out,
-                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_publish("
+                "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_publish("
             )?;
             writeln!(out, "        obligation.peer_id.clone(),")?;
             writeln!(out, "        obligation.epoch,")?;
-            writeln!(out, "    )")?;
+            writeln!(out, "    ))")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
         }
@@ -680,11 +689,11 @@ fn generate_comms_trust_authority_helpers(
             )?;
             writeln!(
                 out,
-                "    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke("
+                "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::from_generated_meerkat_machine_supervisor_revoke("
             )?;
             writeln!(out, "        obligation.peer_id.clone(),")?;
             writeln!(out, "        obligation.epoch,")?;
-            writeln!(out, "    )")?;
+            writeln!(out, "    ))")?;
             writeln!(out, "}}")?;
             writeln!(out)?;
         }
@@ -834,11 +843,11 @@ fn emit_member_authority_fn(
     )?;
     writeln!(
         out,
-        "    meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
+        "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
     )?;
     writeln!(out, "        peer_id.to_owned(),")?;
     writeln!(out, "        obligation.epoch,")?;
-    writeln!(out, "    )")?;
+    writeln!(out, "    ))")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
     Ok(())
@@ -862,11 +871,11 @@ fn emit_external_peer_trust_helper(
     )?;
     writeln!(
         out,
-        "    meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
+        "    Ok(meerkat_core::comms::CommsTrustMutationAuthority::{constructor_name}("
     )?;
     writeln!(out, "        obligation.peer_id.0.clone(),")?;
     writeln!(out, "        obligation.epoch,")?;
-    writeln!(out, "    )")?;
+    writeln!(out, "    ))")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
     Ok(())

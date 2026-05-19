@@ -1980,20 +1980,6 @@ impl MobActor {
             .send(self.dsl_authority.state().clone());
     }
 
-    fn destroy_admitted_error(&self, _context: &str) -> MobError {
-        MobError::InvalidTransition {
-            from: MobState::Destroyed,
-            to: MobState::Destroyed,
-        }
-    }
-
-    fn ensure_destroy_mutation_allowed(&self, context: &str) -> Result<(), MobError> {
-        if self.destroy_admitted() && !self.destroy_cleanup_active {
-            return Err(self.destroy_admitted_error(context));
-        }
-        Ok(())
-    }
-
     fn apply_dsl_input(
         &mut self,
         input: mob_dsl::MobMachineInput,
@@ -2018,7 +2004,6 @@ impl MobActor {
         input: mob_dsl::MobMachineInput,
         context: &str,
     ) -> Result<mob_dsl::MobMachineTransition, MobError> {
-        self.ensure_destroy_mutation_allowed(context)?;
         let input_debug = format!("{input:?}");
         let transition = mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input)
             .map_err(|e| {
@@ -2049,7 +2034,6 @@ impl MobActor {
         input: mob_dsl::MobMachineInput,
         context: &str,
     ) -> Result<PreparedDslTransition, MobError> {
-        self.ensure_destroy_mutation_allowed(context)?;
         let input_debug = format!("{input:?}");
         let mut authority =
             mob_dsl::MobMachineAuthority::recover_from_state(self.dsl_authority.state().clone())
@@ -2074,7 +2058,6 @@ impl MobActor {
         signal: mob_dsl::MobMachineSignal,
         context: &str,
     ) -> Result<PreparedDslTransition, MobError> {
-        self.ensure_destroy_mutation_allowed(context)?;
         let signal_debug = format!("{signal:?}");
         let mut authority =
             mob_dsl::MobMachineAuthority::recover_from_state(self.dsl_authority.state().clone())
@@ -2101,7 +2084,6 @@ impl MobActor {
         inputs: &[mob_dsl::MobMachineInput],
         context: &str,
     ) -> Result<PreparedDslInput, MobError> {
-        self.ensure_destroy_mutation_allowed(context)?;
         let mut authority =
             mob_dsl::MobMachineAuthority::recover_from_state(self.dsl_authority.state().clone())
                 .map_err(|error| {
@@ -2505,7 +2487,6 @@ impl MobActor {
         input: mob_dsl::MobMachineInput,
         context: &str,
     ) -> Result<mob_dsl::MobMachineState, MobError> {
-        self.ensure_destroy_mutation_allowed(context)?;
         let input_debug = format!("{input:?}");
         let mut authority =
             mob_dsl::MobMachineAuthority::recover_from_state(self.dsl_authority.state().clone())
@@ -2528,7 +2509,6 @@ impl MobActor {
         signal: mob_dsl::MobMachineSignal,
         context: &str,
     ) -> Result<(), MobError> {
-        self.ensure_destroy_mutation_allowed(context)?;
         let signal_debug = format!("{signal:?}");
         let transition = self
             .dsl_authority
@@ -4920,10 +4900,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::RotateSupervisor { reply_tx } => {
-                    let result = match self.ensure_destroy_mutation_allowed("rotate_supervisor") {
-                        Ok(()) => self.handle_rotate_supervisor().await,
-                        Err(error) => Err(error),
-                    };
+                    let result = self.handle_rotate_supervisor().await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::PollEvents {

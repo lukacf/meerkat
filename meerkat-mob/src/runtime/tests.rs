@@ -9588,6 +9588,19 @@ fn test_mob_command_admission_arms_do_not_shadow_mob_machine_guards() {
     }
 }
 
+#[test]
+fn test_generated_dsl_paths_do_not_shadow_destroy_admission() {
+    let source = include_str!("actor.rs");
+    assert!(
+        !source.contains("ensure_destroy_mutation_allowed"),
+        "generated MobMachine apply/prepare paths must let MobMachine guards decide destroy-admitted legality"
+    );
+    assert!(
+        !source.contains("destroy_admitted_error"),
+        "actor-local destroyed admission errors must not preempt generated MobMachine transitions"
+    );
+}
+
 #[tokio::test]
 async fn test_stopped_missing_member_wire_is_rejected_by_machine_admission() {
     let (handle, _service) = create_test_mob(sample_definition()).await;

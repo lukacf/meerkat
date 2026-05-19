@@ -157,7 +157,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SubscribeMobEvents`
 - `PollEvents`
 - `ReplayAllEvents`
-- `RecordOperatorActionProvenance`
+- `RecordOperatorActionProvenance`(tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String>)
 - `GetMember`
 - `SetSpawnPolicy`
 - `Shutdown`
@@ -234,6 +234,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RequestRuntimeDestroy`(session_id: SessionId)
 - `RequestSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `AppendLifecycleJournal`(kind: MobLifecycleJournalKind, agent_identity: Option<AgentIdentity>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, session_id: Option<SessionId>)
+- `AppendOperatorActionProvenance`(tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String>)
 - `EmitMemberLifecycleNotice`(kind: MemberLifecycleKind)
 - `EmitRunLifecycleNotice`
 - `EmitFlowRunNotice`
@@ -818,22 +819,26 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordOperatorActionProvenanceRunning`
 - From: `Running`
-- On: `RecordOperatorActionProvenance`()
+- On: `RecordOperatorActionProvenance`(tool_name, principal_token, caller_provenance, audit_invocation_id)
+- Emits: `AppendOperatorActionProvenance`
 - To: `Running`
 
 ### `RecordOperatorActionProvenanceStopped`
 - From: `Stopped`
-- On: `RecordOperatorActionProvenance`()
+- On: `RecordOperatorActionProvenance`(tool_name, principal_token, caller_provenance, audit_invocation_id)
+- Emits: `AppendOperatorActionProvenance`
 - To: `Stopped`
 
 ### `RecordOperatorActionProvenanceCompleted`
 - From: `Completed`
-- On: `RecordOperatorActionProvenance`()
+- On: `RecordOperatorActionProvenance`(tool_name, principal_token, caller_provenance, audit_invocation_id)
+- Emits: `AppendOperatorActionProvenance`
 - To: `Completed`
 
 ### `RecordOperatorActionProvenanceDestroyed`
 - From: `Destroyed`
-- On: `RecordOperatorActionProvenance`()
+- On: `RecordOperatorActionProvenance`(tool_name, principal_token, caller_provenance, audit_invocation_id)
+- Emits: `AppendOperatorActionProvenance`
 - To: `Destroyed`
 
 ### `SetSpawnPolicyRunning`

@@ -11,6 +11,9 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     MobLifecycleJournalKind,
 };
 
+pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
+pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
+
 // ---------------------------------------------------------------------------
 // Bridging newtypes
 // ---------------------------------------------------------------------------

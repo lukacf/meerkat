@@ -707,6 +707,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AppendLifecycleJournal`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `AppendOperatorActionProvenance`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `EmitMemberLifecycleNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`

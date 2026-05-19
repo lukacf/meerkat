@@ -2221,6 +2221,40 @@ impl MobActor {
         }
     }
 
+    fn operator_action_recorded_event_from_generated_effect(
+        transition: &mob_dsl::MobMachineTransition,
+        context: &str,
+    ) -> Result<MobEventKind, MobError> {
+        let mut authorized = transition
+            .effects()
+            .iter()
+            .filter_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::AppendOperatorActionProvenance {
+                    tool_name,
+                    principal_token,
+                    caller_provenance,
+                    audit_invocation_id,
+                } => Some(MobEventKind::OperatorActionRecorded {
+                    tool_name: tool_name.clone(),
+                    principal_token: principal_token.clone(),
+                    caller_provenance: caller_provenance.clone(),
+                    audit_invocation_id: audit_invocation_id.clone(),
+                }),
+                _ => None,
+            });
+        let Some(event) = authorized.next() else {
+            return Err(MobError::Internal(format!(
+                "MobMachine {context} produced no generated operator provenance journal authority"
+            )));
+        };
+        if authorized.next().is_some() {
+            return Err(MobError::Internal(format!(
+                "MobMachine {context} produced multiple generated operator provenance journal authorities"
+            )));
+        }
+        Ok(event)
+    }
+
     fn prepare_command_admission(
         &self,
         input: mob_dsl::MobMachineInput,
@@ -4913,12 +4947,9 @@ impl MobActor {
                     authority_context,
                     reply_tx,
                 } => {
-                    let result = self
-                        .events
-                        .append(NewMobEvent {
-                            mob_id: self.definition.id.clone(),
-                            timestamp: None,
-                            kind: MobEventKind::OperatorActionRecorded {
+                    let result = async {
+                        let prepared = self.prepare_dsl_input_transition(
+                            mob_dsl::MobMachineInput::RecordOperatorActionProvenance {
                                 tool_name,
                                 principal_token: authority_context.principal_token().clone(),
                                 caller_provenance: authority_context.caller_provenance().cloned(),
@@ -4926,10 +4957,24 @@ impl MobActor {
                                     .audit_invocation_id()
                                     .map(ToOwned::to_owned),
                             },
-                        })
-                        .await
-                        .map(|_| ())
-                        .map_err(MobError::from);
+                            "record_operator_action_provenance",
+                        )?;
+                        let kind = Self::operator_action_recorded_event_from_generated_effect(
+                            &prepared.transition,
+                            "record_operator_action_provenance",
+                        )?;
+                        self.events
+                            .append(NewMobEvent {
+                                mob_id: self.definition.id.clone(),
+                                timestamp: None,
+                                kind,
+                            })
+                            .await
+                            .map_err(MobError::from)?;
+                        self.commit_prepared_dsl_transition(prepared);
+                        Ok(())
+                    }
+                    .await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ForceCancel {

@@ -1229,6 +1229,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Reset",
                 ],
             ),
+            NamedTypeBinding::type_path(
+                "MobToolCallerProvenance",
+                "meerkat_core::service::MobToolCallerProvenance",
+            ),
             NamedTypeBinding::string_enum("MobMemberState", &["Active", "Retiring"]),
             NamedTypeBinding::string_enum(
                 "MobPhase",
@@ -1259,6 +1263,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("RunStepKey"),
             NamedTypeBinding::string("SessionId"),
             NamedTypeBinding::string("StepId"),
+            NamedTypeBinding::type_path(
+                "OpaquePrincipalToken",
+                "meerkat_core::service::OpaquePrincipalToken",
+            ),
             NamedTypeBinding::string_enum(
                 "StepRunStatus",
                 &["Dispatched", "Completed", "Failed", "Skipped", "Canceled"],

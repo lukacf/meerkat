@@ -27544,8 +27544,14 @@ async fn test_mob_handle_list_runs_reads_public_run_listing() {
 #[tokio::test]
 async fn test_record_operator_action_provenance_round_trips_through_machine_command_surface() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
+    let caller_provenance = meerkat_core::service::MobToolCallerProvenance::new()
+        .with_session_id(SessionId::from_uuid(Uuid::nil()))
+        .with_mob_id("caller-mob")
+        .with_member_id("caller-lead");
     let authority = meerkat_core::service::MobToolAuthorityContext::create_only_generated()
+        .with_caller_provenance(caller_provenance.clone())
         .with_audit_invocation_id("audit-machine-surface");
+    let expected_principal = authority.principal_token().clone();
 
     handle
         .record_operator_action_provenance("spawn_member", &authority)
@@ -27558,12 +27564,16 @@ async fn test_record_operator_action_provenance_round_trips_through_machine_comm
             &event.kind,
             MobEventKind::OperatorActionRecorded {
                 tool_name,
+                principal_token,
+                caller_provenance: recorded_caller_provenance,
                 audit_invocation_id,
                 ..
             } if tool_name == "spawn_member"
+                && principal_token == &expected_principal
+                && recorded_caller_provenance.as_ref() == Some(&caller_provenance)
                 && audit_invocation_id.as_deref() == Some("audit-machine-surface")
         )),
-        "operator action provenance should be appended through the machine command surface"
+        "operator action provenance should be appended through generated machine authority"
     );
 }
 

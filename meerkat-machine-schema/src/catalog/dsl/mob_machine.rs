@@ -382,7 +382,7 @@ macro_rules! mob_catalog_machine_dsl {
             SubscribeMobEvents,
             PollEvents,
             ReplayAllEvents,
-            RecordOperatorActionProvenance,
+            RecordOperatorActionProvenance { tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String> },
             GetMember,
             SetSpawnPolicy,
             Shutdown,
@@ -462,6 +462,7 @@ macro_rules! mob_catalog_machine_dsl {
             RequestRuntimeDestroy { session_id: SessionId },
             RequestSessionIngressDetachForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
             AppendLifecycleJournal { kind: Enum<MobLifecycleJournalKind>, agent_identity: Option<AgentIdentity>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, session_id: Option<SessionId> },
+            AppendOperatorActionProvenance { tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String> },
             EmitMemberLifecycleNotice { kind: Enum<MemberLifecycleKind> },
             EmitRunLifecycleNotice,
             EmitFlowRunNotice,
@@ -522,6 +523,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition RequestRuntimeDestroy => routed [MeerkatMachine],
         disposition RequestSessionIngressDetachForMobDestroy => external handoff mob_destroying_session_ingress,
         disposition AppendLifecycleJournal => local,
+        disposition AppendOperatorActionProvenance => local,
         disposition EmitMemberLifecycleNotice => external,
         disposition EmitRunLifecycleNotice => external,
         disposition EmitFlowRunNotice => external,
@@ -1465,28 +1467,52 @@ macro_rules! mob_catalog_machine_dsl {
         // =====================================================================
 
         transition RecordOperatorActionProvenanceRunning {
-            on input RecordOperatorActionProvenance
+            on input RecordOperatorActionProvenance { tool_name, principal_token, caller_provenance, audit_invocation_id }
             guard { self.lifecycle_phase == Phase::Running }
             update {}
             to Running
+            emit AppendOperatorActionProvenance {
+                tool_name: tool_name,
+                principal_token: principal_token,
+                caller_provenance: caller_provenance,
+                audit_invocation_id: audit_invocation_id
+            }
         }
         transition RecordOperatorActionProvenanceStopped {
-            on input RecordOperatorActionProvenance
+            on input RecordOperatorActionProvenance { tool_name, principal_token, caller_provenance, audit_invocation_id }
             guard { self.lifecycle_phase == Phase::Stopped }
             update {}
             to Stopped
+            emit AppendOperatorActionProvenance {
+                tool_name: tool_name,
+                principal_token: principal_token,
+                caller_provenance: caller_provenance,
+                audit_invocation_id: audit_invocation_id
+            }
         }
         transition RecordOperatorActionProvenanceCompleted {
-            on input RecordOperatorActionProvenance
+            on input RecordOperatorActionProvenance { tool_name, principal_token, caller_provenance, audit_invocation_id }
             guard { self.lifecycle_phase == Phase::Completed }
             update {}
             to Completed
+            emit AppendOperatorActionProvenance {
+                tool_name: tool_name,
+                principal_token: principal_token,
+                caller_provenance: caller_provenance,
+                audit_invocation_id: audit_invocation_id
+            }
         }
         transition RecordOperatorActionProvenanceDestroyed {
-            on input RecordOperatorActionProvenance
+            on input RecordOperatorActionProvenance { tool_name, principal_token, caller_provenance, audit_invocation_id }
             guard { self.lifecycle_phase == Phase::Destroyed }
             update {}
             to Destroyed
+            emit AppendOperatorActionProvenance {
+                tool_name: tool_name,
+                principal_token: principal_token,
+                caller_provenance: caller_provenance,
+                audit_invocation_id: audit_invocation_id
+            }
         }
 
         transition SetSpawnPolicyRunning {
@@ -4009,6 +4035,9 @@ macro_rules! mob_catalog_machine_dsl {
 }
 
 crate::mob_catalog_machine_dsl!("self", "catalog::dsl::mob_machine");
+
+pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
+pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
 
 // ---------------------------------------------------------------------------
 // Bridging newtypes

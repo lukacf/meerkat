@@ -1431,6 +1431,7 @@ impl std::fmt::Display for MobMemberState {
         f.write_str(self.as_str())
     }
 }
+pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -1501,6 +1502,7 @@ impl std::fmt::Display for NodeRunStatus {
         f.write_str(self.as_str())
     }
 }
+pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
 pub type PeerId = meerkat_machine_schema::catalog::dsl::mob_machine::PeerId;
 #[derive(
     Debug,
@@ -2321,7 +2323,12 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReplayAllEvents {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RecordOperatorActionProvenance {}
+    pub struct RecordOperatorActionProvenance {
+        pub tool_name: String,
+        pub principal_token: OpaquePrincipalToken,
+        pub caller_provenance: Option<MobToolCallerProvenance>,
+        pub audit_invocation_id: Option<String>,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct GetMember {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2924,6 +2931,13 @@ pub mod effects {
         pub session_id: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AppendOperatorActionProvenance {
+        pub tool_name: String,
+        pub principal_token: OpaquePrincipalToken,
+        pub caller_provenance: Option<MobToolCallerProvenance>,
+        pub audit_invocation_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EmitMemberLifecycleNotice {
         pub kind: MemberLifecycleKind,
     }
@@ -3050,6 +3064,7 @@ pub enum Effect {
     RequestRuntimeDestroy(effects::RequestRuntimeDestroy),
     RequestSessionIngressDetachForMobDestroy(effects::RequestSessionIngressDetachForMobDestroy),
     AppendLifecycleJournal(effects::AppendLifecycleJournal),
+    AppendOperatorActionProvenance(effects::AppendOperatorActionProvenance),
     EmitMemberLifecycleNotice(effects::EmitMemberLifecycleNotice),
     EmitRunLifecycleNotice(effects::EmitRunLifecycleNotice),
     EmitFlowRunNotice(effects::EmitFlowRunNotice),
@@ -3087,6 +3102,7 @@ pub enum EffectKind {
     RequestRuntimeDestroy,
     RequestSessionIngressDetachForMobDestroy,
     AppendLifecycleJournal,
+    AppendOperatorActionProvenance,
     EmitMemberLifecycleNotice,
     EmitRunLifecycleNotice,
     EmitFlowRunNotice,

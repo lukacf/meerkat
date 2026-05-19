@@ -162,7 +162,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::SubscribeMobEvents
             | mob_dsl::MobMachineInput::PollEvents
             | mob_dsl::MobMachineInput::ReplayAllEvents
-            | mob_dsl::MobMachineInput::RecordOperatorActionProvenance
+            | mob_dsl::MobMachineInput::RecordOperatorActionProvenance { .. }
             | mob_dsl::MobMachineInput::GetMember
             | mob_dsl::MobMachineInput::SetSpawnPolicy
             | mob_dsl::MobMachineInput::Shutdown
@@ -1242,7 +1242,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::SubscribeMobEvents
             | mob_dsl::MobMachineInput::PollEvents
             | mob_dsl::MobMachineInput::ReplayAllEvents
-            | mob_dsl::MobMachineInput::RecordOperatorActionProvenance
+            | mob_dsl::MobMachineInput::RecordOperatorActionProvenance { .. }
             | mob_dsl::MobMachineInput::GetMember
             | mob_dsl::MobMachineInput::SetSpawnPolicy
             | mob_dsl::MobMachineInput::Shutdown

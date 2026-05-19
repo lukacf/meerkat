@@ -17,7 +17,6 @@ use meerkat_core::comms::{
     PeerId, PeerRoute, TrustedPeerDescriptor,
 };
 use meerkat_core::event::AgentEvent;
-use meerkat_core::generated::comms_trust_authority;
 use meerkat_core::interaction::{
     InteractionContent, PeerIngressFact, PeerInputCandidate, PeerInputClass,
 };
@@ -45,22 +44,6 @@ use crate::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention, PeerInput,
 };
 
-struct SupervisorTrustEffect {
-    peer_id: String,
-    epoch: u64,
-}
-
-impl comms_trust_authority::GeneratedMeerkatMachineSupervisorTrustHandoff
-    for SupervisorTrustEffect
-{
-    fn peer_id(&self) -> &str {
-        self.peer_id.as_str()
-    }
-
-    fn epoch(&self) -> u64 {
-        self.epoch
-    }
-}
 use crate::meerkat_machine::{
     DrainExitReason, MeerkatMachine, SupervisorBinding, SupervisorBindingStageError,
 };
@@ -941,31 +924,17 @@ async fn apply_generated_trust_remove(
 }
 
 fn supervisor_publish_authority(
-    peer_id: &str,
-    epoch: u64,
+    obligation: &crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation,
 ) -> Result<CommsTrustMutationAuthority, String> {
-    let effect = SupervisorTrustEffect {
-        peer_id: peer_id.to_owned(),
-        epoch,
-    };
-    comms_trust_authority::MeerkatMachineSupervisorTrustHandoff::from_generated_supervisor_publish(
-        &effect,
-    )
-    .publish_authority_for(peer_id)
+    crate::generated::comms_trust_authority::supervisor_publish_handoff(obligation)
+        .publish_authority_for(&obligation.peer_id)
 }
 
 fn supervisor_revoke_authority(
-    peer_id: &str,
-    epoch: u64,
+    obligation: &crate::protocol_supervisor_trust_revoke::SupervisorTrustRevokeObligation,
 ) -> Result<CommsTrustMutationAuthority, String> {
-    let effect = SupervisorTrustEffect {
-        peer_id: peer_id.to_owned(),
-        epoch,
-    };
-    comms_trust_authority::MeerkatMachineSupervisorTrustHandoff::from_generated_supervisor_revoke(
-        &effect,
-    )
-    .revoke_authority_for(peer_id)
+    crate::generated::comms_trust_authority::supervisor_revoke_handoff(obligation)
+        .revoke_authority_for(&obligation.peer_id)
 }
 
 async fn publish_supervisor_trust_from_generated_obligation(
@@ -978,7 +947,7 @@ async fn publish_supervisor_trust_from_generated_obligation(
     apply_generated_trust_add(
         comms_runtime,
         trusted_peer,
-        supervisor_publish_authority(&obligation.peer_id, obligation.epoch)?,
+        supervisor_publish_authority(obligation)?,
     )
     .await?;
     adapter
@@ -1570,10 +1539,7 @@ async fn try_handle_supervisor_bridge_command(
             if let Err(error) = apply_generated_trust_add(
                 comms_runtime,
                 publish_spec,
-                match supervisor_publish_authority(
-                    &publish_obligation.peer_id,
-                    publish_obligation.epoch,
-                ) {
+                match supervisor_publish_authority(&publish_obligation) {
                     Ok(authority) => authority,
                     Err(error) => {
                         let _ = adapter
@@ -1867,10 +1833,7 @@ async fn try_handle_supervisor_bridge_command(
                 if let Err(error) = apply_generated_trust_remove(
                     comms_runtime,
                     revoke_obligation.peer_id.clone(),
-                    match supervisor_revoke_authority(
-                        &revoke_obligation.peer_id,
-                        revoke_obligation.epoch,
-                    ) {
+                    match supervisor_revoke_authority(&revoke_obligation) {
                         Ok(authority) => authority,
                         Err(error) => {
                             let _ = adapter
@@ -2054,10 +2017,7 @@ async fn try_handle_supervisor_bridge_command(
             if let Err(error) = apply_generated_trust_remove(
                 comms_runtime,
                 revoke_obligation.peer_id.clone(),
-                match supervisor_revoke_authority(
-                    &revoke_obligation.peer_id,
-                    revoke_obligation.epoch,
-                ) {
+                match supervisor_revoke_authority(&revoke_obligation) {
                     Ok(authority) => authority,
                     Err(error) => {
                         let _ = adapter
@@ -2564,6 +2524,7 @@ mod tests {
     };
     use meerkat_core::InteractionId;
     use meerkat_core::SendError;
+    use meerkat_core::generated::comms_trust_authority;
     use meerkat_core::interaction::InboxInteraction;
     use meerkat_core::interaction::{PeerIngressConvention, PeerIngressIdentity};
     use meerkat_core::types::HandlingMode;

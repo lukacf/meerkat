@@ -20,7 +20,9 @@ pub enum RuntimeState {
     Running,
     /// Retired — no longer accepting new input, draining existing.
     Retired,
-    /// Permanently stopped (terminal).
+    /// Stopped by runtime control; generated lifecycle authority classifies
+    /// this as non-terminal while the runtime can still be recovered or
+    /// destroyed.
     Stopped,
     /// Destroyed (terminal).
     Destroyed,

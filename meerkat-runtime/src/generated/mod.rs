@@ -3,4 +3,5 @@
 // generated artifact so the generated-header audit can distinguish codegen
 // output from stable module wiring.
 
+pub mod comms_trust_authority;
 pub mod meerkat_mob_seam;

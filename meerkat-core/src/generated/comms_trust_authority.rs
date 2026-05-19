@@ -2,30 +2,36 @@
 
 use crate::comms::CommsTrustMutationAuthority;
 
-/// # Safety
+/// Generated-only source contract.
 ///
 /// Implement only for typed facts emitted from generated machine/composition
-/// transitions. Handwritten sources must not implement this trait to mint trust
+/// transitions. Production implementations live in generated modules owned by
+/// the emitting machine/composition seam; handwritten runtime code consumes the
+/// resulting handoff objects and must not implement this trait to mint trust
 /// authority.
 pub trait GeneratedMeerkatMachinePeerProjectionHandoff {
     fn peer_id(&self) -> &str;
     fn epoch(&self) -> u64;
 }
 
-/// # Safety
+/// Generated-only source contract.
 ///
 /// Implement only for typed facts emitted from generated machine/composition
-/// transitions. Handwritten sources must not implement this trait to mint trust
+/// transitions. Production implementations live in generated modules owned by
+/// the emitting machine/composition seam; handwritten runtime code consumes the
+/// resulting handoff objects and must not implement this trait to mint trust
 /// authority.
 pub trait GeneratedMeerkatMachineSupervisorTrustHandoff {
     fn peer_id(&self) -> &str;
     fn epoch(&self) -> u64;
 }
 
-/// # Safety
+/// Generated-only source contract.
 ///
 /// Implement only for typed facts emitted from generated machine/composition
-/// transitions. Handwritten sources must not implement this trait to mint trust
+/// transitions. Production implementations live in generated modules owned by
+/// the emitting machine/composition seam; handwritten runtime code consumes the
+/// resulting handoff objects and must not implement this trait to mint trust
 /// authority.
 pub trait GeneratedMobMachineMemberTrustHandoff {
     fn edge_a(&self) -> &str;
@@ -35,10 +41,12 @@ pub trait GeneratedMobMachineMemberTrustHandoff {
     fn epoch(&self) -> u64;
 }
 
-/// # Safety
+/// Generated-only source contract.
 ///
 /// Implement only for typed facts emitted from generated machine/composition
-/// transitions. Handwritten sources must not implement this trait to mint trust
+/// transitions. Production implementations live in generated modules owned by
+/// the emitting machine/composition seam; handwritten runtime code consumes the
+/// resulting handoff objects and must not implement this trait to mint trust
 /// authority.
 pub trait GeneratedMobMachineExternalPeerTrustHandoff {
     fn peer_id(&self) -> &str;
@@ -325,6 +333,10 @@ enum MobMachineExternalPeerTrustOperation {
 }
 
 impl MobMachineExternalPeerTrustHandoff {
+    pub fn peer_id(&self) -> &str {
+        self.peer_id.as_str()
+    }
+
     pub fn from_generated_external_peer_wiring(
         source: &impl GeneratedMobMachineExternalPeerTrustHandoff,
     ) -> Self {

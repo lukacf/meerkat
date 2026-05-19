@@ -357,6 +357,11 @@ pub enum CommsTrustMutationAuthority {
     MeerkatMachinePeerProjection { epoch: u64 },
     MeerkatMachineSupervisorPublish { peer_id: String, epoch: u64 },
     MeerkatMachineSupervisorRevoke { peer_id: String, epoch: u64 },
+    MobMachinePeerWiring { peer_id: String, epoch: u64 },
+    MobMachinePeerUnwiring { peer_id: String, epoch: u64 },
+    MobMachinePeerRepair { peer_id: String, epoch: u64 },
+    MobMachinePeerRetire { peer_id: String, epoch: u64 },
+    MobMachineResumeRepair { peer_id: String, epoch: u64 },
 }
 
 /// Trust-store projection mutation requested by generated authority.

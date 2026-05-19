@@ -1,7 +1,10 @@
 use super::*;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use meerkat_core::comms::TrustedPeerDescriptor;
+use meerkat_core::comms::{
+    CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, SendError,
+    TrustedPeerDescriptor,
+};
 use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
 use std::collections::HashSet;
@@ -76,6 +79,39 @@ fn apply_seeded_mob_signal(
     })?;
     let _ = transition;
     Ok(())
+}
+
+fn unexpected_resume_trust_mutation_result(
+    operation: &'static str,
+    result: CommsTrustMutationResult,
+) -> SendError {
+    SendError::Internal(format!(
+        "{operation} returned unexpected trust mutation result: {result:?}"
+    ))
+}
+
+async fn apply_resume_trusted_peer_add(
+    comms: &(dyn CoreCommsRuntime + '_),
+    peer: TrustedPeerDescriptor,
+    topology_epoch: u64,
+) -> Result<(), SendError> {
+    let peer_id = peer.peer_id.to_string();
+    match comms
+        .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
+            peer,
+            authority: CommsTrustMutationAuthority::MobMachineResumeRepair {
+                peer_id,
+                epoch: topology_epoch,
+            },
+        })
+        .await?
+    {
+        CommsTrustMutationResult::Added => Ok(()),
+        result => Err(unexpected_resume_trust_mutation_result(
+            "resume add trusted peer",
+            result,
+        )),
+    }
 }
 
 fn apply_seeded_member_session_binding(
@@ -1527,6 +1563,7 @@ impl MobBuilder {
         let entries = roster.list().cloned().collect::<Vec<_>>();
         let machine_wiring_edges = dsl_authority.state().wiring_edges.clone();
         let machine_external_peer_edges = dsl_authority.state().external_peer_edges.clone();
+        let machine_topology_epoch = dsl_authority.state().topology_epoch;
         let broken_members = tool_handle
             .restore_diagnostics
             .read()
@@ -1649,7 +1686,13 @@ impl MobBuilder {
                 {
                     continue;
                 }
-                if let Err(error) = comms_a.add_trusted_peer(spec.clone()).await {
+                if let Err(error) = apply_resume_trusted_peer_add(
+                    comms_a.as_ref(),
+                    spec.clone(),
+                    machine_topology_epoch,
+                )
+                .await
+                {
                     tracing::warn!(
                         agent_identity = %entry.agent_identity,
                         peer = %spec.name,

@@ -20,7 +20,8 @@ use crate::tokio;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use meerkat_core::comms::{
-    PeerAddress, PeerLifecycleKind, PeerName, PeerRoute, TrustedPeerDescriptor,
+    CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, PeerAddress,
+    PeerLifecycleKind, PeerName, PeerRoute, SendError, TrustedPeerDescriptor,
 };
 use meerkat_core::time_compat::SystemTime;
 use serde::de::DeserializeOwned;
@@ -513,12 +514,130 @@ impl MobActor {
         peer.peer_id.to_string()
     }
 
-    async fn remove_trusted_peer_by_descriptor(
-        comms: &dyn CoreCommsRuntime,
-        peer: &TrustedPeerDescriptor,
-    ) -> Result<bool, meerkat_core::comms::SendError> {
-        let peer_id = peer.peer_id.to_string();
-        comms.remove_trusted_peer(&peer_id).await
+    fn trust_epoch(&self) -> u64 {
+        self.dsl_authority.state().topology_epoch
+    }
+
+    fn mob_peer_wiring_authority(&self, peer_id: &str) -> CommsTrustMutationAuthority {
+        CommsTrustMutationAuthority::MobMachinePeerWiring {
+            peer_id: peer_id.to_string(),
+            epoch: self.trust_epoch(),
+        }
+    }
+
+    fn mob_peer_unwiring_authority(&self, peer_id: &str) -> CommsTrustMutationAuthority {
+        CommsTrustMutationAuthority::MobMachinePeerUnwiring {
+            peer_id: peer_id.to_string(),
+            epoch: self.trust_epoch(),
+        }
+    }
+
+    fn mob_peer_repair_authority(&self, peer_id: &str) -> CommsTrustMutationAuthority {
+        CommsTrustMutationAuthority::MobMachinePeerRepair {
+            peer_id: peer_id.to_string(),
+            epoch: self.trust_epoch(),
+        }
+    }
+
+    fn mob_peer_retire_authority(&self, peer_id: &str) -> CommsTrustMutationAuthority {
+        CommsTrustMutationAuthority::MobMachinePeerRetire {
+            peer_id: peer_id.to_string(),
+            epoch: self.trust_epoch(),
+        }
+    }
+
+    fn supervisor_publish_authority(peer_id: &str, epoch: u64) -> CommsTrustMutationAuthority {
+        CommsTrustMutationAuthority::MeerkatMachineSupervisorPublish {
+            peer_id: peer_id.to_string(),
+            epoch,
+        }
+    }
+
+    fn supervisor_revoke_authority(peer_id: &str, epoch: u64) -> CommsTrustMutationAuthority {
+        CommsTrustMutationAuthority::MeerkatMachineSupervisorRevoke {
+            peer_id: peer_id.to_string(),
+            epoch,
+        }
+    }
+
+    fn unexpected_trust_mutation_result(
+        operation: &'static str,
+        result: CommsTrustMutationResult,
+    ) -> SendError {
+        SendError::Internal(format!(
+            "{operation} returned unexpected trust mutation result: {result:?}"
+        ))
+    }
+
+    async fn apply_trusted_peer_add(
+        comms: &(dyn CoreCommsRuntime + '_),
+        peer: TrustedPeerDescriptor,
+        authority: CommsTrustMutationAuthority,
+    ) -> Result<(), SendError> {
+        match comms
+            .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer { peer, authority })
+            .await?
+        {
+            CommsTrustMutationResult::Added => Ok(()),
+            result => Err(Self::unexpected_trust_mutation_result(
+                "add trusted peer",
+                result,
+            )),
+        }
+    }
+
+    async fn apply_trusted_peer_remove(
+        comms: &(dyn CoreCommsRuntime + '_),
+        peer_id: String,
+        authority: CommsTrustMutationAuthority,
+    ) -> Result<bool, SendError> {
+        match comms
+            .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer { peer_id, authority })
+            .await?
+        {
+            CommsTrustMutationResult::Removed { removed } => Ok(removed),
+            result => Err(Self::unexpected_trust_mutation_result(
+                "remove trusted peer",
+                result,
+            )),
+        }
+    }
+
+    async fn apply_private_trusted_peer_add(
+        comms: &(dyn CoreCommsRuntime + '_),
+        peer: TrustedPeerDescriptor,
+        authority: CommsTrustMutationAuthority,
+    ) -> Result<(), SendError> {
+        match comms
+            .apply_trust_mutation(CommsTrustMutation::AddPrivateTrustedPeer { peer, authority })
+            .await?
+        {
+            CommsTrustMutationResult::Added => Ok(()),
+            result => Err(Self::unexpected_trust_mutation_result(
+                "add private trusted peer",
+                result,
+            )),
+        }
+    }
+
+    async fn apply_private_trusted_peer_remove(
+        comms: &(dyn CoreCommsRuntime + '_),
+        peer_id: String,
+        authority: CommsTrustMutationAuthority,
+    ) -> Result<bool, SendError> {
+        match comms
+            .apply_trust_mutation(CommsTrustMutation::RemovePrivateTrustedPeer {
+                peer_id,
+                authority,
+            })
+            .await?
+        {
+            CommsTrustMutationResult::Removed { removed } => Ok(removed),
+            result => Err(Self::unexpected_trust_mutation_result(
+                "remove private trusted peer",
+                result,
+            )),
+        }
     }
 
     fn supervisor_spec_for_authority(
@@ -624,9 +743,15 @@ impl MobActor {
                 let previous_removal_key = previous_private_trust_removal_key
                     .map(str::to_string)
                     .unwrap_or_else(|| revoke_obligation.peer_id.clone());
-                if let Err(error) = comms
-                    .remove_private_trusted_peer(&previous_removal_key)
-                    .await
+                if let Err(error) = Self::apply_private_trusted_peer_remove(
+                    comms.as_ref(),
+                    previous_removal_key,
+                    Self::supervisor_revoke_authority(
+                        &revoke_obligation.peer_id,
+                        revoke_obligation.epoch,
+                    ),
+                )
+                .await
                 {
                     let feedback = adapter
                         .stage_supervisor_trust_revoke_failed(
@@ -773,7 +898,13 @@ impl MobActor {
             let publish_removal_key = Self::trusted_peer_removal_key(&publish_spec);
             let rollback_binding = previous.clone();
 
-            if let Err(error) = comms.add_private_trusted_peer(publish_spec.clone()).await {
+            if let Err(error) = Self::apply_private_trusted_peer_add(
+                comms.as_ref(),
+                publish_spec.clone(),
+                Self::supervisor_publish_authority(&publish_peer_id, publish_epoch),
+            )
+            .await
+            {
                 let _ = adapter
                     .stage_supervisor_trust_publish_failed(
                         session_id,
@@ -799,9 +930,12 @@ impl MobActor {
                     None
                 } else {
                     Some(
-                        comms
-                            .remove_private_trusted_peer(&publish_removal_key)
-                            .await,
+                        Self::apply_private_trusted_peer_remove(
+                            comms.as_ref(),
+                            publish_removal_key.clone(),
+                            Self::supervisor_revoke_authority(&publish_peer_id, publish_epoch),
+                        )
+                        .await,
                     )
                 };
                 let mut reason = format!(
@@ -843,9 +977,12 @@ impl MobActor {
                     None
                 } else {
                     Some(
-                        comms
-                            .remove_private_trusted_peer(&publish_removal_key)
-                            .await,
+                        Self::apply_private_trusted_peer_remove(
+                            comms.as_ref(),
+                            publish_removal_key.clone(),
+                            Self::supervisor_revoke_authority(&publish_peer_id, publish_epoch),
+                        )
+                        .await,
                     )
                 };
                 let mut reason = format!(
@@ -918,9 +1055,12 @@ impl MobActor {
                 );
                 return;
             };
-            if let Err(error) = comms
-                .remove_private_trusted_peer(&install.removal_key)
-                .await
+            if let Err(error) = Self::apply_private_trusted_peer_remove(
+                comms.as_ref(),
+                install.removal_key.clone(),
+                Self::supervisor_revoke_authority(&install.peer_id, install.epoch),
+            )
+            .await
             {
                 let _ = adapter
                     .stage_supervisor_trust_revoke_failed(
@@ -954,9 +1094,12 @@ impl MobActor {
             return;
         }
 
-        if let Err(error) = comms
-            .remove_private_trusted_peer(&install.removal_key)
-            .await
+        if let Err(error) = Self::apply_private_trusted_peer_remove(
+            comms.as_ref(),
+            install.removal_key.clone(),
+            Self::supervisor_revoke_authority(&install.peer_id, install.epoch),
+        )
+        .await
         {
             tracing::warn!(
                 %session_id,
@@ -1042,10 +1185,13 @@ impl MobActor {
                         &obligation,
                     )
                     .map_err(MobError::WiringError)?;
-                comms
-                    .add_private_trusted_peer(trusted_peer)
-                    .await
-                    .map_err(|error| MobError::WiringError(error.to_string()))?;
+                Self::apply_private_trusted_peer_add(
+                    comms.as_ref(),
+                    trusted_peer,
+                    Self::supervisor_publish_authority(&obligation.peer_id, obligation.epoch),
+                )
+                .await
+                .map_err(|error| MobError::WiringError(error.to_string()))?;
                 adapter
                     .stage_supervisor_trust_published(
                         session_id,
@@ -6255,13 +6401,30 @@ impl MobActor {
                         ..
                     },
                 ) => {
-                    if let Err(error) = local_comms.add_trusted_peer(peer_spec.clone()).await {
+                    let peer_key = Self::trusted_peer_removal_key(peer_spec);
+                    let local_key = Self::trusted_peer_removal_key(local_spec);
+                    if let Err(error) = Self::apply_trusted_peer_add(
+                        local_comms.as_ref(),
+                        peer_spec.clone(),
+                        self.mob_peer_repair_authority(&peer_key),
+                    )
+                    .await
+                    {
                         return Err(MobError::from(error));
                     }
-                    if let Err(error) = peer_comms.add_trusted_peer(local_spec.clone()).await {
-                        let _ = local_comms
-                            .remove_trusted_peer(&Self::trusted_peer_removal_key(peer_spec))
-                            .await;
+                    if let Err(error) = Self::apply_trusted_peer_add(
+                        peer_comms.as_ref(),
+                        local_spec.clone(),
+                        self.mob_peer_repair_authority(&local_key),
+                    )
+                    .await
+                    {
+                        let _ = Self::apply_trusted_peer_remove(
+                            local_comms.as_ref(),
+                            peer_key.clone(),
+                            self.mob_peer_unwiring_authority(&peer_key),
+                        )
+                        .await;
                         return Err(MobError::from(error));
                     }
                 }
@@ -6321,7 +6484,14 @@ impl MobActor {
                         binding: peer_binding,
                     },
                 ) => {
-                    if let Err(error) = local_comms.add_trusted_peer(peer_spec.clone()).await {
+                    let peer_key = Self::trusted_peer_removal_key(peer_spec);
+                    if let Err(error) = Self::apply_trusted_peer_add(
+                        local_comms.as_ref(),
+                        peer_spec.clone(),
+                        self.mob_peer_repair_authority(&peer_key),
+                    )
+                    .await
+                    {
                         return Err(MobError::from(error));
                     }
                     if let Err(error) = self
@@ -6333,9 +6503,12 @@ impl MobActor {
                         )
                         .await
                     {
-                        let _ = local_comms
-                            .remove_trusted_peer(&Self::trusted_peer_removal_key(peer_spec))
-                            .await;
+                        let _ = Self::apply_trusted_peer_remove(
+                            local_comms.as_ref(),
+                            peer_key.clone(),
+                            self.mob_peer_unwiring_authority(&peer_key),
+                        )
+                        .await;
                         return Err(error);
                     }
                 }
@@ -6350,7 +6523,14 @@ impl MobActor {
                         ..
                     },
                 ) => {
-                    if let Err(error) = peer_comms.add_trusted_peer(local_spec.clone()).await {
+                    let local_key = Self::trusted_peer_removal_key(local_spec);
+                    if let Err(error) = Self::apply_trusted_peer_add(
+                        peer_comms.as_ref(),
+                        local_spec.clone(),
+                        self.mob_peer_repair_authority(&local_key),
+                    )
+                    .await
+                    {
                         return Err(MobError::from(error));
                     }
                     if let Err(error) = self
@@ -6362,9 +6542,12 @@ impl MobActor {
                         )
                         .await
                     {
-                        let _ = peer_comms
-                            .remove_trusted_peer(&Self::trusted_peer_removal_key(local_spec))
-                            .await;
+                        let _ = Self::apply_trusted_peer_remove(
+                            peer_comms.as_ref(),
+                            local_key.clone(),
+                            self.mob_peer_unwiring_authority(&local_key),
+                        )
+                        .await;
                         return Err(error);
                     }
                 }
@@ -6447,7 +6630,14 @@ impl MobActor {
         ) = (&local_endpoint, &peer_endpoint)
         {
             let dsl_added = self.apply_wire_members_idempotent(&edge)?.dsl_added();
-            if let Err(error) = local_comms.add_trusted_peer(peer_spec.clone()).await {
+            let peer_key = Self::trusted_peer_removal_key(peer_spec);
+            if let Err(error) = Self::apply_trusted_peer_add(
+                local_comms.as_ref(),
+                peer_spec.clone(),
+                self.mob_peer_wiring_authority(&peer_key),
+            )
+            .await
+            {
                 self.rollback_peer_only_wire(&edge, dsl_added, &[], local_spec, peer_spec)
                     .await;
                 return Err(MobError::from(error));
@@ -6461,9 +6651,12 @@ impl MobActor {
                 )
                 .await
             {
-                let _ = local_comms
-                    .remove_trusted_peer(&Self::trusted_peer_removal_key(peer_spec))
-                    .await;
+                let _ = Self::apply_trusted_peer_remove(
+                    local_comms.as_ref(),
+                    peer_key.clone(),
+                    self.mob_peer_unwiring_authority(&peer_key),
+                )
+                .await;
                 self.rollback_peer_only_wire(&edge, dsl_added, &[], local_spec, peer_spec)
                     .await;
                 return Err(error);
@@ -6479,9 +6672,12 @@ impl MobActor {
             let stored = match self.events.append(event).await {
                 Ok(stored) => stored,
                 Err(error) => {
-                    let _ = local_comms
-                        .remove_trusted_peer(&Self::trusted_peer_removal_key(peer_spec))
-                        .await;
+                    let _ = Self::apply_trusted_peer_remove(
+                        local_comms.as_ref(),
+                        peer_key.clone(),
+                        self.mob_peer_unwiring_authority(&peer_key),
+                    )
+                    .await;
                     self.rollback_peer_only_wire(
                         &edge,
                         dsl_added,
@@ -6509,7 +6705,14 @@ impl MobActor {
         ) = (&local_endpoint, &peer_endpoint)
         {
             let dsl_added = self.apply_wire_members_idempotent(&edge)?.dsl_added();
-            if let Err(error) = peer_comms.add_trusted_peer(local_spec.clone()).await {
+            let local_key = Self::trusted_peer_removal_key(local_spec);
+            if let Err(error) = Self::apply_trusted_peer_add(
+                peer_comms.as_ref(),
+                local_spec.clone(),
+                self.mob_peer_wiring_authority(&local_key),
+            )
+            .await
+            {
                 self.rollback_peer_only_wire(&edge, dsl_added, &[], local_spec, peer_spec)
                     .await;
                 return Err(MobError::from(error));
@@ -6523,9 +6726,12 @@ impl MobActor {
                 )
                 .await
             {
-                let _ = peer_comms
-                    .remove_trusted_peer(&Self::trusted_peer_removal_key(local_spec))
-                    .await;
+                let _ = Self::apply_trusted_peer_remove(
+                    peer_comms.as_ref(),
+                    local_key.clone(),
+                    self.mob_peer_unwiring_authority(&local_key),
+                )
+                .await;
                 self.rollback_peer_only_wire(&edge, dsl_added, &[], local_spec, peer_spec)
                     .await;
                 return Err(error);
@@ -6541,9 +6747,12 @@ impl MobActor {
             let stored = match self.events.append(event).await {
                 Ok(stored) => stored,
                 Err(error) => {
-                    let _ = peer_comms
-                        .remove_trusted_peer(&Self::trusted_peer_removal_key(local_spec))
-                        .await;
+                    let _ = Self::apply_trusted_peer_remove(
+                        peer_comms.as_ref(),
+                        local_key.clone(),
+                        self.mob_peer_unwiring_authority(&local_key),
+                    )
+                    .await;
                     self.rollback_peer_only_wire(
                         &edge,
                         dsl_added,
@@ -6584,7 +6793,13 @@ impl MobActor {
         let peer_peer_id = Self::trusted_peer_removal_key(&peer_spec);
 
         // A-side trust install.
-        if let Err(err) = local_comms.add_trusted_peer(peer_spec.clone()).await {
+        if let Err(err) = Self::apply_trusted_peer_add(
+            local_comms.as_ref(),
+            peer_spec.clone(),
+            self.mob_peer_wiring_authority(&peer_peer_id),
+        )
+        .await
+        {
             self.rollback_wire_side_effects(
                 &edge,
                 dsl_added,
@@ -6600,7 +6815,13 @@ impl MobActor {
         }
 
         // B-side trust install.
-        if let Err(err) = peer_comms.add_trusted_peer(local_spec.clone()).await {
+        if let Err(err) = Self::apply_trusted_peer_add(
+            peer_comms.as_ref(),
+            local_spec.clone(),
+            self.mob_peer_wiring_authority(&local_peer_id),
+        )
+        .await
+        {
             self.rollback_wire_side_effects(
                 &edge,
                 dsl_added,
@@ -6845,14 +7066,26 @@ impl MobActor {
                 ))
             })?;
 
-            if let Err(error) = left.comms.add_trusted_peer(right.spec.clone()).await {
+            if let Err(error) = Self::apply_trusted_peer_add(
+                left.comms.as_ref(),
+                right.spec.clone(),
+                self.mob_peer_wiring_authority(&right.removal_key),
+            )
+            .await
+            {
                 self.rollback_wire_members_batch(&to_add, installed_trust)
                     .await;
                 return Err(MobError::from(error));
             }
             installed_trust.push((left.comms.clone(), right.removal_key.clone()));
 
-            if let Err(error) = right.comms.add_trusted_peer(left.spec.clone()).await {
+            if let Err(error) = Self::apply_trusted_peer_add(
+                right.comms.as_ref(),
+                left.spec.clone(),
+                self.mob_peer_wiring_authority(&left.removal_key),
+            )
+            .await
+            {
                 self.rollback_wire_members_batch(&to_add, installed_trust)
                     .await;
                 return Err(MobError::from(error));
@@ -6979,7 +7212,13 @@ impl MobActor {
         installed_trust: Vec<(Arc<dyn CoreCommsRuntime>, String)>,
     ) {
         for (comms, removal_key) in installed_trust.into_iter().rev() {
-            if let Err(error) = comms.remove_trusted_peer(&removal_key).await {
+            if let Err(error) = Self::apply_trusted_peer_remove(
+                comms.as_ref(),
+                removal_key.clone(),
+                self.mob_peer_unwiring_authority(&removal_key),
+            )
+            .await
+            {
                 tracing::warn!(
                     mob_id = %self.definition.id,
                     %error,
@@ -7086,7 +7325,13 @@ impl MobActor {
         peer_peer_id: &str,
     ) {
         if installed_local_trust {
-            if let Err(err) = local_comms.remove_trusted_peer(peer_peer_id).await {
+            if let Err(err) = Self::apply_trusted_peer_remove(
+                local_comms.as_ref(),
+                peer_peer_id.to_string(),
+                self.mob_peer_unwiring_authority(peer_peer_id),
+            )
+            .await
+            {
                 tracing::warn!(
                     mob_id = %self.definition.id,
                     %err,
@@ -7095,7 +7340,13 @@ impl MobActor {
             }
         }
         if installed_peer_trust {
-            if let Err(err) = peer_comms.remove_trusted_peer(local_peer_id).await {
+            if let Err(err) = Self::apply_trusted_peer_remove(
+                peer_comms.as_ref(),
+                local_peer_id.to_string(),
+                self.mob_peer_unwiring_authority(local_peer_id),
+            )
+            .await
+            {
                 tracing::warn!(
                     mob_id = %self.definition.id,
                     %err,
@@ -7445,7 +7696,13 @@ impl MobActor {
         sent_unwired_from_peer = true;
 
         // A-side trust removal (after notifications succeeded).
-        if let Err(err) = local_comms.remove_trusted_peer(&peer_peer_id).await {
+        if let Err(err) = Self::apply_trusted_peer_remove(
+            local_comms.as_ref(),
+            peer_peer_id.clone(),
+            self.mob_peer_unwiring_authority(&peer_peer_id),
+        )
+        .await
+        {
             self.rollback_unwire_side_effects(
                 &edge,
                 dsl_removed,
@@ -7468,7 +7725,13 @@ impl MobActor {
         removed_local_trust = true;
 
         // B-side trust removal.
-        if let Err(err) = peer_comms.remove_trusted_peer(&local_peer_id).await {
+        if let Err(err) = Self::apply_trusted_peer_remove(
+            peer_comms.as_ref(),
+            local_peer_id.clone(),
+            self.mob_peer_unwiring_authority(&local_peer_id),
+        )
+        .await
+        {
             self.rollback_unwire_side_effects(
                 &edge,
                 dsl_removed,
@@ -7629,7 +7892,14 @@ impl MobActor {
         peer_entry: &RosterEntry,
     ) {
         if removed_local_trust {
-            if let Err(err) = local_comms.add_trusted_peer(peer_spec.clone()).await {
+            let peer_key = Self::trusted_peer_removal_key(peer_spec);
+            if let Err(err) = Self::apply_trusted_peer_add(
+                local_comms.as_ref(),
+                peer_spec.clone(),
+                self.mob_peer_wiring_authority(&peer_key),
+            )
+            .await
+            {
                 tracing::warn!(
                     mob_id = %self.definition.id,
                     %err,
@@ -7638,7 +7908,14 @@ impl MobActor {
             }
         }
         if removed_peer_trust {
-            if let Err(err) = peer_comms.add_trusted_peer(local_spec.clone()).await {
+            let local_key = Self::trusted_peer_removal_key(local_spec);
+            if let Err(err) = Self::apply_trusted_peer_add(
+                peer_comms.as_ref(),
+                local_spec.clone(),
+                self.mob_peer_wiring_authority(&local_key),
+            )
+            .await
+            {
                 tracing::warn!(
                     mob_id = %self.definition.id,
                     %err,
@@ -7770,8 +8047,14 @@ impl MobActor {
         })?;
 
         let authority = self.apply_wire_external_peer_idempotent(&key, &edge)?;
+        let removal_key = Self::trusted_peer_removal_key(&spec);
         if authority.is_repair() {
-            comms.add_trusted_peer(spec.clone()).await?;
+            Self::apply_trusted_peer_add(
+                comms.as_ref(),
+                spec.clone(),
+                self.mob_peer_repair_authority(&removal_key),
+            )
+            .await?;
             return Ok(());
         }
 
@@ -7786,7 +8069,13 @@ impl MobActor {
         let dsl_added = authority.dsl_added();
 
         // Install trust on the local's session comms runtime.
-        if let Err(error) = comms.add_trusted_peer(spec.clone()).await {
+        if let Err(error) = Self::apply_trusted_peer_add(
+            comms.as_ref(),
+            spec.clone(),
+            self.mob_peer_wiring_authority(&removal_key),
+        )
+        .await
+        {
             self.rollback_external_wire_dsl(&key, &edge, dsl_added)
                 .await;
             return Err(MobError::from(error));
@@ -7805,9 +8094,12 @@ impl MobActor {
         let stored = match self.events.append(event).await {
             Ok(stored) => stored,
             Err(append_err) => {
-                if let Err(rollback_err) = comms
-                    .remove_trusted_peer(&Self::trusted_peer_removal_key(&spec))
-                    .await
+                if let Err(rollback_err) = Self::apply_trusted_peer_remove(
+                    comms.as_ref(),
+                    removal_key.clone(),
+                    self.mob_peer_unwiring_authority(&removal_key),
+                )
+                .await
                 {
                     tracing::warn!(
                         mob_id = %self.definition.id,
@@ -7916,7 +8208,13 @@ impl MobActor {
                     }
                     return Ok(());
                 }
-                if let Err(error) = comms.remove_trusted_peer(&removal_key).await {
+                if let Err(error) = Self::apply_trusted_peer_remove(
+                    comms.as_ref(),
+                    removal_key.clone(),
+                    self.mob_peer_unwiring_authority(&removal_key),
+                )
+                .await
+                {
                     if dsl_removed && let Some(edge) = authority_edge.as_ref() {
                         let key = Self::external_peer_key_for_edge(edge);
                         if let Err(rollback_err) = self.apply_dsl_input(
@@ -7957,9 +8255,13 @@ impl MobActor {
         }
 
         // Remove trust on the local session runtime.
-        if let Err(error) = comms
-            .remove_trusted_peer(&Self::trusted_peer_removal_key(&prior_spec))
-            .await
+        let prior_removal_key = Self::trusted_peer_removal_key(&prior_spec);
+        if let Err(error) = Self::apply_trusted_peer_remove(
+            comms.as_ref(),
+            prior_removal_key.clone(),
+            self.mob_peer_unwiring_authority(&prior_removal_key),
+        )
+        .await
         {
             if dsl_removed
                 && let Err(rollback_err) = self.apply_dsl_input(
@@ -7993,7 +8295,13 @@ impl MobActor {
             Err(append_err) => {
                 // Restore trust on append failure so the unwire is a full
                 // no-op from the caller's perspective.
-                if let Err(rollback_err) = comms.add_trusted_peer(prior_spec.clone()).await {
+                if let Err(rollback_err) = Self::apply_trusted_peer_add(
+                    comms.as_ref(),
+                    prior_spec.clone(),
+                    self.mob_peer_wiring_authority(&prior_removal_key),
+                )
+                .await
+                {
                     tracing::warn!(
                         mob_id = %self.definition.id,
                         local = %local,
@@ -8969,9 +9277,13 @@ impl MobActor {
                         }
                     }
                     if let Some(recipient_comms) = recipient_comms {
-                        if let Err(error) = recipient_comms
-                            .remove_trusted_peer(&Self::trusted_peer_removal_key(&retiring_spec))
-                            .await
+                        let retiring_key = Self::trusted_peer_removal_key(&retiring_spec);
+                        if let Err(error) = Self::apply_trusted_peer_remove(
+                            recipient_comms.as_ref(),
+                            retiring_key.clone(),
+                            self.mob_peer_retire_authority(&retiring_key),
+                        )
+                        .await
                         {
                             return Some(MobError::from(error));
                         }
@@ -12441,8 +12753,13 @@ impl MobActor {
                     WiringEndpoint::PeerOnly { spec, binding } => (spec, None, Some(binding)),
                 };
                 if let Some(spawned_comms) = spawned_comms.as_ref() {
-                    let _ =
-                        Self::remove_trusted_peer_by_descriptor(&**spawned_comms, &peer_spec).await;
+                    let peer_key = Self::trusted_peer_removal_key(&peer_spec);
+                    let _ = Self::apply_trusted_peer_remove(
+                        spawned_comms.as_ref(),
+                        peer_key.clone(),
+                        self.mob_peer_unwiring_authority(&peer_key),
+                    )
+                    .await;
                 } else if let Some(spawned_binding) = spawned_binding.as_ref() {
                     let _ = self
                         .unwire_peer_only_recipient(
@@ -12454,8 +12771,13 @@ impl MobActor {
                         .await;
                 }
                 if let Some(peer_comms) = peer_comms {
-                    let _ =
-                        Self::remove_trusted_peer_by_descriptor(&*peer_comms, &spawned_spec).await;
+                    let spawned_key = Self::trusted_peer_removal_key(&spawned_spec);
+                    let _ = Self::apply_trusted_peer_remove(
+                        peer_comms.as_ref(),
+                        spawned_key.clone(),
+                        self.mob_peer_unwiring_authority(&spawned_key),
+                    )
+                    .await;
                 } else if let Some(peer_binding) = peer_binding {
                     let _ = self
                         .unwire_peer_only_recipient(

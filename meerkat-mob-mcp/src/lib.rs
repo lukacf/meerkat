@@ -38,7 +38,8 @@ use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
 use meerkat_core::comms::{
-    CommsCommand, PeerId, PeerName, SendError, SendReceipt, TrustedPeerDescriptor,
+    CommsCommand, CommsTrustMutation, CommsTrustMutationResult, PeerId, PeerName, SendError,
+    SendReceipt, TrustedPeerDescriptor,
 };
 use meerkat_core::error::ToolError;
 use meerkat_core::interaction::{InteractionId, PeerInputCandidate};
@@ -1805,24 +1806,64 @@ impl CoreCommsRuntime for LocalCommsRuntime {
         Some(self.address.clone())
     }
 
-    async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
-            .map_err(SendError::Validation)?;
-        self.trusted
-            .write()
-            .await
-            .insert(peer.peer_id.as_str().to_string());
-        Ok(())
+    async fn apply_trust_mutation(
+        &self,
+        mutation: CommsTrustMutation,
+    ) -> Result<CommsTrustMutationResult, SendError> {
+        match mutation {
+            CommsTrustMutation::AddTrustedPeer {
+                peer,
+                authority: _authority,
+            } => {
+                TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                    .map_err(SendError::Validation)?;
+                self.trusted
+                    .write()
+                    .await
+                    .insert(peer.peer_id.as_str().to_string());
+                Ok(CommsTrustMutationResult::Added)
+            }
+            CommsTrustMutation::RemoveTrustedPeer {
+                peer_id,
+                authority: _authority,
+            } => {
+                let removed = self.trusted.write().await.remove(&peer_id);
+                Ok(CommsTrustMutationResult::Removed { removed })
+            }
+            CommsTrustMutation::AddPrivateTrustedPeer {
+                peer,
+                authority: _authority,
+            } => {
+                TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                    .map_err(SendError::Validation)?;
+                Ok(CommsTrustMutationResult::Added)
+            }
+            CommsTrustMutation::RemovePrivateTrustedPeer {
+                peer_id: _peer_id,
+                authority: _authority,
+            } => Ok(CommsTrustMutationResult::Removed { removed: false }),
+        }
     }
 
-    async fn add_private_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
-            .map_err(SendError::Validation)?;
-        Ok(())
+    async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "add_trusted_peer requires apply_trust_mutation authority".to_string(),
+        ))
     }
 
-    async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-        Ok(self.trusted.write().await.remove(peer_id))
+    async fn add_private_trusted_peer(
+        &self,
+        _peer: TrustedPeerDescriptor,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "add_private_trusted_peer requires apply_trust_mutation authority".to_string(),
+        ))
+    }
+
+    async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
+        Err(SendError::Unsupported(
+            "remove_trusted_peer requires apply_trust_mutation authority".to_string(),
+        ))
     }
 
     async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
@@ -3300,7 +3341,10 @@ mod tests {
     use meerkat_core::InteractionId;
     use meerkat_core::PlainEventSource;
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-    use meerkat_core::comms::{CommsCommand, SendError, SendReceipt};
+    use meerkat_core::comms::{
+        CommsCommand, CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult,
+        SendError, SendReceipt, TrustedPeerDescriptor,
+    };
     use meerkat_core::event::AgentEvent;
     use meerkat_core::event_injector::{
         EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
@@ -3336,6 +3380,59 @@ mod tests {
             }
         }))
         .expect("external binding target should deserialize")
+    }
+
+    #[tokio::test]
+    async fn test_local_comms_runtime_trust_requires_mutation_authority() {
+        let runtime = LocalCommsRuntime::new("local");
+        let mut pubkey = [0u8; 32];
+        pubkey[0] = 42;
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey).to_string();
+        let peer = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "peer".to_string(),
+            peer_id.clone(),
+            pubkey,
+            "inproc://peer",
+        )
+        .expect("valid peer descriptor");
+
+        let raw_add = runtime
+            .add_trusted_peer(peer.clone())
+            .await
+            .expect_err("raw add must fail closed");
+        assert!(matches!(raw_add, SendError::Unsupported(_)));
+
+        let added = runtime
+            .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
+                peer: peer.clone(),
+                authority: CommsTrustMutationAuthority::MobMachinePeerWiring {
+                    peer_id: peer_id.clone(),
+                    epoch: 1,
+                },
+            })
+            .await
+            .expect("authorized add succeeds");
+        assert_eq!(added, CommsTrustMutationResult::Added);
+        assert!(runtime.trusted.read().await.contains(&peer_id));
+
+        let raw_remove = runtime
+            .remove_trusted_peer(&peer_id)
+            .await
+            .expect_err("raw remove must fail closed");
+        assert!(matches!(raw_remove, SendError::Unsupported(_)));
+
+        let removed = runtime
+            .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
+                peer_id: peer_id.clone(),
+                authority: CommsTrustMutationAuthority::MobMachinePeerUnwiring {
+                    peer_id: peer_id.clone(),
+                    epoch: 2,
+                },
+            })
+            .await
+            .expect("authorized remove succeeds");
+        assert_eq!(removed, CommsTrustMutationResult::Removed { removed: true });
+        assert!(!runtime.trusted.read().await.contains(&peer_id));
     }
 
     #[test]
@@ -3619,6 +3716,42 @@ mod tests {
 
         fn advertised_address(&self) -> Option<String> {
             Some(self.address.clone())
+        }
+
+        async fn apply_trust_mutation(
+            &self,
+            mutation: CommsTrustMutation,
+        ) -> Result<CommsTrustMutationResult, SendError> {
+            match mutation {
+                CommsTrustMutation::AddTrustedPeer {
+                    peer,
+                    authority: _authority,
+                } => {
+                    self.add_trusted_peer(peer).await?;
+                    Ok(CommsTrustMutationResult::Added)
+                }
+                CommsTrustMutation::RemoveTrustedPeer {
+                    peer_id,
+                    authority: _authority,
+                } => {
+                    let removed = self.remove_trusted_peer(&peer_id).await?;
+                    Ok(CommsTrustMutationResult::Removed { removed })
+                }
+                CommsTrustMutation::AddPrivateTrustedPeer {
+                    peer,
+                    authority: _authority,
+                } => {
+                    self.add_private_trusted_peer(peer).await?;
+                    Ok(CommsTrustMutationResult::Added)
+                }
+                CommsTrustMutation::RemovePrivateTrustedPeer {
+                    peer_id,
+                    authority: _authority,
+                } => {
+                    let removed = self.remove_trusted_peer(&peer_id).await?;
+                    Ok(CommsTrustMutationResult::Removed { removed })
+                }
+            }
         }
 
         async fn add_trusted_peer(

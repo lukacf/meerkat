@@ -23,8 +23,9 @@ use indexmap::IndexMap;
 use meerkat_core::Provider;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName,
-    PeerReachability, PeerReachabilityReason, PeerRoute, PeerSendability, SendError, SendReceipt,
+    CommsCommand, CommsTrustMutation, CommsTrustMutationResult, PeerCapabilitySet,
+    PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName, PeerReachability,
+    PeerReachabilityReason, PeerRoute, PeerSendability, SendError, SendReceipt,
     TrustedPeerDescriptor,
 };
 use meerkat_core::error::ToolError;
@@ -362,6 +363,42 @@ impl CoreCommsRuntime for MockCommsRuntime {
             None
         } else {
             Some(self.default_public_key_bytes)
+        }
+    }
+
+    async fn apply_trust_mutation(
+        &self,
+        mutation: CommsTrustMutation,
+    ) -> Result<CommsTrustMutationResult, SendError> {
+        match mutation {
+            CommsTrustMutation::AddTrustedPeer {
+                peer,
+                authority: _authority,
+            } => {
+                self.add_trusted_peer(peer).await?;
+                Ok(CommsTrustMutationResult::Added)
+            }
+            CommsTrustMutation::RemoveTrustedPeer {
+                peer_id,
+                authority: _authority,
+            } => {
+                let removed = self.remove_trusted_peer(&peer_id).await?;
+                Ok(CommsTrustMutationResult::Removed { removed })
+            }
+            CommsTrustMutation::AddPrivateTrustedPeer {
+                peer,
+                authority: _authority,
+            } => {
+                self.add_private_trusted_peer(peer).await?;
+                Ok(CommsTrustMutationResult::Added)
+            }
+            CommsTrustMutation::RemovePrivateTrustedPeer {
+                peer_id,
+                authority: _authority,
+            } => {
+                let removed = self.remove_private_trusted_peer(&peer_id).await?;
+                Ok(CommsTrustMutationResult::Removed { removed })
+            }
         }
     }
 
@@ -4174,14 +4211,13 @@ where
 
 fn test_trusted_peer_route(comms: &meerkat_comms::CommsRuntime, name: &str) -> PeerRoute {
     let trusted = comms.trusted_peers_shared();
-    let trusted = trusted.read();
-    if let Some(peer) = trusted.peers.iter().find(|peer| peer.name == name) {
+    let trusted_peers = trusted.peers();
+    if let Some(peer) = trusted_peers.iter().find(|peer| peer.name == name) {
         return PeerRoute::with_display_name(
             peer.pubkey.to_peer_id(),
             PeerName::new(peer.name.clone()).expect("valid trusted peer name"),
         );
     }
-    drop(trusted);
 
     let namespace = comms.inproc_namespace().unwrap_or("");
     let inproc_peers = meerkat_comms::InprocRegistry::global().peers_in_namespace(namespace);
@@ -4193,8 +4229,8 @@ fn test_trusted_peer_route(comms: &meerkat_comms::CommsRuntime, name: &str) -> P
     }
 
     let trusted = comms.trusted_peers_shared();
-    let trusted = trusted.read();
-    panic!("trusted or inproc peer route not found for {name}; trusted={trusted:?}");
+    let trusted_peers = trusted.peers();
+    panic!("trusted or inproc peer route not found for {name}; trusted={trusted_peers:?}");
 }
 
 async fn trust_candidate_sender_for_reply(
@@ -28236,9 +28272,8 @@ async fn test_supervisor_private_trust_preserves_send_resolution() {
     // the same list the router uses to resolve `PeerName → PeerAddr`.
     let supervisor_pubkey = {
         let trusted = member_comms.trusted_peers_shared();
-        let guard = trusted.read();
-        let entry = guard
-            .peers
+        let trusted_peers = trusted.peers();
+        let entry = trusted_peers
             .iter()
             .find(|p| p.name.contains("__mob_supervisor__"))
             .expect(
@@ -28301,9 +28336,8 @@ async fn test_rotate_supervisor_reinstalls_private_trust_on_session_backed_membe
     // private trust set must no longer trust after the rotation.
     let previous_supervisor_pubkey = {
         let trusted = member_comms.trusted_peers_shared();
-        let guard = trusted.read();
-        let entry = guard
-            .peers
+        let trusted_peers = trusted.peers();
+        let entry = trusted_peers
             .iter()
             .find(|p| p.name.contains("__mob_supervisor__"))
             .expect("spawn bootstraps supervisor private trust");
@@ -28318,9 +28352,8 @@ async fn test_rotate_supervisor_reinstalls_private_trust_on_session_backed_membe
 
     let previous_name = {
         let trusted = member_comms.trusted_peers_shared();
-        let guard = trusted.read();
-        guard
-            .peers
+        let trusted_peers = trusted.peers();
+        trusted_peers
             .iter()
             .find(|p| p.name.contains("__mob_supervisor__"))
             .expect("supervisor trust entry")
@@ -28346,13 +28379,11 @@ async fn test_rotate_supervisor_reinstalls_private_trust_on_session_backed_membe
     // accepts lifecycle notifications.
     let (new_supervisor_pubkey_opt, old_still_present) = {
         let trusted = member_comms.trusted_peers_shared();
-        let guard = trusted.read();
-        let new_entry = guard
-            .peers
+        let trusted_peers = trusted.peers();
+        let new_entry = trusted_peers
             .iter()
             .find(|p| p.name.contains("__mob_supervisor__"));
-        let old_still_present = guard
-            .peers
+        let old_still_present = trusted_peers
             .iter()
             .any(|p| p.pubkey == previous_supervisor_pubkey);
         (new_entry.map(|entry| entry.pubkey), old_still_present)

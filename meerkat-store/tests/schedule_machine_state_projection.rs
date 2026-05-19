@@ -100,6 +100,90 @@ async fn sqlite_schedule_without_machine_state_fails_closed() {
 }
 
 #[tokio::test]
+async fn sqlite_schedule_machine_schema_version_mismatch_fails_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("schedule.sqlite3");
+    let store = SqliteScheduleStore::open(&path).expect("open");
+    let schedule = sample_schedule();
+    store
+        .put_schedule(schedule.clone())
+        .await
+        .expect("put schedule");
+
+    corrupt_json_blob(
+        &path,
+        "schedule_schedules",
+        "schedule_id",
+        "schedule_json",
+        &schedule.schedule_id.to_string(),
+        |value| {
+            value
+                .as_object_mut()
+                .expect("schedule json object")
+                .get_mut("machine_state")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("schedule machine_state object")
+                .insert("schema_version".to_string(), serde_json::json!(0));
+        },
+    );
+
+    let error = store
+        .get_schedule(&schedule.schedule_id)
+        .await
+        .expect_err("schema version mismatch must fail closed");
+    assert!(error.to_string().contains("schema_version"));
+}
+
+#[tokio::test]
+async fn sqlite_schedule_with_unrecoverable_machine_state_fails_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("schedule.sqlite3");
+    let store = SqliteScheduleStore::open(&path).expect("open");
+    let schedule = sample_schedule();
+    store
+        .put_schedule(schedule.clone())
+        .await
+        .expect("put schedule");
+    let cursor = Utc::now();
+    let cursor_ms = u64::try_from(cursor.timestamp_millis()).expect("positive cursor millis");
+
+    corrupt_json_blob(
+        &path,
+        "schedule_schedules",
+        "schedule_id",
+        "schedule_json",
+        &schedule.schedule_id.to_string(),
+        |value| {
+            let object = value.as_object_mut().expect("schedule json object");
+            object.insert("phase".to_string(), serde_json::json!("deleted"));
+            object.insert(
+                "planning_cursor_utc".to_string(),
+                serde_json::to_value(cursor).expect("cursor json"),
+            );
+            let machine = object
+                .get_mut("machine_state")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("schedule machine_state object");
+            machine.insert("lifecycle_phase".to_string(), serde_json::json!("deleted"));
+            machine.insert(
+                "planning_cursor_utc_ms".to_string(),
+                serde_json::json!(cursor_ms),
+            );
+        },
+    );
+
+    let error = store
+        .get_schedule(&schedule.schedule_id)
+        .await
+        .expect_err("generated recovery invariants must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("generated ScheduleLifecycleMachine rejected")
+    );
+}
+
+#[tokio::test]
 async fn sqlite_occurrence_with_mismatched_phase_projection_fails_closed() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("schedule.sqlite3");
@@ -135,6 +219,54 @@ async fn sqlite_occurrence_with_mismatched_phase_projection_fails_closed() {
         .await
         .expect_err("phase projection must not override machine_state");
     assert!(error.to_string().contains("phase projection"));
+}
+
+#[tokio::test]
+async fn sqlite_occurrence_with_unrecoverable_machine_state_fails_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("schedule.sqlite3");
+    let store = SqliteScheduleStore::open(&path).expect("open");
+    let schedule = sample_schedule();
+    store
+        .put_schedule(schedule.clone())
+        .await
+        .expect("put schedule");
+    let occurrence = Occurrence::planned_from_schedule(&schedule, OccurrenceOrdinal(0), Utc::now())
+        .expect("plan occurrence");
+    store
+        .put_occurrence(occurrence.clone())
+        .await
+        .expect("put occurrence");
+
+    corrupt_json_blob(
+        &path,
+        "schedule_occurrences",
+        "occurrence_id",
+        "occurrence_json",
+        &occurrence.occurrence_id.to_string(),
+        |value| {
+            let object = value.as_object_mut().expect("occurrence json object");
+            object.insert("phase".to_string(), serde_json::json!("delivery_failed"));
+            let machine = object
+                .get_mut("machine_state")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("occurrence machine_state object");
+            machine.insert(
+                "lifecycle_phase".to_string(),
+                serde_json::json!("delivery_failed"),
+            );
+        },
+    );
+
+    let error = store
+        .get_occurrence(&occurrence.occurrence_id)
+        .await
+        .expect_err("generated occurrence recovery invariants must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("generated OccurrenceLifecycleMachine rejected")
+    );
 }
 
 #[tokio::test]

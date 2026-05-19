@@ -313,8 +313,76 @@ fn failure_class_to_machine(failure_class: OccurrenceFailureClass) -> occ_dsl::F
     }
 }
 
+fn schedule_machine_schema_identity() -> (String, u32) {
+    let schema = sched_dsl::ScheduleLifecycleMachineState::schema();
+    (schema.machine.to_string(), schema.version)
+}
+
+fn occurrence_machine_schema_identity() -> (String, u32) {
+    let schema = occ_dsl::OccurrenceLifecycleMachineState::schema();
+    (schema.machine.to_string(), schema.version)
+}
+
+fn validate_schedule_machine_wire_header(machine: &str, schema_version: u32) -> Result<(), String> {
+    let (expected_machine, expected_version) = schedule_machine_schema_identity();
+    if machine != expected_machine {
+        return Err(format!(
+            "schedule machine_state machine `{machine}` does not match generated schema `{expected_machine}`"
+        ));
+    }
+    if schema_version != expected_version {
+        return Err(format!(
+            "schedule machine_state schema_version `{schema_version}` does not match generated schema version `{expected_version}`"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_occurrence_machine_wire_header(
+    machine: &str,
+    schema_version: u32,
+) -> Result<(), String> {
+    let (expected_machine, expected_version) = occurrence_machine_schema_identity();
+    if machine != expected_machine {
+        return Err(format!(
+            "occurrence machine_state machine `{machine}` does not match generated schema `{expected_machine}`"
+        ));
+    }
+    if schema_version != expected_version {
+        return Err(format!(
+            "occurrence machine_state schema_version `{schema_version}` does not match generated schema version `{expected_version}`"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_schedule_machine_recovery(
+    machine: &sched_dsl::ScheduleLifecycleMachineState,
+) -> Result<(), String> {
+    sched_dsl::ScheduleLifecycleMachineAuthority::recover_from_state(machine.clone())
+        .map(|_| ())
+        .map_err(|source| {
+            format!(
+                "generated ScheduleLifecycleMachine rejected recovered machine_state: {source:?}"
+            )
+        })
+}
+
+fn validate_occurrence_machine_recovery(
+    machine: &occ_dsl::OccurrenceLifecycleMachineState,
+) -> Result<(), String> {
+    occ_dsl::OccurrenceLifecycleMachineAuthority::recover_from_state(machine.clone())
+        .map(|_| ())
+        .map_err(|source| {
+            format!(
+                "generated OccurrenceLifecycleMachine rejected recovered machine_state: {source:?}"
+            )
+        })
+}
+
 pub(crate) fn validate_schedule_machine_projection(schedule: &Schedule) -> Result<(), String> {
     let machine = &schedule.machine_state;
+    validate_schedule_machine_recovery(machine)?;
     if machine.schedule_id.0 != schedule.schedule_id.0.to_string() {
         return Err(format!(
             "schedule {} id projection does not match machine_state",
@@ -412,6 +480,7 @@ pub(crate) fn validate_occurrence_machine_projection(
     occurrence: &Occurrence,
 ) -> Result<(), String> {
     let machine = &occurrence.machine_state;
+    validate_occurrence_machine_recovery(machine)?;
     if occurrence_phase_to_machine(occurrence.phase) != machine.lifecycle_phase {
         return Err(format!(
             "occurrence {} phase projection does not match machine_state",
@@ -1544,6 +1613,8 @@ struct ScheduleWire {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct ScheduleMachineStateWire {
+    machine: String,
+    schema_version: u32,
     schedule_id: String,
     lifecycle_phase: String,
     revision: u64,
@@ -1565,7 +1636,10 @@ struct ScheduleMachineStateWire {
 
 impl From<&sched_dsl::ScheduleLifecycleMachineState> for ScheduleMachineStateWire {
     fn from(state: &sched_dsl::ScheduleLifecycleMachineState) -> Self {
+        let (machine, schema_version) = schedule_machine_schema_identity();
         Self {
+            machine,
+            schema_version,
             schedule_id: state.schedule_id.0.clone(),
             lifecycle_phase: schedule_lifecycle_state_to_wire(state.lifecycle_phase).to_string(),
             revision: state.revision,
@@ -1597,6 +1671,7 @@ impl TryFrom<ScheduleMachineStateWire> for sched_dsl::ScheduleLifecycleMachineSt
     type Error = String;
 
     fn try_from(wire: ScheduleMachineStateWire) -> Result<Self, Self::Error> {
+        validate_schedule_machine_wire_header(&wire.machine, wire.schema_version)?;
         Ok(Self {
             schedule_id: sched_dsl::ScheduleId(wire.schedule_id),
             lifecycle_phase: schedule_lifecycle_state_from_wire(&wire.lifecycle_phase)?,
@@ -1826,6 +1901,8 @@ struct OccurrenceWire {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct OccurrenceMachineStateWire {
+    machine: String,
+    schema_version: u32,
     lifecycle_phase: String,
     occurrence_id: String,
     schedule_id: String,
@@ -1858,7 +1935,10 @@ struct OccurrenceMachineStateWire {
 
 impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateWire {
     fn from(state: &occ_dsl::OccurrenceLifecycleMachineState) -> Self {
+        let (machine, schema_version) = occurrence_machine_schema_identity();
         Self {
+            machine,
+            schema_version,
             lifecycle_phase: occurrence_lifecycle_state_to_wire(state.lifecycle_phase).to_string(),
             occurrence_id: state.occurrence_id.0.clone(),
             schedule_id: state.schedule_id.0.clone(),
@@ -1901,6 +1981,7 @@ impl TryFrom<OccurrenceMachineStateWire> for occ_dsl::OccurrenceLifecycleMachine
     type Error = String;
 
     fn try_from(wire: OccurrenceMachineStateWire) -> Result<Self, Self::Error> {
+        validate_occurrence_machine_wire_header(&wire.machine, wire.schema_version)?;
         Ok(Self {
             lifecycle_phase: occurrence_lifecycle_state_from_wire(&wire.lifecycle_phase)?,
             occurrence_id: occ_dsl::OccurrenceId(wire.occurrence_id),

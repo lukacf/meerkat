@@ -51,7 +51,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `MeerkatMachine.sessions` | `capability-index` | `closed` | `MeerkatMachine registered-session + attachment publication contract` | src: `registered session entries with recovered driver/completion capabilities`; trigger: `register/ensure/attach/detach/unregister/destroy transitions + dead-attachment normalization`; stale: `forbidden` |
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.drain_slot` | `capability-index` | `closed` | `MeerkatMachine registered-session contract + drain-control region` | src: `per-session comms drain lifecycle slot co-owned by the registered-session entry`; trigger: `register/unregister/destroy + drain lifecycle transitions + control installation`; stale: `forbidden` |
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.driver` | `capability-handle` | `closed` | `MeerkatMachine control + admission + input-lifecycle regions` | - |
-| `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.phase` | `capability-handle` | `closed` | `MeerkatMachine attachment publication contract` | - |
+| `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.attachment_slot` | `capability-handle` | `closed` | `MeerkatMachine attachment publication contract` | - |
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.completions` | `capability-handle` | `closed` | `InputLifecycle terminal wait plumbing` | - |
 | `meerkat-runtime/src/driver/ephemeral.rs` | `EphemeralRuntimeDriver.queue` | `derived-projection` | `closed` | `MeerkatMachine admission queue lane` | src: `MeerkatMachine admission queue entries`; trigger: `any ingress queue mutation or rollback/recovery rebuild`; stale: `forbidden` |
 | `meerkat-runtime/src/driver/ephemeral.rs` | `EphemeralRuntimeDriver.steer_queue` | `derived-projection` | `closed` | `MeerkatMachine admission steer lane` | src: `MeerkatMachine admission steer entries`; trigger: `any ingress steer mutation or rollback/recovery rebuild`; stale: `forbidden` |
@@ -86,7 +86,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 
 | Name | Stores | Status | Anchor |
 | --- | --- | --- | --- |
-| `runtime_attachment_alignment` | `RuntimeSessionEntry.phase`, `RuntimeSessionEntry.driver` | `closed` | `MeerkatMachine attachment publication contract + RuntimeControl transitions` |
+| `runtime_attachment_alignment` | `RuntimeSessionEntry.attachment_slot`, `RuntimeSessionEntry.driver` | `closed` | `MeerkatMachine attachment publication contract + RuntimeControl transitions` |
 | `runtime_queue_projection_alignment` | `MeerkatMachine.admission.queue`, `EphemeralRuntimeDriver.queue`, `EphemeralRuntimeDriver.steer_queue` | `closed` | `MeerkatMachine admission region` |
 | `runtime_comms_bridge_projection_alignment` | `MeerkatMachine.peer_ingress.classified_interactions`, `RuntimeCommsBridge.runtime_input_projection` | `closed` | `MeerkatMachine peer-ingress classification + RuntimeCommsBridge projection contract` |
 | `runtime_external_event_projection_alignment` | `CLI.stdin_external_event_projection`, `MeerkatMachine.peer_ingress.plain_events`, `Runtime.ExternalEventInput`, `RuntimeLoop.external_event_rendering` | `closed` | `ExternalEventInput projection contract + runtime external-event render contract` |

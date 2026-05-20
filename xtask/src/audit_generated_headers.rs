@@ -219,6 +219,9 @@ pub fn live_emit_paths() -> BTreeSet<PathBuf> {
     set.insert(PathBuf::from(
         "meerkat-core/src/generated/comms_trust_authority_sources.rs",
     ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/auth_lease_transition_authority_sources.rs",
+    ));
 
     set.insert(PathBuf::from(
         "meerkat-machine-kernels/src/generated/mod.rs",

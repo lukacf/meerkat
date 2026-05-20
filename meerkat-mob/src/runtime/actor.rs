@@ -44,6 +44,10 @@ impl InitialTurnHandle {
 const MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS: usize = 64;
 const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
 const MAX_PARALLEL_PEER_RETIRE_NOTIFICATIONS: usize = 64;
+#[cfg(not(test))]
+pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 1024;
+#[cfg(test)]
+pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 4;
 
 fn observed_runtime_id(signal: &mob_dsl::MobMachineSignal) -> Option<&mob_dsl::AgentRuntimeId> {
     match signal {
@@ -90,8 +94,22 @@ struct LocalBatchWiringEndpoint {
 }
 
 struct PeerMessageDeliveryPlan {
+    from: MeerkatId,
+    to: MeerkatId,
     sender_comms: Arc<dyn CoreCommsRuntime>,
     command: CommsCommand,
+}
+
+type PeerDeliveryId = u64;
+
+pub(super) struct PeerDeliveryCompletion {
+    id: PeerDeliveryId,
+}
+
+pub(super) struct PeerDeliveryInflight {
+    from: MeerkatId,
+    to: MeerkatId,
+    cancel_token: tokio_util::sync::CancellationToken,
 }
 
 struct SupervisorPrivateTrustInstall {
@@ -397,6 +415,10 @@ pub(super) struct MobActor {
     pub(super) pending_spawns: PendingSpawnLineage,
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<()>,
+    pub(super) next_peer_delivery_ticket: PeerDeliveryId,
+    pub(super) peer_delivery_tasks: tokio::task::JoinSet<PeerDeliveryCompletion>,
+    pub(super) peer_delivery_inflight: BTreeMap<PeerDeliveryId, PeerDeliveryInflight>,
+    pub(super) peer_delivery_permits: Arc<tokio::sync::Semaphore>,
     pub(super) session_service: Arc<dyn MobSessionService>,
     #[cfg(feature = "runtime-adapter")]
     pub(super) runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
@@ -2172,6 +2194,130 @@ impl MobActor {
         }
     }
 
+    fn drain_completed_peer_delivery_tasks(&mut self) {
+        while let Some(result) = self.peer_delivery_tasks.try_join_next() {
+            match result {
+                Ok(completion) => {
+                    self.peer_delivery_inflight.remove(&completion.id);
+                }
+                Err(error) => {
+                    tracing::debug!(error = %error, "peer delivery task failed");
+                    if self.peer_delivery_tasks.is_empty() {
+                        self.peer_delivery_inflight.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    fn spawn_peer_message_delivery(
+        &mut self,
+        plan: PeerMessageDeliveryPlan,
+        reply_tx: tokio::sync::oneshot::Sender<Result<meerkat_core::comms::SendReceipt, MobError>>,
+    ) {
+        let permit = match self.peer_delivery_permits.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let _ = reply_tx.send(Err(MobError::Internal(format!(
+                    "peer message delivery lane saturated (limit={MAX_PENDING_PEER_DELIVERIES})"
+                ))));
+                return;
+            }
+        };
+        let id = self.next_peer_delivery_ticket;
+        self.next_peer_delivery_ticket = self.next_peer_delivery_ticket.wrapping_add(1);
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.peer_delivery_inflight.insert(
+            id,
+            PeerDeliveryInflight {
+                from: plan.from.clone(),
+                to: plan.to.clone(),
+                cancel_token: cancel_token.clone(),
+            },
+        );
+        self.peer_delivery_tasks.spawn(async move {
+            let _permit = permit;
+            let result = tokio::select! {
+                result = plan.sender_comms.send(plan.command) => result.map_err(MobError::from),
+                () = cancel_token.cancelled() => Err(MobError::Internal(
+                    "peer message delivery canceled because mob topology or lifecycle changed".to_string(),
+                )),
+            };
+            let _ = reply_tx.send(result);
+            PeerDeliveryCompletion { id }
+        });
+    }
+
+    async fn cancel_pending_peer_deliveries(&mut self, reason: &'static str) {
+        self.cancel_peer_deliveries_matching(reason, |_| true).await;
+    }
+
+    async fn cancel_peer_deliveries_for_member(
+        &mut self,
+        member: &MeerkatId,
+        reason: &'static str,
+    ) {
+        self.cancel_peer_deliveries_matching(reason, |delivery| {
+            &delivery.from == member || &delivery.to == member
+        })
+        .await;
+    }
+
+    async fn cancel_peer_deliveries_for_edge(
+        &mut self,
+        a: &MeerkatId,
+        b: &MeerkatId,
+        reason: &'static str,
+    ) {
+        self.cancel_peer_deliveries_matching(reason, |delivery| {
+            (&delivery.from == a && &delivery.to == b) || (&delivery.from == b && &delivery.to == a)
+        })
+        .await;
+    }
+
+    async fn cancel_peer_deliveries_matching(
+        &mut self,
+        reason: &'static str,
+        mut predicate: impl FnMut(&PeerDeliveryInflight) -> bool,
+    ) {
+        let ids = self
+            .peer_delivery_inflight
+            .iter()
+            .filter_map(|(id, delivery)| predicate(delivery).then_some(*id))
+            .collect::<BTreeSet<_>>();
+        if ids.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            mob_id = %self.definition.id,
+            pending = ids.len(),
+            reason,
+            "canceling pending peer delivery tasks"
+        );
+        for id in &ids {
+            if let Some(delivery) = self.peer_delivery_inflight.get(id) {
+                delivery.cancel_token.cancel();
+            }
+        }
+        while ids
+            .iter()
+            .any(|id| self.peer_delivery_inflight.contains_key(id))
+        {
+            match self.peer_delivery_tasks.join_next().await {
+                Some(Ok(completion)) => {
+                    self.peer_delivery_inflight.remove(&completion.id);
+                }
+                Some(Err(error)) => {
+                    tracing::debug!(error = %error, "peer delivery task failed during cancellation");
+                }
+                None => break,
+            }
+        }
+        for id in ids {
+            self.peer_delivery_inflight.remove(&id);
+        }
+    }
+
     async fn notify_orchestrator_lifecycle(&mut self, message: String) {
         // Drain completed lifecycle tasks (non-blocking).
         while let Some(result) = self.lifecycle_tasks.try_join_next() {
@@ -3203,6 +3349,7 @@ impl MobActor {
         }
         let mut deferred_commands = VecDeque::new();
         loop {
+            self.drain_completed_peer_delivery_tasks();
             let cmd = if let Some(cmd) = deferred_commands.pop_front() {
                 cmd
             } else if let Some(cmd) = command_rx.recv().await {
@@ -3310,14 +3457,7 @@ impl MobActor {
                         .await
                     {
                         Ok(plan) => {
-                            tokio::spawn(async move {
-                                let result = plan
-                                    .sender_comms
-                                    .send(plan.command)
-                                    .await
-                                    .map_err(MobError::from);
-                                let _ = reply_tx.send(result);
-                            });
+                            self.spawn_peer_message_delivery(plan, reply_tx);
                         }
                         Err(error) => {
                             let _ = reply_tx.send(Err(error));
@@ -3537,6 +3677,7 @@ impl MobActor {
                     ) {
                         Ok(()) => {
                             self.fail_all_pending_spawns("mob is stopping").await;
+                            self.cancel_pending_peer_deliveries("mob is stopping").await;
                             self.notify_orchestrator_lifecycle(format!(
                                 "Mob '{}' is stopping.",
                                 self.definition.id
@@ -3658,6 +3799,8 @@ impl MobActor {
                     ) {
                         Ok(()) => {
                             self.fail_all_pending_spawns("mob is completing").await;
+                            self.cancel_pending_peer_deliveries("mob is completing")
+                                .await;
                             self.handle_complete().await
                         }
                         Err(error) => Err(error),
@@ -3688,6 +3831,8 @@ impl MobActor {
                         continue;
                     }
                     self.fail_all_pending_spawns("mob is resetting").await;
+                    self.cancel_pending_peer_deliveries("mob is resetting")
+                        .await;
                     let result = self.handle_reset(prior_state).await;
                     let _ = reply_tx.send(result);
                 }
@@ -3878,6 +4023,8 @@ impl MobActor {
                         continue;
                     }
                     self.fail_all_pending_spawns("mob runtime is shutting down")
+                        .await;
+                    self.cancel_pending_peer_deliveries("mob runtime is shutting down")
                         .await;
                     let mut result: Result<(), MobError> = Ok(());
                     if let Err(error) = self.cancel_all_flow_tasks().await {
@@ -6627,6 +6774,8 @@ impl MobActor {
         };
 
         Ok(PeerMessageDeliveryPlan {
+            from,
+            to,
             sender_comms,
             command: CommsCommand::PeerMessage {
                 to: route,
@@ -6927,6 +7076,8 @@ impl MobActor {
                 return Ok(());
             }
 
+            self.cancel_peer_deliveries_for_edge(&local, &peer_meerkat_id, "members are unwiring")
+                .await;
             let dsl_removed = self.apply_unwire_members_idempotent(&edge)?;
             if let Err(error) = self
                 .unwire_peer_only_recipient(
@@ -7039,6 +7190,9 @@ impl MobActor {
             let _ = peer_comms.remove_trusted_peer(&local_peer_id).await;
             return Ok(());
         }
+
+        self.cancel_peer_deliveries_for_edge(&local, &peer_meerkat_id, "members are unwiring")
+            .await;
 
         // Submit DSL input first. Idempotent rejection (edge absent) is
         // handled above; here we expect acceptance (or a non-idempotent
@@ -7716,6 +7870,8 @@ impl MobActor {
     /// pipeline (policy-driven), then unconditional roster removal.
     async fn handle_retire(&mut self, agent_identity: MeerkatId) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("handle_retire preflight")?;
+        self.cancel_peer_deliveries_for_member(&agent_identity, "member is retiring")
+            .await;
         self.handle_retire_inner(&agent_identity, false, false)
             .await?;
         self.ensure_pending_spawn_alignment("handle_retire completion")
@@ -8087,6 +8243,8 @@ impl MobActor {
                 "respawn canceled pending spawn lineage before replacement workflow"
             );
         }
+        self.cancel_peer_deliveries_for_member(&agent_identity, "member is respawning")
+            .await;
 
         // 1. Snapshot all replacement inputs before retiring. Topology comes
         // from the MobMachine authority; the roster is only the read model
@@ -9367,6 +9525,8 @@ impl MobActor {
             return Err(MobDestroyError::Incomplete { report });
         }
         self.fail_all_pending_spawns("mob is destroying").await;
+        self.cancel_pending_peer_deliveries("mob is destroying")
+            .await;
         if destroy_input_needed && self.has_orchestrator {
             self.apply_dsl_signal(
                 mob_dsl::MobMachineSignal::StopOrchestrator,
@@ -10602,6 +10762,8 @@ impl MobActor {
         let pending_reason = format!("{context}: draining pending spawns before bulk retirement");
         self.fail_all_pending_spawns(&pending_reason).await;
         self.ensure_pending_spawn_alignment("retire_all_members after pending drain")?;
+        self.cancel_pending_peer_deliveries("all members are retiring")
+            .await;
 
         let ids = {
             let roster = self.roster.read().await;

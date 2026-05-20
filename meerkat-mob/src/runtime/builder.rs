@@ -1910,6 +1910,12 @@ impl MobBuilder {
             pending_spawns: PendingSpawnLineage::new(),
             edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
             lifecycle_tasks: tokio::task::JoinSet::new(),
+            next_peer_delivery_ticket: 0,
+            peer_delivery_tasks: tokio::task::JoinSet::new(),
+            peer_delivery_inflight: BTreeMap::new(),
+            peer_delivery_permits: Arc::new(tokio::sync::Semaphore::new(
+                super::actor::MAX_PENDING_PEER_DELIVERIES,
+            )),
             session_service: handle_session_service,
             #[cfg(feature = "runtime-adapter")]
             runtime_adapter,

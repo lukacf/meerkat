@@ -654,6 +654,16 @@ pub enum WorkOrigin {
     Ingest,
 }
 
+/// Typed runtime-mode override carried by generated spawn-policy resolution
+/// handoff. The runtime callback is observation only; MobMachine records this
+/// closed value before unknown-member work may auto-spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SpawnPolicyRuntimeMode {
+    #[default]
+    AutonomousHost,
+    TurnDriven,
+}
+
 impl From<crate::ids::WorkOrigin> for WorkOrigin {
     fn from(origin: crate::ids::WorkOrigin) -> Self {
         match origin {
@@ -675,6 +685,24 @@ impl TryFrom<WorkOrigin> for crate::ids::WorkOrigin {
             WorkOrigin::External => Ok(Self::External),
             WorkOrigin::Internal => Ok(Self::Internal),
             WorkOrigin::Ingest => Err("WorkOrigin::Ingest has no meerkat-mob domain counterpart"),
+        }
+    }
+}
+
+impl From<crate::MobRuntimeMode> for SpawnPolicyRuntimeMode {
+    fn from(mode: crate::MobRuntimeMode) -> Self {
+        match mode {
+            crate::MobRuntimeMode::AutonomousHost => Self::AutonomousHost,
+            crate::MobRuntimeMode::TurnDriven => Self::TurnDriven,
+        }
+    }
+}
+
+impl From<SpawnPolicyRuntimeMode> for crate::MobRuntimeMode {
+    fn from(mode: SpawnPolicyRuntimeMode) -> Self {
+        match mode {
+            SpawnPolicyRuntimeMode::AutonomousHost => Self::AutonomousHost,
+            SpawnPolicyRuntimeMode::TurnDriven => Self::TurnDriven,
         }
     }
 }
@@ -1337,6 +1365,108 @@ mod tests {
         assert_eq!(
             authority.state().run_ready_frames.get(&run_id),
             Some(&Vec::new())
+        );
+    }
+
+    #[test]
+    fn spawn_policy_resolution_records_machine_owned_revision_and_value() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("policy-worker");
+
+        assert!(!authority.state().spawn_policy_enabled);
+        assert_eq!(authority.state().spawn_policy_revision, 0);
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SetSpawnPolicy { enabled: true },
+        )
+        .expect("SetSpawnPolicy should enable generated policy authority");
+        assert!(authority.state().spawn_policy_enabled);
+        assert_eq!(authority.state().spawn_policy_revision, 1);
+
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ResolveSpawnPolicy {
+                agent_identity: identity.clone(),
+                revision: 1,
+                profile_name: Some("worker".to_string()),
+                runtime_mode: Some(SpawnPolicyRuntimeMode::TurnDriven),
+            },
+        )
+        .expect("matching policy revision should record typed resolution");
+        assert!(transition.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                MobMachineEffect::SpawnPolicyResolutionRecorded {
+                    agent_identity,
+                    revision: 1,
+                    profile_name: Some(profile),
+                    runtime_mode: Some(SpawnPolicyRuntimeMode::TurnDriven),
+                } if *agent_identity == identity && profile == "worker"
+            )
+        }));
+        assert_eq!(
+            authority
+                .state()
+                .spawn_policy_resolution_revision
+                .get(&identity),
+            Some(&1)
+        );
+        assert_eq!(
+            authority
+                .state()
+                .spawn_policy_resolution_profiles
+                .get(&identity),
+            Some(&"worker".to_string())
+        );
+        assert_eq!(
+            authority
+                .state()
+                .spawn_policy_resolution_runtime_modes
+                .get(&identity),
+            Some(&Some(SpawnPolicyRuntimeMode::TurnDriven))
+        );
+
+        let stale = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ResolveSpawnPolicy {
+                agent_identity: AgentIdentity::from("stale-worker"),
+                revision: 0,
+                profile_name: Some("worker".to_string()),
+                runtime_mode: None,
+            },
+        );
+        assert!(
+            stale.is_err(),
+            "spawn-policy resolution must fail closed for stale generated revisions"
+        );
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SetSpawnPolicy { enabled: false },
+        )
+        .expect("SetSpawnPolicy should clear generated policy authority");
+        assert!(!authority.state().spawn_policy_enabled);
+        assert_eq!(authority.state().spawn_policy_revision, 2);
+        assert!(
+            authority
+                .state()
+                .spawn_policy_resolution_profiles
+                .is_empty()
+        );
+
+        let disabled = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ResolveSpawnPolicy {
+                agent_identity: AgentIdentity::from("disabled-worker"),
+                revision: 2,
+                profile_name: Some("worker".to_string()),
+                runtime_mode: None,
+            },
+        );
+        assert!(
+            disabled.is_err(),
+            "spawn-policy resolution must fail closed when generated policy authority is disabled"
         );
     }
 

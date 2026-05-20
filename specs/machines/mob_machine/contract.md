@@ -104,6 +104,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_peer_ids`: `Map<AgentIdentity, PeerId>`
 - `member_peer_endpoints`: `Map<AgentIdentity, MemberPeerEndpoint>`
 - `pending_session_ingress_detach_runtime_ids`: `Set<AgentRuntimeId>`
+- `spawn_policy_enabled`: `Bool`
+- `spawn_policy_revision`: `u64`
+- `spawn_policy_resolution_revision`: `Map<AgentIdentity, u64>`
+- `spawn_policy_resolution_profiles`: `Map<AgentIdentity, String>`
+- `spawn_policy_resolution_runtime_modes`: `Map<AgentIdentity, Option<SpawnPolicyRuntimeMode>>`
+- `spawn_policy_resolution_absent`: `Set<AgentIdentity>`
 - `topology_epoch`: `u64`
 
 ## Inputs
@@ -161,7 +167,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReplayAllEvents`
 - `RecordOperatorActionProvenance`(tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String>)
 - `GetMember`
-- `SetSpawnPolicy`
+- `SetSpawnPolicy`(enabled: Bool)
+- `ResolveSpawnPolicy`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
 - `Shutdown`
 - `ForceCancel`(agent_identity: AgentIdentity)
 - `KickoffMarkPending`(member_id: String)
@@ -251,6 +258,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PersistKickoffUpdate`(member_id: String, phase: KickoffPhase)
 - `PersistKickoffFailureUpdate`(member_id: String, phase: KickoffPhase, error: String)
 - `EmitKickoffLifecycleNotice`(member_id: String, intent: KickoffIntent)
+- `SpawnPolicyResolutionRecorded`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
 - `MemberTrustWiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, a_endpoint: MemberPeerEndpoint, b_endpoint: MemberPeerEndpoint, epoch: u64)
@@ -864,23 +872,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SetSpawnPolicyRunning`
 - From: `Running`
-- On: `SetSpawnPolicy`()
+- On: `SetSpawnPolicy`(enabled)
 - To: `Running`
 
 ### `SetSpawnPolicyStopped`
 - From: `Stopped`
-- On: `SetSpawnPolicy`()
+- On: `SetSpawnPolicy`(enabled)
 - To: `Stopped`
 
 ### `SetSpawnPolicyCompleted`
 - From: `Completed`
-- On: `SetSpawnPolicy`()
+- On: `SetSpawnPolicy`(enabled)
 - To: `Completed`
 
 ### `SetSpawnPolicyDestroyed`
 - From: `Destroyed`
-- On: `SetSpawnPolicy`()
+- On: `SetSpawnPolicy`(enabled)
 - To: `Destroyed`
+
+### `ResolveSpawnPolicyAdmitted`
+- From: `Running`
+- On: `ResolveSpawnPolicy`(agent_identity, revision, profile_name, runtime_mode)
+- Guards:
+  - `policy_enabled`
+  - `revision_matches`
+  - `identity_absent`
+  - `profile_present`
+- Emits: `SpawnPolicyResolutionRecorded`
+- To: `Running`
+
+### `ResolveSpawnPolicyNoMatch`
+- From: `Running`
+- On: `ResolveSpawnPolicy`(agent_identity, revision, profile_name, runtime_mode)
+- Guards:
+  - `policy_enabled`
+  - `revision_matches`
+  - `identity_absent`
+  - `profile_absent`
+  - `runtime_mode_absent`
+- Emits: `SpawnPolicyResolutionRecorded`
+- To: `Running`
 
 ### `StopRunning`
 - From: `Running`

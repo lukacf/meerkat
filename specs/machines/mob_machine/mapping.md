@@ -255,6 +255,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SetSpawnPolicyDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `ResolveSpawnPolicyAdmitted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+- `ResolveSpawnPolicyNoMatch`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
 - `StopRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
@@ -773,6 +779,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EmitKickoffLifecycleNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `SpawnPolicyResolutionRecorded`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
 - `WiringGraphChanged`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`

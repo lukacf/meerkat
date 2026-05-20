@@ -1588,6 +1588,56 @@ impl std::fmt::Display for SessionId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SpawnPolicyRuntimeMode {
+    #[default]
+    #[serde(rename = "AutonomousHost")]
+    AutonomousHost,
+    #[serde(rename = "TurnDriven")]
+    TurnDriven,
+}
+impl SpawnPolicyRuntimeMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AutonomousHost => "AutonomousHost",
+            Self::TurnDriven => "TurnDriven",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SpawnPolicyRuntimeMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AutonomousHost" => Ok(Self::AutonomousHost),
+            "TurnDriven" => Ok(Self::TurnDriven),
+            other => Err(format!("invalid SpawnPolicyRuntimeMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SpawnPolicyRuntimeMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SpawnPolicyRuntimeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -2043,6 +2093,13 @@ pub struct State {
     pub member_peer_ids: std::collections::BTreeMap<AgentIdentity, PeerId>,
     pub member_peer_endpoints: std::collections::BTreeMap<AgentIdentity, MemberPeerEndpoint>,
     pub pending_session_ingress_detach_runtime_ids: std::collections::BTreeSet<AgentRuntimeId>,
+    pub spawn_policy_enabled: bool,
+    pub spawn_policy_revision: u64,
+    pub spawn_policy_resolution_revision: std::collections::BTreeMap<AgentIdentity, u64>,
+    pub spawn_policy_resolution_profiles: std::collections::BTreeMap<AgentIdentity, String>,
+    pub spawn_policy_resolution_runtime_modes:
+        std::collections::BTreeMap<AgentIdentity, Option<SpawnPolicyRuntimeMode>>,
+    pub spawn_policy_resolution_absent: std::collections::BTreeSet<AgentIdentity>,
     pub topology_epoch: u64,
 }
 impl Default for State {
@@ -2344,7 +2401,16 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct GetMember {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SetSpawnPolicy {}
+    pub struct SetSpawnPolicy {
+        pub enabled: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSpawnPolicy {
+        pub agent_identity: AgentIdentity,
+        pub revision: u64,
+        pub profile_name: Option<String>,
+        pub runtime_mode: Option<SpawnPolicyRuntimeMode>,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Shutdown {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2446,6 +2512,7 @@ pub enum Input {
     RecordOperatorActionProvenance(inputs::RecordOperatorActionProvenance),
     GetMember(inputs::GetMember),
     SetSpawnPolicy(inputs::SetSpawnPolicy),
+    ResolveSpawnPolicy(inputs::ResolveSpawnPolicy),
     Shutdown(inputs::Shutdown),
     ForceCancel(inputs::ForceCancel),
     KickoffMarkPending(inputs::KickoffMarkPending),
@@ -2529,6 +2596,7 @@ impl Input {
             Self::RecordOperatorActionProvenance(_) => InputKind::RecordOperatorActionProvenance,
             Self::GetMember(_) => InputKind::GetMember,
             Self::SetSpawnPolicy(_) => InputKind::SetSpawnPolicy,
+            Self::ResolveSpawnPolicy(_) => InputKind::ResolveSpawnPolicy,
             Self::Shutdown(_) => InputKind::Shutdown,
             Self::ForceCancel(_) => InputKind::ForceCancel,
             Self::KickoffMarkPending(_) => InputKind::KickoffMarkPending,
@@ -2599,6 +2667,7 @@ pub enum InputKind {
     RecordOperatorActionProvenance,
     GetMember,
     SetSpawnPolicy,
+    ResolveSpawnPolicy,
     Shutdown,
     ForceCancel,
     KickoffMarkPending,
@@ -3000,6 +3069,13 @@ pub mod effects {
         pub intent: KickoffIntent,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SpawnPolicyResolutionRecorded {
+        pub agent_identity: AgentIdentity,
+        pub revision: u64,
+        pub profile_name: Option<String>,
+        pub runtime_mode: Option<SpawnPolicyRuntimeMode>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WiringGraphChanged {
         pub epoch: u64,
     }
@@ -3101,6 +3177,7 @@ pub enum Effect {
     PersistKickoffUpdate(effects::PersistKickoffUpdate),
     PersistKickoffFailureUpdate(effects::PersistKickoffFailureUpdate),
     EmitKickoffLifecycleNotice(effects::EmitKickoffLifecycleNotice),
+    SpawnPolicyResolutionRecorded(effects::SpawnPolicyResolutionRecorded),
     WiringGraphChanged(effects::WiringGraphChanged),
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
     MemberTrustWiringRequested(effects::MemberTrustWiringRequested),
@@ -3139,6 +3216,7 @@ pub enum EffectKind {
     PersistKickoffUpdate,
     PersistKickoffFailureUpdate,
     EmitKickoffLifecycleNotice,
+    SpawnPolicyResolutionRecorded,
     WiringGraphChanged,
     MemberSessionBindingChanged,
     MemberTrustWiringRequested,
@@ -3234,6 +3312,8 @@ pub enum TransitionId {
     SetSpawnPolicyStopped,
     SetSpawnPolicyCompleted,
     SetSpawnPolicyDestroyed,
+    ResolveSpawnPolicyAdmitted,
+    ResolveSpawnPolicyNoMatch,
     StopRunning,
     ResumeStopped,
     CompleteRunning,
@@ -3553,6 +3633,12 @@ pub fn initial_state() -> State {
         member_peer_ids: Default::default(),
         member_peer_endpoints: Default::default(),
         pending_session_ingress_detach_runtime_ids: Default::default(),
+        spawn_policy_enabled: false,
+        spawn_policy_revision: 0,
+        spawn_policy_resolution_revision: Default::default(),
+        spawn_policy_resolution_profiles: Default::default(),
+        spawn_policy_resolution_runtime_modes: Default::default(),
+        spawn_policy_resolution_absent: Default::default(),
         topology_epoch: 0,
     }
 }

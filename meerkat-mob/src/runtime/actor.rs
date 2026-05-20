@@ -3699,6 +3699,64 @@ impl MobActor {
         )
     }
 
+    async fn resolve_spawn_policy_via_machine(
+        &mut self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<super::spawn_policy::SpawnSpec>, MobError> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        let (policy_enabled, revision) = {
+            let state = self.dsl_authority.state();
+            (state.spawn_policy_enabled, state.spawn_policy_revision)
+        };
+        if !policy_enabled {
+            return Ok(None);
+        }
+
+        let observed = self.spawn_policy.observe_resolution(identity).await;
+        let profile_name = observed
+            .as_ref()
+            .map(|spec| spec.profile.as_str().to_owned());
+        let runtime_mode = observed
+            .as_ref()
+            .and_then(|spec| spec.runtime_mode.map(mob_dsl::SpawnPolicyRuntimeMode::from));
+
+        let transition = self.apply_dsl_input_collect_transition(
+            mob_dsl::MobMachineInput::ResolveSpawnPolicy {
+                agent_identity: dsl_identity.clone(),
+                revision,
+                profile_name,
+                runtime_mode,
+            },
+            "resolve_spawn_policy",
+        )?;
+
+        let recorded = transition.effects().iter().find_map(|effect| match effect {
+            mob_dsl::MobMachineEffect::SpawnPolicyResolutionRecorded {
+                agent_identity,
+                revision: effect_revision,
+                profile_name,
+                runtime_mode,
+            } if *agent_identity == dsl_identity && *effect_revision == revision => {
+                Some((profile_name.clone(), *runtime_mode))
+            }
+            _ => None,
+        });
+
+        match recorded {
+            Some((Some(profile), runtime_mode)) => Ok(Some(super::spawn_policy::SpawnSpec {
+                profile: crate::ids::ProfileName::from(profile),
+                runtime_mode: runtime_mode.map(crate::MobRuntimeMode::from),
+            })),
+            Some((None, None)) => Ok(None),
+            Some((None, Some(_))) => Err(MobError::Internal(
+                "MobMachine recorded spawn-policy runtime mode without profile".into(),
+            )),
+            None => Err(MobError::Internal(
+                "MobMachine accepted spawn-policy resolution but emitted no typed feedback".into(),
+            )),
+        }
+    }
+
     fn resolve_cancel_all_work_rejection_in_authority(
         authority: &mut mob_dsl::MobMachineAuthority,
         dsl_identity: &mob_dsl::AgentIdentity,
@@ -5132,8 +5190,9 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SetSpawnPolicy { policy, reply_tx } => {
+                    let enabled = policy.is_some();
                     let result = self.apply_dsl_input(
-                        mob_dsl::MobMachineInput::SetSpawnPolicy,
+                        mob_dsl::MobMachineInput::SetSpawnPolicy { enabled },
                         "set_spawn_policy",
                     )
                     .map_err(|error| {
@@ -12717,8 +12776,8 @@ impl MobActor {
     /// [`WorkOrigin`] to the DSL and lets the guards accept or reject.
     ///
     /// Shell-owned pre-work (shell is the only place that can do these):
-    ///   * Auto-spawn via the roster's [`SpawnPolicy`] when the target member
-    ///     is absent but a policy resolves a spec. Only meaningful for
+    ///   * Auto-spawn when the target member is absent and MobMachine accepts
+    ///     typed spawn-policy resolution feedback. Only meaningful for
     ///     externally-originated work — internal origins never auto-spawn.
     ///   * Post-authorization dispatch — reading the machine's
     ///     `RequestRuntimeIngress` effect and materializing it as an actual
@@ -12772,9 +12831,10 @@ impl MobActor {
         };
 
         // Auto-spawn is an external-only policy seam that runs when the target
-        // member is absent and a `SpawnPolicy` is set. For existing members,
-        // the caller's runtime/fence pair is forwarded into MobMachine so
-        // generated authority owns stale-incarnation rejection.
+        // member is absent and MobMachine accepts typed spawn-policy feedback.
+        // For existing members, the caller's runtime/fence pair is forwarded
+        // into MobMachine so generated authority owns stale-incarnation
+        // rejection.
         let initial_entry = {
             let roster = self.roster.read().await;
             roster.get(&agent_identity).cloned()
@@ -12801,7 +12861,7 @@ impl MobActor {
                     ));
                 }
                 let identity = AgentIdentity::from(agent_identity.as_str());
-                if let Some(spec) = self.spawn_policy.resolve(&identity).await {
+                if let Some(spec) = self.resolve_spawn_policy_via_machine(&identity).await? {
                     Box::pin(self.spawn_from_policy_inline(&identity, spec, &work_ref, origin))
                         .await?;
                     {

@@ -867,7 +867,8 @@ async fn handle_force_cancel(&mut self) -> Result<(), MobError> {
 async fn dispatch(&mut self, command: MobCommand) -> Result<(), MobError> {
     match command {
         MobCommand::SetSpawnPolicy { policy, reply_tx } => {
-            self.apply_dsl_input(MobMachineInput::SetSpawnPolicy, "set_spawn_policy")?;
+            let enabled = policy.is_some();
+            self.apply_dsl_input(MobMachineInput::SetSpawnPolicy { enabled }, "set_spawn_policy")?;
             self.spawn_policy.set(policy).await;
             let _ = reply_tx.send(());
             Ok(())

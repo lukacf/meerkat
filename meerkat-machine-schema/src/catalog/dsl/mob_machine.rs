@@ -125,6 +125,16 @@ macro_rules! mob_catalog_machine_dsl {
             member_peer_ids: Map<AgentIdentity, PeerId>,
             member_peer_endpoints: Map<AgentIdentity, MemberPeerEndpoint>,
             pending_session_ingress_detach_runtime_ids: Set<AgentRuntimeId>,
+            // Dynamic auto-spawn policy facts. The opaque callback remains a
+            // shell observation source, but MobMachine owns whether policy is
+            // enabled, the active revision, and every typed resolution that
+            // can admit unknown-member external work.
+            spawn_policy_enabled: bool,
+            spawn_policy_revision: u64,
+            spawn_policy_resolution_revision: Map<AgentIdentity, u64>,
+            spawn_policy_resolution_profiles: Map<AgentIdentity, String>,
+            spawn_policy_resolution_runtime_modes: Map<AgentIdentity, Option<Enum<SpawnPolicyRuntimeMode>>>,
+            spawn_policy_resolution_absent: Set<AgentIdentity>,
             topology_epoch: u64,
         }
 
@@ -226,6 +236,12 @@ macro_rules! mob_catalog_machine_dsl {
             member_peer_ids = EmptyMap,
             member_peer_endpoints = EmptyMap,
             pending_session_ingress_detach_runtime_ids = EmptySet,
+            spawn_policy_enabled = false,
+            spawn_policy_revision = 0,
+            spawn_policy_resolution_revision = EmptyMap,
+            spawn_policy_resolution_profiles = EmptyMap,
+            spawn_policy_resolution_runtime_modes = EmptyMap,
+            spawn_policy_resolution_absent = EmptySet,
             topology_epoch = 0,
         }
 
@@ -386,7 +402,8 @@ macro_rules! mob_catalog_machine_dsl {
             ReplayAllEvents,
             RecordOperatorActionProvenance { tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String> },
             GetMember,
-            SetSpawnPolicy,
+            SetSpawnPolicy { enabled: bool },
+            ResolveSpawnPolicy { agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<Enum<SpawnPolicyRuntimeMode>> },
             Shutdown,
             ForceCancel { agent_identity: AgentIdentity },
             KickoffMarkPending { member_id: String },
@@ -479,6 +496,7 @@ macro_rules! mob_catalog_machine_dsl {
             PersistKickoffUpdate { member_id: String, phase: KickoffPhase },
             PersistKickoffFailureUpdate { member_id: String, phase: KickoffPhase, error: String },
             EmitKickoffLifecycleNotice { member_id: String, intent: Enum<KickoffIntent> },
+            SpawnPolicyResolutionRecorded { agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<Enum<SpawnPolicyRuntimeMode>> },
             // Track-B (R5): canonical topology-change signals consumed by
             // the `RecomputeMobPeerOverlay` composition driver.
             //
@@ -543,6 +561,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition PersistKickoffUpdate => local,
         disposition PersistKickoffFailureUpdate => local,
         disposition EmitKickoffLifecycleNotice => external,
+        disposition SpawnPolicyResolutionRecorded => local,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
         disposition MemberTrustWiringRequested => external handoff mob_member_trust_wiring,
@@ -1556,28 +1575,101 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition SetSpawnPolicyRunning {
-            on input SetSpawnPolicy
+            on input SetSpawnPolicy { enabled }
             guard { self.lifecycle_phase == Phase::Running }
-            update {}
+            update {
+                self.spawn_policy_enabled = enabled;
+                self.spawn_policy_revision += 1;
+                self.spawn_policy_resolution_revision = EmptyMap;
+                self.spawn_policy_resolution_profiles = EmptyMap;
+                self.spawn_policy_resolution_runtime_modes = EmptyMap;
+                self.spawn_policy_resolution_absent = EmptySet;
+            }
             to Running
         }
         transition SetSpawnPolicyStopped {
-            on input SetSpawnPolicy
+            on input SetSpawnPolicy { enabled }
             guard { self.lifecycle_phase == Phase::Stopped }
-            update {}
+            update {
+                self.spawn_policy_enabled = enabled;
+                self.spawn_policy_revision += 1;
+                self.spawn_policy_resolution_revision = EmptyMap;
+                self.spawn_policy_resolution_profiles = EmptyMap;
+                self.spawn_policy_resolution_runtime_modes = EmptyMap;
+                self.spawn_policy_resolution_absent = EmptySet;
+            }
             to Stopped
         }
         transition SetSpawnPolicyCompleted {
-            on input SetSpawnPolicy
+            on input SetSpawnPolicy { enabled }
             guard { self.lifecycle_phase == Phase::Completed }
-            update {}
+            update {
+                self.spawn_policy_enabled = enabled;
+                self.spawn_policy_revision += 1;
+                self.spawn_policy_resolution_revision = EmptyMap;
+                self.spawn_policy_resolution_profiles = EmptyMap;
+                self.spawn_policy_resolution_runtime_modes = EmptyMap;
+                self.spawn_policy_resolution_absent = EmptySet;
+            }
             to Completed
         }
         transition SetSpawnPolicyDestroyed {
-            on input SetSpawnPolicy
+            on input SetSpawnPolicy { enabled }
             guard { self.lifecycle_phase == Phase::Destroyed }
-            update {}
+            update {
+                self.spawn_policy_enabled = enabled;
+                self.spawn_policy_revision += 1;
+                self.spawn_policy_resolution_revision = EmptyMap;
+                self.spawn_policy_resolution_profiles = EmptyMap;
+                self.spawn_policy_resolution_runtime_modes = EmptyMap;
+                self.spawn_policy_resolution_absent = EmptySet;
+            }
             to Destroyed
+        }
+
+        transition ResolveSpawnPolicyAdmitted {
+            on input ResolveSpawnPolicy { agent_identity, revision, profile_name, runtime_mode }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "policy_enabled" { self.spawn_policy_enabled }
+            guard "revision_matches" { revision == self.spawn_policy_revision }
+            guard "identity_absent" { !self.identity_to_runtime.contains_key(agent_identity) }
+            guard "profile_present" { profile_name != None }
+            update {
+                self.spawn_policy_resolution_revision.insert(agent_identity, revision);
+                self.spawn_policy_resolution_profiles.insert(agent_identity, profile_name.get("value"));
+                self.spawn_policy_resolution_runtime_modes.insert(agent_identity, runtime_mode);
+                self.spawn_policy_resolution_absent.remove(agent_identity);
+            }
+            to Running
+            emit SpawnPolicyResolutionRecorded {
+                agent_identity: agent_identity,
+                revision: revision,
+                profile_name: profile_name,
+                runtime_mode: runtime_mode
+            }
+        }
+
+        transition ResolveSpawnPolicyNoMatch {
+            on input ResolveSpawnPolicy { agent_identity, revision, profile_name, runtime_mode }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "policy_enabled" { self.spawn_policy_enabled }
+            guard "revision_matches" { revision == self.spawn_policy_revision }
+            guard "identity_absent" { !self.identity_to_runtime.contains_key(agent_identity) }
+            guard "profile_absent" { profile_name == None }
+            guard "runtime_mode_absent" { runtime_mode == None }
+            update {
+                self.spawn_policy_resolution_revision.insert(agent_identity, revision);
+                self.spawn_policy_resolution_profiles.remove(agent_identity);
+                self.spawn_policy_resolution_runtime_modes.remove(agent_identity);
+                self.spawn_policy_resolution_absent.insert(agent_identity);
+            }
+            to Running
+            emit SpawnPolicyResolutionRecorded {
+                agent_identity: agent_identity,
+                revision: revision,
+                profile_name: None,
+                runtime_mode: None
+            }
         }
 
         // =====================================================================
@@ -4642,6 +4734,16 @@ pub enum WorkOrigin {
     External,
     Internal,
     Ingest,
+}
+
+/// Typed runtime-mode override carried by generated spawn-policy resolution
+/// handoff. The shell may observe an opaque callback result, but MobMachine
+/// records this closed enum before unknown-member work may auto-spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SpawnPolicyRuntimeMode {
+    #[default]
+    AutonomousHost,
+    TurnDriven,
 }
 
 /// Fallible reverse mapping: the `Ingest` variant has no counterpart in the

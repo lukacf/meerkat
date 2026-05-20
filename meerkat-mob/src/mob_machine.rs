@@ -340,6 +340,7 @@ pub enum MobMachineCatalogInput {
     RecordOperatorActionProvenance,
     GetMember,
     SetSpawnPolicy,
+    ResolveSpawnPolicy,
     Shutdown,
     ForceCancel,
     CreateRunSeed,
@@ -409,6 +410,7 @@ impl MobMachineCatalogInput {
         Self::RecordOperatorActionProvenance,
         Self::GetMember,
         Self::SetSpawnPolicy,
+        Self::ResolveSpawnPolicy,
         Self::Shutdown,
         Self::ForceCancel,
         Self::CreateRunSeed,
@@ -495,6 +497,7 @@ impl MobMachineCatalogInput {
             }
             Self::GetMember => MobMachineInputVariant::GetMember,
             Self::SetSpawnPolicy => MobMachineInputVariant::SetSpawnPolicy,
+            Self::ResolveSpawnPolicy => MobMachineInputVariant::ResolveSpawnPolicy,
             Self::Shutdown => MobMachineInputVariant::Shutdown,
             Self::ForceCancel => MobMachineInputVariant::ForceCancel,
             Self::CreateRunSeed => MobMachineInputVariant::CreateRunSeed,
@@ -586,6 +589,7 @@ impl MobMachineCatalogInput {
             Self::RecordOperatorActionProvenance => "RecordOperatorActionProvenance",
             Self::GetMember => "GetMember",
             Self::SetSpawnPolicy => "SetSpawnPolicy",
+            Self::ResolveSpawnPolicy => "ResolveSpawnPolicy",
             Self::Shutdown => "Shutdown",
             Self::ForceCancel => "ForceCancel",
             Self::CreateRunSeed => "CreateRunSeed",
@@ -694,6 +698,7 @@ pub enum MobMachineShellMechanicReason {
 pub enum MobMachineRuntimeInternalReason {
     FlowProjectionAuthority,
     RuntimeRejectionFeedback,
+    SpawnPolicyFeedbackAuthority,
     SessionIngressDetachFeedback,
     SessionIngressDetachRequest,
     StartupKickoffLifecycle,
@@ -758,6 +763,10 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::ResolveCancelAllWorkRejection,
         reason: MobMachineRuntimeInternalReason::RuntimeRejectionFeedback,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveSpawnPolicy,
+        reason: MobMachineRuntimeInternalReason::SpawnPolicyFeedbackAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::RetireAbsent,

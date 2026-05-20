@@ -166,7 +166,8 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ReplayAllEvents
             | mob_dsl::MobMachineInput::RecordOperatorActionProvenance { .. }
             | mob_dsl::MobMachineInput::GetMember
-            | mob_dsl::MobMachineInput::SetSpawnPolicy
+            | mob_dsl::MobMachineInput::SetSpawnPolicy { .. }
+            | mob_dsl::MobMachineInput::ResolveSpawnPolicy { .. }
             | mob_dsl::MobMachineInput::Shutdown
             | mob_dsl::MobMachineInput::ForceCancel { .. }
             | mob_dsl::MobMachineInput::KickoffMarkPending { .. }
@@ -1248,7 +1249,8 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ReplayAllEvents
             | mob_dsl::MobMachineInput::RecordOperatorActionProvenance { .. }
             | mob_dsl::MobMachineInput::GetMember
-            | mob_dsl::MobMachineInput::SetSpawnPolicy
+            | mob_dsl::MobMachineInput::SetSpawnPolicy { .. }
+            | mob_dsl::MobMachineInput::ResolveSpawnPolicy { .. }
             | mob_dsl::MobMachineInput::Shutdown
             | mob_dsl::MobMachineInput::ForceCancel { .. }
             | mob_dsl::MobMachineInput::KickoffMarkPending { .. }

@@ -3,7 +3,7 @@ use meerkat_machine_dsl::machine;
 
 machine! {
     machine OccurrenceLifecycleMachine {
-        version: 1,
+        version: 2,
         rust: "self" / "catalog::dsl::occurrence_lifecycle",
 
         state {
@@ -29,6 +29,9 @@ machine! {
             delivery_correlation_id: Option<String>,
             last_receipt: Option<DeliveryReceipt>,
             runtime_outcome_key: Option<String>,
+            receipt_stage: Option<Enum<DeliveryReceiptStage>>,
+            receipt_failure_class: Option<Enum<OccurrenceFailureClass>>,
+            receipt_detail: Option<String>,
             failure_class: Option<Enum<OccurrenceFailureClass>>,
             failure_detail: Option<String>,
             dispatched_at_utc_ms: Option<u64>,
@@ -59,6 +62,9 @@ machine! {
             delivery_correlation_id = None,
             last_receipt = None,
             runtime_outcome_key = None,
+            receipt_stage = None,
+            receipt_failure_class = None,
+            receipt_detail = None,
             failure_class = None,
             failure_detail = None,
             dispatched_at_utc_ms = None,
@@ -99,17 +105,24 @@ machine! {
                 misfire_deadline_utc_ms: u64,
             },
             SyncTargetSnapshot { target_binding_key: String },
-            RecordReceipt { receipt: DeliveryReceipt, runtime_outcome_key: Option<String> },
+            RecordReceipt {
+                receipt: DeliveryReceipt,
+                stage: Enum<DeliveryReceiptStage>,
+                failure_class: Option<Enum<OccurrenceFailureClass>>,
+                detail: Option<String>,
+                runtime_outcome_key: Option<String>
+            },
             ClassifyDue { now_utc_ms: u64 },
             Claim { owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken },
             DispatchStarted { correlation_id: Option<String>, at_utc_ms: u64 },
             AwaitCompletion { at_utc_ms: u64 },
-            Complete { receipt: DeliveryReceipt, at_utc_ms: u64 },
+            Complete { at_utc_ms: u64 },
             Skip { detail: Option<String>, failure_class: Option<Enum<OccurrenceFailureClass>>, at_utc_ms: u64 },
             Misfire { detail: Option<String>, failure_class: Option<Enum<OccurrenceFailureClass>>, at_utc_ms: u64 },
             Supersede { superseded_by_revision: u64, at_utc_ms: u64 },
-            DeliveryFailed { receipt: Option<DeliveryReceipt>, failure_class: Enum<OccurrenceFailureClass>, detail: Option<String>, at_utc_ms: u64 },
+            DeliveryFailed { failure_class: Enum<OccurrenceFailureClass>, detail: Option<String>, at_utc_ms: u64 },
             LeaseExpired { at_utc_ms: u64 },
+            ReleaseLeaseForPausedSchedule { at_utc_ms: u64 },
         }
 
         effect OccurrenceLifecycleEffect {
@@ -227,6 +240,9 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.last_receipt = None;
                 self.runtime_outcome_key = None;
+                self.receipt_stage = None;
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
                 self.failure_class = None;
                 self.failure_detail = None;
                 self.dispatched_at_utc_ms = None;
@@ -406,8 +422,13 @@ machine! {
         // --- Receipt/result projection ---
 
         transition RecordReceiptPending {
-            on input RecordReceipt { receipt, runtime_outcome_key }
-            guard { self.lifecycle_phase == Phase::Pending }
+            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.receipt_stage == Some(stage)
+                && self.receipt_failure_class == failure_class
+                && self.receipt_detail == detail
+            }
             update {
                 self.last_receipt = Some(receipt);
                 self.runtime_outcome_key = runtime_outcome_key;
@@ -416,8 +437,13 @@ machine! {
         }
 
         transition RecordReceiptClaimed {
-            on input RecordReceipt { receipt, runtime_outcome_key }
-            guard { self.lifecycle_phase == Phase::Claimed }
+            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Claimed
+                && self.receipt_stage == Some(stage)
+                && self.receipt_failure_class == failure_class
+                && self.receipt_detail == detail
+            }
             update {
                 self.last_receipt = Some(receipt);
                 self.runtime_outcome_key = runtime_outcome_key;
@@ -426,8 +452,13 @@ machine! {
         }
 
         transition RecordReceiptDispatching {
-            on input RecordReceipt { receipt, runtime_outcome_key }
-            guard { self.lifecycle_phase == Phase::Dispatching }
+            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Dispatching
+                && self.receipt_stage == Some(stage)
+                && self.receipt_failure_class == failure_class
+                && self.receipt_detail == detail
+            }
             update {
                 self.last_receipt = Some(receipt);
                 self.runtime_outcome_key = runtime_outcome_key;
@@ -436,8 +467,13 @@ machine! {
         }
 
         transition RecordReceiptAwaitingCompletion {
-            on input RecordReceipt { receipt, runtime_outcome_key }
-            guard { self.lifecycle_phase == Phase::AwaitingCompletion }
+            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::AwaitingCompletion
+                && self.receipt_stage == Some(stage)
+                && self.receipt_failure_class == failure_class
+                && self.receipt_detail == detail
+            }
             update {
                 self.last_receipt = Some(receipt);
                 self.runtime_outcome_key = runtime_outcome_key;
@@ -446,8 +482,13 @@ machine! {
         }
 
         transition RecordReceiptCompleted {
-            on input RecordReceipt { receipt, runtime_outcome_key }
-            guard { self.lifecycle_phase == Phase::Completed }
+            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Completed
+                && self.receipt_stage == Some(stage)
+                && self.receipt_failure_class == failure_class
+                && self.receipt_detail == detail
+            }
             update {
                 self.last_receipt = Some(receipt);
                 self.runtime_outcome_key = runtime_outcome_key;
@@ -456,8 +497,13 @@ machine! {
         }
 
         transition RecordReceiptSkipped {
-            on input RecordReceipt { receipt, runtime_outcome_key }
-            guard { self.lifecycle_phase == Phase::Skipped }
+            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Skipped
+                && self.receipt_stage == Some(stage)
+                && self.receipt_failure_class == failure_class
+                && self.receipt_detail == detail
+            }
             update {
                 self.last_receipt = Some(receipt);
                 self.runtime_outcome_key = runtime_outcome_key;
@@ -466,8 +512,13 @@ machine! {
         }
 
         transition RecordReceiptMisfired {
-            on input RecordReceipt { receipt, runtime_outcome_key }
-            guard { self.lifecycle_phase == Phase::Misfired }
+            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Misfired
+                && self.receipt_stage == Some(stage)
+                && self.receipt_failure_class == failure_class
+                && self.receipt_detail == detail
+            }
             update {
                 self.last_receipt = Some(receipt);
                 self.runtime_outcome_key = runtime_outcome_key;
@@ -476,8 +527,13 @@ machine! {
         }
 
         transition RecordReceiptSuperseded {
-            on input RecordReceipt { receipt, runtime_outcome_key }
-            guard { self.lifecycle_phase == Phase::Superseded }
+            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Superseded
+                && self.receipt_stage == Some(stage)
+                && self.receipt_failure_class == failure_class
+                && self.receipt_detail == detail
+            }
             update {
                 self.last_receipt = Some(receipt);
                 self.runtime_outcome_key = runtime_outcome_key;
@@ -486,8 +542,13 @@ machine! {
         }
 
         transition RecordReceiptDeliveryFailed {
-            on input RecordReceipt { receipt, runtime_outcome_key }
-            guard { self.lifecycle_phase == Phase::DeliveryFailed }
+            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::DeliveryFailed
+                && self.receipt_stage == Some(stage)
+                && self.receipt_failure_class == failure_class
+                && self.receipt_detail == detail
+            }
             update {
                 self.last_receipt = Some(receipt);
                 self.runtime_outcome_key = runtime_outcome_key;
@@ -512,6 +573,9 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.last_receipt = None;
                 self.runtime_outcome_key = None;
+                self.receipt_stage = None;
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
                 self.failure_class = None;
                 self.failure_detail = None;
                 self.dispatched_at_utc_ms = None;
@@ -530,6 +594,9 @@ machine! {
             update {
                 self.delivery_correlation_id = correlation_id;
                 self.dispatched_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DispatchStarted);
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
             }
             to Dispatching
             emit DispatchStarted
@@ -550,11 +617,13 @@ machine! {
         // --- Complete ---
 
         transition CompleteFromDispatchingOrAwaiting {
-            on input Complete { receipt, at_utc_ms }
+            on input Complete { at_utc_ms }
             guard { self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
             update {
-                self.last_receipt = Some(receipt);
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Completed);
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
             }
             to Completed
             emit Completed
@@ -574,6 +643,9 @@ machine! {
                 self.failure_detail = detail;
                 self.failure_class = failure_class;
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Skipped);
+                self.receipt_failure_class = failure_class;
+                self.receipt_detail = detail;
                 self.claimed_by = None;
                 self.lease_expires_at_utc_ms = None;
                 self.claim_token = None;
@@ -597,6 +669,9 @@ machine! {
                 self.failure_detail = detail;
                 self.failure_class = failure_class;
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Misfired);
+                self.receipt_failure_class = failure_class;
+                self.receipt_detail = detail;
                 self.claimed_by = None;
                 self.lease_expires_at_utc_ms = None;
                 self.claim_token = None;
@@ -619,6 +694,9 @@ machine! {
             update {
                 self.superseded_by_revision = Some(superseded_by_revision);
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Superseded);
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
             }
             to Superseded
             emit Superseded
@@ -628,17 +706,19 @@ machine! {
         // --- Delivery failed ---
 
         transition DeliveryFailedFromClaimedOrLive {
-            on input DeliveryFailed { receipt, failure_class, detail, at_utc_ms }
+            on input DeliveryFailed { failure_class, detail, at_utc_ms }
             guard {
                 self.lifecycle_phase == Phase::Claimed
                 || self.lifecycle_phase == Phase::Dispatching
                 || self.lifecycle_phase == Phase::AwaitingCompletion
             }
             update {
-                self.last_receipt = receipt;
                 self.failure_class = Some(failure_class);
                 self.failure_detail = detail;
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(failure_class);
+                self.receipt_detail = detail;
             }
             to DeliveryFailed
             emit DeliveryFailed
@@ -656,6 +736,9 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.claimed_at_utc_ms = None;
                 self.dispatched_at_utc_ms = None;
+                self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = Some("lease expired before completion");
             }
             to Pending
             emit LeaseExpired
@@ -671,6 +754,9 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.claimed_at_utc_ms = None;
                 self.dispatched_at_utc_ms = None;
+                self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = Some("lease expired before completion");
             }
             to Pending
             emit LeaseExpired
@@ -686,6 +772,63 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.claimed_at_utc_ms = None;
                 self.dispatched_at_utc_ms = None;
+                self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = Some("lease expired before completion");
+            }
+            to Pending
+            emit LeaseExpired
+        }
+
+        transition ReleaseLeaseForPausedScheduleFromClaimed {
+            on input ReleaseLeaseForPausedSchedule { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed }
+            update {
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+                self.claimed_at_utc_ms = None;
+                self.dispatched_at_utc_ms = None;
+                self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = Some("lease released because schedule was paused before dispatch");
+            }
+            to Pending
+            emit LeaseExpired
+        }
+
+        transition ReleaseLeaseForPausedScheduleFromDispatching {
+            on input ReleaseLeaseForPausedSchedule { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Dispatching }
+            update {
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+                self.claimed_at_utc_ms = None;
+                self.dispatched_at_utc_ms = None;
+                self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = Some("lease released because schedule was paused before dispatch");
+            }
+            to Pending
+            emit LeaseExpired
+        }
+
+        transition ReleaseLeaseForPausedScheduleFromAwaitingCompletion {
+            on input ReleaseLeaseForPausedSchedule { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::AwaitingCompletion }
+            update {
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+                self.claimed_at_utc_ms = None;
+                self.dispatched_at_utc_ms = None;
+                self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = Some("lease released because schedule was paused before dispatch");
             }
             to Pending
             emit LeaseExpired
@@ -752,4 +895,19 @@ pub enum OccurrenceFailureClass {
     LeaseLost,
     TransportError,
     InternalError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryReceiptStage {
+    Planned,
+    Claimed,
+    DispatchStarted,
+    DispatchAccepted,
+    AwaitingCompletion,
+    Completed,
+    Skipped,
+    Misfired,
+    Superseded,
+    DeliveryFailed,
+    LeaseExpired,
 }

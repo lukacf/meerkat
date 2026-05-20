@@ -266,6 +266,47 @@ fn occurrence_failure_class_from_wire(
     }
 }
 
+fn occurrence_receipt_stage_to_wire(stage: occ_dsl::DeliveryReceiptStage) -> &'static str {
+    match stage {
+        occ_dsl::DeliveryReceiptStage::Planned => "planned",
+        occ_dsl::DeliveryReceiptStage::Claimed => "claimed",
+        occ_dsl::DeliveryReceiptStage::DispatchStarted => "dispatch_started",
+        occ_dsl::DeliveryReceiptStage::DispatchAccepted => "dispatch_accepted",
+        occ_dsl::DeliveryReceiptStage::AwaitingCompletion => "awaiting_completion",
+        occ_dsl::DeliveryReceiptStage::Completed => "completed",
+        occ_dsl::DeliveryReceiptStage::Skipped => "skipped",
+        occ_dsl::DeliveryReceiptStage::Misfired => "misfired",
+        occ_dsl::DeliveryReceiptStage::Superseded => "superseded",
+        occ_dsl::DeliveryReceiptStage::DeliveryFailed => "delivery_failed",
+        occ_dsl::DeliveryReceiptStage::LeaseExpired => "lease_expired",
+    }
+}
+
+fn occurrence_receipt_stage_from_wire(
+    stage: &str,
+) -> Result<occ_dsl::DeliveryReceiptStage, String> {
+    match stage {
+        "planned" | "Planned" => Ok(occ_dsl::DeliveryReceiptStage::Planned),
+        "claimed" | "Claimed" => Ok(occ_dsl::DeliveryReceiptStage::Claimed),
+        "dispatch_started" | "DispatchStarted" => {
+            Ok(occ_dsl::DeliveryReceiptStage::DispatchStarted)
+        }
+        "dispatch_accepted" | "DispatchAccepted" => {
+            Ok(occ_dsl::DeliveryReceiptStage::DispatchAccepted)
+        }
+        "awaiting_completion" | "AwaitingCompletion" => {
+            Ok(occ_dsl::DeliveryReceiptStage::AwaitingCompletion)
+        }
+        "completed" | "Completed" => Ok(occ_dsl::DeliveryReceiptStage::Completed),
+        "skipped" | "Skipped" => Ok(occ_dsl::DeliveryReceiptStage::Skipped),
+        "misfired" | "Misfired" => Ok(occ_dsl::DeliveryReceiptStage::Misfired),
+        "superseded" | "Superseded" => Ok(occ_dsl::DeliveryReceiptStage::Superseded),
+        "delivery_failed" | "DeliveryFailed" => Ok(occ_dsl::DeliveryReceiptStage::DeliveryFailed),
+        "lease_expired" | "LeaseExpired" => Ok(occ_dsl::DeliveryReceiptStage::LeaseExpired),
+        other => Err(format!("invalid DeliveryReceiptStage `{other}`")),
+    }
+}
+
 fn schedule_overlap_policy_to_machine(policy: &OverlapPolicy) -> sched_dsl::OverlapPolicy {
     match policy {
         OverlapPolicy::AllowConcurrent => sched_dsl::OverlapPolicy::AllowConcurrent,
@@ -1925,6 +1966,9 @@ struct OccurrenceMachineStateWire {
     delivery_correlation_id: Option<String>,
     last_receipt: Option<String>,
     runtime_outcome_key: Option<String>,
+    receipt_stage: Option<String>,
+    receipt_failure_class: Option<String>,
+    receipt_detail: Option<String>,
     failure_class: Option<String>,
     failure_detail: Option<String>,
     dispatched_at_utc_ms: Option<u64>,
@@ -1964,6 +2008,15 @@ impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateW
             delivery_correlation_id: state.delivery_correlation_id.clone(),
             last_receipt: state.last_receipt.as_ref().map(|receipt| receipt.0.clone()),
             runtime_outcome_key: state.runtime_outcome_key.clone(),
+            receipt_stage: state
+                .receipt_stage
+                .map(occurrence_receipt_stage_to_wire)
+                .map(str::to_string),
+            receipt_failure_class: state
+                .receipt_failure_class
+                .map(occurrence_failure_class_to_wire)
+                .map(str::to_string),
+            receipt_detail: state.receipt_detail.clone(),
             failure_class: state
                 .failure_class
                 .map(occurrence_failure_class_to_wire)
@@ -2007,6 +2060,17 @@ impl TryFrom<OccurrenceMachineStateWire> for occ_dsl::OccurrenceLifecycleMachine
             delivery_correlation_id: wire.delivery_correlation_id,
             last_receipt: wire.last_receipt.map(occ_dsl::DeliveryReceipt),
             runtime_outcome_key: wire.runtime_outcome_key,
+            receipt_stage: wire
+                .receipt_stage
+                .as_deref()
+                .map(occurrence_receipt_stage_from_wire)
+                .transpose()?,
+            receipt_failure_class: wire
+                .receipt_failure_class
+                .as_deref()
+                .map(occurrence_failure_class_from_wire)
+                .transpose()?,
+            receipt_detail: wire.receipt_detail,
             failure_class: wire
                 .failure_class
                 .as_deref()

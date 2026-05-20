@@ -128,6 +128,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LeaseExpiredFromAwaitingCompletion`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_lease_recovery`
+- `ReleaseLeaseForPausedScheduleFromClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ReleaseLeaseForPausedScheduleFromDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ReleaseLeaseForPausedScheduleFromAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
 
 ### Effects
 - `Claimed`

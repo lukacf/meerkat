@@ -1373,6 +1373,22 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         vec![
             NamedTypeBinding::string("ClaimToken"),
             NamedTypeBinding::string("DeliveryReceipt"),
+            NamedTypeBinding::string_enum(
+                "DeliveryReceiptStage",
+                &[
+                    "Planned",
+                    "Claimed",
+                    "DispatchStarted",
+                    "DispatchAccepted",
+                    "AwaitingCompletion",
+                    "Completed",
+                    "Skipped",
+                    "Misfired",
+                    "Superseded",
+                    "DeliveryFailed",
+                    "LeaseExpired",
+                ],
+            ),
             NamedTypeBinding::string_enum("MisfirePolicy", &["Skip", "CatchUpWithin"]),
             NamedTypeBinding::string_enum("MissingTargetPolicy", &["MarkMisfired", "Skip"]),
             NamedTypeBinding::string_enum(

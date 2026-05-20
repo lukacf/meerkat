@@ -3,11 +3,10 @@ use crate::sqlite_store::{begin_immediate_transaction, open_connection};
 use async_trait::async_trait;
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use meerkat_schedule::{
-    ClaimDueRequest, ClaimDueResult, DeliveryReceipt, DeliveryReceiptStage, Occurrence,
-    OccurrenceDueAction, OccurrenceFailureClass, OccurrenceFilter, OccurrenceId,
-    OccurrenceLifecycleEffect, OccurrenceLifecycleError, OccurrenceLifecycleInput,
-    OccurrenceLifecycleMutator, OccurrencePhase, PendingSupersession, Schedule, ScheduleFilter,
-    SchedulePhase, ScheduleStore, ScheduleStoreError, ScheduleStoreKind,
+    ClaimDueRequest, ClaimDueResult, DeliveryReceipt, Occurrence, OccurrenceDueAction,
+    OccurrenceFilter, OccurrenceId, OccurrenceLifecycleEffect, OccurrenceLifecycleError,
+    OccurrenceLifecycleInput, OccurrenceLifecycleMutator, OccurrencePhase, PendingSupersession,
+    Schedule, ScheduleFilter, SchedulePhase, ScheduleStore, ScheduleStoreError, ScheduleStoreKind,
     apply_supersession_feedback,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -349,12 +348,11 @@ impl SqliteScheduleStore {
                                 StoreError::Internal(error.to_string())
                             })?
                             .into_occurrence();
-                        let mut receipt = DeliveryReceipt::new(
-                            updated.occurrence_id.clone(),
-                            updated.attempt_count,
-                            DeliveryReceiptStage::Misfired,
-                        );
-                        receipt.detail = detail;
+                        let receipt = updated
+                            .delivery_receipt_from_authority(None, None, None)
+                            .map_err(|error: OccurrenceLifecycleError| {
+                                StoreError::Internal(error.to_string())
+                            })?;
                         updated = updated
                             .apply(OccurrenceLifecycleInput::RecordReceipt {
                                 runtime_outcome: receipt.runtime_outcome.clone(),
@@ -720,13 +718,9 @@ fn expire_occurrence_lease_for_sqlite(
         .apply(OccurrenceLifecycleInput::LeaseExpired { at_utc })
         .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
         .into_occurrence();
-    let mut receipt = DeliveryReceipt::new(
-        expired.occurrence_id.clone(),
-        expired.attempt_count,
-        DeliveryReceiptStage::LeaseExpired,
-    );
-    receipt.failure_class = Some(OccurrenceFailureClass::LeaseLost);
-    receipt.detail = Some("lease expired before completion".to_string());
+    let receipt = expired
+        .delivery_receipt_from_authority(None, None, None)
+        .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?;
     let expired = expired
         .apply(OccurrenceLifecycleInput::RecordReceipt {
             runtime_outcome: receipt.runtime_outcome.clone(),

@@ -3,8 +3,8 @@ use crate::lifecycle::OccurrenceLifecycleInput;
 use crate::service::ScheduleService;
 use crate::store::{ClaimDueRequest, ScheduleStore};
 use crate::types::{
-    DeliveryReceipt, DeliveryReceiptStage, Occurrence, OccurrenceFailureClass, OccurrencePhase,
-    OverlapPolicy, RuntimeDeliveryOutcome, SchedulePhase,
+    DeliveryReceipt, Occurrence, OccurrenceFailureClass, OccurrencePhase, OverlapPolicy,
+    RuntimeDeliveryOutcome, SchedulePhase,
 };
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -226,21 +226,15 @@ impl ScheduleDriver {
                         &frozen_occurrence.occurrence_id,
                         frozen_occurrence.attempt_count,
                         frozen_occurrence.claim_token(),
-                        OccurrenceLifecycleInput::LeaseExpired {
+                        OccurrenceLifecycleInput::ReleaseLeaseForPausedSchedule {
                             at_utc: store_now_utc,
                         },
                     )
                     .await?;
                 if let Some(released) = released {
-                    let mut receipt = DeliveryReceipt::new(
-                        released.occurrence_id.clone(),
-                        released.attempt_count,
-                        DeliveryReceiptStage::LeaseExpired,
-                    );
-                    receipt.failure_class = Some(OccurrenceFailureClass::LeaseLost);
-                    receipt.detail = Some(
-                        "lease released because schedule was paused before dispatch".to_string(),
-                    );
+                    let receipt = released
+                        .delivery_receipt_from_authority(None, None, None)
+                        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
                     self.store.append_receipt(receipt).await?;
                 }
                 return Ok(false);
@@ -255,7 +249,6 @@ impl ScheduleDriver {
                         superseded_by_revision,
                         at_utc: store_now_utc,
                     },
-                    DeliveryReceiptStage::Superseded,
                     None,
                 )
                 .await?;
@@ -276,7 +269,6 @@ impl ScheduleDriver {
                             failure_class: Some(OccurrenceFailureClass::TargetBusy),
                             at_utc: store_now_utc,
                         },
-                        DeliveryReceiptStage::Skipped,
                         None,
                     )
                     .await?;
@@ -300,11 +292,7 @@ impl ScheduleDriver {
                         at_utc: store_now_utc,
                     }
                 };
-                let stage = match lifecycle {
-                    OccurrenceLifecycleInput::Skip { .. } => DeliveryReceiptStage::Skipped,
-                    _ => DeliveryReceiptStage::Misfired,
-                };
-                self.terminalize_occurrence(occurrence, lifecycle, stage, None)
+                self.terminalize_occurrence(occurrence, lifecycle, None)
                     .await?;
                 return Ok(true);
             }
@@ -317,12 +305,10 @@ impl ScheduleDriver {
                 self.terminalize_occurrence(
                     occurrence,
                     OccurrenceLifecycleInput::DeliveryFailed {
-                        receipt: None,
                         failure_class: OccurrenceFailureClass::TransportError,
                         detail: Some(detail),
                         at_utc: store_now_utc,
                     },
-                    DeliveryReceiptStage::DeliveryFailed,
                     None,
                 )
                 .await?;
@@ -340,14 +326,6 @@ impl ScheduleDriver {
                 .await?;
         }
 
-        let mut dispatch_receipt = dispatch.receipt.clone();
-        if dispatch_receipt.correlation_id.is_none() {
-            dispatch_receipt.correlation_id = dispatch.correlation_id.clone();
-        }
-        if dispatch_receipt.materialized_session_id.is_none() {
-            dispatch_receipt.materialized_session_id = dispatch.materialized_session_id.clone();
-        }
-
         let mut dispatching = occurrence
             .apply(OccurrenceLifecycleInput::DispatchStarted {
                 correlation_id: dispatch.correlation_id.clone(),
@@ -355,6 +333,15 @@ impl ScheduleDriver {
             })
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
             .into_occurrence();
+        // The delivery adapter's receipt is transport metadata; the recorded
+        // public receipt class is projected from OccurrenceLifecycleMachine.
+        let dispatch_receipt = dispatching
+            .delivery_receipt_from_authority(
+                None,
+                dispatch.receipt.runtime_outcome.clone(),
+                dispatch.materialized_session_id.clone(),
+            )
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
         dispatching = dispatching
             .apply(OccurrenceLifecycleInput::RecordReceipt {
                 receipt: dispatch_receipt.clone(),
@@ -425,14 +412,12 @@ impl ScheduleDriver {
         &self,
         occurrence: Occurrence,
         lifecycle: OccurrenceLifecycleInput,
-        stage: DeliveryReceiptStage,
         receipt: Option<DeliveryReceipt>,
     ) -> Result<(), ScheduleDomainError> {
         let _ = terminalize_occurrence_inner(
             self.store.clone(),
             occurrence,
             lifecycle,
-            stage,
             receipt,
             None,
             None,
@@ -474,7 +459,6 @@ async fn complete_dispatched_occurrence(
                 superseded_by_revision: schedule.revision,
                 at_utc: store_now_utc,
             },
-            DeliveryReceiptStage::Superseded,
             None,
             terminal.materialized_session_id,
             None,
@@ -483,29 +467,10 @@ async fn complete_dispatched_occurrence(
         return Ok(());
     }
 
-    let completed_receipt = matches!(terminal.phase, OccurrencePhase::Completed).then(|| {
-        build_terminal_receipt(
-            &occurrence,
-            DeliveryReceiptStage::Completed,
-            terminal.receipt.clone(),
-            terminal.failure_class,
-            terminal.runtime_outcome.clone(),
-            terminal.detail.clone(),
-            terminal.materialized_session_id.clone(),
-        )
-    });
     let lifecycle = match terminal.phase {
-        OccurrencePhase::Completed => {
-            let receipt = completed_receipt.clone().ok_or_else(|| {
-                ScheduleDomainError::Internal(
-                    "completed terminal must carry a completed receipt".to_string(),
-                )
-            })?;
-            OccurrenceLifecycleInput::Complete {
-                receipt,
-                at_utc: store_now_utc,
-            }
-        }
+        OccurrencePhase::Completed => OccurrenceLifecycleInput::Complete {
+            at_utc: store_now_utc,
+        },
         OccurrencePhase::Skipped => OccurrenceLifecycleInput::Skip {
             detail: terminal.detail.clone(),
             failure_class: terminal.failure_class,
@@ -517,7 +482,6 @@ async fn complete_dispatched_occurrence(
             at_utc: store_now_utc,
         },
         OccurrencePhase::DeliveryFailed => OccurrenceLifecycleInput::DeliveryFailed {
-            receipt: terminal.receipt.clone(),
             failure_class: terminal
                 .failure_class
                 .unwrap_or(OccurrenceFailureClass::InternalError),
@@ -530,20 +494,12 @@ async fn complete_dispatched_occurrence(
             )));
         }
     };
-    let receipt_stage = match terminal.phase {
-        OccurrencePhase::Completed => DeliveryReceiptStage::Completed,
-        OccurrencePhase::Skipped => DeliveryReceiptStage::Skipped,
-        OccurrencePhase::Misfired => DeliveryReceiptStage::Misfired,
-        OccurrencePhase::DeliveryFailed => DeliveryReceiptStage::DeliveryFailed,
-        _ => DeliveryReceiptStage::DeliveryFailed,
-    };
 
     let _ = terminalize_occurrence_inner(
         store,
         occurrence,
         lifecycle,
-        receipt_stage,
-        completed_receipt.or(terminal.receipt),
+        terminal.receipt,
         terminal.materialized_session_id,
         terminal.runtime_outcome,
     )
@@ -555,7 +511,6 @@ async fn terminalize_occurrence_inner(
     store: Arc<dyn ScheduleStore>,
     occurrence: Occurrence,
     lifecycle: OccurrenceLifecycleInput,
-    stage: DeliveryReceiptStage,
     receipt: Option<DeliveryReceipt>,
     materialized_session_id: Option<SessionId>,
     runtime_outcome: Option<RuntimeDeliveryOutcome>,
@@ -571,15 +526,9 @@ async fn terminalize_occurrence_inner(
     else {
         return Ok(false);
     };
-    let final_receipt = build_terminal_receipt(
-        &updated,
-        stage,
-        receipt,
-        updated.failure_class,
-        runtime_outcome.clone(),
-        updated.failure_detail.clone(),
-        materialized_session_id,
-    );
+    let final_receipt = updated
+        .delivery_receipt_from_authority(receipt, runtime_outcome.clone(), materialized_session_id)
+        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
     updated = updated
         .apply(OccurrenceLifecycleInput::RecordReceipt {
             receipt: final_receipt.clone(),
@@ -592,52 +541,12 @@ async fn terminalize_occurrence_inner(
     Ok(true)
 }
 
-fn build_terminal_receipt(
-    occurrence: &Occurrence,
-    stage: DeliveryReceiptStage,
-    receipt: Option<DeliveryReceipt>,
-    failure_class: Option<OccurrenceFailureClass>,
-    runtime_outcome: Option<RuntimeDeliveryOutcome>,
-    detail: Option<String>,
-    materialized_session_id: Option<SessionId>,
-) -> DeliveryReceipt {
-    let mut receipt = receipt.unwrap_or_else(|| {
-        DeliveryReceipt::new(
-            occurrence.occurrence_id.clone(),
-            occurrence.attempt_count,
-            stage,
-        )
-    });
-    receipt.stage = stage;
-    if receipt.correlation_id.is_none() {
-        receipt.correlation_id = occurrence.delivery_correlation_id.clone();
-    }
-    if receipt.failure_class.is_none() {
-        receipt.failure_class = failure_class;
-    }
-    if receipt.runtime_outcome.is_none() {
-        receipt.runtime_outcome = runtime_outcome;
-    }
-    if receipt.detail.is_none() {
-        receipt.detail = detail;
-    }
-    if receipt.materialized_session_id.is_none() {
-        receipt.materialized_session_id = materialized_session_id.or_else(|| {
-            occurrence
-                .last_receipt
-                .as_ref()
-                .and_then(|last_receipt| last_receipt.materialized_session_id.clone())
-        });
-    }
-    receipt
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::types::{
-        CreateScheduleRequest, IntervalTriggerSpec, ScheduledSessionAction,
+        CreateScheduleRequest, DeliveryReceiptStage, IntervalTriggerSpec, ScheduledSessionAction,
         SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
     };
     use crate::{
@@ -1029,10 +938,16 @@ mod tests {
             Some("session creation failed")
         );
 
-        let receipts = store.list_receipts(&occurrence.occurrence_id).await?;
-        let last_receipt = receipts.last().ok_or_else(|| {
-            ScheduleDomainError::Internal("delivery failure receipt should exist".to_string())
-        })?;
+        let last_receipt = loop {
+            let receipts = store.list_receipts(&occurrence.occurrence_id).await?;
+            if let Some(receipt) = receipts
+                .last()
+                .filter(|receipt| receipt.stage == DeliveryReceiptStage::DeliveryFailed)
+            {
+                break receipt.clone();
+            }
+            sleep(std::time::Duration::from_millis(10)).await;
+        };
         assert_eq!(last_receipt.stage, DeliveryReceiptStage::DeliveryFailed);
         assert_eq!(
             last_receipt.failure_class,

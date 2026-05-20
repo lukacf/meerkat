@@ -82,6 +82,92 @@ impl std::fmt::Display for DeliveryReceipt {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum DeliveryReceiptStage {
+    #[default]
+    #[serde(rename = "Planned")]
+    Planned,
+    #[serde(rename = "Claimed")]
+    Claimed,
+    #[serde(rename = "DispatchStarted")]
+    DispatchStarted,
+    #[serde(rename = "DispatchAccepted")]
+    DispatchAccepted,
+    #[serde(rename = "AwaitingCompletion")]
+    AwaitingCompletion,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Skipped")]
+    Skipped,
+    #[serde(rename = "Misfired")]
+    Misfired,
+    #[serde(rename = "Superseded")]
+    Superseded,
+    #[serde(rename = "DeliveryFailed")]
+    DeliveryFailed,
+    #[serde(rename = "LeaseExpired")]
+    LeaseExpired,
+}
+impl DeliveryReceiptStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Planned => "Planned",
+            Self::Claimed => "Claimed",
+            Self::DispatchStarted => "DispatchStarted",
+            Self::DispatchAccepted => "DispatchAccepted",
+            Self::AwaitingCompletion => "AwaitingCompletion",
+            Self::Completed => "Completed",
+            Self::Skipped => "Skipped",
+            Self::Misfired => "Misfired",
+            Self::Superseded => "Superseded",
+            Self::DeliveryFailed => "DeliveryFailed",
+            Self::LeaseExpired => "LeaseExpired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DeliveryReceiptStage {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Planned" => Ok(Self::Planned),
+            "Claimed" => Ok(Self::Claimed),
+            "DispatchStarted" => Ok(Self::DispatchStarted),
+            "DispatchAccepted" => Ok(Self::DispatchAccepted),
+            "AwaitingCompletion" => Ok(Self::AwaitingCompletion),
+            "Completed" => Ok(Self::Completed),
+            "Skipped" => Ok(Self::Skipped),
+            "Misfired" => Ok(Self::Misfired),
+            "Superseded" => Ok(Self::Superseded),
+            "DeliveryFailed" => Ok(Self::DeliveryFailed),
+            "LeaseExpired" => Ok(Self::LeaseExpired),
+            other => Err(format!("invalid DeliveryReceiptStage value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DeliveryReceiptStage {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DeliveryReceiptStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MisfirePolicy {
     #[default]
     #[serde(rename = "Skip")]
@@ -469,6 +555,9 @@ pub struct State {
     pub delivery_correlation_id: Option<String>,
     pub last_receipt: Option<DeliveryReceipt>,
     pub runtime_outcome_key: Option<String>,
+    pub receipt_stage: Option<DeliveryReceiptStage>,
+    pub receipt_failure_class: Option<OccurrenceFailureClass>,
+    pub receipt_detail: Option<String>,
     pub failure_class: Option<OccurrenceFailureClass>,
     pub failure_detail: Option<String>,
     pub dispatched_at_utc_ms: Option<u64>,
@@ -509,6 +598,9 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordReceipt {
         pub receipt: DeliveryReceipt,
+        pub stage: DeliveryReceiptStage,
+        pub failure_class: Option<OccurrenceFailureClass>,
+        pub detail: Option<String>,
         pub runtime_outcome_key: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -533,7 +625,6 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Complete {
-        pub receipt: DeliveryReceipt,
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -555,13 +646,16 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DeliveryFailed {
-        pub receipt: Option<DeliveryReceipt>,
         pub failure_class: OccurrenceFailureClass,
         pub detail: Option<String>,
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LeaseExpired {
+        pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseLeaseForPausedSchedule {
         pub at_utc_ms: u64,
     }
 }
@@ -581,6 +675,7 @@ pub enum Input {
     Supersede(inputs::Supersede),
     DeliveryFailed(inputs::DeliveryFailed),
     LeaseExpired(inputs::LeaseExpired),
+    ReleaseLeaseForPausedSchedule(inputs::ReleaseLeaseForPausedSchedule),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -598,6 +693,7 @@ impl Input {
             Self::Supersede(_) => InputKind::Supersede,
             Self::DeliveryFailed(_) => InputKind::DeliveryFailed,
             Self::LeaseExpired(_) => InputKind::LeaseExpired,
+            Self::ReleaseLeaseForPausedSchedule(_) => InputKind::ReleaseLeaseForPausedSchedule,
         }
     }
 }
@@ -616,6 +712,7 @@ pub enum InputKind {
     Supersede,
     DeliveryFailed,
     LeaseExpired,
+    ReleaseLeaseForPausedSchedule,
 }
 
 pub mod effects {
@@ -729,6 +826,9 @@ pub enum TransitionId {
     LeaseExpiredFromClaimed,
     LeaseExpiredFromDispatching,
     LeaseExpiredFromAwaitingCompletion,
+    ReleaseLeaseForPausedScheduleFromClaimed,
+    ReleaseLeaseForPausedScheduleFromDispatching,
+    ReleaseLeaseForPausedScheduleFromAwaitingCompletion,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -822,6 +922,9 @@ pub fn initial_state() -> State {
         delivery_correlation_id: None,
         last_receipt: None,
         runtime_outcome_key: None,
+        receipt_stage: None,
+        receipt_failure_class: None,
+        receipt_detail: None,
         failure_class: None,
         failure_detail: None,
         dispatched_at_utc_ms: None,

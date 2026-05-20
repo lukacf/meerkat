@@ -4,8 +4,8 @@ use crate::lifecycle::{
     OccurrenceLifecycleInput, OccurrenceLifecycleMutator, ScheduleLifecycleInput,
 };
 use crate::types::{
-    DeliveryReceipt, DeliveryReceiptStage, Occurrence, OccurrenceFailureClass, OccurrenceId,
-    OccurrencePhase, Schedule, ScheduleId, SchedulePhase, ScheduleRevision,
+    DeliveryReceipt, Occurrence, OccurrenceId, OccurrencePhase, Schedule, ScheduleId,
+    SchedulePhase, ScheduleRevision,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -117,13 +117,7 @@ pub(crate) fn expire_occurrence_lease(
     let expired = occurrence
         .apply(OccurrenceLifecycleInput::LeaseExpired { at_utc })?
         .into_occurrence();
-    let mut receipt = DeliveryReceipt::new(
-        expired.occurrence_id.clone(),
-        expired.attempt_count,
-        DeliveryReceiptStage::LeaseExpired,
-    );
-    receipt.failure_class = Some(OccurrenceFailureClass::LeaseLost);
-    receipt.detail = Some("lease expired before completion".to_string());
+    let receipt = expired.delivery_receipt_from_authority(None, None, None)?;
     let expired = expired
         .apply(OccurrenceLifecycleInput::RecordReceipt {
             runtime_outcome: receipt.runtime_outcome.clone(),
@@ -615,12 +609,9 @@ impl ScheduleStore for MemoryScheduleStore {
                         })
                         .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
                         .into_occurrence();
-                    let mut receipt = DeliveryReceipt::new(
-                        updated.occurrence_id.clone(),
-                        updated.attempt_count,
-                        DeliveryReceiptStage::Misfired,
-                    );
-                    receipt.detail = detail;
+                    let receipt = updated
+                        .delivery_receipt_from_authority(None, None, None)
+                        .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
                     state
                         .receipts
                         .entry(updated.occurrence_id.clone())

@@ -7,12 +7,13 @@
 use crate::machines::occurrence_lifecycle as occ_dsl;
 use crate::machines::schedule_lifecycle as sched_dsl;
 use crate::types::{
-    CreateScheduleRequest, DeliveryReceipt, Occurrence, OccurrenceFailureClass, OccurrenceOrdinal,
-    OccurrencePhase, RuntimeDeliveryOutcome, Schedule, ScheduleId, SchedulePhase, ScheduleRevision,
-    TargetBinding, TriggerSpec, UpdateScheduleRequest, validate_occurrence_machine_projection,
-    validate_schedule_machine_projection,
+    CreateScheduleRequest, DeliveryReceipt, DeliveryReceiptStage, Occurrence,
+    OccurrenceFailureClass, OccurrenceOrdinal, OccurrencePhase, RuntimeDeliveryOutcome, Schedule,
+    ScheduleId, SchedulePhase, ScheduleRevision, TargetBinding, TriggerSpec, UpdateScheduleRequest,
+    validate_occurrence_machine_projection, validate_schedule_machine_projection,
 };
 use chrono::{DateTime, Utc};
+use meerkat_core::SessionId;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
@@ -157,7 +158,6 @@ pub enum OccurrenceLifecycleInput {
         at_utc: DateTime<Utc>,
     },
     Complete {
-        receipt: DeliveryReceipt,
         at_utc: DateTime<Utc>,
     },
     Skip {
@@ -175,12 +175,14 @@ pub enum OccurrenceLifecycleInput {
         at_utc: DateTime<Utc>,
     },
     DeliveryFailed {
-        receipt: Option<DeliveryReceipt>,
         failure_class: OccurrenceFailureClass,
         detail: Option<String>,
         at_utc: DateTime<Utc>,
     },
     LeaseExpired {
+        at_utc: DateTime<Utc>,
+    },
+    ReleaseLeaseForPausedSchedule {
         at_utc: DateTime<Utc>,
     },
 }
@@ -279,6 +281,29 @@ pub enum OccurrenceLifecycleError {
         machine_key: Option<String>,
         snapshot_key: Option<String>,
     },
+    #[error("OccurrenceLifecycleMachine has no generated receipt authority for this projection")]
+    MissingReceiptAuthority,
+    #[error(
+        "OccurrenceLifecycleMachine receipt stage `{expected:?}` did not match supplied receipt stage `{actual:?}`"
+    )]
+    ReceiptStageMismatch {
+        expected: DeliveryReceiptStage,
+        actual: DeliveryReceiptStage,
+    },
+    #[error(
+        "OccurrenceLifecycleMachine receipt failure class `{expected:?}` did not match supplied receipt failure class `{actual:?}`"
+    )]
+    ReceiptFailureClassMismatch {
+        expected: Option<OccurrenceFailureClass>,
+        actual: Option<OccurrenceFailureClass>,
+    },
+    #[error(
+        "OccurrenceLifecycleMachine receipt detail `{expected:?}` did not match supplied receipt detail `{actual:?}`"
+    )]
+    ReceiptDetailMismatch {
+        expected: Option<String>,
+        actual: Option<String>,
+    },
     #[error("OccurrenceLifecycleMachine emitted ambiguous due classification effects: {effects:?}")]
     AmbiguousDueClassification { effects: Vec<&'static str> },
     #[error("occurrence projection does not match generated machine_state: {reason}")]
@@ -364,6 +389,17 @@ impl Occurrence {
             .clone()
             .apply(OccurrenceLifecycleInput::ClassifyDue { now_utc })?;
         due_action_from_effects(&mutator.effects)
+    }
+
+    /// Build a public receipt from the generated receipt facts accepted by the
+    /// occurrence lifecycle machine.
+    pub fn delivery_receipt_from_authority(
+        &self,
+        receipt: Option<DeliveryReceipt>,
+        runtime_outcome: Option<RuntimeDeliveryOutcome>,
+        materialized_session_id: Option<SessionId>,
+    ) -> Result<DeliveryReceipt, OccurrenceLifecycleError> {
+        delivery_receipt_from_authority(self, receipt, runtime_outcome, materialized_session_id)
     }
 }
 
@@ -517,6 +553,9 @@ fn convert_occurrence_input(
             runtime_outcome,
         } => occ_dsl::OccurrenceLifecycleInput::RecordReceipt {
             receipt: receipt_to_dsl(receipt),
+            stage: to_dsl_receipt_stage(receipt.stage),
+            failure_class: receipt.failure_class.map(to_dsl_failure_class),
+            detail: receipt.detail.clone(),
             runtime_outcome_key: runtime_outcome.as_ref().map(runtime_outcome_authority_key),
         },
         OccurrenceLifecycleInput::ClassifyDue { now_utc } => {
@@ -550,11 +589,8 @@ fn convert_occurrence_input(
                 at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
             }
         }
-        OccurrenceLifecycleInput::Complete { receipt, at_utc } => {
+        OccurrenceLifecycleInput::Complete { at_utc } => {
             occ_dsl::OccurrenceLifecycleInput::Complete {
-                receipt: occ_dsl::DeliveryReceipt(
-                    serde_json::to_string(receipt).unwrap_or_default(),
-                ),
                 at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
             }
         }
@@ -584,20 +620,21 @@ fn convert_occurrence_input(
             at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
         },
         OccurrenceLifecycleInput::DeliveryFailed {
-            receipt,
             failure_class,
             detail,
             at_utc,
         } => occ_dsl::OccurrenceLifecycleInput::DeliveryFailed {
-            receipt: receipt
-                .as_ref()
-                .map(|r| occ_dsl::DeliveryReceipt(serde_json::to_string(r).unwrap_or_default())),
             failure_class: to_dsl_failure_class(*failure_class),
             detail: detail.clone(),
             at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
         },
         OccurrenceLifecycleInput::LeaseExpired { at_utc } => {
             occ_dsl::OccurrenceLifecycleInput::LeaseExpired {
+                at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+            }
+        }
+        OccurrenceLifecycleInput::ReleaseLeaseForPausedSchedule { at_utc } => {
+            occ_dsl::OccurrenceLifecycleInput::ReleaseLeaseForPausedSchedule {
                 at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
             }
         }
@@ -707,6 +744,7 @@ fn write_back_occurrence(
         runtime_outcome,
     } = input
     {
+        validate_receipt_against_authority(dsl, receipt)?;
         let snapshot_key = runtime_outcome.as_ref().map(runtime_outcome_authority_key);
         if dsl.runtime_outcome_key != snapshot_key {
             return Err(OccurrenceLifecycleError::RuntimeOutcomeKeyMismatch {
@@ -721,27 +759,10 @@ fn write_back_occurrence(
     }
 
     // DeliveryReceipt: the DSL stores it as serialized JSON. We recover the
-    // real receipt from the original input when the DSL assigned it (Complete,
-    // DeliveryFailed). For other transitions the DSL either kept None or the
-    // existing value — we round-trip through serde only when the DSL has a value
-    // we didn't supply.
+    // real receipt only through the typed RecordReceipt handoff. Lifecycle
+    // transitions own the receipt class facts in generated state; caller-built
+    // receipt blobs are not accepted until RecordReceipt validates them.
     occ.last_receipt = match input {
-        OccurrenceLifecycleInput::Complete { receipt, .. } => {
-            // DSL sets last_receipt = Some(receipt), recover from input
-            if dsl.last_receipt.is_some() {
-                Some(receipt.clone())
-            } else {
-                None
-            }
-        }
-        OccurrenceLifecycleInput::DeliveryFailed { receipt, .. } => {
-            // DSL sets last_receipt = receipt (Option), recover from input
-            if dsl.last_receipt.is_some() {
-                receipt.clone()
-            } else {
-                None
-            }
-        }
         OccurrenceLifecycleInput::Claim { .. } => {
             // DSL clears last_receipt to None
             occ.runtime_outcome = None;
@@ -752,8 +773,8 @@ fn write_back_occurrence(
             None
         }
         _ => {
-            // Other transitions don't touch last_receipt in the DSL,
-            // so preserve the original domain value.
+            // Other transitions don't project a receipt blob. They may mint
+            // receipt class authority for a later RecordReceipt handoff.
             occ.last_receipt.take()
         }
     };
@@ -783,7 +804,10 @@ fn map_occurrence_error(
         OccurrenceLifecycleInput::AwaitCompletion { .. } => {
             OccurrenceLifecycleError::NotDispatching
         }
-        OccurrenceLifecycleInput::LeaseExpired { .. } => OccurrenceLifecycleError::NotLeaseHolding,
+        OccurrenceLifecycleInput::LeaseExpired { .. }
+        | OccurrenceLifecycleInput::ReleaseLeaseForPausedSchedule { .. } => {
+            OccurrenceLifecycleError::NotLeaseHolding
+        }
         OccurrenceLifecycleInput::Complete { .. }
         | OccurrenceLifecycleInput::Skip { .. }
         | OccurrenceLifecycleInput::Misfire { .. }
@@ -1431,6 +1455,131 @@ fn receipt_to_dsl(receipt: &DeliveryReceipt) -> occ_dsl::DeliveryReceipt {
     occ_dsl::DeliveryReceipt(serde_json::to_string(receipt).unwrap_or_default())
 }
 
+fn delivery_receipt_from_authority(
+    occurrence: &Occurrence,
+    receipt: Option<DeliveryReceipt>,
+    runtime_outcome: Option<RuntimeDeliveryOutcome>,
+    materialized_session_id: Option<SessionId>,
+) -> Result<DeliveryReceipt, OccurrenceLifecycleError> {
+    let dsl = occurrence_machine_state_for_authority(occurrence)?;
+    let stage = dsl
+        .receipt_stage
+        .map(from_dsl_receipt_stage)
+        .ok_or(OccurrenceLifecycleError::MissingReceiptAuthority)?;
+    let failure_class = dsl.receipt_failure_class.map(from_dsl_failure_class);
+    let detail = dsl.receipt_detail.clone();
+
+    let mut receipt = receipt.unwrap_or_else(|| {
+        DeliveryReceipt::new(
+            occurrence.occurrence_id.clone(),
+            occurrence.attempt_count,
+            stage,
+        )
+    });
+    if receipt.stage != stage {
+        return Err(OccurrenceLifecycleError::ReceiptStageMismatch {
+            expected: stage,
+            actual: receipt.stage,
+        });
+    }
+    if receipt.failure_class.is_some() && receipt.failure_class != failure_class {
+        return Err(OccurrenceLifecycleError::ReceiptFailureClassMismatch {
+            expected: failure_class,
+            actual: receipt.failure_class,
+        });
+    }
+    if receipt.detail.is_some() && receipt.detail != detail {
+        return Err(OccurrenceLifecycleError::ReceiptDetailMismatch {
+            expected: detail,
+            actual: receipt.detail,
+        });
+    }
+    if receipt.correlation_id.is_none() {
+        receipt.correlation_id = occurrence.delivery_correlation_id.clone();
+    }
+    receipt.failure_class = failure_class;
+    if receipt.runtime_outcome.is_none() {
+        receipt.runtime_outcome = runtime_outcome;
+    }
+    receipt.detail = detail;
+    if receipt.materialized_session_id.is_none() {
+        receipt.materialized_session_id = materialized_session_id.or_else(|| {
+            occurrence
+                .last_receipt
+                .as_ref()
+                .and_then(|last_receipt| last_receipt.materialized_session_id.clone())
+        });
+    }
+    validate_receipt_against_authority(&dsl, &receipt)?;
+    Ok(receipt)
+}
+
+fn validate_receipt_against_authority(
+    dsl: &occ_dsl::OccurrenceLifecycleMachineState,
+    receipt: &DeliveryReceipt,
+) -> Result<(), OccurrenceLifecycleError> {
+    let expected_stage = dsl
+        .receipt_stage
+        .map(from_dsl_receipt_stage)
+        .ok_or(OccurrenceLifecycleError::MissingReceiptAuthority)?;
+    if receipt.stage != expected_stage {
+        return Err(OccurrenceLifecycleError::ReceiptStageMismatch {
+            expected: expected_stage,
+            actual: receipt.stage,
+        });
+    }
+    let expected_failure_class = dsl.receipt_failure_class.map(from_dsl_failure_class);
+    if receipt.failure_class != expected_failure_class {
+        return Err(OccurrenceLifecycleError::ReceiptFailureClassMismatch {
+            expected: expected_failure_class,
+            actual: receipt.failure_class,
+        });
+    }
+    if receipt.detail != dsl.receipt_detail {
+        return Err(OccurrenceLifecycleError::ReceiptDetailMismatch {
+            expected: dsl.receipt_detail.clone(),
+            actual: receipt.detail.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn to_dsl_receipt_stage(stage: DeliveryReceiptStage) -> occ_dsl::DeliveryReceiptStage {
+    match stage {
+        DeliveryReceiptStage::Planned => occ_dsl::DeliveryReceiptStage::Planned,
+        DeliveryReceiptStage::Claimed => occ_dsl::DeliveryReceiptStage::Claimed,
+        DeliveryReceiptStage::DispatchStarted => occ_dsl::DeliveryReceiptStage::DispatchStarted,
+        DeliveryReceiptStage::DispatchAccepted => occ_dsl::DeliveryReceiptStage::DispatchAccepted,
+        DeliveryReceiptStage::AwaitingCompletion => {
+            occ_dsl::DeliveryReceiptStage::AwaitingCompletion
+        }
+        DeliveryReceiptStage::Completed => occ_dsl::DeliveryReceiptStage::Completed,
+        DeliveryReceiptStage::Skipped => occ_dsl::DeliveryReceiptStage::Skipped,
+        DeliveryReceiptStage::Misfired => occ_dsl::DeliveryReceiptStage::Misfired,
+        DeliveryReceiptStage::Superseded => occ_dsl::DeliveryReceiptStage::Superseded,
+        DeliveryReceiptStage::DeliveryFailed => occ_dsl::DeliveryReceiptStage::DeliveryFailed,
+        DeliveryReceiptStage::LeaseExpired => occ_dsl::DeliveryReceiptStage::LeaseExpired,
+    }
+}
+
+fn from_dsl_receipt_stage(stage: occ_dsl::DeliveryReceiptStage) -> DeliveryReceiptStage {
+    match stage {
+        occ_dsl::DeliveryReceiptStage::Planned => DeliveryReceiptStage::Planned,
+        occ_dsl::DeliveryReceiptStage::Claimed => DeliveryReceiptStage::Claimed,
+        occ_dsl::DeliveryReceiptStage::DispatchStarted => DeliveryReceiptStage::DispatchStarted,
+        occ_dsl::DeliveryReceiptStage::DispatchAccepted => DeliveryReceiptStage::DispatchAccepted,
+        occ_dsl::DeliveryReceiptStage::AwaitingCompletion => {
+            DeliveryReceiptStage::AwaitingCompletion
+        }
+        occ_dsl::DeliveryReceiptStage::Completed => DeliveryReceiptStage::Completed,
+        occ_dsl::DeliveryReceiptStage::Skipped => DeliveryReceiptStage::Skipped,
+        occ_dsl::DeliveryReceiptStage::Misfired => DeliveryReceiptStage::Misfired,
+        occ_dsl::DeliveryReceiptStage::Superseded => DeliveryReceiptStage::Superseded,
+        occ_dsl::DeliveryReceiptStage::DeliveryFailed => DeliveryReceiptStage::DeliveryFailed,
+        occ_dsl::DeliveryReceiptStage::LeaseExpired => DeliveryReceiptStage::LeaseExpired,
+    }
+}
+
 fn runtime_outcome_authority_key(outcome: &RuntimeDeliveryOutcome) -> String {
     match serde_json::to_string(outcome) {
         Ok(json) => format!("runtime_outcome:{json}"),
@@ -1709,6 +1858,18 @@ mod tests {
         .expect("sample schedule creation should pass generated authority")
     }
 
+    fn sample_claimed_occurrence() -> Occurrence {
+        sample_occurrence()
+            .apply(OccurrenceLifecycleInput::Claim {
+                owner_id: "owner".into(),
+                at_utc: Utc::now(),
+                lease_expires_at_utc: Utc::now() + Duration::seconds(30),
+                claim_token: Uuid::now_v7(),
+            })
+            .expect("claim should pass generated authority")
+            .into_occurrence()
+    }
+
     #[test]
     fn claim_rejects_non_pending_occurrences() {
         let input = OccurrenceLifecycleInput::Claim {
@@ -1779,6 +1940,56 @@ mod tests {
                 .expect("overdue classification should pass"),
             Some(OccurrenceDueAction::MisfireRequired)
         );
+    }
+
+    #[test]
+    fn record_receipt_rejects_stage_without_generated_authority() {
+        let dispatching = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("corr-1".into()),
+                at_utc: Utc::now(),
+            })
+            .expect("dispatch start should pass generated authority")
+            .into_occurrence();
+        let mut receipt = dispatching
+            .delivery_receipt_from_authority(None, None, None)
+            .expect("generated receipt authority should project dispatch receipt");
+        receipt.stage = DeliveryReceiptStage::Completed;
+
+        assert!(matches!(
+            dispatching.apply(OccurrenceLifecycleInput::RecordReceipt {
+                receipt,
+                runtime_outcome: None,
+            }),
+            Err(OccurrenceLifecycleError::ReceiptRecordRejected)
+        ));
+    }
+
+    #[test]
+    fn lease_expired_receipt_projection_comes_from_generated_authority() {
+        let expired = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::LeaseExpired { at_utc: Utc::now() })
+            .expect("lease expiry should pass generated authority")
+            .into_occurrence();
+        let receipt = expired
+            .delivery_receipt_from_authority(None, None, None)
+            .expect("generated receipt authority should project lease receipt");
+
+        assert_eq!(receipt.stage, DeliveryReceiptStage::LeaseExpired);
+        assert_eq!(
+            receipt.failure_class,
+            Some(OccurrenceFailureClass::LeaseLost)
+        );
+        assert_eq!(
+            receipt.detail.as_deref(),
+            Some("lease expired before completion")
+        );
+        expired
+            .apply(OccurrenceLifecycleInput::RecordReceipt {
+                receipt,
+                runtime_outcome: None,
+            })
+            .expect("generated receipt authority should accept matching receipt");
     }
 
     #[test]

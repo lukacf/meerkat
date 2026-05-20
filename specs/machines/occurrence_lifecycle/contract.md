@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `1`
+- Version: `2`
 - Rust owner: `self` / `catalog::dsl::occurrence_lifecycle`
 
 ## State
@@ -28,6 +28,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `delivery_correlation_id`: `Option<String>`
 - `last_receipt`: `Option<DeliveryReceipt>`
 - `runtime_outcome_key`: `Option<String>`
+- `receipt_stage`: `Option<DeliveryReceiptStage>`
+- `receipt_failure_class`: `Option<OccurrenceFailureClass>`
+- `receipt_detail`: `Option<String>`
 - `failure_class`: `Option<OccurrenceFailureClass>`
 - `failure_detail`: `Option<String>`
 - `dispatched_at_utc_ms`: `Option<u64>`
@@ -38,17 +41,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Inputs
 - `PlanOccurrence`(occurrence_id: OccurrenceId, schedule_id: ScheduleId, schedule_revision: u64, occurrence_ordinal: u64, trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, due_at_utc_ms: u64, misfire_deadline_utc_ms: u64)
 - `SyncTargetSnapshot`(target_binding_key: String)
-- `RecordReceipt`(receipt: DeliveryReceipt, runtime_outcome_key: Option<String>)
+- `RecordReceipt`(receipt: DeliveryReceipt, stage: DeliveryReceiptStage, failure_class: Option<OccurrenceFailureClass>, detail: Option<String>, runtime_outcome_key: Option<String>)
 - `ClassifyDue`(now_utc_ms: u64)
 - `Claim`(owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken)
 - `DispatchStarted`(correlation_id: Option<String>, at_utc_ms: u64)
 - `AwaitCompletion`(at_utc_ms: u64)
-- `Complete`(receipt: DeliveryReceipt, at_utc_ms: u64)
+- `Complete`(at_utc_ms: u64)
 - `Skip`(detail: Option<String>, failure_class: Option<OccurrenceFailureClass>, at_utc_ms: u64)
 - `Misfire`(detail: Option<String>, failure_class: Option<OccurrenceFailureClass>, at_utc_ms: u64)
 - `Supersede`(superseded_by_revision: u64, at_utc_ms: u64)
-- `DeliveryFailed`(receipt: Option<DeliveryReceipt>, failure_class: OccurrenceFailureClass, detail: Option<String>, at_utc_ms: u64)
+- `DeliveryFailed`(failure_class: OccurrenceFailureClass, detail: Option<String>, at_utc_ms: u64)
 - `LeaseExpired`(at_utc_ms: u64)
+- `ReleaseLeaseForPausedSchedule`(at_utc_ms: u64)
 
 ## Signals
 
@@ -199,47 +203,65 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordReceiptPending`
 - From: `Pending`
-- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- Guards:
+  - ``
 - To: `Pending`
 
 ### `RecordReceiptClaimed`
 - From: `Claimed`
-- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- Guards:
+  - ``
 - To: `Claimed`
 
 ### `RecordReceiptDispatching`
 - From: `Dispatching`
-- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- Guards:
+  - ``
 - To: `Dispatching`
 
 ### `RecordReceiptAwaitingCompletion`
 - From: `AwaitingCompletion`
-- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- Guards:
+  - ``
 - To: `AwaitingCompletion`
 
 ### `RecordReceiptCompleted`
 - From: `Completed`
-- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- Guards:
+  - ``
 - To: `Completed`
 
 ### `RecordReceiptSkipped`
 - From: `Skipped`
-- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- Guards:
+  - ``
 - To: `Skipped`
 
 ### `RecordReceiptMisfired`
 - From: `Misfired`
-- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- Guards:
+  - ``
 - To: `Misfired`
 
 ### `RecordReceiptSuperseded`
 - From: `Superseded`
-- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- Guards:
+  - ``
 - To: `Superseded`
 
 ### `RecordReceiptDeliveryFailed`
 - From: `DeliveryFailed`
-- On: `RecordReceipt`(receipt, runtime_outcome_key)
+- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- Guards:
+  - ``
 - To: `DeliveryFailed`
 
 ### `ClaimPending`
@@ -264,7 +286,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CompleteFromDispatchingOrAwaiting`
 - From: `Dispatching`, `AwaitingCompletion`
-- On: `Complete`(receipt, at_utc_ms)
+- On: `Complete`(at_utc_ms)
 - Emits: `Completed`
 - To: `Completed`
 
@@ -288,7 +310,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeliveryFailedFromClaimedOrLive`
 - From: `Claimed`, `Dispatching`, `AwaitingCompletion`
-- On: `DeliveryFailed`(receipt, failure_class, detail, at_utc_ms)
+- On: `DeliveryFailed`(failure_class, detail, at_utc_ms)
 - Emits: `DeliveryFailed`
 - To: `DeliveryFailed`
 
@@ -307,6 +329,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `LeaseExpiredFromAwaitingCompletion`
 - From: `AwaitingCompletion`
 - On: `LeaseExpired`(at_utc_ms)
+- Emits: `LeaseExpired`
+- To: `Pending`
+
+### `ReleaseLeaseForPausedScheduleFromClaimed`
+- From: `Claimed`
+- On: `ReleaseLeaseForPausedSchedule`(at_utc_ms)
+- Emits: `LeaseExpired`
+- To: `Pending`
+
+### `ReleaseLeaseForPausedScheduleFromDispatching`
+- From: `Dispatching`
+- On: `ReleaseLeaseForPausedSchedule`(at_utc_ms)
+- Emits: `LeaseExpired`
+- To: `Pending`
+
+### `ReleaseLeaseForPausedScheduleFromAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ReleaseLeaseForPausedSchedule`(at_utc_ms)
 - Emits: `LeaseExpired`
 - To: `Pending`
 

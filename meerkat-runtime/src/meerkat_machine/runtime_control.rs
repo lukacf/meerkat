@@ -82,7 +82,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         reason: String,
     ) -> Result<(), RuntimeDriverError> {
-        let (effect_tx, state_before_stop, effect) = {
+        let (driver, effect_tx, effect) = {
             let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await
             else {
                 return Err(RuntimeDriverError::NotReady {
@@ -110,8 +110,8 @@ impl MeerkatMachine {
                     state: RuntimeState::Destroyed,
                 })?;
             (
+                entry.driver.clone(),
                 entry.effect_sender(),
-                entry.control_snapshot().phase,
                 projected_effect.into_effect(),
             )
         };
@@ -119,19 +119,59 @@ impl MeerkatMachine {
         if let Some(effect_tx) = effect_tx
             && effect_tx.send(effect).await.is_ok()
         {
-            if matches!(state_before_stop, RuntimeState::Attached) {
-                let _ = tokio::time::timeout(std::time::Duration::from_millis(200), async {
-                    loop {
-                        match self.existing_session_runtime_state(session_id).await {
-                            Some(RuntimeState::Stopped | RuntimeState::Destroyed) => break,
-                            Some(RuntimeState::Attached) => {
-                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                            }
-                            Some(_) | None => break,
+            let stopped = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+                loop {
+                    let state = {
+                        let sessions = self.sessions.read().await;
+                        let entry = sessions
+                            .get(session_id)
+                            .ok_or(RuntimeDriverError::NotReady {
+                                state: RuntimeState::Destroyed,
+                            })?;
+                        if !Arc::ptr_eq(&entry.driver, &driver) {
+                            return Err(RuntimeDriverError::NotReady {
+                                state: RuntimeState::Destroyed,
+                            });
                         }
+                        entry.control_snapshot().phase
+                    };
+                    match state {
+                        RuntimeState::Stopped => return Ok(()),
+                        RuntimeState::Destroyed => {
+                            return Err(RuntimeDriverError::NotReady {
+                                state: RuntimeState::Destroyed,
+                            });
+                        }
+                        _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
                     }
-                })
-                .await;
+                }
+            })
+            .await
+            .map_err(|_| RuntimeDriverError::ValidationFailed {
+                reason: "StopRuntimeExecutor effect was accepted but generated authority did not reach stopped"
+                    .to_string(),
+            })?;
+            stopped?;
+
+            let _gate_guard = self
+                .lock_current_session_driver_gate(session_id, &driver)
+                .await?;
+            let final_state = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(session_id)
+                    .ok_or(RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    })?
+                    .control_snapshot()
+                    .phase
+            };
+            if !matches!(final_state, RuntimeState::Stopped) {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "StopRuntimeExecutor effect completed without generated stopped authority: {final_state}"
+                    ),
+                });
             }
 
             return Ok(());

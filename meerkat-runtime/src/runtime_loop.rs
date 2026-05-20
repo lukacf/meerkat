@@ -517,6 +517,13 @@ impl RuntimeLoopAuthorityBinding {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedWakeOutcome {
+    Noop,
+    Injected,
+    StaleAuthority,
+}
+
 /// Spawn the per-session runtime loop with optional completion registry.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_runtime_loop_with_completions(
@@ -635,7 +642,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             // Secondary wake path: re-check after queue drain.
                             // If a completion arrived during process_queue, inject
                             // and immediately process the continuation.
-                            if maybe_inject_feed_wake(
+                            match maybe_inject_feed_wake(
                                 &driver,
                                 completion_feed.as_deref(),
                                 &mut observed_seq,
@@ -644,16 +651,22 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 &authority_binding,
                             )
                             .await
-                                && process_queue(
-                                    &driver,
-                                    &mut *executor,
-                                    &mut effect_rx,
-                                    completions.as_ref(),
-                                    &authority_binding,
-                                )
-                                .await
                             {
-                                break;
+                                FeedWakeOutcome::Injected => {
+                                    if process_queue(
+                                        &driver,
+                                        &mut *executor,
+                                        &mut effect_rx,
+                                        completions.as_ref(),
+                                        &authority_binding,
+                                    )
+                                    .await
+                                    {
+                                        break;
+                                    }
+                                }
+                                FeedWakeOutcome::StaleAuthority => break,
+                                FeedWakeOutcome::Noop => {}
                             }
                         }
                         None => break,
@@ -664,7 +677,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                     // BackgroundToolOp that hasn't been injected yet.
                     // Only BackgroundToolOp triggers idle wake — MobMemberChild
                     // completions already wake through comms terminal response.
-                    if maybe_inject_feed_wake(
+                    match maybe_inject_feed_wake(
                         &driver,
                         completion_feed.as_deref(),
                         &mut observed_seq,
@@ -673,16 +686,22 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                         &authority_binding,
                     )
                     .await
-                        && process_queue(
-                            &driver,
-                            &mut *executor,
-                            &mut effect_rx,
-                            completions.as_ref(),
-                            &authority_binding,
-                        )
-                        .await
                     {
-                        break;
+                        FeedWakeOutcome::Injected => {
+                            if process_queue(
+                                &driver,
+                                &mut *executor,
+                                &mut effect_rx,
+                                completions.as_ref(),
+                                &authority_binding,
+                            )
+                            .await
+                            {
+                                break;
+                            }
+                        }
+                        FeedWakeOutcome::StaleAuthority => break,
+                        FeedWakeOutcome::Noop => {}
                     }
                 }
             }
@@ -699,7 +718,8 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 /// Check for new background op completions and inject a continuation if needed.
 ///
 /// Called after queue processing completes (session has returned to idle).
-/// Returns `true` if a continuation was injected (caller should process_queue).
+/// Distinguishes ordinary no-op from stale-authority shutdown so cursor
+/// projection cannot advance after the runtime loop loses current ownership.
 async fn maybe_inject_feed_wake(
     driver: &crate::meerkat_machine::SharedDriver,
     feed: Option<&dyn meerkat_core::completion_feed::CompletionFeed>,
@@ -707,9 +727,9 @@ async fn maybe_inject_feed_wake(
     last_injected_seq: &mut meerkat_core::completion_feed::CompletionSeq,
     epoch_cursor_state: Option<&meerkat_core::EpochCursorState>,
     authority_binding: &RuntimeLoopAuthorityBinding,
-) -> bool {
+) -> FeedWakeOutcome {
     let Some(feed) = feed else {
-        return false;
+        return FeedWakeOutcome::Noop;
     };
     let batch = feed.list_since(*observed_seq);
 
@@ -717,6 +737,13 @@ async fn maybe_inject_feed_wake(
         e.kind == meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp
             && e.seq > *last_injected_seq
     });
+
+    let Ok(_authority_guard) = authority_binding
+        .lock_current_driver_authority(driver, "runtime loop feed wake")
+        .await
+    else {
+        return FeedWakeOutcome::StaleAuthority;
+    };
 
     if !has_new_bg_completion {
         // No new BG completions — advance to prevent hot-spin
@@ -726,22 +753,15 @@ async fn maybe_inject_feed_wake(
             cs.runtime_observed_seq
                 .store(batch.watermark, std::sync::atomic::Ordering::Release);
         }
-        return false;
+        return FeedWakeOutcome::Noop;
     }
-
-    let Ok(_authority_guard) = authority_binding
-        .lock_current_driver_authority(driver, "runtime loop feed wake")
-        .await
-    else {
-        return false;
-    };
 
     // Verify quiescence before injecting.
     let d = driver.lock().await;
     if !d.is_quiescent_for_detached_wake() {
         // Non-quiescent: do NOT advance observed_seq. The completion
         // stays visible for the next wake so it's not permanently lost.
-        return false;
+        return FeedWakeOutcome::Noop;
     }
     drop(d);
 
@@ -762,7 +782,7 @@ async fn maybe_inject_feed_wake(
         cs.runtime_observed_seq
             .store(batch.watermark, std::sync::atomic::Ordering::Release);
     }
-    true
+    FeedWakeOutcome::Injected
 }
 
 /// Process all queued inputs until the queue is empty.
@@ -1237,6 +1257,18 @@ mod tests {
             source_label: "runtime-loop-test".into(),
             child_session_id: None,
             expect_peer_channel: false,
+        }
+    }
+
+    fn mob_child_spec(name: &str) -> OperationSpec {
+        OperationSpec {
+            id: meerkat_core::ops_lifecycle::OperationId::new(),
+            kind: OperationKind::MobMemberChild,
+            owner_session_id: SessionId::new(),
+            display_name: name.into(),
+            source_label: "runtime-loop-test".into(),
+            child_session_id: Some(SessionId::new()),
+            expect_peer_channel: true,
         }
     }
 
@@ -2703,8 +2735,9 @@ mod tests {
         )
         .await;
 
-        assert!(
+        assert_eq!(
             injected,
+            FeedWakeOutcome::Injected,
             "feed-backed path should inject inline when quiescent"
         );
         assert_eq!(observed_seq, feed.watermark());
@@ -2743,7 +2776,11 @@ mod tests {
         )
         .await;
 
-        assert!(!injected, "no feed means no injection");
+        assert_eq!(
+            injected,
+            FeedWakeOutcome::Noop,
+            "no feed means no injection"
+        );
         assert_eq!(observed_seq, 0);
         assert_eq!(last_injected_seq, 0);
 
@@ -2772,12 +2809,53 @@ mod tests {
         )
         .await;
 
-        assert!(!injected, "empty feed should not inject");
+        assert_eq!(
+            injected,
+            FeedWakeOutcome::Noop,
+            "empty feed should not inject"
+        );
         assert_eq!(observed_seq, feed.watermark());
         assert_eq!(last_injected_seq, 0);
 
         let guard = driver.lock().await;
         assert!(guard.as_driver().active_input_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn maybe_inject_feed_wake_stale_no_bg_completion_does_not_advance_cursor() {
+        let driver = make_shared_ephemeral_driver("advance-only-stale");
+        let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+        let spec = mob_child_spec("advance-only-stale");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+        registry
+            .complete_operation(&op_id, op_result(&op_id, "done"))
+            .unwrap();
+        let feed = registry.completion_feed_handle();
+        let mut observed_seq = 0;
+        let mut last_injected_seq = 0;
+        let stale_binding = RuntimeLoopAuthorityBinding::new(
+            std::sync::Weak::<crate::meerkat_machine::MeerkatMachine>::new(),
+            SessionId::new(),
+        );
+
+        let injected = maybe_inject_feed_wake(
+            &driver,
+            Some(feed.as_ref()),
+            &mut observed_seq,
+            &mut last_injected_seq,
+            None,
+            &stale_binding,
+        )
+        .await;
+
+        assert_eq!(injected, FeedWakeOutcome::StaleAuthority);
+        assert_eq!(
+            observed_seq, 0,
+            "stale runtime loop must not advance observed cursor truth"
+        );
+        assert_eq!(last_injected_seq, 0);
     }
 
     // --- execution_kind stamping tests ---

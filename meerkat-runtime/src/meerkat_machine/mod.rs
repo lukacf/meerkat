@@ -973,7 +973,7 @@ impl MeerkatMachine {
         }
     }
 
-    pub(crate) async fn lock_current_runtime_loop_driver_authority(
+    pub(crate) async fn lock_current_session_driver_gate(
         &self,
         session_id: &SessionId,
         driver: &SharedDriver,
@@ -996,6 +996,25 @@ impl MeerkatMachine {
                     state: RuntimeState::Destroyed,
                 });
             }
+        }
+        Ok(gate_guard)
+    }
+
+    pub(crate) async fn lock_current_runtime_loop_driver_authority(
+        &self,
+        session_id: &SessionId,
+        driver: &SharedDriver,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeDriverError> {
+        let gate_guard = self
+            .lock_current_session_driver_gate(session_id, driver)
+            .await?;
+        {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
             if !entry.generated_executor_registration_active() {
                 return Err(RuntimeDriverError::ValidationFailed {
                     reason:

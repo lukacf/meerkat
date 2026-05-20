@@ -5960,10 +5960,261 @@ async fn service_peer_admission_wakes_without_live_cancel_after_boundary() {
     );
 }
 
+#[derive(Clone)]
+struct InterruptYieldingProbe {
+    live_boundary_cancel_calls: Arc<AtomicUsize>,
+    live_boundary_stage_calls: Arc<AtomicUsize>,
+    live_boundary_staged_texts: Arc<std::sync::Mutex<Vec<String>>>,
+    fail_live_stage: Arc<AtomicBool>,
+}
+
+impl InterruptYieldingProbe {
+    fn new(fail_live_stage: bool) -> Self {
+        Self {
+            live_boundary_cancel_calls: Arc::new(AtomicUsize::new(0)),
+            live_boundary_stage_calls: Arc::new(AtomicUsize::new(0)),
+            live_boundary_staged_texts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            fail_live_stage: Arc::new(AtomicBool::new(fail_live_stage)),
+        }
+    }
+
+    fn staged_texts(&self) -> Vec<String> {
+        self.live_boundary_staged_texts
+            .lock()
+            .expect("staged text mutex poisoned")
+            .clone()
+    }
+}
+
+struct InterruptYieldingBoundaryHandle {
+    probe: InterruptYieldingProbe,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutorBoundaryHandle for InterruptYieldingBoundaryHandle {
+    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.probe
+            .live_boundary_cancel_calls
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn stage_system_context_at_boundary(
+        &self,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+    ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
+        self.probe
+            .live_boundary_stage_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if self.probe.fail_live_stage.load(Ordering::SeqCst) {
+            return Err(CoreExecutorError::Internal(
+                "test live-stage failure".to_string(),
+            ));
+        }
+        let mut staged = self
+            .probe
+            .live_boundary_staged_texts
+            .lock()
+            .expect("staged text mutex poisoned");
+        staged.extend(appends.into_iter().map(|append| append.text));
+        Ok(None)
+    }
+}
+
+struct InterruptYieldingBlockingExecutor {
+    apply_calls: Arc<AtomicUsize>,
+    queued_boundary_cancel_calls: Arc<AtomicUsize>,
+    apply_started: Arc<Notify>,
+    allow_finish: Arc<Notify>,
+    probe: Option<InterruptYieldingProbe>,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutor for InterruptYieldingBlockingExecutor {
+    fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+        self.probe.clone().map(|probe| {
+            Arc::new(InterruptYieldingBoundaryHandle { probe })
+                as Arc<dyn CoreExecutorBoundaryHandle>
+        })
+    }
+
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        self.apply_calls.fetch_add(1, Ordering::SeqCst);
+        self.apply_started.notify_waiters();
+        self.allow_finish.notified().await;
+        Ok(CoreApplyOutput {
+            receipt: RunBoundaryReceipt {
+                run_id,
+                boundary: primitive.apply_boundary(),
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            session_snapshot: None,
+            terminal: None,
+        })
+    }
+
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.queued_boundary_cancel_calls
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
+struct InterruptYieldingTestRig {
+    adapter: Arc<MeerkatMachine>,
+    session_id: SessionId,
+    apply_calls: Arc<AtomicUsize>,
+    queued_boundary_cancel_calls: Arc<AtomicUsize>,
+    apply_started: Arc<Notify>,
+    allow_finish: Arc<Notify>,
+    probe: Option<InterruptYieldingProbe>,
+}
+
+impl InterruptYieldingTestRig {
+    async fn new(with_live_boundary: bool, fail_live_stage: bool) -> Self {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let queued_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+        let apply_started = Arc::new(Notify::new());
+        let allow_finish = Arc::new(Notify::new());
+        let probe = with_live_boundary.then(|| InterruptYieldingProbe::new(fail_live_stage));
+
+        adapter
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(InterruptYieldingBlockingExecutor {
+                    apply_calls: Arc::clone(&apply_calls),
+                    queued_boundary_cancel_calls: Arc::clone(&queued_boundary_cancel_calls),
+                    apply_started: Arc::clone(&apply_started),
+                    allow_finish: Arc::clone(&allow_finish),
+                    probe: probe.clone(),
+                }),
+            )
+            .await;
+
+        Self {
+            adapter,
+            session_id,
+            apply_calls,
+            queued_boundary_cancel_calls,
+            apply_started,
+            allow_finish,
+            probe,
+        }
+    }
+
+    async fn start_busy_turn(&self) {
+        let first_input = Input::Prompt(crate::input::PromptInput::new(
+            "first turn keeps the runtime busy",
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                    ..Default::default()
+                },
+            ),
+        ));
+        let (outcome, _completion_handle) = self
+            .adapter
+            .accept_input_with_completion(&self.session_id, first_input)
+            .await
+            .expect("initial steer prompt should be accepted");
+        assert!(outcome.is_accepted());
+
+        tokio::time::timeout(Duration::from_secs(1), self.apply_started.notified())
+            .await
+            .expect("first apply should start");
+    }
+
+    async fn wait_for_apply_calls(&self, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if self.apply_calls.load(Ordering::SeqCst) >= expected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("expected at least {expected} apply calls"));
+    }
+
+    async fn wait_until_attached_and_empty(&self) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let snapshot = self
+                    .adapter
+                    .meerkat_machine_spine_snapshot(&self.session_id)
+                    .await
+                    .expect("snapshot should exist until runtime settles");
+                if snapshot.control.phase == RuntimeState::Attached
+                    && snapshot.inputs.queue.is_empty()
+                    && snapshot.inputs.steer_queue.is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should settle attached with empty queues");
+    }
+}
+
+fn interrupt_yielding_peer_input(
+    body: &str,
+    handling_mode: Option<meerkat_core::types::HandlingMode>,
+) -> (Input, InputId) {
+    interrupt_yielding_peer_input_with_idempotency(body, handling_mode, None)
+}
+
+fn interrupt_yielding_peer_input_with_idempotency(
+    body: &str,
+    handling_mode: Option<meerkat_core::types::HandlingMode>,
+    idempotency_key: Option<IdempotencyKey>,
+) -> (Input, InputId) {
+    let input = Input::Peer(crate::input::PeerInput {
+        header: crate::input::InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::Peer {
+                peer_id: "interrupt-yielding-peer".into(),
+                display_identity: None,
+                runtime_id: None,
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(crate::input::PeerConvention::Message),
+        body: body.to_string(),
+        payload: None,
+        blocks: None,
+        handling_mode,
+    });
+    let input_id = input.id().clone();
+    (input, input_id)
+}
+
 #[tokio::test]
-async fn explicit_running_steer_admission_does_not_emit_boundary_cancel_effect() {
+async fn explicit_running_steer_admission_injects_live_boundary_context_once() {
     struct LiveBoundaryHandle {
         calls: Arc<AtomicUsize>,
+        stage_calls: Arc<AtomicUsize>,
+        staged_texts: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     #[async_trait::async_trait]
@@ -5972,12 +6223,27 @@ async fn explicit_running_steer_admission_does_not_emit_boundary_cancel_effect()
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+
+        async fn stage_system_context_at_boundary(
+            &self,
+            appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
+            self.stage_calls.fetch_add(1, Ordering::SeqCst);
+            let mut staged = self
+                .staged_texts
+                .lock()
+                .expect("staged text mutex poisoned");
+            staged.extend(appends.into_iter().map(|append| append.text));
+            Ok(None)
+        }
     }
 
     struct BlockingExecutor {
         apply_calls: Arc<AtomicUsize>,
         queued_boundary_cancel_calls: Arc<AtomicUsize>,
         live_boundary_cancel_calls: Arc<AtomicUsize>,
+        live_boundary_stage_calls: Arc<AtomicUsize>,
+        live_boundary_staged_texts: Arc<std::sync::Mutex<Vec<String>>>,
         apply_started: Arc<Notify>,
         allow_finish: Arc<Notify>,
     }
@@ -5987,6 +6253,8 @@ async fn explicit_running_steer_admission_does_not_emit_boundary_cancel_effect()
         fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
             Some(Arc::new(LiveBoundaryHandle {
                 calls: Arc::clone(&self.live_boundary_cancel_calls),
+                stage_calls: Arc::clone(&self.live_boundary_stage_calls),
+                staged_texts: Arc::clone(&self.live_boundary_staged_texts),
             }))
         }
 
@@ -6034,6 +6302,8 @@ async fn explicit_running_steer_admission_does_not_emit_boundary_cancel_effect()
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let queued_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
     let live_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+    let live_boundary_stage_calls = Arc::new(AtomicUsize::new(0));
+    let live_boundary_staged_texts = Arc::new(std::sync::Mutex::new(Vec::new()));
     let apply_started = Arc::new(Notify::new());
     let allow_finish = Arc::new(Notify::new());
 
@@ -6044,6 +6314,8 @@ async fn explicit_running_steer_admission_does_not_emit_boundary_cancel_effect()
                 apply_calls: Arc::clone(&apply_calls),
                 queued_boundary_cancel_calls: Arc::clone(&queued_boundary_cancel_calls),
                 live_boundary_cancel_calls: Arc::clone(&live_boundary_cancel_calls),
+                live_boundary_stage_calls: Arc::clone(&live_boundary_stage_calls),
+                live_boundary_staged_texts: Arc::clone(&live_boundary_staged_texts),
                 apply_started: Arc::clone(&apply_started),
                 allow_finish: Arc::clone(&allow_finish),
             }),
@@ -6070,6 +6342,7 @@ async fn explicit_running_steer_admission_does_not_emit_boundary_cancel_effect()
         .expect("first apply should start");
 
     live_boundary_cancel_calls.store(0, Ordering::SeqCst);
+    live_boundary_stage_calls.store(0, Ordering::SeqCst);
     queued_boundary_cancel_calls.store(0, Ordering::SeqCst);
 
     let steered_peer_input = Input::Peer(crate::input::PeerInput {
@@ -6093,37 +6366,474 @@ async fn explicit_running_steer_admission_does_not_emit_boundary_cancel_effect()
         blocks: None,
         handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
     });
+    let steered_peer_input_id = steered_peer_input.id().clone();
 
-    let result = adapter
+    let (outcome, completion_handle) = adapter
         .accept_input_with_completion(&session_id, steered_peer_input)
         .await
         .expect("running explicit steer should be accepted");
-    assert!(result.0.is_accepted());
+    assert!(outcome.is_accepted());
+    let completion_handle = completion_handle.expect("steered input should register completion");
+    let completion = tokio::time::timeout(Duration::from_secs(1), completion_handle.wait())
+        .await
+        .expect("live-injected steer input should resolve without waiting for outer turn");
+    assert!(
+        matches!(completion, CompletionOutcome::CompletedWithoutResult),
+        "live-injected steer input should complete without producing a separate run result, got {completion:?}"
+    );
     assert_eq!(
         live_boundary_cancel_calls.load(Ordering::SeqCst),
         0,
         "running steer admission must not call the live boundary-cancel handle"
     );
     assert_eq!(
+        live_boundary_stage_calls.load(Ordering::SeqCst),
+        1,
+        "running steer admission must stage context on the live boundary handle"
+    );
+    {
+        let staged = live_boundary_staged_texts
+            .lock()
+            .expect("staged text mutex poisoned");
+        assert_eq!(staged.len(), 1);
+        assert!(
+            staged[0].contains("explicit steer should not cancel the active run"),
+            "steered peer body should be projected into live boundary context: {staged:?}"
+        );
+    }
+    assert_eq!(
         queued_boundary_cancel_calls.load(Ordering::SeqCst),
         0,
         "running steer admission must not enqueue a cancel-after-boundary effect"
+    );
+    let after_steer = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should exist while the first apply is blocked");
+    assert_eq!(after_steer.control.phase, RuntimeState::Running);
+    assert!(
+        after_steer.inputs.steer_queue.is_empty(),
+        "live-injected steer input must be consumed from the steer lane, not replayed later"
+    );
+    let steered_phase = after_steer
+        .inputs
+        .admission_order
+        .iter()
+        .find(|input| input.input_id == steered_peer_input_id)
+        .and_then(|input| input.lifecycle);
+    assert_eq!(
+        steered_phase,
+        Some(crate::input_state::InputLifecycleState::Consumed)
+    );
+    assert_eq!(
+        apply_calls.load(Ordering::SeqCst),
+        1,
+        "live-injected steer input must not start a second apply while outer turn is blocked"
     );
 
     allow_finish.notify_waiters();
 
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if apply_calls.load(Ordering::SeqCst) >= 2 {
+            let snapshot = adapter
+                .meerkat_machine_spine_snapshot(&session_id)
+                .await
+                .expect("snapshot should exist until runtime settles");
+            if snapshot.control.phase == RuntimeState::Attached
+                && snapshot.inputs.queue.is_empty()
+                && snapshot.inputs.steer_queue.is_empty()
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("steered peer input should still be processed after the active apply returns");
+    .expect("outer turn should settle without replaying the live-injected steer input");
+    assert_eq!(
+        apply_calls.load(Ordering::SeqCst),
+        1,
+        "live-injected steer input must not be processed again after the outer turn returns"
+    );
     assert_eq!(live_boundary_cancel_calls.load(Ordering::SeqCst), 0);
     assert_eq!(queued_boundary_cancel_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn interrupt_yielding_multiple_steers_are_injected_and_consumed_without_replay() {
+    let rig = InterruptYieldingTestRig::new(true, false).await;
+    rig.start_busy_turn().await;
+    let probe = rig.probe.clone().expect("live boundary probe installed");
+
+    let (first_peer, first_peer_id) = interrupt_yielding_peer_input(
+        "first live steer while outer turn is running",
+        Some(meerkat_core::types::HandlingMode::Steer),
+    );
+    let (second_peer, second_peer_id) = interrupt_yielding_peer_input(
+        "second live steer while outer turn is still running",
+        Some(meerkat_core::types::HandlingMode::Steer),
+    );
+
+    let (first_outcome, first_completion) = rig
+        .adapter
+        .accept_input_with_completion(&rig.session_id, first_peer)
+        .await
+        .expect("first running steer should be accepted");
+    assert!(first_outcome.is_accepted());
+    let (second_outcome, second_completion) = rig
+        .adapter
+        .accept_input_with_completion(&rig.session_id, second_peer)
+        .await
+        .expect("second running steer should be accepted");
+    assert!(second_outcome.is_accepted());
+
+    let first_completion = first_completion.expect("first steer should register completion");
+    let second_completion = second_completion.expect("second steer should register completion");
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), first_completion.wait())
+            .await
+            .expect("first live steer should complete immediately"),
+        CompletionOutcome::CompletedWithoutResult
+    ));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), second_completion.wait())
+            .await
+            .expect("second live steer should complete immediately"),
+        CompletionOutcome::CompletedWithoutResult
+    ));
+
+    assert_eq!(
+        probe.live_boundary_stage_calls.load(Ordering::SeqCst),
+        2,
+        "each explicit steer should get one live context injection"
+    );
+    assert_eq!(probe.live_boundary_cancel_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        rig.queued_boundary_cancel_calls.load(Ordering::SeqCst),
+        0,
+        "live injection must not synthesize queued cancellation work"
+    );
+    let staged = probe.staged_texts();
+    assert_eq!(staged.len(), 2);
+    assert!(staged[0].contains("first live steer"));
+    assert!(staged[1].contains("second live steer"));
+
+    let during_busy = rig
+        .adapter
+        .meerkat_machine_spine_snapshot(&rig.session_id)
+        .await
+        .expect("snapshot should exist while busy");
+    assert_eq!(during_busy.control.phase, RuntimeState::Running);
+    assert!(
+        during_busy.inputs.steer_queue.is_empty(),
+        "live-injected steers must be removed from the steer lane"
+    );
+    let first_snapshot = during_busy
+        .inputs
+        .admission_order
+        .iter()
+        .find(|input| input.input_id == first_peer_id)
+        .expect("first peer should remain visible in admission order");
+    let second_snapshot = during_busy
+        .inputs
+        .admission_order
+        .iter()
+        .find(|input| input.input_id == second_peer_id)
+        .expect("second peer should remain visible in admission order");
+    assert_eq!(
+        first_snapshot.lifecycle,
+        Some(crate::input_state::InputLifecycleState::Consumed)
+    );
+    assert_eq!(
+        second_snapshot.lifecycle,
+        Some(crate::input_state::InputLifecycleState::Consumed)
+    );
+    assert_eq!(
+        first_snapshot.last_boundary_sequence,
+        Some(1),
+        "first live boundary receipt should not collide with the eventual turn receipt"
+    );
+    assert_eq!(
+        second_snapshot.last_boundary_sequence,
+        Some(2),
+        "subsequent live boundary receipts should be monotonically sequenced"
+    );
+    assert_eq!(
+        rig.apply_calls.load(Ordering::SeqCst),
+        1,
+        "live-injected steers must not start their own apply while the outer turn is blocked"
+    );
+
+    rig.allow_finish.notify_waiters();
+    rig.wait_until_attached_and_empty().await;
+    assert_eq!(
+        rig.apply_calls.load(Ordering::SeqCst),
+        1,
+        "live-injected steers must not replay after the outer turn completes"
+    );
+}
+
+#[tokio::test]
+async fn interrupt_yielding_deduplicated_steer_does_not_stage_twice() {
+    let rig = InterruptYieldingTestRig::new(true, false).await;
+    rig.start_busy_turn().await;
+    let probe = rig.probe.clone().expect("live boundary probe installed");
+    let key = IdempotencyKey::new("interrupt-yielding-same-message");
+
+    let (first_peer, first_peer_id) = interrupt_yielding_peer_input_with_idempotency(
+        "deduped live steer body",
+        Some(meerkat_core::types::HandlingMode::Steer),
+        Some(key.clone()),
+    );
+    let (first_outcome, first_completion) = rig
+        .adapter
+        .accept_input_with_completion(&rig.session_id, first_peer)
+        .await
+        .expect("first running steer should be accepted");
+    assert!(first_outcome.is_accepted());
+    assert!(matches!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            first_completion
+                .expect("first steer should register completion")
+                .wait()
+        )
+        .await
+        .expect("first live steer should complete immediately"),
+        CompletionOutcome::CompletedWithoutResult
+    ));
+
+    let (duplicate_peer, duplicate_peer_id) = interrupt_yielding_peer_input_with_idempotency(
+        "deduped live steer body retry",
+        Some(meerkat_core::types::HandlingMode::Steer),
+        Some(key),
+    );
+    let (duplicate_outcome, duplicate_completion) = rig
+        .adapter
+        .accept_input_with_completion(&rig.session_id, duplicate_peer)
+        .await
+        .expect("duplicate running steer should be accepted as dedup");
+    assert!(
+        duplicate_outcome.is_deduplicated(),
+        "duplicate steer should deduplicate to the already live-injected input"
+    );
+    assert!(
+        duplicate_completion.is_none(),
+        "dedup of an already consumed live-injected steer should not register a second waiter"
+    );
+    assert_ne!(first_peer_id, duplicate_peer_id);
+    assert_eq!(
+        probe.live_boundary_stage_calls.load(Ordering::SeqCst),
+        1,
+        "deduplicated steer retry must not perform another live context injection"
+    );
+
+    let during_busy = rig
+        .adapter
+        .meerkat_machine_spine_snapshot(&rig.session_id)
+        .await
+        .expect("snapshot should exist while busy");
+    assert!(during_busy.inputs.steer_queue.is_empty());
+    assert!(
+        during_busy
+            .inputs
+            .admission_order
+            .iter()
+            .all(|input| input.input_id != duplicate_peer_id),
+        "deduplicated retry should not become its own admitted machine work item"
+    );
+
+    rig.allow_finish.notify_waiters();
+    rig.wait_until_attached_and_empty().await;
+    assert_eq!(rig.apply_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn interrupt_yielding_attached_steer_starts_outer_turn_without_live_injection() {
+    let rig = InterruptYieldingTestRig::new(true, false).await;
+    let probe = rig.probe.clone().expect("live boundary probe installed");
+
+    let (peer_input, peer_id) = interrupt_yielding_peer_input(
+        "attached steer should start normal work",
+        Some(meerkat_core::types::HandlingMode::Steer),
+    );
+    let (outcome, completion_handle) = rig
+        .adapter
+        .accept_input_with_completion(&rig.session_id, peer_input)
+        .await
+        .expect("attached steer should be accepted");
+    assert!(outcome.is_accepted());
+    assert!(completion_handle.is_some());
+
+    rig.wait_for_apply_calls(1).await;
+    assert_eq!(
+        probe.live_boundary_stage_calls.load(Ordering::SeqCst),
+        0,
+        "idle/attached steer should start an outer turn, not inject into a live one"
+    );
+    assert_eq!(probe.live_boundary_cancel_calls.load(Ordering::SeqCst), 0);
+    let during_apply = rig
+        .adapter
+        .meerkat_machine_spine_snapshot(&rig.session_id)
+        .await
+        .expect("snapshot should exist during attached steer apply");
+    assert_eq!(during_apply.control.phase, RuntimeState::Running);
+    assert_eq!(during_apply.inputs.current_run_contributors, vec![peer_id]);
+
+    rig.allow_finish.notify_waiters();
+    rig.wait_until_attached_and_empty().await;
+    assert_eq!(rig.apply_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn interrupt_yielding_default_peer_message_does_not_live_inject() {
+    let rig = InterruptYieldingTestRig::new(true, false).await;
+    rig.start_busy_turn().await;
+    let probe = rig.probe.clone().expect("live boundary probe installed");
+
+    let (peer_input, peer_id) = interrupt_yielding_peer_input("ordinary queued peer message", None);
+    let (outcome, completion_handle) = rig
+        .adapter
+        .accept_input_with_completion(&rig.session_id, peer_input)
+        .await
+        .expect("default peer message should be accepted");
+    assert!(outcome.is_accepted());
+    assert!(completion_handle.is_some());
+
+    assert_eq!(
+        probe.live_boundary_stage_calls.load(Ordering::SeqCst),
+        0,
+        "only explicit Steer ingress should project into the live boundary"
+    );
+    assert_eq!(probe.live_boundary_cancel_calls.load(Ordering::SeqCst), 0);
+
+    let during_busy = rig
+        .adapter
+        .meerkat_machine_spine_snapshot(&rig.session_id)
+        .await
+        .expect("snapshot should exist while busy");
+    assert!(
+        during_busy.inputs.queue.contains(&peer_id),
+        "default peer messages must remain outer-turn queued while busy"
+    );
+    assert!(during_busy.inputs.steer_queue.is_empty());
+
+    rig.allow_finish.notify_waiters();
+    rig.wait_for_apply_calls(2).await;
+    assert_eq!(probe.live_boundary_stage_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(rig.queued_boundary_cancel_calls.load(Ordering::SeqCst), 0);
+    rig.allow_finish.notify_waiters();
+    rig.wait_until_attached_and_empty().await;
+}
+
+#[tokio::test]
+async fn interrupt_yielding_without_live_boundary_handle_falls_back_to_steer_queue() {
+    let rig = InterruptYieldingTestRig::new(false, false).await;
+    rig.start_busy_turn().await;
+
+    let (peer_input, peer_id) = interrupt_yielding_peer_input(
+        "explicit steer waits for post-turn drain when no live handle exists",
+        Some(meerkat_core::types::HandlingMode::Steer),
+    );
+    let (outcome, completion_handle) = rig
+        .adapter
+        .accept_input_with_completion(&rig.session_id, peer_input)
+        .await
+        .expect("running explicit steer should be accepted without a live handle");
+    assert!(outcome.is_accepted());
+    assert!(completion_handle.is_some());
+
+    let during_busy = rig
+        .adapter
+        .meerkat_machine_spine_snapshot(&rig.session_id)
+        .await
+        .expect("snapshot should exist while busy");
+    assert!(
+        during_busy.inputs.steer_queue.contains(&peer_id),
+        "without a live boundary handle, explicit steer must remain queued for ordinary drain"
+    );
+    assert!(
+        during_busy
+            .completion_waiters
+            .waiting_inputs
+            .iter()
+            .any(|waiter| waiter.input_id == peer_id),
+        "fallback steers should keep their completion waiter until the queued run consumes them"
+    );
+    assert_eq!(rig.queued_boundary_cancel_calls.load(Ordering::SeqCst), 0);
+
+    rig.allow_finish.notify_waiters();
+    rig.wait_for_apply_calls(2).await;
+    rig.allow_finish.notify_waiters();
+    rig.wait_until_attached_and_empty().await;
+    assert_eq!(
+        rig.apply_calls.load(Ordering::SeqCst),
+        2,
+        "fallback queued steer should run exactly once after the busy turn completes"
+    );
+    assert_eq!(rig.queued_boundary_cancel_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn interrupt_yielding_live_stage_failure_leaves_accepted_work_queued() {
+    let rig = InterruptYieldingTestRig::new(true, true).await;
+    rig.start_busy_turn().await;
+    let probe = rig.probe.clone().expect("live boundary probe installed");
+
+    let (peer_input, peer_id) = interrupt_yielding_peer_input(
+        "explicit steer survives failed live staging",
+        Some(meerkat_core::types::HandlingMode::Steer),
+    );
+    let (outcome, completion_handle) = rig
+        .adapter
+        .accept_input_with_completion(&rig.session_id, peer_input)
+        .await
+        .expect("stage failure should not turn accepted ingress into admission failure");
+    assert!(outcome.is_accepted());
+    assert!(completion_handle.is_some());
+
+    assert_eq!(
+        probe.live_boundary_stage_calls.load(Ordering::SeqCst),
+        1,
+        "the live injection path should be attempted once"
+    );
+    assert!(
+        probe.staged_texts().is_empty(),
+        "failed live staging must not report a committed injection"
+    );
+    let during_busy = rig
+        .adapter
+        .meerkat_machine_spine_snapshot(&rig.session_id)
+        .await
+        .expect("snapshot should exist while busy");
+    assert!(
+        during_busy.inputs.steer_queue.contains(&peer_id),
+        "failed live staging should leave the accepted steer in the steer lane"
+    );
+    let steered_snapshot = during_busy
+        .inputs
+        .admission_order
+        .iter()
+        .find(|input| input.input_id == peer_id)
+        .expect("failed live-stage input should remain visible");
+    assert_eq!(
+        steered_snapshot.lifecycle,
+        Some(crate::input_state::InputLifecycleState::Queued)
+    );
+    assert_eq!(steered_snapshot.last_boundary_sequence, None);
+
+    probe.fail_live_stage.store(false, Ordering::SeqCst);
+    rig.allow_finish.notify_waiters();
+    rig.wait_for_apply_calls(2).await;
+    rig.allow_finish.notify_waiters();
+    rig.wait_until_attached_and_empty().await;
+    assert_eq!(
+        rig.apply_calls.load(Ordering::SeqCst),
+        2,
+        "work left queued after failed live staging should still drain once"
+    );
+    assert_eq!(rig.queued_boundary_cancel_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.live_boundary_cancel_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

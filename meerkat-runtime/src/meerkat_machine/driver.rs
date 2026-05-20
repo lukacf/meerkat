@@ -471,6 +471,37 @@ impl DriverEntry {
         }
     }
 
+    pub(crate) fn next_live_boundary_context_sequence(&self, run_id: &RunId) -> u64 {
+        match self {
+            DriverEntry::Ephemeral(d) => d.next_live_boundary_context_sequence(run_id),
+            DriverEntry::Persistent(d) => d.next_live_boundary_context_sequence(run_id),
+        }
+    }
+
+    pub(crate) async fn machine_realize_live_boundary_context_injected(
+        &mut self,
+        run_id: &RunId,
+        input_ids: &[InputId],
+        receipt: &RunBoundaryReceipt,
+        session_snapshot: Option<Vec<u8>>,
+    ) -> Result<(), RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(d) => {
+                let _ = session_snapshot;
+                d.machine_realize_live_boundary_context_injected(run_id, input_ids, receipt)
+            }
+            DriverEntry::Persistent(d) => {
+                d.machine_realize_live_boundary_context_injected(
+                    run_id,
+                    input_ids,
+                    receipt,
+                    session_snapshot,
+                )
+                .await
+            }
+        }
+    }
+
     /// Stage an input (Queued → Staged).
     pub(crate) fn stage_input(
         &mut self,

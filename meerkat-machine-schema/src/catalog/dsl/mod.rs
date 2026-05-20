@@ -1428,8 +1428,24 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string("WorkItemKey"),
-            NamedTypeBinding::string("WorkEdgeKey"),
-            NamedTypeBinding::string("WorkDependencyPathKey"),
+            NamedTypeBinding::type_path_struct(
+                "WorkEdgeKey",
+                "crate::catalog::dsl::workgraph_lifecycle::WorkEdgeKey",
+                vec![
+                    TypePathStructField::named("kind", "WorkEdgeKind"),
+                    TypePathStructField::named("from_item_key", "WorkItemKey"),
+                    TypePathStructField::named("to_item_key", "WorkItemKey"),
+                ],
+            ),
+            NamedTypeBinding::type_path_struct(
+                "WorkDependencyPathKey",
+                "crate::catalog::dsl::workgraph_lifecycle::WorkDependencyPathKey",
+                vec![
+                    TypePathStructField::named("kind", "WorkEdgeKind"),
+                    TypePathStructField::named("from_item_key", "WorkItemKey"),
+                    TypePathStructField::named("to_item_key", "WorkItemKey"),
+                ],
+            ),
             NamedTypeBinding::string_enum(
                 "WorkEdgeKind",
                 &["Blocks", "Parent", "Related", "Supersedes", "DerivedFrom"],

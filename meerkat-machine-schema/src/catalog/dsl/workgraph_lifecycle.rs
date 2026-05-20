@@ -33,12 +33,10 @@ impl<T: Into<String>> From<T> for WorkItemKey {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct WorkEdgeKey(pub String);
-
-impl<T: Into<String>> From<T> for WorkEdgeKey {
-    fn from(value: T) -> Self {
-        Self(value.into())
-    }
+pub struct WorkEdgeKey {
+    pub kind: WorkEdgeKind,
+    pub from_item_key: WorkItemKey,
+    pub to_item_key: WorkItemKey,
 }
 
 #[derive(
@@ -53,12 +51,10 @@ impl<T: Into<String>> From<T> for WorkEdgeKey {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct WorkDependencyPathKey(pub String);
-
-impl<T: Into<String>> From<T> for WorkDependencyPathKey {
-    fn from(value: T) -> Self {
-        Self(value.into())
-    }
+pub struct WorkDependencyPathKey {
+    pub kind: WorkEdgeKind,
+    pub from_item_key: WorkItemKey,
+    pub to_item_key: WorkItemKey,
 }
 
 #[derive(

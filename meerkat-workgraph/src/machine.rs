@@ -807,12 +807,11 @@ fn work_edge_key(
     from_id: &WorkItemId,
     to_id: &WorkItemId,
 ) -> wg_dsl::WorkEdgeKey {
-    wg_dsl::WorkEdgeKey(format!(
-        "{}:{}:{}",
-        edge_kind_key(kind),
-        from_id.as_str(),
-        to_id.as_str()
-    ))
+    wg_dsl::WorkEdgeKey {
+        kind: dsl_edge_kind(kind),
+        from_item_key: work_item_key(from_id),
+        to_item_key: work_item_key(to_id),
+    }
 }
 
 fn dependency_path_key(
@@ -820,12 +819,11 @@ fn dependency_path_key(
     from_id: &WorkItemId,
     to_id: &WorkItemId,
 ) -> wg_dsl::WorkDependencyPathKey {
-    wg_dsl::WorkDependencyPathKey(format!(
-        "{}:{}:{}",
-        edge_kind_key(kind),
-        from_id.as_str(),
-        to_id.as_str()
-    ))
+    wg_dsl::WorkDependencyPathKey {
+        kind: dsl_edge_kind(kind),
+        from_item_key: work_item_key(from_id),
+        to_item_key: work_item_key(to_id),
+    }
 }
 
 fn dsl_edge_kind(kind: WorkEdgeKind) -> wg_dsl::WorkEdgeKind {
@@ -835,16 +833,6 @@ fn dsl_edge_kind(kind: WorkEdgeKind) -> wg_dsl::WorkEdgeKind {
         WorkEdgeKind::Related => wg_dsl::WorkEdgeKind::Related,
         WorkEdgeKind::Supersedes => wg_dsl::WorkEdgeKind::Supersedes,
         WorkEdgeKind::DerivedFrom => wg_dsl::WorkEdgeKind::DerivedFrom,
-    }
-}
-
-fn edge_kind_key(kind: WorkEdgeKind) -> &'static str {
-    match kind {
-        WorkEdgeKind::Blocks => "blocks",
-        WorkEdgeKind::Parent => "parent",
-        WorkEdgeKind::Related => "related",
-        WorkEdgeKind::Supersedes => "supersedes",
-        WorkEdgeKind::DerivedFrom => "derived_from",
     }
 }
 
@@ -1133,6 +1121,12 @@ mod tests {
         .into_insert_parts()
         .expect("insert parts")
         .0
+    }
+
+    fn create_with_id(id: &str, now: DateTime<Utc>) -> WorkItem {
+        let mut item = create(id, now);
+        item.id = WorkItemId::new(id).expect("work item id");
+        item
     }
 
     fn owner(id: &str) -> WorkOwner {
@@ -1498,6 +1492,37 @@ mod tests {
             WorkGraphMachine::blocker_satisfies_dependency(&completed)
                 .expect("completed blocker classification")
         );
+    }
+
+    #[test]
+    fn link_identity_uses_structured_machine_keys() {
+        let now = Utc::now();
+        let a = create_with_id("a", now);
+        let b_colon_c = create_with_id("b:c", now);
+        let a_colon_b = create_with_id("a:b", now);
+        let c = create_with_id("c", now);
+        let items = vec![a.clone(), b_colon_c.clone(), a_colon_b.clone(), c.clone()];
+        let first_edge = WorkEdge {
+            realm_id: "realm".to_string(),
+            namespace: WorkNamespace::default(),
+            kind: WorkEdgeKind::Blocks,
+            from_id: a.id.clone(),
+            to_id: b_colon_c.id.clone(),
+            created_at: now,
+        };
+        WorkGraphMachine::link_edge(first_edge.clone(), &items, &[], now)
+            .expect("first edge should validate");
+
+        let second_edge = WorkEdge {
+            realm_id: "realm".to_string(),
+            namespace: WorkNamespace::default(),
+            kind: WorkEdgeKind::Blocks,
+            from_id: a_colon_b.id,
+            to_id: c.id,
+            created_at: now,
+        };
+        WorkGraphMachine::link_edge(second_edge, &items, &[first_edge], now)
+            .expect("distinct structured edge key should not collide");
     }
 
     #[test]

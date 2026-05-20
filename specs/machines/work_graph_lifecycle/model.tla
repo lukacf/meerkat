@@ -5,8 +5,16 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkGraphErrorKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
 
+SetOfWorkDependencyPathKeyValuesCi == {{}}
+SetOfWorkEdgeKeyValuesCi == {{}}
+WorkDependencyPathKeyValuesCi == {}
+WorkEdgeKeyValuesCi == {}
 WorkOwnerKeyValuesCi == {}
 
+SetOfWorkDependencyPathKeyValuesDeep == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkEdgeKeyValuesDeep == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+WorkDependencyPathKeyValuesDeep == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkEdgeKeyValuesDeep == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
 WorkOwnerKeyValuesDeep == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
 
 None == [tag |-> "none", value |-> "none"]

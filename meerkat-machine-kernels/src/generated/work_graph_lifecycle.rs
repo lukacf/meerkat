@@ -12,62 +12,9 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::catalog::dsl::dsl_work_graph_lifecycle_machine()
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct WorkDependencyPathKey(pub String);
-impl From<String> for WorkDependencyPathKey {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for WorkDependencyPathKey {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for WorkDependencyPathKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct WorkEdgeKey(pub String);
-impl From<String> for WorkEdgeKey {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for WorkEdgeKey {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for WorkEdgeKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+pub type WorkDependencyPathKey =
+    meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkDependencyPathKey;
+pub type WorkEdgeKey = meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkEdgeKey;
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,

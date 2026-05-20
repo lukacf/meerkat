@@ -104,7 +104,11 @@ impl PersistentRuntimeDriver {
     /// Attached must never be persisted — on recovery, the executor is
     /// re-attached by the surface. Map Attached to Idle for store operations.
     fn runtime_state_for_persistence(&self) -> RuntimeState {
-        match self.inner.runtime_state() {
+        Self::runtime_state_for_persistence_from_inner(&self.inner)
+    }
+
+    fn runtime_state_for_persistence_from_inner(inner: &EphemeralRuntimeDriver) -> RuntimeState {
+        match inner.runtime_state() {
             RuntimeState::Attached => RuntimeState::Idle,
             other => other,
         }
@@ -666,10 +670,11 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         .await?;
 
         let input_states = staged.stored_input_states_snapshot()?;
+        let recovered_runtime_state = Self::runtime_state_for_persistence_from_inner(&staged);
         self.store
             .commit_machine_lifecycle(
                 &self.runtime_id,
-                MachineLifecycleCommit::new(self.runtime_state_for_persistence()),
+                MachineLifecycleCommit::new(recovered_runtime_state),
                 &input_states,
             )
             .await

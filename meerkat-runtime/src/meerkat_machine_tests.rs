@@ -13998,6 +13998,48 @@ async fn persistent_staged_run_driver(
     )
 }
 
+#[tokio::test]
+async fn persistent_driver_recover_preserves_durable_runtime_authority() {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let runtime_id = LogicalRuntimeId::new("persistent-recover-authority");
+    crate::store::RuntimeStore::commit_machine_lifecycle(
+        store.as_ref(),
+        &runtime_id,
+        crate::store::MachineLifecycleCommit::new(RuntimeState::Retired),
+        &[],
+    )
+    .await
+    .expect("seed retired runtime state");
+
+    let mut driver = PersistentRuntimeDriver::new(
+        runtime_id.clone(),
+        store.clone() as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    );
+    driver
+        .recover()
+        .await
+        .expect("public persistent recover should use generated runtime authority");
+
+    assert_eq!(driver.runtime_state(), RuntimeState::Retired);
+    assert_eq!(
+        crate::store::RuntimeStore::load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state after recovery"),
+        Some(RuntimeState::Retired),
+        "recovery must not rewrite durable lifecycle truth from the default shell"
+    );
+
+    let authority = driver.inner_ref().shared_dsl_authority();
+    let authority = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(
+        authority.state().lifecycle_phase,
+        mm_dsl::MeerkatPhase::Retired
+    );
+}
+
 fn assert_live_run_remains_staged(
     entry: &DriverEntry,
     run_id: &RunId,

@@ -142,11 +142,31 @@ pub(crate) fn recover_authority_from_runtime_observation(
     silent_intent_overrides: BTreeSet<String>,
     active_fence_token: Option<u64>,
 ) -> Result<mm_dsl::MeerkatMachineAuthority, mm_dsl::MeerkatMachineTransitionError> {
+    recover_authority_from_runtime_observation_id(
+        mm_dsl::SessionId::from_domain(session_id),
+        runtime_phase,
+        runtime_id,
+        current_run_id,
+        pre_run_phase,
+        silent_intent_overrides,
+        active_fence_token,
+    )
+}
+
+pub(crate) fn recover_authority_from_runtime_observation_id(
+    session_id: mm_dsl::SessionId,
+    runtime_phase: RuntimeState,
+    runtime_id: Option<&LogicalRuntimeId>,
+    current_run_id: Option<&RunId>,
+    pre_run_phase: Option<RuntimeState>,
+    silent_intent_overrides: BTreeSet<String>,
+    active_fence_token: Option<u64>,
+) -> Result<mm_dsl::MeerkatMachineAuthority, mm_dsl::MeerkatMachineTransitionError> {
     let mut authority = mm_dsl::MeerkatMachineAuthority::new();
     mm_dsl::MeerkatMachineMutator::apply(
         &mut authority,
         mm_dsl::MeerkatMachineInput::RecoverRuntimeAuthority {
-            session_id: mm_dsl::SessionId::from_domain(session_id),
+            session_id,
             state: observed_runtime_lifecycle_state(runtime_phase),
             agent_runtime_id: runtime_id.map(mm_dsl::AgentRuntimeId::from_domain),
             fence_token: active_fence_token.map(mm_dsl::FenceToken::from),

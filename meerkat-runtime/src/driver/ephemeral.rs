@@ -341,6 +341,52 @@ impl EphemeralRuntimeDriver {
         Arc::clone(&self.dsl.0)
     }
 
+    pub(crate) fn session_authority_id_for_recovery(&self) -> mm_dsl::SessionId {
+        self.with_dsl_state(|state| state.session_id.clone())
+            .unwrap_or_else(|| self.contract_session_authority_id())
+    }
+
+    pub(crate) fn recover_runtime_authority_from_observation(
+        &mut self,
+        session_id: mm_dsl::SessionId,
+        runtime_phase: RuntimeState,
+        runtime_id: Option<&LogicalRuntimeId>,
+    ) -> Result<(), RuntimeDriverError> {
+        let current_run_id = self.current_run_id();
+        let pre_run_phase = self.pre_run_phase();
+        let (silent_intent_overrides, active_fence_token) = self.with_dsl_state(|state| {
+            (
+                state.silent_intent_overrides.clone(),
+                state.active_fence_token.map(|token| token.0),
+            )
+        });
+        let recovered =
+            crate::meerkat_machine::dsl_authority::recover_authority_from_runtime_observation_id(
+                session_id,
+                runtime_phase,
+                runtime_id,
+                current_run_id.as_ref(),
+                pre_run_phase,
+                silent_intent_overrides,
+                active_fence_token,
+            )
+            .map_err(|err| {
+                RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
+                    err,
+                    "persistent runtime recovery authority",
+                ))
+            })?;
+        {
+            let authority = self.shared_dsl_authority();
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *authority = recovered;
+        }
+        self.sync_control_projection_from_dsl_authority();
+        Ok(())
+    }
+
     /// Apply a DSL input locally, mapping any rejection into a driver error.
     /// Used inside the ingress/input lifecycle paths that previously flowed
     /// through the deleted `RuntimeIngressAuthority` helper.

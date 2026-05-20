@@ -1837,6 +1837,19 @@ pub(crate) async fn machine_recover_persistent_driver(
     runtime_id: &LogicalRuntimeId,
     driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
 ) -> Result<RecoveryReport, RuntimeDriverError> {
+    let recovered_runtime_state = store
+        .load_runtime_state(runtime_id)
+        .await
+        .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+    if let Some(runtime_state) = recovered_runtime_state {
+        let session_id = driver.session_authority_id_for_recovery();
+        driver.recover_runtime_authority_from_observation(
+            session_id,
+            runtime_state,
+            Some(runtime_id),
+        )?;
+    }
+
     let mut recovered_payloads = Vec::new();
 
     for (_stored_runtime_id, bundle) in load_input_states_for_runtime(store, runtime_id)
@@ -1912,10 +1925,6 @@ pub(crate) async fn machine_recover_persistent_driver(
         }
     }
 
-    let recovered_runtime_state = store
-        .load_runtime_state(runtime_id)
-        .await
-        .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
     if let Some(runtime_state) = recovered_runtime_state
         && matches!(
             runtime_state,

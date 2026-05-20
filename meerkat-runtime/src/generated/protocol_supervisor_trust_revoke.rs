@@ -5,6 +5,24 @@
 
 use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};
 
+struct GeneratedAuthorityBridgeToken;
+
+static GENERATED_AUTHORITY_BRIDGE_TOKEN: GeneratedAuthorityBridgeToken =
+    GeneratedAuthorityBridgeToken;
+
+fn generated_authority_bridge_token() -> &'static (dyn std::any::Any + Send + Sync) {
+    &GENERATED_AUTHORITY_BRIDGE_TOKEN
+}
+
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!("__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_supervisor_trust_revoke_", env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")))]
+pub extern "Rust" fn generated_authority_bridge_token_is_valid(
+    token: &(dyn std::any::Any + Send + Sync),
+) -> bool {
+    token.is::<GeneratedAuthorityBridgeToken>()
+}
+
 #[derive(Debug, Clone)]
 pub struct SupervisorTrustRevokeObligation {
     local_endpoint: Option<PeerEndpoint>,
@@ -82,7 +100,7 @@ impl SupervisorTrustRevokeObligation {
                 #[allow(unsafe_code)]
                 unsafe {
                     core_generated_comms_trust_authority_build(
-                        crate::generated_authority_bridge::generated_authority_bridge_token(),
+                        generated_authority_bridge_token(),
                         meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke,
                         self.epoch,
                         meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish,

@@ -276,6 +276,7 @@ fn comms_trust_authority_minting_is_generated_only() {
     let mut violations = Vec::new();
     let mut raw_constructor_violations = Vec::new();
     let mut generated_parts_impl_violations = Vec::new();
+    let mut generated_bridge_violations = Vec::new();
     for path in files {
         let relative = path
             .strip_prefix(&root)
@@ -303,6 +304,10 @@ fn comms_trust_authority_minting_is_generated_only() {
         }
         let generated_protocol_file = relative.contains("/src/generated/protocol_")
             || relative == "xtask/src/protocol_codegen.rs";
+        let codegen_file = relative == "xtask/src/protocol_codegen.rs";
+        let drift_test_file = relative == "xtask/tests/protocol_codegen_drift.rs";
+        let core_bridge_file =
+            relative == "meerkat-core/src/comms.rs" || relative == "meerkat-core/src/handles.rs";
         if (source.contains(concat!(
             "impl meerkat_core::comms::",
             "GeneratedCommsTrustAuthorityParts"
@@ -311,7 +316,26 @@ fn comms_trust_authority_minting_is_generated_only() {
             "GeneratedAuthLeaseTransitionParts"
         ))) && !generated_protocol_file
         {
-            generated_parts_impl_violations.push(relative);
+            generated_parts_impl_violations.push(relative.clone());
+        }
+        if source.contains("generated_authority_bridge_token()")
+            && !(generated_protocol_file || codegen_file || drift_test_file)
+        {
+            generated_bridge_violations.push(relative.clone());
+        }
+        if (source.contains("__meerkat_core_runtime_generated_")
+            || source.contains("__meerkat_core_mob_generated_")
+            || source.contains("__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_")
+            || source.contains("__meerkat_mob_generated_authority_bridge_token_is_valid_v1_"))
+            && !(generated_protocol_file || codegen_file || core_bridge_file || drift_test_file)
+        {
+            generated_bridge_violations.push(relative.clone());
+        }
+        if (source.contains("core_generated_comms_trust_authority_build")
+            || source.contains("core_runtime_generated_auth_lease_transition_build"))
+            && !(generated_protocol_file || codegen_file || core_bridge_file || drift_test_file)
+        {
+            generated_bridge_violations.push(relative);
         }
     }
 
@@ -326,5 +350,11 @@ fn comms_trust_authority_minting_is_generated_only() {
     assert!(
         generated_parts_impl_violations.is_empty(),
         "generated authority parts impls must be emitted only by protocol codegen into src/generated/protocol_* helpers; found {generated_parts_impl_violations:?}",
+    );
+    generated_bridge_violations.sort();
+    generated_bridge_violations.dedup();
+    assert!(
+        generated_bridge_violations.is_empty(),
+        "generated authority bridge tokens and hidden bridge calls must stay inside generated protocol helpers, xtask codegen, or core validators; found {generated_bridge_violations:?}",
     );
 }

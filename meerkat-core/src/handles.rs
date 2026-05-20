@@ -1173,10 +1173,10 @@ impl AuthLeaseTransition {
 #[allow(improper_ctypes_definitions, unsafe_code)]
 unsafe extern "Rust" {
     #[link_name = concat!(
-        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_",
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_auth_lease_lifecycle_publication_",
         env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
     )]
-    fn runtime_generated_authority_bridge_token_is_valid(
+    fn runtime_auth_lease_lifecycle_publication_generated_authority_bridge_token_is_valid(
         token: &(dyn std::any::Any + Send + Sync),
     ) -> bool;
 }
@@ -1211,11 +1211,16 @@ fn validate_runtime_generated_authority_bridge_token(
     token: &(dyn std::any::Any + Send + Sync),
 ) -> Result<(), String> {
     #[allow(unsafe_code)]
-    let valid = unsafe { runtime_generated_authority_bridge_token_is_valid(token) };
+    let valid = unsafe {
+        runtime_auth_lease_lifecycle_publication_generated_authority_bridge_token_is_valid(token)
+    };
     if valid {
         Ok(())
     } else {
-        Err("generated auth lease transition requires the canonical runtime bridge token".into())
+        Err(
+            "generated auth lease transition requires the generated AuthMachine protocol bridge token"
+                .into(),
+        )
     }
 }
 

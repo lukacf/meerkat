@@ -51,7 +51,6 @@ pub mod error;
 pub mod event;
 #[doc(hidden)]
 pub mod generated;
-mod generated_authority_bridge;
 pub mod ids;
 pub mod launch;
 #[doc(hidden)]

@@ -53,7 +53,6 @@ pub mod durability;
 pub(crate) mod effect;
 #[doc(hidden)]
 pub mod generated;
-mod generated_authority_bridge;
 pub mod handles;
 pub mod identifiers;
 pub mod ingress_types;

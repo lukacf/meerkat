@@ -188,6 +188,9 @@ fn generate_protocol_helpers_impl(
     if !protocol.rust.required_imports.is_empty() {
         writeln!(&mut out)?;
     }
+    if uses_generated_authority_bridge(protocol) {
+        emit_generated_authority_bridge_token(&mut out, protocol)?;
+    }
 
     let obligation_type = generate_obligation_struct(&mut out, protocol, producer_machine)?;
     generate_feedback_input_pattern_macro(&mut out, protocol, composition, machine_by_name)?;
@@ -218,6 +221,55 @@ fn generate_protocol_helpers_impl(
     }
 
     Ok(out)
+}
+
+fn uses_generated_authority_bridge(protocol: &EffectHandoffProtocol) -> bool {
+    protocol.name.as_str() == "auth_lease_lifecycle_publication"
+        || protocol.comms_trust_authority.is_some()
+}
+
+fn generated_authority_bridge_owner(protocol: &EffectHandoffProtocol) -> &'static str {
+    if protocol.name.as_str().starts_with("mob_") {
+        "mob"
+    } else {
+        "runtime"
+    }
+}
+
+fn emit_generated_authority_bridge_token(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+) -> Result<()> {
+    let owner = generated_authority_bridge_owner(protocol);
+    let protocol_name = protocol.name.as_str();
+    writeln!(out, "struct GeneratedAuthorityBridgeToken;")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "static GENERATED_AUTHORITY_BRIDGE_TOKEN: GeneratedAuthorityBridgeToken = GeneratedAuthorityBridgeToken;"
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "fn generated_authority_bridge_token() -> &'static (dyn std::any::Any + Send + Sync) {{"
+    )?;
+    writeln!(out, "    &GENERATED_AUTHORITY_BRIDGE_TOKEN")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(out, "#[doc(hidden)]")?;
+    writeln!(out, "#[allow(improper_ctypes_definitions, unsafe_code)]")?;
+    writeln!(
+        out,
+        "#[unsafe(export_name = concat!(\"__meerkat_{owner}_generated_authority_bridge_token_is_valid_v1_{protocol_name}_\", env!(\"MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX\")))]"
+    )?;
+    writeln!(
+        out,
+        "pub extern \"Rust\" fn generated_authority_bridge_token_is_valid(token: &(dyn std::any::Any + Send + Sync)) -> bool {{"
+    )?;
+    writeln!(out, "    token.is::<GeneratedAuthorityBridgeToken>()")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
 }
 
 fn generate_feedback_input_pattern_macro(
@@ -470,10 +522,7 @@ fn emit_auth_lease_transition_authority_helper(
         out,
         "            core_runtime_generated_auth_lease_transition_build("
     )?;
-    writeln!(
-        out,
-        "                crate::generated_authority_bridge::generated_authority_bridge_token(),"
-    )?;
+    writeln!(out, "                generated_authority_bridge_token(),")?;
     writeln!(out, "                lease_key,")?;
     writeln!(out, "                expires_at,")?;
     writeln!(out, "                self.credential_generation,")?;
@@ -853,7 +902,7 @@ fn emit_comms_trust_bridge_call(
     )?;
     writeln!(
         out,
-        "                        crate::generated_authority_bridge::generated_authority_bridge_token(),"
+        "                        generated_authority_bridge_token(),"
     )?;
     writeln!(
         out,

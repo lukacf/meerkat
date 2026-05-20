@@ -611,18 +611,74 @@ impl CommsTrustMutationAuthority {
 #[allow(improper_ctypes_definitions, unsafe_code)]
 unsafe extern "Rust" {
     #[link_name = concat!(
-        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_",
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_comms_trust_reconcile_",
         env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
     )]
-    fn runtime_generated_authority_bridge_token_is_valid(
+    fn runtime_comms_trust_reconcile_generated_authority_bridge_token_is_valid(
         token: &(dyn std::any::Any + Send + Sync),
     ) -> bool;
 
     #[link_name = concat!(
-        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_",
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_supervisor_trust_publish_",
         env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
     )]
-    fn mob_generated_authority_bridge_token_is_valid(
+    fn runtime_supervisor_trust_publish_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_supervisor_trust_revoke_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_supervisor_trust_revoke_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_member_trust_wiring_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_member_trust_wiring_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_member_trust_unwiring_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_member_trust_unwiring_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_external_peer_trust_wiring_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_external_peer_trust_wiring_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_external_peer_trust_unwiring_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_external_peer_trust_unwiring_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_external_peer_trust_repair_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_external_peer_trust_repair_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_external_peer_reciprocal_trust_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_external_peer_reciprocal_trust_generated_authority_bridge_token_is_valid(
         token: &(dyn std::any::Any + Send + Sync),
     ) -> bool;
 }
@@ -644,7 +700,7 @@ pub(crate) extern "Rust" fn runtime_generated_comms_trust_authority_build(
     trust_store_peer_id: Option<String>,
     peer_descriptor: Option<TrustedPeerDescriptor>,
 ) -> Result<CommsTrustMutationAuthority, String> {
-    validate_runtime_generated_authority_bridge_token(token)?;
+    validate_runtime_generated_authority_bridge_token(source_kind, token)?;
     validate_meerkat_machine_trust_source(source_kind, trust_row_owner_kind)?;
     CommsTrustMutationAuthority::from_generated_parts(
         source_kind,
@@ -674,7 +730,7 @@ pub(crate) extern "Rust" fn mob_generated_comms_trust_authority_build(
     trust_store_peer_id: Option<String>,
     peer_descriptor: Option<TrustedPeerDescriptor>,
 ) -> Result<CommsTrustMutationAuthority, String> {
-    validate_mob_generated_authority_bridge_token(token)?;
+    validate_mob_generated_authority_bridge_token(source_kind, token)?;
     validate_mob_machine_trust_source(source_kind, trust_row_owner_kind)?;
     CommsTrustMutationAuthority::from_generated_parts(
         source_kind,
@@ -689,27 +745,64 @@ pub(crate) extern "Rust" fn mob_generated_comms_trust_authority_build(
 
 #[cfg(meerkat_internal_generated_authority_bridge)]
 fn validate_runtime_generated_authority_bridge_token(
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
     token: &(dyn std::any::Any + Send + Sync),
 ) -> Result<(), String> {
     #[allow(unsafe_code)]
-    let valid = unsafe { runtime_generated_authority_bridge_token_is_valid(token) };
+    let valid = unsafe {
+        match source_kind {
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection => {
+                runtime_comms_trust_reconcile_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish => {
+                runtime_supervisor_trust_publish_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke => {
+                runtime_supervisor_trust_revoke_generated_authority_bridge_token_is_valid(token)
+            }
+            _ => false,
+        }
+    };
     if valid {
         Ok(())
     } else {
-        Err("generated comms trust authority requires the canonical runtime bridge token".into())
+        Err("generated comms trust authority requires the matching generated runtime protocol bridge token".into())
     }
 }
 
 #[cfg(meerkat_internal_generated_authority_bridge)]
 fn validate_mob_generated_authority_bridge_token(
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
     token: &(dyn std::any::Any + Send + Sync),
 ) -> Result<(), String> {
     #[allow(unsafe_code)]
-    let valid = unsafe { mob_generated_authority_bridge_token_is_valid(token) };
+    let valid = unsafe {
+        match source_kind {
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring => {
+                mob_member_trust_wiring_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustUnwiring => {
+                mob_member_trust_unwiring_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring => {
+                mob_external_peer_trust_wiring_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustUnwiring => {
+                mob_external_peer_trust_unwiring_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustRepair => {
+                mob_external_peer_trust_repair_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust => {
+                mob_external_peer_reciprocal_trust_generated_authority_bridge_token_is_valid(token)
+            }
+            _ => false,
+        }
+    };
     if valid {
         Ok(())
     } else {
-        Err("generated comms trust authority requires the canonical MobMachine bridge token".into())
+        Err("generated comms trust authority requires the matching generated MobMachine protocol bridge token".into())
     }
 }
 

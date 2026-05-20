@@ -8,6 +8,24 @@ use crate::machines::mob_machine::{
     PeerId,
 };
 
+struct GeneratedAuthorityBridgeToken;
+
+static GENERATED_AUTHORITY_BRIDGE_TOKEN: GeneratedAuthorityBridgeToken =
+    GeneratedAuthorityBridgeToken;
+
+fn generated_authority_bridge_token() -> &'static (dyn std::any::Any + Send + Sync) {
+    &GENERATED_AUTHORITY_BRIDGE_TOKEN
+}
+
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!("__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_external_peer_reciprocal_trust_", env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")))]
+pub extern "Rust" fn generated_authority_bridge_token_is_valid(
+    token: &(dyn std::any::Any + Send + Sync),
+) -> bool {
+    token.is::<GeneratedAuthorityBridgeToken>()
+}
+
 #[derive(Debug, Clone)]
 pub struct MobTopologyFreshnessAuthority {
     topology_epoch: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
@@ -166,7 +184,7 @@ impl MobExternalPeerReciprocalTrustObligation {
                 #[allow(unsafe_code)]
                 unsafe {
                     core_generated_comms_trust_authority_build(
-                        crate::generated_authority_bridge::generated_authority_bridge_token(),
+                        generated_authority_bridge_token(),
                         meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust,
                         self.epoch,
                         meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,

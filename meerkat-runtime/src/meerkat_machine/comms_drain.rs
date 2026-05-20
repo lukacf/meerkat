@@ -745,6 +745,55 @@ impl MeerkatMachine {
         Ok(transition)
     }
 
+    pub async fn supervisor_trust_publish_freshness_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        crate::protocol_supervisor_trust_publish::SupervisorTrustFreshnessAuthority,
+        SupervisorBindingStageError,
+    > {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        Ok(
+            crate::protocol_supervisor_trust_publish::SupervisorTrustFreshnessAuthority::from_authority(
+                Arc::clone(&entry.dsl_authority),
+            ),
+        )
+    }
+
+    pub async fn generated_authority_owner_token(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(session_id)?;
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(authority.generated_authority_owner_token())
+    }
+
+    pub async fn supervisor_trust_revoke_freshness_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        crate::protocol_supervisor_trust_revoke::SupervisorTrustFreshnessAuthority,
+        SupervisorBindingStageError,
+    > {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        Ok(
+            crate::protocol_supervisor_trust_revoke::SupervisorTrustFreshnessAuthority::from_authority(
+                Arc::clone(&entry.dsl_authority),
+            ),
+        )
+    }
+
     /// Stage a DSL `AuthorizeSupervisor` input (Wave 3 D Row 21).
     ///
     /// Rotates the current binding to a new supervisor + epoch. The shell

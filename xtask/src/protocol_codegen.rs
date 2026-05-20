@@ -390,6 +390,9 @@ fn generate_obligation_struct(
     if protocol.name.as_str() == "comms_trust_reconcile" {
         emit_peer_projection_freshness_authority(out)?;
     }
+    if is_supervisor_trust_protocol(protocol.name.as_str()) {
+        emit_supervisor_trust_freshness_authority(out)?;
+    }
     if is_mob_topology_trust_protocol(protocol.name.as_str()) {
         emit_mob_topology_freshness_authority(out)?;
     }
@@ -430,6 +433,12 @@ fn generate_obligation_struct(
         writeln!(
             out,
             "    peer_projection_freshness_authority: PeerProjectionFreshnessAuthority,"
+        )?;
+    }
+    if is_supervisor_trust_protocol(protocol.name.as_str()) {
+        writeln!(
+            out,
+            "    supervisor_trust_freshness_authority: SupervisorTrustFreshnessAuthority,"
         )?;
     }
     if is_mob_topology_trust_protocol(protocol.name.as_str()) {
@@ -718,6 +727,127 @@ fn emit_mob_topology_freshness_authority(out: &mut String) -> Result<()> {
     Ok(())
 }
 
+fn emit_supervisor_trust_freshness_authority(out: &mut String) -> Result<()> {
+    writeln!(out, "#[derive(Clone)]")?;
+    writeln!(out, "pub struct SupervisorTrustFreshnessAuthority {{")?;
+    writeln!(
+        out,
+        "    authority: Option<std::sync::Arc<std::sync::Mutex<crate::meerkat_machine::dsl::MeerkatMachineAuthority>>>,"
+    )?;
+    writeln!(
+        out,
+        "    source_owner_token: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,"
+    )?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "impl std::fmt::Debug for SupervisorTrustFreshnessAuthority {{"
+    )?;
+    writeln!(
+        out,
+        "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
+    )?;
+    writeln!(
+        out,
+        "        f.debug_struct(\"SupervisorTrustFreshnessAuthority\").field(\"present\", &self.authority.is_some()).field(\"owner_present\", &self.source_owner_token.is_some()).finish()"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(out, "#[allow(dead_code)]")?;
+    writeln!(out, "impl SupervisorTrustFreshnessAuthority {{")?;
+    writeln!(
+        out,
+        "    pub fn from_authority(authority: std::sync::Arc<std::sync::Mutex<crate::meerkat_machine::dsl::MeerkatMachineAuthority>>) -> Self {{"
+    )?;
+    writeln!(
+        out,
+        "        let source_owner_token = authority.lock().unwrap_or_else(std::sync::PoisonError::into_inner).generated_authority_owner_token();"
+    )?;
+    writeln!(
+        out,
+        "        Self {{ authority: Some(authority), source_owner_token: Some(source_owner_token) }}"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(out, "    fn missing() -> Self {{")?;
+    writeln!(
+        out,
+        "        Self {{ authority: None, source_owner_token: None }}"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "    fn source_owner_token(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {{"
+    )?;
+    writeln!(
+        out,
+        "        self.source_owner_token.as_ref().map(std::sync::Arc::clone)"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "    fn validate_pending_publish(&self, expected_peer_id: &str, expected_epoch: u64) -> Result<(), String> {{"
+    )?;
+    writeln!(out, "        let Some(authority) = &self.authority else {{")?;
+    writeln!(
+        out,
+        "            return Err(\"generated supervisor trust freshness authority is absent\".to_string());"
+    )?;
+    writeln!(out, "        }};")?;
+    writeln!(
+        out,
+        "        let guard = authority.lock().map_err(|_| \"generated supervisor trust freshness authority was poisoned\".to_string())?;"
+    )?;
+    writeln!(out, "        let state = guard.state();")?;
+    writeln!(
+        out,
+        "        if state.supervisor_publish_pending_peer_id.as_deref() == Some(expected_peer_id) && state.supervisor_publish_pending_epoch == Some(expected_epoch) {{"
+    )?;
+    writeln!(out, "            Ok(())")?;
+    writeln!(out, "        }} else {{")?;
+    writeln!(
+        out,
+        "            Err(format!(\"stale generated supervisor trust publish obligation for peer {{expected_peer_id:?}} at epoch {{expected_epoch}}\"))"
+    )?;
+    writeln!(out, "        }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "    fn validate_pending_revoke(&self, expected_peer_id: &str, expected_epoch: u64) -> Result<(), String> {{"
+    )?;
+    writeln!(out, "        let Some(authority) = &self.authority else {{")?;
+    writeln!(
+        out,
+        "            return Err(\"generated supervisor trust freshness authority is absent\".to_string());"
+    )?;
+    writeln!(out, "        }};")?;
+    writeln!(
+        out,
+        "        let guard = authority.lock().map_err(|_| \"generated supervisor trust freshness authority was poisoned\".to_string())?;"
+    )?;
+    writeln!(out, "        let state = guard.state();")?;
+    writeln!(
+        out,
+        "        if state.supervisor_revoke_pending_peer_id.as_deref() == Some(expected_peer_id) && state.supervisor_revoke_pending_epoch == Some(expected_epoch) {{"
+    )?;
+    writeln!(out, "            Ok(())")?;
+    writeln!(out, "        }} else {{")?;
+    writeln!(
+        out,
+        "            Err(format!(\"stale generated supervisor trust revoke obligation for peer {{expected_peer_id:?}} at epoch {{expected_epoch}}\"))"
+    )?;
+    writeln!(out, "        }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
 fn emit_comms_trust_authority_source_impl(
     out: &mut String,
     protocol: &EffectHandoffProtocol,
@@ -757,6 +887,17 @@ fn emit_comms_trust_authority_source_impl(
         writeln!(
             out,
             "        self.peer_projection_freshness_authority.validate_peer_projection_epoch(self.peer_projection_epoch)?;"
+        )?;
+    }
+    if is_supervisor_trust_protocol(protocol.name.as_str()) {
+        let freshness_method = if protocol.name.as_str() == "supervisor_trust_publish" {
+            "validate_pending_publish"
+        } else {
+            "validate_pending_revoke"
+        };
+        writeln!(
+            out,
+            "        self.supervisor_trust_freshness_authority.{freshness_method}(self.peer_id.as_str(), self.epoch)?;"
         )?;
     }
     if is_mob_topology_trust_protocol(protocol.name.as_str()) {
@@ -971,6 +1112,8 @@ fn emit_comms_trust_bridge_call(
     writeln!(out, "                        {source_epoch_expr},")?;
     let owner_token_expr = if source_kind == "MeerkatMachinePeerProjection" {
         "self.peer_projection_freshness_authority.source_owner_token()"
+    } else if source_kind.starts_with("MeerkatMachineSupervisor") {
+        "self.supervisor_trust_freshness_authority.source_owner_token()"
     } else if source_kind.starts_with("MobMachine") {
         "self.mob_topology_freshness_authority.source_owner_token()"
     } else {
@@ -1399,6 +1542,10 @@ fn is_mob_topology_trust_protocol(name: &str) -> bool {
     )
 }
 
+fn is_supervisor_trust_protocol(name: &str) -> bool {
+    matches!(name, "supervisor_trust_publish" | "supervisor_trust_revoke")
+}
+
 fn getter_returns_copy(ty: &TypeRef) -> bool {
     matches!(
         ty,
@@ -1567,6 +1714,25 @@ fn generate_effect_extractor_helpers(
         writeln!(
             out,
             "pub fn extract_obligations_with_freshness(transition: &{transition_type}, peer_projection_freshness_authority: PeerProjectionFreshnessAuthority) -> Vec<{obligation_type}> {{"
+        )?;
+        writeln!(out, "    transition.effects()")?;
+    } else if is_supervisor_trust_protocol(protocol.name.as_str()) {
+        let transition_type = transition_type
+            .as_ref()
+            .context("supervisor trust protocol requires transition extractor")?;
+        writeln!(
+            out,
+            "pub fn extract_obligations(transition: &{transition_type}) -> Vec<{obligation_type}> {{"
+        )?;
+        writeln!(
+            out,
+            "    extract_obligations_with_freshness(transition, SupervisorTrustFreshnessAuthority::missing())"
+        )?;
+        writeln!(out, "}}")?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "pub fn extract_obligations_with_freshness(transition: &{transition_type}, supervisor_trust_freshness_authority: SupervisorTrustFreshnessAuthority) -> Vec<{obligation_type}> {{"
         )?;
         writeln!(out, "    transition.effects()")?;
     } else if is_mob_topology_trust_protocol(protocol.name.as_str()) {
@@ -2550,6 +2716,11 @@ fn obligation_ctor_expr(
                 "peer_projection_freshness_authority: peer_projection_freshness_authority.clone()",
             );
         }
+        if is_supervisor_trust_protocol(protocol.name.as_str()) {
+            extra_fields.push(
+                "supervisor_trust_freshness_authority: supervisor_trust_freshness_authority.clone()",
+            );
+        }
         if is_mob_topology_trust_protocol(protocol.name.as_str()) {
             extra_fields
                 .push("mob_topology_freshness_authority: mob_topology_freshness_authority.clone()");
@@ -2592,6 +2763,12 @@ fn obligation_ctor_expr(
     if protocol.name.as_str() == "comms_trust_reconcile" {
         fields.push(
             "peer_projection_freshness_authority: peer_projection_freshness_authority.clone()"
+                .to_string(),
+        );
+    }
+    if is_supervisor_trust_protocol(protocol.name.as_str()) {
+        fields.push(
+            "supervisor_trust_freshness_authority: supervisor_trust_freshness_authority.clone()"
                 .to_string(),
         );
     }

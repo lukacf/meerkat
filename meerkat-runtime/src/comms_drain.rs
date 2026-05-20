@@ -843,11 +843,22 @@ pub fn trusted_peer_descriptor_from_supervisor_publish_obligation(
     )
 }
 
-fn single_supervisor_publish_obligation(
+async fn single_supervisor_publish_obligation(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
     transition: &crate::meerkat_machine::dsl::MeerkatMachineTransition,
     context: &str,
 ) -> Result<crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation, String> {
-    let obligations = crate::protocol_supervisor_trust_publish::extract_obligations(transition);
+    let freshness_authority = adapter
+        .supervisor_trust_publish_freshness_authority(session_id)
+        .await
+        .map_err(|error| {
+            format!("{context}: generated supervisor publish freshness unavailable: {error}")
+        })?;
+    let obligations = crate::protocol_supervisor_trust_publish::extract_obligations_with_freshness(
+        transition,
+        freshness_authority,
+    );
     match obligations.as_slice() {
         [obligation] => Ok(obligation.clone()),
         [] => Err(format!("{context}: generated publish effect was absent")),
@@ -857,16 +868,27 @@ fn single_supervisor_publish_obligation(
     }
 }
 
-fn matching_supervisor_revoke_obligation(
+async fn matching_supervisor_revoke_obligation(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
     transition: &crate::meerkat_machine::dsl::MeerkatMachineTransition,
     peer_id: &str,
     epoch: u64,
     context: &str,
 ) -> Result<crate::protocol_supervisor_trust_revoke::SupervisorTrustRevokeObligation, String> {
-    crate::protocol_supervisor_trust_revoke::extract_obligations(transition)
-        .into_iter()
-        .find(|obligation| obligation.peer_id().as_str() == peer_id && obligation.epoch() == epoch)
-        .ok_or_else(|| format!("{context}: generated revoke effect was absent"))
+    let freshness_authority = adapter
+        .supervisor_trust_revoke_freshness_authority(session_id)
+        .await
+        .map_err(|error| {
+            format!("{context}: generated supervisor revoke freshness unavailable: {error}")
+        })?;
+    crate::protocol_supervisor_trust_revoke::extract_obligations_with_freshness(
+        transition,
+        freshness_authority,
+    )
+    .into_iter()
+    .find(|obligation| obligation.peer_id().as_str() == peer_id && obligation.epoch() == epoch)
+    .ok_or_else(|| format!("{context}: generated revoke effect was absent"))
 }
 
 fn validate_supervisor_publish_obligation(
@@ -932,6 +954,15 @@ fn supervisor_publish_authority(
     )
 }
 
+fn supervisor_publish_cleanup_authority(
+    obligation: &crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation,
+) -> Result<CommsTrustMutationAuthority, String> {
+    crate::protocol_supervisor_trust_publish::cleanup_authority_for_peer(
+        obligation,
+        obligation.peer_id(),
+    )
+}
+
 fn supervisor_revoke_authority(
     obligation: &crate::protocol_supervisor_trust_revoke::SupervisorTrustRevokeObligation,
 ) -> Result<CommsTrustMutationAuthority, String> {
@@ -948,20 +979,33 @@ async fn publish_supervisor_trust_from_generated_obligation(
     obligation: &crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation,
 ) -> Result<(), String> {
     let trusted_peer = trusted_peer_descriptor_from_supervisor_publish_obligation(obligation)?;
+    let cleanup_authority = supervisor_publish_cleanup_authority(obligation)?;
     apply_generated_private_trust_add(
         comms_runtime,
         trusted_peer,
         supervisor_publish_authority(obligation)?,
     )
     .await?;
-    adapter
+    if let Err(error) = adapter
         .stage_supervisor_trust_published(
             session_id,
             obligation.peer_id().clone(),
             obligation.epoch(),
         )
         .await
-        .map_err(|error| error.to_string())?;
+    {
+        let cleanup_result = apply_generated_private_trust_remove(
+            comms_runtime,
+            obligation.peer_id().clone(),
+            cleanup_authority,
+        )
+        .await;
+        let mut reason = format!("generated trust publish ack rejected: {error}");
+        if let Err(cleanup_error) = cleanup_result {
+            reason.push_str(&format!("; cleanup remove failed: {cleanup_error}"));
+        }
+        return Err(reason);
+    }
     Ok(())
 }
 
@@ -988,7 +1032,8 @@ async fn bind_and_publish_supervisor_trust(
         )
         .await
         .map_err(|error| format!("{context}: DSL rejected bind: {error}"))?;
-    let obligation = single_supervisor_publish_obligation(&transition, context)?;
+    let obligation =
+        single_supervisor_publish_obligation(adapter, session_id, &transition, context).await?;
     validate_supervisor_publish_obligation(&obligation, supervisor, epoch, context)?;
     publish_supervisor_trust_from_generated_obligation(
         adapter,
@@ -1503,27 +1548,33 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            let publish_obligation =
-                match single_supervisor_publish_obligation(&bind_transition, "bind member") {
-                    Ok(obligation) => obligation,
-                    Err(error) => {
-                        let _ = rollback_bind_after_trust_publication_failure(
-                            adapter,
-                            session_id,
-                            &supervisor_spec.peer_id.as_str(),
-                            payload.epoch,
-                        )
-                        .await;
-                        send_bridge_failure(
-                            comms_runtime,
-                            candidate,
-                            BridgeRejectionCause::Internal,
-                            error,
-                        )
-                        .await;
-                        return true;
-                    }
-                };
+            let publish_obligation = match single_supervisor_publish_obligation(
+                adapter,
+                session_id,
+                &bind_transition,
+                "bind member",
+            )
+            .await
+            {
+                Ok(obligation) => obligation,
+                Err(error) => {
+                    let _ = rollback_bind_after_trust_publication_failure(
+                        adapter,
+                        session_id,
+                        &supervisor_spec.peer_id.as_str(),
+                        payload.epoch,
+                    )
+                    .await;
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        error,
+                    )
+                    .await;
+                    return true;
+                }
+            };
             if let Err(error) = validate_supervisor_publish_obligation(
                 &publish_obligation,
                 &supervisor_spec,
@@ -1546,52 +1597,11 @@ async fn try_handle_supervisor_bridge_command(
                 .await;
                 return true;
             }
-            let publish_spec = match trusted_peer_descriptor_from_supervisor_publish_obligation(
-                &publish_obligation,
-            ) {
-                Ok(spec) => spec,
-                Err(error) => {
-                    let _ = rollback_bind_after_trust_publication_failure(
-                        adapter,
-                        session_id,
-                        publish_obligation.peer_id(),
-                        publish_obligation.epoch(),
-                    )
-                    .await;
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        BridgeRejectionCause::Internal,
-                        format!("bind member failed: invalid generated trust payload: {error}"),
-                    )
-                    .await;
-                    return true;
-                }
-            };
-            if let Err(error) = apply_generated_private_trust_add(
+            if let Err(error) = publish_supervisor_trust_from_generated_obligation(
+                adapter,
+                session_id,
                 comms_runtime,
-                publish_spec,
-                match supervisor_publish_authority(&publish_obligation) {
-                    Ok(authority) => authority,
-                    Err(error) => {
-                        let _ = adapter
-                            .stage_supervisor_trust_publish_failed(
-                                session_id,
-                                publish_obligation.peer_id().clone(),
-                                publish_obligation.epoch(),
-                                error.clone(),
-                            )
-                            .await;
-                        send_bridge_failure(
-                            comms_runtime,
-                            candidate,
-                            BridgeRejectionCause::Internal,
-                            error,
-                        )
-                        .await;
-                        return true;
-                    }
-                },
+                &publish_obligation,
             )
             .await
             {
@@ -1623,23 +1633,6 @@ async fn try_handle_supervisor_bridge_command(
                     candidate,
                     BridgeRejectionCause::Internal,
                     reason,
-                )
-                .await;
-                return true;
-            }
-            if let Err(error) = adapter
-                .stage_supervisor_trust_published(
-                    session_id,
-                    publish_obligation.peer_id().clone(),
-                    publish_obligation.epoch(),
-                )
-                .await
-            {
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    format!("bind member failed: generated trust publish ack rejected: {error}"),
                 )
                 .await;
                 return true;
@@ -1746,9 +1739,13 @@ async fn try_handle_supervisor_bridge_command(
                     }
                 };
                 let publish_obligation = match single_supervisor_publish_obligation(
+                    adapter,
+                    session_id,
                     &authorize_transition,
                     "authorize supervisor",
-                ) {
+                )
+                .await
+                {
                     Ok(obligation) => obligation,
                     Err(error) => {
                         let _ = rollback_authorize_after_trust_publication_failure(
@@ -1850,11 +1847,15 @@ async fn try_handle_supervisor_bridge_command(
                     }
                 };
                 let revoke_obligation = match matching_supervisor_revoke_obligation(
+                    adapter,
+                    session_id,
                     &revoke_transition,
                     &previous_binding.peer_id,
                     previous_binding.epoch,
                     "authorize supervisor",
-                ) {
+                )
+                .await
+                {
                     Ok(obligation) => obligation,
                     Err(error) => {
                         let _ = adapter
@@ -2040,38 +2041,43 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            let revoke_obligations =
-                crate::protocol_supervisor_trust_revoke::extract_obligations(&revoke_transition);
-            let Some(revoke_obligation) = revoke_obligations.into_iter().find(|obligation| {
-                obligation.peer_id().as_str() == supervisor_peer_id.as_str()
-                    && obligation.epoch() == payload.epoch
-            }) else {
-                let reason =
-                    "revoke supervisor failed: generated revoke effect was absent".to_string();
-                if let Err(error) = adapter
-                    .stage_supervisor_trust_revoke_failed(
-                        session_id,
-                        supervisor_peer_id.clone(),
-                        payload.epoch,
-                        reason.clone(),
+            let revoke_obligation = match matching_supervisor_revoke_obligation(
+                adapter,
+                session_id,
+                &revoke_transition,
+                supervisor_peer_id.as_str(),
+                payload.epoch,
+                "revoke supervisor",
+            )
+            .await
+            {
+                Ok(obligation) => obligation,
+                Err(reason) => {
+                    if let Err(error) = adapter
+                        .stage_supervisor_trust_revoke_failed(
+                            session_id,
+                            supervisor_peer_id.clone(),
+                            payload.epoch,
+                            reason.clone(),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            %session_id,
+                            epoch = payload.epoch,
+                            %error,
+                            "failed to restore supervisor binding after missing revoke effect"
+                        );
+                    }
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        reason,
                     )
-                    .await
-                {
-                    tracing::warn!(
-                        %session_id,
-                        epoch = payload.epoch,
-                        %error,
-                        "failed to restore supervisor binding after missing revoke effect"
-                    );
+                    .await;
+                    return true;
                 }
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    reason,
-                )
-                .await;
-                return true;
             };
             if let Err(error) = apply_generated_private_trust_remove(
                 comms_runtime,

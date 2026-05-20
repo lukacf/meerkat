@@ -322,7 +322,7 @@ impl CoreCommsRuntime for CommsRuntime {
     ) -> Result<CommsTrustMutationResult, SendError> {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
-                self.validate_public_trust_authority_owner(&authority)?;
+                self.validate_meerkat_machine_trust_authority_owner(&authority)?;
                 authority
                     .validate_public_add(self.peer_id(), &peer)
                     .map_err(SendError::Validation)?;
@@ -331,7 +331,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
-                self.validate_public_trust_authority_owner(&authority)?;
+                self.validate_meerkat_machine_trust_authority_owner(&authority)?;
                 let parsed_peer_id = meerkat_core::comms::PeerId::parse(&peer_id)
                     .map_err(|err| SendError::Validation(err.to_string()))?;
                 authority
@@ -343,6 +343,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
             CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                self.validate_meerkat_machine_trust_authority_owner(&authority)?;
                 authority
                     .validate_private_add(self.peer_id(), &peer)
                     .map_err(SendError::Validation)?;
@@ -351,6 +352,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                self.validate_meerkat_machine_trust_authority_owner(&authority)?;
                 let parsed_peer_id = meerkat_core::comms::PeerId::parse(&peer_id)
                     .map_err(|err| SendError::Validation(err.to_string()))?;
                 authority
@@ -1257,7 +1259,7 @@ pub struct CommsRuntime {
     subscriber_registry: crate::event_injector::SubscriberRegistry,
     interaction_stream_registry: InteractionStreamRegistry,
     peer_comms_handle: crate::classify::PeerCommsHandleSlot,
-    peer_projection_trust_owner: parking_lot::RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
+    meerkat_machine_trust_owner: parking_lot::RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
     require_peer_comms_machine_authority: Arc<AtomicBool>,
     /// Narrow notify that fires only for actionable peer input (messages/requests).
     /// Set during construction when classified inbox is used.
@@ -1399,7 +1401,7 @@ impl CommsRuntime {
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
-            peer_projection_trust_owner: parking_lot::RwLock::new(None),
+            meerkat_machine_trust_owner: parking_lot::RwLock::new(None),
             require_peer_comms_machine_authority,
             actionable_notify,
             blob_store: None,
@@ -1508,7 +1510,7 @@ impl CommsRuntime {
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
-            peer_projection_trust_owner: parking_lot::RwLock::new(None),
+            meerkat_machine_trust_owner: parking_lot::RwLock::new(None),
             require_peer_comms_machine_authority,
             actionable_notify,
             blob_store: None,
@@ -1597,7 +1599,7 @@ impl CommsRuntime {
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
-            peer_projection_trust_owner: parking_lot::RwLock::new(None),
+            meerkat_machine_trust_owner: parking_lot::RwLock::new(None),
             require_peer_comms_machine_authority,
             actionable_notify,
             blob_store: None,
@@ -1643,20 +1645,23 @@ impl CommsRuntime {
         &self,
         handle: Arc<dyn meerkat_core::handles::PeerCommsHandle>,
     ) {
-        *self.peer_projection_trust_owner.write() = handle.generated_peer_projection_trust_owner();
+        *self.meerkat_machine_trust_owner.write() = handle.generated_peer_projection_trust_owner();
         *self.peer_comms_handle.write() = Some(handle);
     }
 
-    fn validate_public_trust_authority_owner(
+    fn validate_meerkat_machine_trust_authority_owner(
         &self,
         authority: &meerkat_core::comms::CommsTrustMutationAuthority,
     ) -> Result<(), SendError> {
-        if authority.source_kind()
-            != GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection
-        {
+        if !matches!(
+            authority.source_kind(),
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection
+                | GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish
+                | GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke
+        ) {
             return Ok(());
         }
-        let expected = self.peer_projection_trust_owner.read();
+        let expected = self.meerkat_machine_trust_owner.read();
         authority
             .validate_source_owner_token(expected.as_ref())
             .map_err(SendError::Validation)
@@ -3033,7 +3038,7 @@ mod tests {
         runtime: &CommsRuntime,
         authority: &meerkat_core::comms::CommsTrustMutationAuthority,
     ) {
-        *runtime.peer_projection_trust_owner.write() = authority.source_owner_token();
+        *runtime.meerkat_machine_trust_owner.write() = authority.source_owner_token();
     }
 
     async fn try_add_trusted_peer_with_generated_authority(

@@ -23,6 +23,98 @@ pub extern "Rust" fn generated_authority_bridge_token_is_valid(
     token.is::<GeneratedAuthorityBridgeToken>()
 }
 
+#[derive(Clone)]
+pub struct SupervisorTrustFreshnessAuthority {
+    authority: Option<
+        std::sync::Arc<std::sync::Mutex<crate::meerkat_machine::dsl::MeerkatMachineAuthority>>,
+    >,
+    source_owner_token: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+impl std::fmt::Debug for SupervisorTrustFreshnessAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SupervisorTrustFreshnessAuthority")
+            .field("present", &self.authority.is_some())
+            .field("owner_present", &self.source_owner_token.is_some())
+            .finish()
+    }
+}
+
+#[allow(dead_code)]
+impl SupervisorTrustFreshnessAuthority {
+    pub fn from_authority(
+        authority: std::sync::Arc<
+            std::sync::Mutex<crate::meerkat_machine::dsl::MeerkatMachineAuthority>,
+        >,
+    ) -> Self {
+        let source_owner_token = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generated_authority_owner_token();
+        Self {
+            authority: Some(authority),
+            source_owner_token: Some(source_owner_token),
+        }
+    }
+
+    fn missing() -> Self {
+        Self {
+            authority: None,
+            source_owner_token: None,
+        }
+    }
+
+    fn source_owner_token(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
+        self.source_owner_token.as_ref().map(std::sync::Arc::clone)
+    }
+
+    fn validate_pending_publish(
+        &self,
+        expected_peer_id: &str,
+        expected_epoch: u64,
+    ) -> Result<(), String> {
+        let Some(authority) = &self.authority else {
+            return Err("generated supervisor trust freshness authority is absent".to_string());
+        };
+        let guard = authority.lock().map_err(|_| {
+            "generated supervisor trust freshness authority was poisoned".to_string()
+        })?;
+        let state = guard.state();
+        if state.supervisor_publish_pending_peer_id.as_deref() == Some(expected_peer_id)
+            && state.supervisor_publish_pending_epoch == Some(expected_epoch)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "stale generated supervisor trust publish obligation for peer {expected_peer_id:?} at epoch {expected_epoch}"
+            ))
+        }
+    }
+
+    fn validate_pending_revoke(
+        &self,
+        expected_peer_id: &str,
+        expected_epoch: u64,
+    ) -> Result<(), String> {
+        let Some(authority) = &self.authority else {
+            return Err("generated supervisor trust freshness authority is absent".to_string());
+        };
+        let guard = authority.lock().map_err(|_| {
+            "generated supervisor trust freshness authority was poisoned".to_string()
+        })?;
+        let state = guard.state();
+        if state.supervisor_revoke_pending_peer_id.as_deref() == Some(expected_peer_id)
+            && state.supervisor_revoke_pending_epoch == Some(expected_epoch)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "stale generated supervisor trust revoke obligation for peer {expected_peer_id:?} at epoch {expected_epoch}"
+            ))
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SupervisorTrustRevokeObligation {
     local_endpoint: Option<PeerEndpoint>,
@@ -30,6 +122,7 @@ pub struct SupervisorTrustRevokeObligation {
     epoch: u64,
     comms_trust_authority_claims:
         std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+    supervisor_trust_freshness_authority: SupervisorTrustFreshnessAuthority,
 }
 
 impl SupervisorTrustRevokeObligation {
@@ -60,6 +153,8 @@ impl SupervisorTrustRevokeObligation {
                 "generated comms trust source cannot authorize operation {operation:?}"
             ));
         }
+        self.supervisor_trust_freshness_authority
+            .validate_pending_revoke(self.peer_id.as_str(), self.epoch)?;
         if self.peer_id != peer_id {
             return Err(format!(
                 "MeerkatMachine supervisor trust obligation peer_id {:?} does not match requested peer {peer_id:?}",
@@ -104,7 +199,7 @@ impl SupervisorTrustRevokeObligation {
                         generated_authority_bridge_token(),
                         meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke,
                         self.epoch,
-                        None,
+                        self.supervisor_trust_freshness_authority.source_owner_token(),
                         meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish,
                         meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PrivateRemove,
                         peer_id.to_string(),
@@ -121,6 +216,13 @@ impl SupervisorTrustRevokeObligation {
 pub fn extract_obligations(
     transition: &MeerkatMachineTransition,
 ) -> Vec<SupervisorTrustRevokeObligation> {
+    extract_obligations_with_freshness(transition, SupervisorTrustFreshnessAuthority::missing())
+}
+
+pub fn extract_obligations_with_freshness(
+    transition: &MeerkatMachineTransition,
+    supervisor_trust_freshness_authority: SupervisorTrustFreshnessAuthority,
+) -> Vec<SupervisorTrustRevokeObligation> {
     transition
         .effects()
         .iter()
@@ -134,6 +236,7 @@ pub fn extract_obligations(
                 peer_id: peer_id.clone(),
                 epoch: *epoch,
                 comms_trust_authority_claims: Default::default(),
+                supervisor_trust_freshness_authority: supervisor_trust_freshness_authority.clone(),
             }),
             _ => None,
         })

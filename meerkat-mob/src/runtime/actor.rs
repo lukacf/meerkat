@@ -953,9 +953,18 @@ impl MobActor {
                             "previous supervisor private trust revoke rejected for session '{session_id}': {error}"
                         ))
                     })?;
+                let revoke_freshness = adapter
+                    .supervisor_trust_revoke_freshness_authority(session_id)
+                    .await
+                    .map_err(|error| {
+                        MobError::WiringError(format!(
+                            "previous supervisor private trust revoke freshness unavailable for session '{session_id}': {error}"
+                        ))
+                    })?;
                 let revoke_obligation =
-                    meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations(
+                    meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations_with_freshness(
                         &revoke_transition,
+                        revoke_freshness,
                     )
                     .into_iter()
                     .find(|obligation| {
@@ -1083,8 +1092,18 @@ impl MobActor {
                     }
                 }
             };
-            let obligations =
-                protocol_supervisor_trust_publish::extract_obligations(&stage_transition);
+            let publish_freshness = adapter
+                .supervisor_trust_publish_freshness_authority(session_id)
+                .await
+                .map_err(|error| {
+                    MobError::WiringError(format!(
+                        "supervisor private trust publish freshness unavailable for session '{session_id}': {error}"
+                    ))
+                })?;
+            let obligations = protocol_supervisor_trust_publish::extract_obligations_with_freshness(
+                &stage_transition,
+                publish_freshness,
+            );
             let publish_obligation = match obligations.as_slice() {
                 [obligation] => obligation.clone(),
                 [] => {
@@ -1121,6 +1140,9 @@ impl MobActor {
             let publish_peer_id = publish_obligation.peer_id().clone();
             let publish_epoch = publish_obligation.epoch();
             let publish_removal_key = Self::trusted_peer_removal_key(&publish_spec);
+            let publish_cleanup_authority =
+                Self::supervisor_publish_cleanup_authority(&publish_obligation)
+                    .map_err(MobError::WiringError)?;
             let rollback_binding = previous.clone();
 
             if let Err(error) = Self::apply_private_trusted_peer_add(
@@ -1143,7 +1165,7 @@ impl MobActor {
                     self.cleanup_supervisor_private_trust_publish_attempt(
                         session_id,
                         comms,
-                        &publish_obligation,
+                        publish_cleanup_authority.clone(),
                         publish_removal_key.clone(),
                         "failed to clean up supervisor private trust after publish add failure",
                     )
@@ -1183,7 +1205,7 @@ impl MobActor {
                     self.cleanup_supervisor_private_trust_publish_attempt(
                         session_id,
                         comms,
-                        &publish_obligation,
+                        publish_cleanup_authority,
                         publish_removal_key.clone(),
                         "failed to clean up supervisor private trust after rejected publish ack",
                     )
@@ -1223,30 +1245,15 @@ impl MobActor {
         &self,
         session_id: &SessionId,
         comms: &Arc<dyn CoreCommsRuntime>,
-        obligation: &meerkat_runtime::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation,
+        authority: CommsTrustMutationAuthority,
         removal_key: String,
         context: &'static str,
     ) {
-        let authority = match Self::supervisor_publish_cleanup_authority(obligation) {
-            Ok(authority) => authority,
-            Err(error) => {
-                tracing::warn!(
-                    %session_id,
-                    peer_id = %obligation.peer_id(),
-                    epoch = obligation.epoch(),
-                    %error,
-                    "failed to build generated supervisor private trust publish-attempt cleanup authority"
-                );
-                return;
-            }
-        };
         if let Err(error) =
             Self::apply_private_trusted_peer_remove(comms.as_ref(), removal_key, authority).await
         {
             tracing::warn!(
                 %session_id,
-                peer_id = %obligation.peer_id(),
-                epoch = obligation.epoch(),
                 %error,
                 context,
                 "failed to clean up supervisor private trust publish attempt"
@@ -1291,8 +1298,24 @@ impl MobActor {
                     return;
                 }
             };
+            let revoke_freshness = match adapter
+                .supervisor_trust_revoke_freshness_authority(session_id)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    tracing::warn!(
+                        %session_id,
+                        peer_id = %install.peer_id,
+                        epoch = install.epoch,
+                        %error,
+                        "failed to build generated supervisor private trust cleanup freshness"
+                    );
+                    return;
+                }
+            };
             let obligations =
-                meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations(&transition);
+                meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations_with_freshness(&transition, revoke_freshness);
             let Some(obligation) = obligations.into_iter().find(|obligation| {
                 obligation.peer_id() == &install.peer_id && obligation.epoch() == install.epoch
             }) else {
@@ -1407,9 +1430,14 @@ impl MobActor {
                     .stage_supervisor_revoke(session_id, current_peer_id.to_string(), current_epoch)
                     .await
                     .map_err(|error| MobError::WiringError(error.to_string()))?;
+                let revoke_freshness = adapter
+                    .supervisor_trust_revoke_freshness_authority(session_id)
+                    .await
+                    .map_err(|error| MobError::WiringError(error.to_string()))?;
                 if let Some(obligation) =
-                    meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations(
+                    meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations_with_freshness(
                         &transition,
+                        revoke_freshness,
                     )
                     .into_iter()
                     .find(|obligation| {
@@ -1464,9 +1492,14 @@ impl MobActor {
                     }
                 }
                 .map_err(|error| MobError::WiringError(error.to_string()))?;
+                let publish_freshness = adapter
+                    .supervisor_trust_publish_freshness_authority(session_id)
+                    .await
+                    .map_err(|error| MobError::WiringError(error.to_string()))?;
                 let obligation =
-                    meerkat_runtime::protocol_supervisor_trust_publish::extract_obligations(
+                    meerkat_runtime::protocol_supervisor_trust_publish::extract_obligations_with_freshness(
                         &transition,
+                        publish_freshness,
                     )
                     .into_iter()
                     .find(|obligation| {

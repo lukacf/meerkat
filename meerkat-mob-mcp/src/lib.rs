@@ -1733,6 +1733,7 @@ struct LocalCommsRuntime {
     address: String,
     key: String,
     trusted: RwLock<HashMap<String, BTreeSet<GeneratedCommsTrustAuthoritySourceKind>>>,
+    meerkat_machine_trust_owner: RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
     notify: Arc<tokio::sync::Notify>,
 }
 
@@ -1785,8 +1786,34 @@ impl LocalCommsRuntime {
             address: format!("inproc://{name}"),
             key: encode_ed25519_public_key(&public_key_bytes),
             trusted: RwLock::new(HashMap::new()),
+            meerkat_machine_trust_owner: RwLock::new(None),
             notify: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    async fn install_generated_meerkat_machine_trust_owner(
+        &self,
+        owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    ) {
+        *self.meerkat_machine_trust_owner.write().await = owner;
+    }
+
+    async fn validate_meerkat_machine_trust_authority_owner(
+        &self,
+        authority: &meerkat_core::comms::CommsTrustMutationAuthority,
+    ) -> Result<(), SendError> {
+        if !matches!(
+            authority.source_kind(),
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection
+                | GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish
+                | GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke
+        ) {
+            return Ok(());
+        }
+        let expected = self.meerkat_machine_trust_owner.read().await;
+        authority
+            .validate_source_owner_token(expected.as_ref())
+            .map_err(SendError::Validation)
     }
 }
 
@@ -1836,6 +1863,8 @@ impl CoreCommsRuntime for LocalCommsRuntime {
     ) -> Result<CommsTrustMutationResult, SendError> {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                self.validate_meerkat_machine_trust_authority_owner(&authority)
+                    .await?;
                 authority
                     .validate_public_add(self.peer_id(), &peer)
                     .map_err(SendError::Validation)?;
@@ -1850,6 +1879,8 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                self.validate_meerkat_machine_trust_authority_owner(&authority)
+                    .await?;
                 let parsed_peer_id = PeerId::parse(&peer_id)
                     .map_err(|err| SendError::Validation(err.to_string()))?;
                 authority
@@ -1861,6 +1892,8 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
             CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                self.validate_meerkat_machine_trust_authority_owner(&authority)
+                    .await?;
                 authority
                     .validate_private_add(self.peer_id(), &peer)
                     .map_err(SendError::Validation)?;
@@ -1869,6 +1902,8 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                self.validate_meerkat_machine_trust_authority_owner(&authority)
+                    .await?;
                 let parsed_peer_id = PeerId::parse(&peer_id)
                     .map_err(|err| SendError::Validation(err.to_string()))?;
                 authority
@@ -2010,10 +2045,16 @@ impl SessionService for LocalSessionService {
             .build
             .and_then(|b| b.comms_name)
             .unwrap_or_else(|| format!("session-{n}"));
-        self.sessions
-            .write()
-            .await
-            .insert(sid.clone(), Arc::new(LocalCommsRuntime::new(&name)));
+        self.runtime_adapter.register_session(sid.clone()).await;
+        let runtime = Arc::new(LocalCommsRuntime::new(&name));
+        runtime
+            .install_generated_meerkat_machine_trust_owner(
+                self.runtime_adapter
+                    .generated_authority_owner_token(&sid)
+                    .await,
+            )
+            .await;
+        self.sessions.write().await.insert(sid.clone(), runtime);
         self.pending_context
             .write()
             .await
@@ -3499,7 +3540,14 @@ mod tests {
                 &endpoint,
             )
             .expect("generated wiring obligation covers peer");
+        let generated_owner = add_authority.source_owner_token();
+        runtime
+            .install_generated_meerkat_machine_trust_owner(generated_owner.clone())
+            .await;
         let wrong_runtime = LocalCommsRuntime::new("wrong-target");
+        wrong_runtime
+            .install_generated_meerkat_machine_trust_owner(generated_owner)
+            .await;
         let wrong_target_obligation =
             meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
                 &wiring_transition,

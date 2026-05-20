@@ -757,6 +757,14 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("SurfacePhase", &["Operating", "Shutdown"]),
             NamedTypeBinding::string("SurfaceId"),
             NamedTypeBinding::string_enum("SurfacePendingOp", &["None", "Add", "Reload"]),
+            NamedTypeBinding::string_enum(
+                "SurfaceRequestPhase",
+                &["Pending", "Published", "Cancelled", "Completed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "SurfaceRequestTerminalPolicy",
+                &["PublishOnSuccess", "RespondWithoutPublish"],
+            ),
             NamedTypeBinding::string_enum("SurfaceStagedOp", &["None", "Add", "Remove", "Reload"]),
             NamedTypeBinding::type_path_enum_with_structural_variants(
                 "ToolFilter",

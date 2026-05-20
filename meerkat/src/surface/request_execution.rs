@@ -7,6 +7,7 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use meerkat_contracts::RequestLifecycle;
 use meerkat_core::{Session, SessionId, SessionRuntimeBindings};
+use meerkat_runtime::meerkat_machine::dsl as request_dsl;
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -42,10 +43,53 @@ pub fn noop_request_action() -> RequestAsyncAction {
     request_action(|| async {})
 }
 
-/// Returned by [`SurfaceRequestExecutor::try_begin_request`] when the key
-/// is already tracked as an in-flight request.
-#[derive(Debug)]
+/// Compatibility marker for the duplicate-admission case represented by
+/// [`RequestAdmissionError::AlreadyExists`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestAlreadyExists;
+
+/// Typed rejection from surface request admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestAdmissionError {
+    /// The generated authority already tracks this request key.
+    AlreadyExists,
+    /// Generated authority rejected admission; callers must not install local
+    /// request mechanics as a fallback.
+    AuthorityRejected {
+        operation: &'static str,
+        detail: String,
+    },
+}
+
+impl RequestAdmissionError {
+    fn from_transition(error: RequestTransitionError) -> Self {
+        match error {
+            RequestTransitionError::AuthorityRejected { operation, detail } => {
+                Self::AuthorityRejected { operation, detail }
+            }
+            other => Self::AuthorityRejected {
+                operation: "AdmitSurfaceRequest",
+                detail: other.to_string(),
+            },
+        }
+    }
+}
+
+impl fmt::Display for RequestAdmissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyExists => write!(f, "request already exists"),
+            Self::AuthorityRejected { operation, detail } => {
+                write!(
+                    f,
+                    "generated request authority rejected {operation}: {detail}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for RequestAdmissionError {}
 
 /// Terminal outcome produced by a long-running task (RPC/MCP async dispatch).
 #[derive(Debug)]
@@ -66,7 +110,7 @@ impl<T> RequestTerminal<T> {
     }
 }
 
-/// Canonical resolution of a surface terminal through the lifecycle machine.
+/// Canonical resolution of a surface terminal through generated authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestTerminalResolution<T> {
     /// The surface may emit or return the request's terminal payload.
@@ -74,7 +118,7 @@ pub enum RequestTerminalResolution<T> {
     /// Cancel won before terminal publication. The surface should emit its
     /// protocol-specific cancellation response instead of the stale payload.
     Cancelled,
-    /// The lifecycle machine rejected a committed publication transition.
+    /// Generated authority rejected a committed publication transition.
     LifecycleError(RequestTransitionError),
 }
 
@@ -171,6 +215,26 @@ impl fmt::Display for SurfaceRequestPhase {
     }
 }
 
+impl From<request_dsl::SurfaceRequestPhase> for SurfaceRequestPhase {
+    fn from(phase: request_dsl::SurfaceRequestPhase) -> Self {
+        match phase {
+            request_dsl::SurfaceRequestPhase::Pending => Self::Pending,
+            request_dsl::SurfaceRequestPhase::Published => Self::Published,
+            request_dsl::SurfaceRequestPhase::Cancelled => Self::Cancelled,
+            request_dsl::SurfaceRequestPhase::Completed => Self::Completed,
+        }
+    }
+}
+
+impl From<SurfaceRequestTerminalPolicy> for request_dsl::SurfaceRequestTerminalPolicy {
+    fn from(policy: SurfaceRequestTerminalPolicy) -> Self {
+        match policy {
+            SurfaceRequestTerminalPolicy::PublishOnSuccess => Self::PublishOnSuccess,
+            SurfaceRequestTerminalPolicy::RespondWithoutPublish => Self::RespondWithoutPublish,
+        }
+    }
+}
+
 /// Typed rejection when a transition is inapplicable to the current phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestTransitionError {
@@ -179,6 +243,12 @@ pub enum RequestTransitionError {
     /// The request is already in a terminal phase; the requested transition
     /// is rejected rather than silently overwriting prior state.
     AlreadyTerminal { current: SurfaceRequestPhase },
+    /// Generated lifecycle authority rejected an input that the shell expected
+    /// to be total. This fails closed rather than guessing a result class.
+    AuthorityRejected {
+        operation: &'static str,
+        detail: String,
+    },
 }
 
 impl fmt::Display for RequestTransitionError {
@@ -187,6 +257,12 @@ impl fmt::Display for RequestTransitionError {
             Self::NotFound => f.write_str("request not tracked"),
             Self::AlreadyTerminal { current } => {
                 write!(f, "request already terminal (phase = {current})")
+            }
+            Self::AuthorityRejected { operation, detail } => {
+                write!(
+                    f,
+                    "generated request authority rejected {operation}: {detail}"
+                )
             }
         }
     }
@@ -212,6 +288,9 @@ pub enum CancelOutcome {
     AlreadyCompleted,
     /// No tracked request with this key.
     NotFound,
+    /// Generated authority rejected the cancellation input; callers must not
+    /// infer any lifecycle fact from shell state.
+    AuthorityRejected,
 }
 
 /// Outcome of installing request cancellation mechanics.
@@ -232,6 +311,9 @@ pub enum CompleteOutcome {
     /// Cancel landed first; the surface should write a cancel response instead
     /// of the task's uncommitted terminal.
     SupersededByCancel,
+    /// Generated authority rejected the completion input; callers must not
+    /// emit the task's terminal payload.
+    AuthorityRejected,
 }
 
 /// Outcome of claiming committed publication authority before a response is
@@ -246,29 +328,18 @@ pub enum PublishOutcome {
 }
 
 struct RequestEntry {
-    phase: Mutex<SurfaceRequestPhase>,
-    terminal_policy: SurfaceRequestTerminalPolicy,
     cancel_action: Mutex<RequestAsyncAction>,
     unpublished_cleanup: Mutex<Option<RequestAsyncAction>>,
     task_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl RequestEntry {
-    fn new(
-        initial_cancel: RequestAsyncAction,
-        terminal_policy: SurfaceRequestTerminalPolicy,
-    ) -> Self {
+    fn new(initial_cancel: RequestAsyncAction) -> Self {
         Self {
-            phase: Mutex::new(SurfaceRequestPhase::Pending),
-            terminal_policy,
             cancel_action: Mutex::new(initial_cancel),
             unpublished_cleanup: Mutex::new(None),
             task_handle: Mutex::new(None),
         }
-    }
-
-    fn phase(&self) -> SurfaceRequestPhase {
-        *lock_or_recover(&self.phase)
     }
 }
 
@@ -276,6 +347,7 @@ impl RequestEntry {
 pub struct RequestContext {
     key: String,
     entry: Arc<RequestEntry>,
+    authority: SurfaceRequestAuthorityShell,
 }
 
 impl RequestContext {
@@ -286,13 +358,18 @@ impl RequestContext {
     /// Current lifecycle phase (observation seam; not for decision-making
     /// that should go through typed transitions).
     pub fn phase(&self) -> SurfaceRequestPhase {
-        self.entry.phase()
+        self.authority
+            .phase(&self.key)
+            .unwrap_or(SurfaceRequestPhase::Completed)
     }
 
     /// Narrow cancellation observation for pre-admission gates. Surfaces
     /// should prefer this over branching on arbitrary lifecycle phases.
     pub fn cancel_already_requested(&self) -> bool {
-        matches!(self.entry.phase(), SurfaceRequestPhase::Cancelled)
+        matches!(
+            self.authority.phase(&self.key),
+            Some(SurfaceRequestPhase::Cancelled)
+        )
     }
 
     /// Install (or replace) the cancel action. If the request is already
@@ -303,7 +380,7 @@ impl RequestContext {
     /// Returns the phase observed at install time.
     pub async fn install_cancel_action(&self, action: RequestAsyncAction) -> SurfaceRequestPhase {
         let (phase, maybe_run) = {
-            let phase = *lock_or_recover(&self.entry.phase);
+            let phase = self.phase();
             let mut slot = lock_or_recover(&self.entry.cancel_action);
             *slot = Arc::clone(&action);
             // If cancel already landed, honour the upgrade by re-firing now.
@@ -337,19 +414,38 @@ impl RequestContext {
     }
 }
 
-/// Machine-owned lifecycle authority for tracked surface requests.
-///
-/// Transport adapters may store closures, task handles, and response writers,
-/// but all phase transitions and terminal outcomes flow through this type.
-#[derive(Clone)]
-struct SurfaceRequestLifecycleMachine {
-    entries: Arc<Mutex<HashMap<String, Arc<RequestEntry>>>>,
+struct SurfaceRequestAuthorityState {
+    authority: request_dsl::MeerkatMachineAuthority,
+    entries: HashMap<String, Arc<RequestEntry>>,
 }
 
-impl SurfaceRequestLifecycleMachine {
+impl SurfaceRequestAuthorityState {
     fn new() -> Self {
         Self {
-            entries: Arc::new(Mutex::new(HashMap::new())),
+            authority: request_dsl::MeerkatMachineAuthority::new(),
+            entries: HashMap::new(),
+        }
+    }
+}
+
+enum SurfaceAdmission {
+    Accepted,
+    Duplicate,
+}
+
+/// Mechanical shell for generated surface-request authority.
+///
+/// The generated MeerkatMachine substate owns request lifecycle facts. This
+/// shell stores only transport mechanics keyed by admitted request id.
+#[derive(Clone)]
+struct SurfaceRequestAuthorityShell {
+    inner: Arc<Mutex<SurfaceRequestAuthorityState>>,
+}
+
+impl SurfaceRequestAuthorityShell {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SurfaceRequestAuthorityState::new())),
         }
     }
 
@@ -372,17 +468,26 @@ impl SurfaceRequestLifecycleMachine {
         semantics: SurfaceRequestSemantics,
     ) -> RequestContext {
         let key = key.into();
-        let entry = Arc::new(RequestEntry::new(initial_cancel, semantics.terminal_policy));
-        let mut entries = lock_or_recover(&self.entries);
-        entries.insert(key.clone(), Arc::clone(&entry));
-        RequestContext { key, entry }
+        match self.try_begin_request_with_semantics(
+            key.clone(),
+            Arc::clone(&initial_cancel),
+            semantics,
+        ) {
+            Ok(context) => context,
+            Err(RequestAdmissionError::AlreadyExists) => {
+                self.replace_mechanics_for_existing(key, initial_cancel)
+            }
+            Err(error @ RequestAdmissionError::AuthorityRejected { .. }) => {
+                panic!("{error}");
+            }
+        }
     }
 
     fn try_begin_request(
         &self,
         key: impl Into<String>,
         initial_cancel: RequestAsyncAction,
-    ) -> Result<RequestContext, RequestAlreadyExists> {
+    ) -> Result<RequestContext, RequestAdmissionError> {
         self.try_begin_request_with_semantics(
             key,
             initial_cancel,
@@ -395,15 +500,21 @@ impl SurfaceRequestLifecycleMachine {
         key: impl Into<String>,
         initial_cancel: RequestAsyncAction,
         semantics: SurfaceRequestSemantics,
-    ) -> Result<RequestContext, RequestAlreadyExists> {
+    ) -> Result<RequestContext, RequestAdmissionError> {
         let key = key.into();
-        let mut entries = lock_or_recover(&self.entries);
-        if entries.contains_key(&key) {
-            return Err(RequestAlreadyExists);
+        let mut inner = lock_or_recover(&self.inner);
+        match Self::admit_locked(&mut inner, &key, semantics)? {
+            SurfaceAdmission::Accepted => {
+                let entry = Arc::new(RequestEntry::new(initial_cancel));
+                inner.entries.insert(key.clone(), Arc::clone(&entry));
+                Ok(RequestContext {
+                    key,
+                    entry,
+                    authority: self.clone(),
+                })
+            }
+            SurfaceAdmission::Duplicate => Err(RequestAdmissionError::AlreadyExists),
         }
-        let entry = Arc::new(RequestEntry::new(initial_cancel, semantics.terminal_policy));
-        entries.insert(key.clone(), Arc::clone(&entry));
-        Ok(RequestContext { key, entry })
     }
 
     fn classify_terminal<T>(
@@ -412,58 +523,104 @@ impl SurfaceRequestLifecycleMachine {
         success: bool,
         response: T,
     ) -> Result<RequestTerminal<T>, RequestTransitionError> {
-        let terminal_policy = lock_or_recover(&self.entries)
-            .get(key)
-            .map(|entry| entry.terminal_policy)
-            .ok_or(RequestTransitionError::NotFound)?;
+        let mut inner = lock_or_recover(&self.inner);
+        let effects = Self::apply_generated_locked(
+            &mut inner.authority,
+            request_dsl::MeerkatMachineInput::ClassifySurfaceRequestTerminal {
+                request_key: key.to_owned(),
+                success,
+            },
+            "ClassifySurfaceRequestTerminal",
+        )?;
 
-        if success
-            && matches!(
-                terminal_policy,
-                SurfaceRequestTerminalPolicy::PublishOnSuccess
-            )
-        {
-            Ok(RequestTerminal::Publish(response))
-        } else {
-            Ok(RequestTerminal::RespondWithoutPublish(response))
+        for effect in effects {
+            match effect {
+                request_dsl::MeerkatMachineEffect::SurfaceRequestTerminalPublish { .. } => {
+                    return Ok(RequestTerminal::Publish(response));
+                }
+                request_dsl::MeerkatMachineEffect::SurfaceRequestTerminalRespondWithoutPublish {
+                    ..
+                } => {
+                    return Ok(RequestTerminal::RespondWithoutPublish(response));
+                }
+                request_dsl::MeerkatMachineEffect::SurfaceRequestNotFound { .. } => {
+                    return Err(RequestTransitionError::NotFound);
+                }
+                _ => {}
+            }
         }
+        Err(Self::unexpected_generated_effect(
+            "ClassifySurfaceRequestTerminal",
+        ))
     }
 
     fn attach_task(&self, key: &str, handle: JoinHandle<()>) {
-        if let Some(entry) = lock_or_recover(&self.entries).get(key).cloned() {
+        if let Some(entry) = lock_or_recover(&self.inner).entries.get(key).cloned() {
             let mut slot = lock_or_recover(&entry.task_handle);
             *slot = Some(handle);
         }
     }
 
     fn phase(&self, key: &str) -> Option<SurfaceRequestPhase> {
-        lock_or_recover(&self.entries)
+        lock_or_recover(&self.inner)
+            .authority
+            .state()
+            .surface_request_phases
             .get(key)
-            .map(|entry| entry.phase())
+            .copied()
+            .map(SurfaceRequestPhase::from)
     }
 
     async fn cancel_request(&self, key: &str) -> CancelOutcome {
-        // Acquire entry + decide transition atomically. Actions run outside
-        // the lock so they can await.
         let (outcome, maybe_action) = {
-            let entries = lock_or_recover(&self.entries);
-            let Some(entry) = entries.get(key).cloned() else {
-                return CancelOutcome::NotFound;
+            let mut inner = lock_or_recover(&self.inner);
+            let effects = match Self::apply_generated_locked(
+                &mut inner.authority,
+                request_dsl::MeerkatMachineInput::CancelSurfaceRequest {
+                    request_key: key.to_owned(),
+                },
+                "CancelSurfaceRequest",
+            ) {
+                Ok(effects) => effects,
+                Err(_) => return CancelOutcome::AuthorityRejected,
             };
-            drop(entries);
 
-            let mut phase = lock_or_recover(&entry.phase);
-            match *phase {
-                SurfaceRequestPhase::Pending => {
-                    *phase = SurfaceRequestPhase::Cancelled;
-                    drop(phase);
-                    let action = Arc::clone(&lock_or_recover(&entry.cancel_action));
-                    (CancelOutcome::Cancelled, Some(action))
+            let entry = inner.entries.get(key).cloned();
+            let mut resolved = None;
+            for effect in effects {
+                match effect {
+                    request_dsl::MeerkatMachineEffect::SurfaceRequestCancelled { .. } => {
+                        let action =
+                            entry.map(|entry| Arc::clone(&lock_or_recover(&entry.cancel_action)));
+                        resolved = Some((CancelOutcome::Cancelled, action));
+                        break;
+                    }
+                    request_dsl::MeerkatMachineEffect::SurfaceRequestAlreadyPublished {
+                        ..
+                    } => {
+                        resolved = Some((CancelOutcome::AlreadyPublished, None));
+                        break;
+                    }
+                    request_dsl::MeerkatMachineEffect::SurfaceRequestAlreadyCancelled {
+                        ..
+                    } => {
+                        resolved = Some((CancelOutcome::AlreadyCancelled, None));
+                        break;
+                    }
+                    request_dsl::MeerkatMachineEffect::SurfaceRequestAlreadyCompleted {
+                        ..
+                    } => {
+                        resolved = Some((CancelOutcome::AlreadyCompleted, None));
+                        break;
+                    }
+                    request_dsl::MeerkatMachineEffect::SurfaceRequestNotFound { .. } => {
+                        resolved = Some((CancelOutcome::NotFound, None));
+                        break;
+                    }
+                    _ => {}
                 }
-                SurfaceRequestPhase::Published => (CancelOutcome::AlreadyPublished, None),
-                SurfaceRequestPhase::Cancelled => (CancelOutcome::AlreadyCancelled, None),
-                SurfaceRequestPhase::Completed => (CancelOutcome::AlreadyCompleted, None),
             }
+            resolved.unwrap_or((CancelOutcome::AuthorityRejected, None))
         };
 
         if let Some(action) = maybe_action {
@@ -473,51 +630,95 @@ impl SurfaceRequestLifecycleMachine {
     }
 
     fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError> {
-        let mut entries = lock_or_recover(&self.entries);
-        let Some(entry) = entries.get(key).cloned() else {
-            return Err(RequestTransitionError::NotFound);
-        };
-        let mut phase = lock_or_recover(&entry.phase);
-        match *phase {
-            SurfaceRequestPhase::Pending => {
-                *phase = SurfaceRequestPhase::Published;
-                drop(phase);
-                entries.remove(key);
-                Ok(())
+        let mut inner = lock_or_recover(&self.inner);
+        let effects = Self::apply_generated_locked(
+            &mut inner.authority,
+            request_dsl::MeerkatMachineInput::PublishSurfaceRequest {
+                request_key: key.to_owned(),
+            },
+            "PublishSurfaceRequest",
+        )?;
+
+        for effect in effects {
+            match effect {
+                request_dsl::MeerkatMachineEffect::SurfaceRequestPublished { .. } => {
+                    inner.entries.remove(key);
+                    return Ok(());
+                }
+                request_dsl::MeerkatMachineEffect::SurfaceRequestAlreadyTerminal {
+                    current,
+                    ..
+                } => {
+                    return Err(RequestTransitionError::AlreadyTerminal {
+                        current: current.into(),
+                    });
+                }
+                request_dsl::MeerkatMachineEffect::SurfaceRequestNotFound { .. } => {
+                    return Err(RequestTransitionError::NotFound);
+                }
+                _ => {}
             }
-            current => Err(RequestTransitionError::AlreadyTerminal { current }),
         }
+        Err(Self::unexpected_generated_effect("PublishSurfaceRequest"))
     }
 
-    async fn finish_unpublished(&self, key: &str) -> CompleteOutcome {
+    async fn publish_or_cancelled(
+        &self,
+        key: &str,
+    ) -> Result<PublishOutcome, RequestTransitionError> {
         let (outcome, cleanup) = {
-            let mut entries = lock_or_recover(&self.entries);
-            let Some(entry) = entries.get(key).cloned() else {
-                return CompleteOutcome::Completed;
-            };
-            let mut phase = lock_or_recover(&entry.phase);
-            match *phase {
-                SurfaceRequestPhase::Pending => {
-                    *phase = SurfaceRequestPhase::Completed;
-                    drop(phase);
-                    entries.remove(key);
-                    let cleanup = lock_or_recover(&entry.unpublished_cleanup).take();
-                    (CompleteOutcome::Completed, cleanup)
-                }
-                SurfaceRequestPhase::Cancelled => {
-                    drop(phase);
-                    entries.remove(key);
-                    let cleanup = lock_or_recover(&entry.unpublished_cleanup).take();
-                    (CompleteOutcome::SupersededByCancel, cleanup)
-                }
-                SurfaceRequestPhase::Published | SurfaceRequestPhase::Completed => {
-                    // Entry may linger only if publish_and_complete wasn't
-                    // called; belt-and-braces remove.
-                    drop(phase);
-                    entries.remove(key);
-                    (CompleteOutcome::Completed, None)
+            let mut inner = lock_or_recover(&self.inner);
+            let effects = Self::apply_generated_locked(
+                &mut inner.authority,
+                request_dsl::MeerkatMachineInput::PublishOrCancelSurfaceRequest {
+                    request_key: key.to_owned(),
+                },
+                "PublishOrCancelSurfaceRequest",
+            )?;
+
+            let mut resolved = None;
+            for effect in effects {
+                match effect {
+                    request_dsl::MeerkatMachineEffect::SurfaceRequestPublished { .. } => {
+                        inner.entries.remove(key);
+                        resolved = Some((Ok(PublishOutcome::Published), None));
+                        break;
+                    }
+                    request_dsl::MeerkatMachineEffect::SurfaceRequestCancelledBeforePublish {
+                        ..
+                    } => {
+                        let cleanup = inner
+                            .entries
+                            .remove(key)
+                            .and_then(|entry| lock_or_recover(&entry.unpublished_cleanup).take());
+                        resolved = Some((Ok(PublishOutcome::CancelledBeforePublish), cleanup));
+                        break;
+                    }
+                    request_dsl::MeerkatMachineEffect::SurfaceRequestAlreadyTerminal {
+                        current,
+                        ..
+                    } => {
+                        resolved = Some((
+                            Err(RequestTransitionError::AlreadyTerminal {
+                                current: current.into(),
+                            }),
+                            None,
+                        ));
+                        break;
+                    }
+                    request_dsl::MeerkatMachineEffect::SurfaceRequestNotFound { .. } => {
+                        resolved = Some((Err(RequestTransitionError::NotFound), None));
+                        break;
+                    }
+                    _ => {}
                 }
             }
+            resolved.unwrap_or((
+                Err(Self::unexpected_generated_effect(
+                    "PublishOrCancelSurfaceRequest",
+                )),
+                None,
+            ))
         };
 
         if let Some(cleanup) = cleanup {
@@ -526,36 +727,153 @@ impl SurfaceRequestLifecycleMachine {
         outcome
     }
 
+    async fn finish_unpublished(&self, key: &str) -> CompleteOutcome {
+        let (outcome, cleanup) =
+            {
+                let mut inner = lock_or_recover(&self.inner);
+                let effects = match Self::apply_generated_locked(
+                    &mut inner.authority,
+                    request_dsl::MeerkatMachineInput::FinishSurfaceRequestUnpublished {
+                        request_key: key.to_owned(),
+                    },
+                    "FinishSurfaceRequestUnpublished",
+                ) {
+                    Ok(effects) => effects,
+                    Err(_) => return CompleteOutcome::AuthorityRejected,
+                };
+
+                let mut resolved = None;
+                for effect in effects {
+                    match effect {
+                        request_dsl::MeerkatMachineEffect::SurfaceRequestCompleted { .. } => {
+                            let cleanup = inner.entries.remove(key).and_then(|entry| {
+                                lock_or_recover(&entry.unpublished_cleanup).take()
+                            });
+                            resolved = Some((CompleteOutcome::Completed, cleanup));
+                            break;
+                        }
+                        request_dsl::MeerkatMachineEffect::SurfaceRequestSupersededByCancel {
+                            ..
+                        } => {
+                            let cleanup = inner.entries.remove(key).and_then(|entry| {
+                                lock_or_recover(&entry.unpublished_cleanup).take()
+                            });
+                            resolved = Some((CompleteOutcome::SupersededByCancel, cleanup));
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                resolved.unwrap_or((CompleteOutcome::AuthorityRejected, None))
+            };
+
+        if let Some(cleanup) = cleanup {
+            cleanup().await;
+        }
+        outcome
+    }
+
     fn is_empty(&self) -> bool {
-        lock_or_recover(&self.entries).is_empty()
+        lock_or_recover(&self.inner).entries.is_empty()
     }
 
     fn keys(&self) -> Vec<String> {
-        lock_or_recover(&self.entries).keys().cloned().collect()
+        lock_or_recover(&self.inner)
+            .entries
+            .keys()
+            .cloned()
+            .collect()
     }
 
     fn remaining_entries(&self) -> Vec<(String, Arc<RequestEntry>)> {
-        lock_or_recover(&self.entries)
+        lock_or_recover(&self.inner)
+            .entries
             .iter()
             .map(|(key, entry)| (key.clone(), Arc::clone(entry)))
             .collect()
     }
 
-    fn remove(&self, key: &str) {
-        lock_or_recover(&self.entries).remove(key);
+    fn replace_mechanics_for_existing(
+        &self,
+        key: String,
+        initial_cancel: RequestAsyncAction,
+    ) -> RequestContext {
+        let mut inner = lock_or_recover(&self.inner);
+        let entry = inner
+            .entries
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(RequestEntry::new(Arc::clone(&initial_cancel))))
+            .clone();
+        *lock_or_recover(&entry.cancel_action) = initial_cancel;
+        RequestContext {
+            key,
+            entry,
+            authority: self.clone(),
+        }
+    }
+
+    fn admit_locked(
+        inner: &mut SurfaceRequestAuthorityState,
+        key: &str,
+        semantics: SurfaceRequestSemantics,
+    ) -> Result<SurfaceAdmission, RequestAdmissionError> {
+        let effects = Self::apply_generated_locked(
+            &mut inner.authority,
+            request_dsl::MeerkatMachineInput::AdmitSurfaceRequest {
+                request_key: key.to_owned(),
+                terminal_policy: semantics.terminal_policy.into(),
+            },
+            "AdmitSurfaceRequest",
+        )
+        .map_err(RequestAdmissionError::from_transition)?;
+        for effect in effects {
+            match effect {
+                request_dsl::MeerkatMachineEffect::SurfaceRequestAdmissionAccepted { .. } => {
+                    return Ok(SurfaceAdmission::Accepted);
+                }
+                request_dsl::MeerkatMachineEffect::SurfaceRequestAdmissionDuplicate { .. } => {
+                    return Ok(SurfaceAdmission::Duplicate);
+                }
+                _ => {}
+            }
+        }
+        Err(RequestAdmissionError::from_transition(
+            Self::unexpected_generated_effect("AdmitSurfaceRequest"),
+        ))
+    }
+
+    fn apply_generated_locked(
+        authority: &mut request_dsl::MeerkatMachineAuthority,
+        input: request_dsl::MeerkatMachineInput,
+        operation: &'static str,
+    ) -> Result<Vec<request_dsl::MeerkatMachineEffect>, RequestTransitionError> {
+        request_dsl::MeerkatMachineMutator::apply(authority, input)
+            .map(|transition| transition.into_effects())
+            .map_err(|err| RequestTransitionError::AuthorityRejected {
+                operation,
+                detail: format!("{err:?}"),
+            })
+    }
+
+    fn unexpected_generated_effect(operation: &'static str) -> RequestTransitionError {
+        RequestTransitionError::AuthorityRejected {
+            operation,
+            detail: "generated request authority emitted no recognized surface request effect"
+                .to_owned(),
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct SurfaceRequestExecutor {
-    lifecycle: SurfaceRequestLifecycleMachine,
+    lifecycle: SurfaceRequestAuthorityShell,
     shutdown_grace: Duration,
 }
 
 impl SurfaceRequestExecutor {
     pub fn new(shutdown_grace: Duration) -> Self {
         Self {
-            lifecycle: SurfaceRequestLifecycleMachine::new(),
+            lifecycle: SurfaceRequestAuthorityShell::new(),
             shutdown_grace,
         }
     }
@@ -573,7 +891,7 @@ impl SurfaceRequestExecutor {
     /// Register a request together with its terminal publication semantics.
     ///
     /// This is the admission path for surfaces whose terminal response should
-    /// be classified by the lifecycle owner instead of by the transport task.
+    /// be classified by generated authority instead of by the transport task.
     pub fn begin_request_with_semantics(
         &self,
         key: impl Into<String>,
@@ -586,14 +904,14 @@ impl SurfaceRequestExecutor {
 
     /// Fallible variant of `begin_request` that rejects duplicate in-flight keys.
     ///
-    /// Returns `Err(RequestAlreadyExists)` if a request with the same key is
-    /// already tracked. This prevents REST callers from silently overwriting an
-    /// in-flight request's cancel/cleanup state.
+    /// Returns `Err(RequestAdmissionError::AlreadyExists)` if a request with
+    /// the same key is already tracked. This prevents REST callers from
+    /// silently overwriting an in-flight request's cancel/cleanup state.
     pub fn try_begin_request(
         &self,
         key: impl Into<String>,
         initial_cancel: RequestAsyncAction,
-    ) -> Result<RequestContext, RequestAlreadyExists> {
+    ) -> Result<RequestContext, RequestAdmissionError> {
         self.lifecycle.try_begin_request(key, initial_cancel)
     }
 
@@ -603,7 +921,7 @@ impl SurfaceRequestExecutor {
         key: impl Into<String>,
         initial_cancel: RequestAsyncAction,
         semantics: SurfaceRequestSemantics,
-    ) -> Result<RequestContext, RequestAlreadyExists> {
+    ) -> Result<RequestContext, RequestAdmissionError> {
         self.lifecycle
             .try_begin_request_with_semantics(key, initial_cancel, semantics)
     }
@@ -648,16 +966,7 @@ impl SurfaceRequestExecutor {
         &self,
         key: &str,
     ) -> Result<PublishOutcome, RequestTransitionError> {
-        match self.publish_and_complete(key) {
-            Ok(()) => Ok(PublishOutcome::Published),
-            Err(RequestTransitionError::AlreadyTerminal {
-                current: SurfaceRequestPhase::Cancelled,
-            }) => {
-                let _ = self.finish_unpublished(key).await;
-                Ok(PublishOutcome::CancelledBeforePublish)
-            }
-            Err(err) => Err(err),
-        }
+        self.lifecycle.publish_or_cancelled(key).await
     }
 
     /// Uncommitted-terminal transition.
@@ -673,7 +982,7 @@ impl SurfaceRequestExecutor {
         self.lifecycle.finish_unpublished(key).await
     }
 
-    /// Resolve a surface terminal through the canonical lifecycle machine.
+    /// Resolve a surface terminal through generated request authority.
     ///
     /// This is the shared publish/cancel/complete authority used by RPC, MCP,
     /// and REST. Surfaces still own wire formatting for cancellation and
@@ -697,6 +1006,15 @@ impl SurfaceRequestExecutor {
                 match self.finish_unpublished(key).await {
                     CompleteOutcome::Completed => RequestTerminalResolution::Emit(payload),
                     CompleteOutcome::SupersededByCancel => RequestTerminalResolution::Cancelled,
+                    CompleteOutcome::AuthorityRejected => {
+                        RequestTerminalResolution::LifecycleError(
+                            RequestTransitionError::AuthorityRejected {
+                                operation: "FinishSurfaceRequestUnpublished",
+                                detail: "generated request authority did not accept completion"
+                                    .to_owned(),
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -704,9 +1022,10 @@ impl SurfaceRequestExecutor {
 
     /// Resolve a raw surface completion through the admitted request semantics.
     ///
-    /// The committed-publish vs cancellable-observation split is read from the
-    /// lifecycle entry created at admission, then resolved through the same
-    /// publish/cancel/complete transitions as [`Self::resolve_terminal`].
+    /// The committed-publish vs cancellable-observation split is classified by
+    /// the generated request authority from the admission record, then resolved
+    /// through the same publish/cancel/complete transitions as
+    /// [`Self::resolve_terminal`].
     pub async fn resolve_admitted_terminal<T>(
         &self,
         key: Option<&str>,
@@ -745,17 +1064,7 @@ impl SurfaceRequestExecutor {
             if let Some(handle) = lock_or_recover(&entry.task_handle).take() {
                 handle.abort();
             }
-            let phase = entry.phase();
-            if matches!(
-                phase,
-                SurfaceRequestPhase::Pending | SurfaceRequestPhase::Cancelled
-            ) {
-                let cleanup = lock_or_recover(&entry.unpublished_cleanup).take();
-                if let Some(cleanup) = cleanup {
-                    cleanup().await;
-                }
-            }
-            self.lifecycle.remove(&key);
+            let _ = self.finish_unpublished(&key).await;
         }
     }
 }
@@ -1009,16 +1318,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_machine_owns_cancel_publish_complete_transitions() {
-        let lifecycle = SurfaceRequestLifecycleMachine::new();
-        let _ctx = lifecycle.begin_request("machine-owned", noop_request_action());
+    async fn generated_authority_owns_cancel_publish_complete_transitions() {
+        let source = include_str!("request_execution.rs");
+        assert!(
+            source.contains(concat!("Meerkat", "Machine", "Mutator::apply")),
+            "surface request transitions must go through generated MeerkatMachine authority"
+        );
+        assert!(
+            !source.contains(concat!("Surface", "Request", "Lifecycle", "Machine")),
+            "surface request execution must not reintroduce handwritten request authority"
+        );
+
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let _ctx = executor.begin_request("generated-owned", noop_request_action());
 
         assert_eq!(
-            lifecycle.cancel_request("machine-owned").await,
+            executor.cancel_request("generated-owned").await,
             CancelOutcome::Cancelled
         );
-        let publish_error = lifecycle
-            .publish_and_complete("machine-owned")
+        let publish_error = executor
+            .publish_and_complete("generated-owned")
             .expect_err("cancelled requests cannot later publish committed work");
         assert_eq!(
             publish_error,
@@ -1027,10 +1346,10 @@ mod tests {
             }
         );
         assert_eq!(
-            lifecycle.finish_unpublished("machine-owned").await,
+            executor.finish_unpublished("generated-owned").await,
             CompleteOutcome::SupersededByCancel
         );
-        assert_eq!(lifecycle.phase("machine-owned"), None);
+        assert_eq!(executor.phase("generated-owned"), None);
     }
 
     #[tokio::test]

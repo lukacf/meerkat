@@ -204,7 +204,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let outcome = executor.finish_unpublished(&completion.request_key).await;
                         let to_write = match outcome {
                             meerkat::surface::CompleteOutcome::Completed => response,
-                            meerkat::surface::CompleteOutcome::SupersededByCancel => {
+                            meerkat::surface::CompleteOutcome::SupersededByCancel
+                            | meerkat::surface::CompleteOutcome::AuthorityRejected => {
                                 request_cancelled_response(cancel_id)
                             }
                         };

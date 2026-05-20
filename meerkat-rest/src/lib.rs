@@ -43,7 +43,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::surface::{
-    RequestAlreadyExists, RequestContext, RequestTerminal, RequestTerminalResolution,
+    RequestAdmissionError, RequestContext, RequestTerminal, RequestTerminalResolution,
     SurfaceRequestExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
     build_recovered_session, noop_request_action, request_action,
     run_runtime_backed_initial_turn_with_machine, split_runtime_backed_eager_create_request,
@@ -3871,7 +3871,7 @@ impl From<WorkGraphEventsQuery> for meerkat::WorkGraphEventFilter {
 ///
 /// Requests without the header are not tracked (returns `Ok(None)`). Empty or
 /// malformed headers surface as `BadRequest`. Duplicate keys are rejected via
-/// the executor's typed `RequestAlreadyExists` outcome.
+/// the executor's typed admission outcome.
 fn extract_request_context(
     headers: &axum::http::HeaderMap,
     executor: &SurfaceRequestExecutor,
@@ -3890,9 +3890,12 @@ fn extract_request_context(
     }
     match executor.try_begin_request(request_id, noop_request_action()) {
         Ok(ctx) => Ok(Some(ctx)),
-        Err(RequestAlreadyExists) => Err(ApiError::DuplicateRequestId {
+        Err(RequestAdmissionError::AlreadyExists) => Err(ApiError::DuplicateRequestId {
             request_id: request_id.to_string(),
         }),
+        Err(RequestAdmissionError::AuthorityRejected { .. }) => Err(ApiError::Internal(format!(
+            "generated request authority rejected admission for request: {request_id}"
+        ))),
     }
 }
 
@@ -4826,6 +4829,9 @@ async fn cancel_request(
         }
         CancelOutcome::NotFound => Err(ApiError::NotFound(format!(
             "request not found: {request_id}"
+        ))),
+        CancelOutcome::AuthorityRejected => Err(ApiError::Internal(format!(
+            "generated request authority rejected cancellation for request: {request_id}"
         ))),
     }
 }

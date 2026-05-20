@@ -5646,6 +5646,116 @@ impl std::fmt::Display for SurfacePhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum SurfaceRequestPhase {
+    #[default]
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "Published")]
+    Published,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "Completed")]
+    Completed,
+}
+impl SurfaceRequestPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Published => "Published",
+            Self::Cancelled => "Cancelled",
+            Self::Completed => "Completed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SurfaceRequestPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "Published" => Ok(Self::Published),
+            "Cancelled" => Ok(Self::Cancelled),
+            "Completed" => Ok(Self::Completed),
+            other => Err(format!("invalid SurfaceRequestPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfaceRequestPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SurfaceRequestPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestTerminalPolicy {
+    #[default]
+    #[serde(rename = "PublishOnSuccess")]
+    PublishOnSuccess,
+    #[serde(rename = "RespondWithoutPublish")]
+    RespondWithoutPublish,
+}
+impl SurfaceRequestTerminalPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PublishOnSuccess => "PublishOnSuccess",
+            Self::RespondWithoutPublish => "RespondWithoutPublish",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SurfaceRequestTerminalPolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PublishOnSuccess" => Ok(Self::PublishOnSuccess),
+            "RespondWithoutPublish" => Ok(Self::RespondWithoutPublish),
+            other => Err(format!(
+                "invalid SurfaceRequestTerminalPolicy value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfaceRequestTerminalPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SurfaceRequestTerminalPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SurfaceStagedOp {
     #[default]
     #[serde(rename = "None")]
@@ -6388,6 +6498,9 @@ pub struct State {
     pub completion_agent_applied_cursor: u64,
     pub completion_runtime_observed_cursor: u64,
     pub completion_runtime_injected_cursor: u64,
+    pub surface_request_phases: std::collections::BTreeMap<String, SurfaceRequestPhase>,
+    pub surface_request_terminal_policies:
+        std::collections::BTreeMap<String, SurfaceRequestTerminalPolicy>,
     pub known_surfaces: std::collections::BTreeSet<String>,
     pub active_surfaces: std::collections::BTreeSet<String>,
     pub visible_surfaces: std::collections::BTreeSet<String>,
@@ -7147,6 +7260,32 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelWaitAll {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitSurfaceRequest {
+        pub request_key: String,
+        pub terminal_policy: SurfaceRequestTerminalPolicy,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifySurfaceRequestTerminal {
+        pub request_key: String,
+        pub success: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CancelSurfaceRequest {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PublishSurfaceRequest {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PublishOrCancelSurfaceRequest {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FinishSurfaceRequestUnpublished {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnDrain {
         pub mode: DrainMode,
     }
@@ -7539,6 +7678,12 @@ pub enum Input {
     RequestWaitAll(inputs::RequestWaitAll),
     SatisfyWaitAll(inputs::SatisfyWaitAll),
     CancelWaitAll(inputs::CancelWaitAll),
+    AdmitSurfaceRequest(inputs::AdmitSurfaceRequest),
+    ClassifySurfaceRequestTerminal(inputs::ClassifySurfaceRequestTerminal),
+    CancelSurfaceRequest(inputs::CancelSurfaceRequest),
+    PublishSurfaceRequest(inputs::PublishSurfaceRequest),
+    PublishOrCancelSurfaceRequest(inputs::PublishOrCancelSurfaceRequest),
+    FinishSurfaceRequestUnpublished(inputs::FinishSurfaceRequestUnpublished),
     SpawnDrain(inputs::SpawnDrain),
     StopDrain(inputs::StopDrain),
     StageVisibilityFilter(inputs::StageVisibilityFilter),
@@ -7756,6 +7901,12 @@ impl Input {
             Self::RequestWaitAll(_) => InputKind::RequestWaitAll,
             Self::SatisfyWaitAll(_) => InputKind::SatisfyWaitAll,
             Self::CancelWaitAll(_) => InputKind::CancelWaitAll,
+            Self::AdmitSurfaceRequest(_) => InputKind::AdmitSurfaceRequest,
+            Self::ClassifySurfaceRequestTerminal(_) => InputKind::ClassifySurfaceRequestTerminal,
+            Self::CancelSurfaceRequest(_) => InputKind::CancelSurfaceRequest,
+            Self::PublishSurfaceRequest(_) => InputKind::PublishSurfaceRequest,
+            Self::PublishOrCancelSurfaceRequest(_) => InputKind::PublishOrCancelSurfaceRequest,
+            Self::FinishSurfaceRequestUnpublished(_) => InputKind::FinishSurfaceRequestUnpublished,
             Self::SpawnDrain(_) => InputKind::SpawnDrain,
             Self::StopDrain(_) => InputKind::StopDrain,
             Self::StageVisibilityFilter(_) => InputKind::StageVisibilityFilter,
@@ -7956,6 +8107,12 @@ pub enum InputKind {
     RequestWaitAll,
     SatisfyWaitAll,
     CancelWaitAll,
+    AdmitSurfaceRequest,
+    ClassifySurfaceRequestTerminal,
+    CancelSurfaceRequest,
+    PublishSurfaceRequest,
+    PublishOrCancelSurfaceRequest,
+    FinishSurfaceRequestUnpublished,
     SpawnDrain,
     StopDrain,
     StageVisibilityFilter,
@@ -8383,6 +8540,63 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CollectCompletedResult {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestAdmissionAccepted {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestAdmissionDuplicate {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestNotFound {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestTerminalPublish {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestTerminalRespondWithoutPublish {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestCancelled {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestAlreadyCancelled {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestAlreadyPublished {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestAlreadyCompleted {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestPublished {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestAlreadyTerminal {
+        pub request_key: String,
+        pub current: SurfaceRequestPhase,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestCancelledBeforePublish {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestCompleted {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestSupersededByCancel {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnqueueClassifiedEntry {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerIngressClassified {
@@ -8574,6 +8788,22 @@ pub enum Effect {
     WaitAllAdmissionResolved(effects::WaitAllAdmissionResolved),
     WaitAllSatisfied(effects::WaitAllSatisfied),
     CollectCompletedResult(effects::CollectCompletedResult),
+    SurfaceRequestAdmissionAccepted(effects::SurfaceRequestAdmissionAccepted),
+    SurfaceRequestAdmissionDuplicate(effects::SurfaceRequestAdmissionDuplicate),
+    SurfaceRequestNotFound(effects::SurfaceRequestNotFound),
+    SurfaceRequestTerminalPublish(effects::SurfaceRequestTerminalPublish),
+    SurfaceRequestTerminalRespondWithoutPublish(
+        effects::SurfaceRequestTerminalRespondWithoutPublish,
+    ),
+    SurfaceRequestCancelled(effects::SurfaceRequestCancelled),
+    SurfaceRequestAlreadyCancelled(effects::SurfaceRequestAlreadyCancelled),
+    SurfaceRequestAlreadyPublished(effects::SurfaceRequestAlreadyPublished),
+    SurfaceRequestAlreadyCompleted(effects::SurfaceRequestAlreadyCompleted),
+    SurfaceRequestPublished(effects::SurfaceRequestPublished),
+    SurfaceRequestAlreadyTerminal(effects::SurfaceRequestAlreadyTerminal),
+    SurfaceRequestCancelledBeforePublish(effects::SurfaceRequestCancelledBeforePublish),
+    SurfaceRequestCompleted(effects::SurfaceRequestCompleted),
+    SurfaceRequestSupersededByCancel(effects::SurfaceRequestSupersededByCancel),
     EnqueueClassifiedEntry(effects::EnqueueClassifiedEntry),
     PeerIngressClassified(effects::PeerIngressClassified),
     PeerResponseReplyClassified(effects::PeerResponseReplyClassified),
@@ -8667,6 +8897,20 @@ pub enum EffectKind {
     WaitAllAdmissionResolved,
     WaitAllSatisfied,
     CollectCompletedResult,
+    SurfaceRequestAdmissionAccepted,
+    SurfaceRequestAdmissionDuplicate,
+    SurfaceRequestNotFound,
+    SurfaceRequestTerminalPublish,
+    SurfaceRequestTerminalRespondWithoutPublish,
+    SurfaceRequestCancelled,
+    SurfaceRequestAlreadyCancelled,
+    SurfaceRequestAlreadyPublished,
+    SurfaceRequestAlreadyCompleted,
+    SurfaceRequestPublished,
+    SurfaceRequestAlreadyTerminal,
+    SurfaceRequestCancelledBeforePublish,
+    SurfaceRequestCompleted,
+    SurfaceRequestSupersededByCancel,
     EnqueueClassifiedEntry,
     PeerIngressClassified,
     PeerResponseReplyClassified,
@@ -9463,6 +9707,28 @@ pub enum TransitionId {
     CollectCompletedOpRunning,
     CollectCompletedOpRetired,
     CollectCompletedOpStopped,
+    AdmitSurfaceRequestAcceptedInitializing,
+    AdmitSurfaceRequestDuplicateInitializing,
+    ClassifySurfaceRequestTerminalMissingInitializing,
+    ClassifySurfaceRequestTerminalPublishInitializing,
+    ClassifySurfaceRequestTerminalFailedInitializing,
+    ClassifySurfaceRequestTerminalObservationInitializing,
+    CancelSurfaceRequestMissingInitializing,
+    CancelSurfaceRequestPendingInitializing,
+    CancelSurfaceRequestAlreadyCancelledInitializing,
+    CancelSurfaceRequestAlreadyPublishedInitializing,
+    CancelSurfaceRequestAlreadyCompletedInitializing,
+    PublishSurfaceRequestMissingInitializing,
+    PublishSurfaceRequestPendingInitializing,
+    PublishSurfaceRequestAlreadyTerminalInitializing,
+    PublishOrCancelSurfaceRequestMissingInitializing,
+    PublishOrCancelSurfaceRequestPendingInitializing,
+    PublishOrCancelSurfaceRequestCancelledInitializing,
+    PublishOrCancelSurfaceRequestAlreadyTerminalInitializing,
+    FinishSurfaceRequestUnpublishedMissingInitializing,
+    FinishSurfaceRequestUnpublishedPendingInitializing,
+    FinishSurfaceRequestUnpublishedCancelledInitializing,
+    FinishSurfaceRequestUnpublishedTerminalInitializing,
     ResolveWaitAllAdmissionDuplicateRejectedIdle,
     ResolveWaitAllAdmissionDuplicateRejectedAttached,
     ResolveWaitAllAdmissionDuplicateRejectedRunning,
@@ -9875,6 +10141,8 @@ pub fn initial_state() -> State {
         completion_agent_applied_cursor: 0,
         completion_runtime_observed_cursor: 0,
         completion_runtime_injected_cursor: 0,
+        surface_request_phases: Default::default(),
+        surface_request_terminal_policies: Default::default(),
         known_surfaces: Default::default(),
         active_surfaces: Default::default(),
         visible_surfaces: Default::default(),

@@ -1960,6 +1960,27 @@ impl From<DrainExitReason> for meerkat_core::handles::DrainExitReason {
     }
 }
 
+/// Generated surface-request lifecycle phase. Surface transports may project
+/// this value for diagnostics; mutation authority lives in MeerkatMachine
+/// transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestPhase {
+    #[default]
+    Pending,
+    Published,
+    Cancelled,
+    Completed,
+}
+
+/// Generated terminal-publication policy recorded when a surface request is
+/// admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestTerminalPolicy {
+    PublishOnSuccess,
+    #[default]
+    RespondWithoutPublish,
+}
+
 /// Typed work-lane origin for [`MeerkatMachineInput::Ingest`]. Closed set of
 /// the work-lane labels the DSL observes on the admission seam — replaces
 /// the former literal-string `origin` field. Structurally mirrors the

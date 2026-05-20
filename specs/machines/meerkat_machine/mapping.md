@@ -2327,6 +2327,72 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CollectCompletedOpStopped`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
+- `AdmitSurfaceRequestAcceptedInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `AdmitSurfaceRequestDuplicateInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifySurfaceRequestTerminalMissingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifySurfaceRequestTerminalPublishInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ClassifySurfaceRequestTerminalFailedInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifySurfaceRequestTerminalObservationInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestMissingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestPendingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestAlreadyCancelledInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestAlreadyPublishedInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestAlreadyCompletedInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `PublishSurfaceRequestMissingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `PublishSurfaceRequestPendingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `PublishSurfaceRequestAlreadyTerminalInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `PublishOrCancelSurfaceRequestMissingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `PublishOrCancelSurfaceRequestPendingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `PublishOrCancelSurfaceRequestCancelledInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `PublishOrCancelSurfaceRequestAlreadyTerminalInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedMissingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedPendingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedCancelledInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedTerminalInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `ResolveWaitAllAdmissionDuplicateRejectedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -3230,6 +3296,48 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `CollectCompletedResult`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `SurfaceRequestAdmissionAccepted`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `SurfaceRequestAdmissionDuplicate`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `SurfaceRequestNotFound`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `SurfaceRequestTerminalPublish`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `SurfaceRequestTerminalRespondWithoutPublish`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `SurfaceRequestCancelled`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `SurfaceRequestAlreadyCancelled`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `SurfaceRequestAlreadyPublished`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `SurfaceRequestAlreadyCompleted`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `SurfaceRequestPublished`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `SurfaceRequestAlreadyTerminal`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `SurfaceRequestCancelledBeforePublish`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `SurfaceRequestCompleted`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `SurfaceRequestSupersededByCancel`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `EnqueueClassifiedEntry`

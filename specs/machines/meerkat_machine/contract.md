@@ -111,6 +111,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `completion_agent_applied_cursor`: `u64`
 - `completion_runtime_observed_cursor`: `u64`
 - `completion_runtime_injected_cursor`: `u64`
+- `surface_request_phases`: `Map<String, SurfaceRequestPhase>`
+- `surface_request_terminal_policies`: `Map<String, SurfaceRequestTerminalPolicy>`
 - `known_surfaces`: `Set<String>`
 - `active_surfaces`: `Set<String>`
 - `visible_surfaces`: `Set<String>`
@@ -306,6 +308,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RequestWaitAll`(wait_request_id: WaitRequestId, operation_id_sequence: Seq<String>, operation_ids: Set<String>, operation_id_tokens: Set<OperationId>, operation_token_by_id: Map<String, OperationId>, operation_id_by_token: Map<OperationId, String>)
 - `SatisfyWaitAll`(wait_request_id: WaitRequestId, operation_id_tokens: Set<OperationId>)
 - `CancelWaitAll`
+- `AdmitSurfaceRequest`(request_key: String, terminal_policy: SurfaceRequestTerminalPolicy)
+- `ClassifySurfaceRequestTerminal`(request_key: String, success: Bool)
+- `CancelSurfaceRequest`(request_key: String)
+- `PublishSurfaceRequest`(request_key: String)
+- `PublishOrCancelSurfaceRequest`(request_key: String)
+- `FinishSurfaceRequestUnpublished`(request_key: String)
 - `SpawnDrain`(mode: DrainMode)
 - `StopDrain`
 - `StageVisibilityFilter`(filter: ToolFilter)
@@ -448,6 +456,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `WaitAllAdmissionResolved`(wait_request_id: WaitRequestId, result: WaitAllAdmissionResultKind, reject_reason: Option<WaitAllRejectReasonKind>, rejected_operation_id: Option<String>)
 - `WaitAllSatisfied`(wait_request_id: WaitRequestId, operation_ids: Set<OperationId>)
 - `CollectCompletedResult`
+- `SurfaceRequestAdmissionAccepted`(request_key: String)
+- `SurfaceRequestAdmissionDuplicate`(request_key: String)
+- `SurfaceRequestNotFound`(request_key: String)
+- `SurfaceRequestTerminalPublish`(request_key: String)
+- `SurfaceRequestTerminalRespondWithoutPublish`(request_key: String)
+- `SurfaceRequestCancelled`(request_key: String)
+- `SurfaceRequestAlreadyCancelled`(request_key: String)
+- `SurfaceRequestAlreadyPublished`(request_key: String)
+- `SurfaceRequestAlreadyCompleted`(request_key: String)
+- `SurfaceRequestPublished`(request_key: String)
+- `SurfaceRequestAlreadyTerminal`(request_key: String, current: SurfaceRequestPhase)
+- `SurfaceRequestCancelledBeforePublish`(request_key: String)
+- `SurfaceRequestCompleted`(request_key: String)
+- `SurfaceRequestSupersededByCancel`(request_key: String)
 - `EnqueueClassifiedEntry`
 - `PeerIngressClassified`(class: PeerIngressInputClass, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
 - `PeerResponseReplyClassified`(response_terminality: PeerIngressResponseTerminality)
@@ -7128,6 +7150,187 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `op_terminal`
 - Emits: `CollectCompletedResult`
 - To: `Stopped`
+
+### `AdmitSurfaceRequestAcceptedInitializing`
+- From: `Initializing`
+- On: `AdmitSurfaceRequest`(request_key, terminal_policy)
+- Guards:
+  - `request_not_tracked`
+- Emits: `SurfaceRequestAdmissionAccepted`
+- To: `Initializing`
+
+### `AdmitSurfaceRequestDuplicateInitializing`
+- From: `Initializing`
+- On: `AdmitSurfaceRequest`(request_key, terminal_policy)
+- Guards:
+  - `request_already_tracked`
+- Emits: `SurfaceRequestAdmissionDuplicate`
+- To: `Initializing`
+
+### `ClassifySurfaceRequestTerminalMissingInitializing`
+- From: `Initializing`
+- On: `ClassifySurfaceRequestTerminal`(request_key, success)
+- Guards:
+  - `request_not_tracked`
+- Emits: `SurfaceRequestNotFound`
+- To: `Initializing`
+
+### `ClassifySurfaceRequestTerminalPublishInitializing`
+- From: `Initializing`
+- On: `ClassifySurfaceRequestTerminal`(request_key, success)
+- Guards:
+  - `request_tracked`
+  - `terminal_success`
+  - `publish_policy`
+- Emits: `SurfaceRequestTerminalPublish`
+- To: `Initializing`
+
+### `ClassifySurfaceRequestTerminalFailedInitializing`
+- From: `Initializing`
+- On: `ClassifySurfaceRequestTerminal`(request_key, success)
+- Guards:
+  - `request_tracked`
+  - `terminal_failed`
+- Emits: `SurfaceRequestTerminalRespondWithoutPublish`
+- To: `Initializing`
+
+### `ClassifySurfaceRequestTerminalObservationInitializing`
+- From: `Initializing`
+- On: `ClassifySurfaceRequestTerminal`(request_key, success)
+- Guards:
+  - `request_tracked`
+  - `terminal_success`
+  - `observation_policy`
+- Emits: `SurfaceRequestTerminalRespondWithoutPublish`
+- To: `Initializing`
+
+### `CancelSurfaceRequestMissingInitializing`
+- From: `Initializing`
+- On: `CancelSurfaceRequest`(request_key)
+- Guards:
+  - `request_not_tracked`
+- Emits: `SurfaceRequestNotFound`
+- To: `Initializing`
+
+### `CancelSurfaceRequestPendingInitializing`
+- From: `Initializing`
+- On: `CancelSurfaceRequest`(request_key)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestCancelled`
+- To: `Initializing`
+
+### `CancelSurfaceRequestAlreadyCancelledInitializing`
+- From: `Initializing`
+- On: `CancelSurfaceRequest`(request_key)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestAlreadyCancelled`
+- To: `Initializing`
+
+### `CancelSurfaceRequestAlreadyPublishedInitializing`
+- From: `Initializing`
+- On: `CancelSurfaceRequest`(request_key)
+- Guards:
+  - `request_published`
+- Emits: `SurfaceRequestAlreadyPublished`
+- To: `Initializing`
+
+### `CancelSurfaceRequestAlreadyCompletedInitializing`
+- From: `Initializing`
+- On: `CancelSurfaceRequest`(request_key)
+- Guards:
+  - `request_completed`
+- Emits: `SurfaceRequestAlreadyCompleted`
+- To: `Initializing`
+
+### `PublishSurfaceRequestMissingInitializing`
+- From: `Initializing`
+- On: `PublishSurfaceRequest`(request_key)
+- Guards:
+  - `request_not_tracked`
+- Emits: `SurfaceRequestNotFound`
+- To: `Initializing`
+
+### `PublishSurfaceRequestPendingInitializing`
+- From: `Initializing`
+- On: `PublishSurfaceRequest`(request_key)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestPublished`
+- To: `Initializing`
+
+### `PublishSurfaceRequestAlreadyTerminalInitializing`
+- From: `Initializing`
+- On: `PublishSurfaceRequest`(request_key)
+- Guards:
+  - `request_terminal`
+- Emits: `SurfaceRequestAlreadyTerminal`
+- To: `Initializing`
+
+### `PublishOrCancelSurfaceRequestMissingInitializing`
+- From: `Initializing`
+- On: `PublishOrCancelSurfaceRequest`(request_key)
+- Guards:
+  - `request_not_tracked`
+- Emits: `SurfaceRequestNotFound`
+- To: `Initializing`
+
+### `PublishOrCancelSurfaceRequestPendingInitializing`
+- From: `Initializing`
+- On: `PublishOrCancelSurfaceRequest`(request_key)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestPublished`
+- To: `Initializing`
+
+### `PublishOrCancelSurfaceRequestCancelledInitializing`
+- From: `Initializing`
+- On: `PublishOrCancelSurfaceRequest`(request_key)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestCancelledBeforePublish`
+- To: `Initializing`
+
+### `PublishOrCancelSurfaceRequestAlreadyTerminalInitializing`
+- From: `Initializing`
+- On: `PublishOrCancelSurfaceRequest`(request_key)
+- Guards:
+  - `request_terminal`
+- Emits: `SurfaceRequestAlreadyTerminal`
+- To: `Initializing`
+
+### `FinishSurfaceRequestUnpublishedMissingInitializing`
+- From: `Initializing`
+- On: `FinishSurfaceRequestUnpublished`(request_key)
+- Guards:
+  - `request_not_tracked`
+- Emits: `SurfaceRequestCompleted`
+- To: `Initializing`
+
+### `FinishSurfaceRequestUnpublishedPendingInitializing`
+- From: `Initializing`
+- On: `FinishSurfaceRequestUnpublished`(request_key)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestCompleted`
+- To: `Initializing`
+
+### `FinishSurfaceRequestUnpublishedCancelledInitializing`
+- From: `Initializing`
+- On: `FinishSurfaceRequestUnpublished`(request_key)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestSupersededByCancel`
+- To: `Initializing`
+
+### `FinishSurfaceRequestUnpublishedTerminalInitializing`
+- From: `Initializing`
+- On: `FinishSurfaceRequestUnpublished`(request_key)
+- Guards:
+  - `request_terminal`
+- Emits: `SurfaceRequestCompleted`
+- To: `Initializing`
 
 ### `ResolveWaitAllAdmissionDuplicateRejectedIdle`
 - From: `Idle`

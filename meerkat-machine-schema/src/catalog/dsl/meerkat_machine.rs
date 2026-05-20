@@ -920,6 +920,27 @@ pub enum ExternalToolSurfaceFailureCause {
     SurfaceUnavailable,
 }
 
+/// Generated surface-request lifecycle phase. Surface transports may project
+/// this value for diagnostics; mutation authority lives in MeerkatMachine
+/// transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestPhase {
+    #[default]
+    Pending,
+    Published,
+    Cancelled,
+    Completed,
+}
+
+/// Generated terminal-publication policy recorded when a surface request is
+/// admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestTerminalPolicy {
+    PublishOnSuccess,
+    #[default]
+    RespondWithoutPublish,
+}
+
 /// Typed drain-exit reason. Closed mirror of
 /// [`meerkat_core::handles::DrainExitReason`] — replaces the former
 /// literal-string `reason` field on `NotifyDrainExited`.
@@ -1730,6 +1751,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             completion_runtime_observed_cursor: u64,
             completion_runtime_injected_cursor: u64,
 
+            // --- Surface request lifecycle substate ---
+            //
+            // Surface transports keep closures, task handles, and response
+            // writers as shell mechanics. Admission, cancellation,
+            // publication, completion, and terminal publish-vs-observation
+            // classification live here so REST/RPC/MCP cannot race local
+            // phase tables against generated runtime authority.
+            surface_request_phases: Map<String, Enum<SurfaceRequestPhase>>,
+            surface_request_terminal_policies: Map<String, Enum<SurfaceRequestTerminalPolicy>>,
+
             // --- External tool surface substate ---
             known_surfaces: Set<String>,
             active_surfaces: Set<String>,
@@ -2008,6 +2039,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             completion_agent_applied_cursor = 0,
             completion_runtime_observed_cursor = 0,
             completion_runtime_injected_cursor = 0,
+            // Surface request lifecycle substate
+            surface_request_phases = EmptyMap,
+            surface_request_terminal_policies = EmptyMap,
+            // External tool surface substate
             known_surfaces = EmptySet,
             active_surfaces = EmptySet,
             visible_surfaces = EmptySet,
@@ -2424,6 +2459,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             },
             SatisfyWaitAll { wait_request_id: WaitRequestId, operation_id_tokens: Set<OperationId> },
             CancelWaitAll,
+            // Surface request lifecycle inputs. These are fed by REST/RPC/MCP
+            // executors after their route/catalog layer has supplied typed
+            // request semantics.
+            AdmitSurfaceRequest {
+                request_key: String,
+                terminal_policy: Enum<SurfaceRequestTerminalPolicy>,
+            },
+            ClassifySurfaceRequestTerminal { request_key: String, success: bool },
+            CancelSurfaceRequest { request_key: String },
+            PublishSurfaceRequest { request_key: String },
+            PublishOrCancelSurfaceRequest { request_key: String },
+            FinishSurfaceRequestUnpublished { request_key: String },
             // Comms drain inputs
             SpawnDrain { mode: DrainMode },
             StopDrain,
@@ -2802,6 +2849,23 @@ macro_rules! meerkat_catalog_machine_dsl {
             },
             WaitAllSatisfied { wait_request_id: WaitRequestId, operation_ids: Set<OperationId> },
             CollectCompletedResult,
+            SurfaceRequestAdmissionAccepted { request_key: String },
+            SurfaceRequestAdmissionDuplicate { request_key: String },
+            SurfaceRequestNotFound { request_key: String },
+            SurfaceRequestTerminalPublish { request_key: String },
+            SurfaceRequestTerminalRespondWithoutPublish { request_key: String },
+            SurfaceRequestCancelled { request_key: String },
+            SurfaceRequestAlreadyCancelled { request_key: String },
+            SurfaceRequestAlreadyPublished { request_key: String },
+            SurfaceRequestAlreadyCompleted { request_key: String },
+            SurfaceRequestPublished { request_key: String },
+            SurfaceRequestAlreadyTerminal {
+                request_key: String,
+                current: Enum<SurfaceRequestPhase>,
+            },
+            SurfaceRequestCancelledBeforePublish { request_key: String },
+            SurfaceRequestCompleted { request_key: String },
+            SurfaceRequestSupersededByCancel { request_key: String },
             EnqueueClassifiedEntry,
             PeerIngressClassified {
                 class: Enum<PeerIngressInputClass>,
@@ -2958,6 +3022,20 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition WaitAllAdmissionResolved => local,
         disposition WaitAllSatisfied => external handoff ops_barrier_satisfaction,
         disposition CollectCompletedResult => local,
+        disposition SurfaceRequestAdmissionAccepted => local,
+        disposition SurfaceRequestAdmissionDuplicate => local,
+        disposition SurfaceRequestNotFound => local,
+        disposition SurfaceRequestTerminalPublish => local,
+        disposition SurfaceRequestTerminalRespondWithoutPublish => local,
+        disposition SurfaceRequestCancelled => local,
+        disposition SurfaceRequestAlreadyCancelled => local,
+        disposition SurfaceRequestAlreadyPublished => local,
+        disposition SurfaceRequestAlreadyCompleted => local,
+        disposition SurfaceRequestPublished => local,
+        disposition SurfaceRequestAlreadyTerminal => local,
+        disposition SurfaceRequestCancelledBeforePublish => local,
+        disposition SurfaceRequestCompleted => local,
+        disposition SurfaceRequestSupersededByCancel => local,
         disposition EnqueueClassifiedEntry => local,
         disposition PeerIngressClassified => local,
         disposition PeerResponseReplyClassified => local,
@@ -10764,6 +10842,278 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit CollectCompletedResult
+        }
+
+        // Surface request lifecycle authority. The surface executor owns
+        // only transport mechanics; this generated substate owns admission,
+        // cancellation, publication, completion, and terminal classification.
+        // These transitions intentionally run on a standalone Initializing
+        // MeerkatMachine authority used only by SurfaceRequestExecutor, so
+        // they cannot rewrite a real session runtime phase.
+        transition AdmitSurfaceRequestAccepted {
+            per_phase [Initializing]
+            on input AdmitSurfaceRequest { request_key, terminal_policy }
+            guard "request_not_tracked" { !self.surface_request_phases.contains_key(request_key) }
+            update {
+                self.surface_request_phases.insert(request_key, SurfaceRequestPhase::Pending);
+                self.surface_request_terminal_policies.insert(request_key, terminal_policy);
+            }
+            to Initializing
+            emit SurfaceRequestAdmissionAccepted { request_key: request_key }
+        }
+
+        transition AdmitSurfaceRequestDuplicate {
+            per_phase [Initializing]
+            on input AdmitSurfaceRequest { request_key, terminal_policy }
+            guard "request_already_tracked" { self.surface_request_phases.contains_key(request_key) }
+            update {}
+            to Initializing
+            emit SurfaceRequestAdmissionDuplicate { request_key: request_key }
+        }
+
+        transition ClassifySurfaceRequestTerminalMissing {
+            per_phase [Initializing]
+            on input ClassifySurfaceRequestTerminal { request_key, success }
+            guard "request_not_tracked" { !self.surface_request_phases.contains_key(request_key) }
+            update {}
+            to Initializing
+            emit SurfaceRequestNotFound { request_key: request_key }
+        }
+
+        transition ClassifySurfaceRequestTerminalPublish {
+            per_phase [Initializing]
+            on input ClassifySurfaceRequestTerminal { request_key, success }
+            guard "request_tracked" { self.surface_request_phases.contains_key(request_key) }
+            guard "terminal_success" { success == true }
+            guard "publish_policy" {
+                self.surface_request_terminal_policies.get_copied(request_key)
+                    == Some(SurfaceRequestTerminalPolicy::PublishOnSuccess)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestTerminalPublish { request_key: request_key }
+        }
+
+        transition ClassifySurfaceRequestTerminalFailed {
+            per_phase [Initializing]
+            on input ClassifySurfaceRequestTerminal { request_key, success }
+            guard "request_tracked" { self.surface_request_phases.contains_key(request_key) }
+            guard "terminal_failed" { success == false }
+            update {}
+            to Initializing
+            emit SurfaceRequestTerminalRespondWithoutPublish { request_key: request_key }
+        }
+
+        transition ClassifySurfaceRequestTerminalObservation {
+            per_phase [Initializing]
+            on input ClassifySurfaceRequestTerminal { request_key, success }
+            guard "request_tracked" { self.surface_request_phases.contains_key(request_key) }
+            guard "terminal_success" { success == true }
+            guard "observation_policy" {
+                self.surface_request_terminal_policies.get_copied(request_key)
+                    == Some(SurfaceRequestTerminalPolicy::RespondWithoutPublish)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestTerminalRespondWithoutPublish { request_key: request_key }
+        }
+
+        transition CancelSurfaceRequestMissing {
+            per_phase [Initializing]
+            on input CancelSurfaceRequest { request_key }
+            guard "request_not_tracked" { !self.surface_request_phases.contains_key(request_key) }
+            update {}
+            to Initializing
+            emit SurfaceRequestNotFound { request_key: request_key }
+        }
+
+        transition CancelSurfaceRequestPending {
+            per_phase [Initializing]
+            on input CancelSurfaceRequest { request_key }
+            guard "request_pending" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Pending)
+            }
+            update {
+                self.surface_request_phases.insert(request_key, SurfaceRequestPhase::Cancelled);
+            }
+            to Initializing
+            emit SurfaceRequestCancelled { request_key: request_key }
+        }
+
+        transition CancelSurfaceRequestAlreadyCancelled {
+            per_phase [Initializing]
+            on input CancelSurfaceRequest { request_key }
+            guard "request_cancelled" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Cancelled)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestAlreadyCancelled { request_key: request_key }
+        }
+
+        transition CancelSurfaceRequestAlreadyPublished {
+            per_phase [Initializing]
+            on input CancelSurfaceRequest { request_key }
+            guard "request_published" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Published)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestAlreadyPublished { request_key: request_key }
+        }
+
+        transition CancelSurfaceRequestAlreadyCompleted {
+            per_phase [Initializing]
+            on input CancelSurfaceRequest { request_key }
+            guard "request_completed" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Completed)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestAlreadyCompleted { request_key: request_key }
+        }
+
+        transition PublishSurfaceRequestMissing {
+            per_phase [Initializing]
+            on input PublishSurfaceRequest { request_key }
+            guard "request_not_tracked" { !self.surface_request_phases.contains_key(request_key) }
+            update {}
+            to Initializing
+            emit SurfaceRequestNotFound { request_key: request_key }
+        }
+
+        transition PublishSurfaceRequestPending {
+            per_phase [Initializing]
+            on input PublishSurfaceRequest { request_key }
+            guard "request_pending" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Pending)
+            }
+            update {
+                self.surface_request_phases.remove(request_key);
+                self.surface_request_terminal_policies.remove(request_key);
+            }
+            to Initializing
+            emit SurfaceRequestPublished { request_key: request_key }
+        }
+
+        transition PublishSurfaceRequestAlreadyTerminal {
+            per_phase [Initializing]
+            on input PublishSurfaceRequest { request_key }
+            guard "request_terminal" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Published)
+                || self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Cancelled)
+                || self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Completed)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestAlreadyTerminal {
+                request_key: request_key,
+                current: self.surface_request_phases.get_copied(request_key).get("value")
+            }
+        }
+
+        transition PublishOrCancelSurfaceRequestMissing {
+            per_phase [Initializing]
+            on input PublishOrCancelSurfaceRequest { request_key }
+            guard "request_not_tracked" { !self.surface_request_phases.contains_key(request_key) }
+            update {}
+            to Initializing
+            emit SurfaceRequestNotFound { request_key: request_key }
+        }
+
+        transition PublishOrCancelSurfaceRequestPending {
+            per_phase [Initializing]
+            on input PublishOrCancelSurfaceRequest { request_key }
+            guard "request_pending" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Pending)
+            }
+            update {
+                self.surface_request_phases.remove(request_key);
+                self.surface_request_terminal_policies.remove(request_key);
+            }
+            to Initializing
+            emit SurfaceRequestPublished { request_key: request_key }
+        }
+
+        transition PublishOrCancelSurfaceRequestCancelled {
+            per_phase [Initializing]
+            on input PublishOrCancelSurfaceRequest { request_key }
+            guard "request_cancelled" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Cancelled)
+            }
+            update {
+                self.surface_request_phases.remove(request_key);
+                self.surface_request_terminal_policies.remove(request_key);
+            }
+            to Initializing
+            emit SurfaceRequestCancelledBeforePublish { request_key: request_key }
+        }
+
+        transition PublishOrCancelSurfaceRequestAlreadyTerminal {
+            per_phase [Initializing]
+            on input PublishOrCancelSurfaceRequest { request_key }
+            guard "request_terminal" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Published)
+                || self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Completed)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestAlreadyTerminal {
+                request_key: request_key,
+                current: self.surface_request_phases.get_copied(request_key).get("value")
+            }
+        }
+
+        transition FinishSurfaceRequestUnpublishedMissing {
+            per_phase [Initializing]
+            on input FinishSurfaceRequestUnpublished { request_key }
+            guard "request_not_tracked" { !self.surface_request_phases.contains_key(request_key) }
+            update {}
+            to Initializing
+            emit SurfaceRequestCompleted { request_key: request_key }
+        }
+
+        transition FinishSurfaceRequestUnpublishedPending {
+            per_phase [Initializing]
+            on input FinishSurfaceRequestUnpublished { request_key }
+            guard "request_pending" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Pending)
+            }
+            update {
+                self.surface_request_phases.remove(request_key);
+                self.surface_request_terminal_policies.remove(request_key);
+            }
+            to Initializing
+            emit SurfaceRequestCompleted { request_key: request_key }
+        }
+
+        transition FinishSurfaceRequestUnpublishedCancelled {
+            per_phase [Initializing]
+            on input FinishSurfaceRequestUnpublished { request_key }
+            guard "request_cancelled" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Cancelled)
+            }
+            update {
+                self.surface_request_phases.remove(request_key);
+                self.surface_request_terminal_policies.remove(request_key);
+            }
+            to Initializing
+            emit SurfaceRequestSupersededByCancel { request_key: request_key }
+        }
+
+        transition FinishSurfaceRequestUnpublishedTerminal {
+            per_phase [Initializing]
+            on input FinishSurfaceRequestUnpublished { request_key }
+            guard "request_terminal" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Published)
+                || self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Completed)
+            }
+            update {
+                self.surface_request_phases.remove(request_key);
+                self.surface_request_terminal_policies.remove(request_key);
+            }
+            to Initializing
+            emit SurfaceRequestCompleted { request_key: request_key }
         }
 
         // ResolveWaitAllAdmission: generated wait-all admission/result-class

@@ -302,23 +302,16 @@ impl MeerkatMachine {
             match stopped {
                 Ok(result) => result?,
                 Err(_) => {
-                    let deferred = {
-                        let sessions = self.sessions.read().await;
-                        let entry =
-                            sessions
-                                .get(session_id)
-                                .ok_or(RuntimeDriverError::NotReady {
-                                    state: RuntimeState::Destroyed,
-                                })?;
-                        if !Arc::ptr_eq(&entry.driver, &driver) {
-                            return Err(RuntimeDriverError::NotReady {
-                                state: RuntimeState::Destroyed,
-                            });
-                        }
-                        let snapshot = entry.control_snapshot();
-                        snapshot.phase == RuntimeState::Running && snapshot.current_run_id.is_some()
-                    };
-                    if deferred {
+                    let authority = self
+                        .session_dsl_authority(session_id)
+                        .await
+                        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                    let generated_stop_deferred = authority
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .state()
+                        .runtime_stop_deferred;
+                    if generated_stop_deferred {
                         return Ok(());
                     }
                     return Err(RuntimeDriverError::ValidationFailed {

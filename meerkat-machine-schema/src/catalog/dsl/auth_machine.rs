@@ -586,6 +586,28 @@ macro_rules! auth_catalog_machine_dsl {
                 }
             }
 
+            transition ReopenReleasedForOAuthBrowserFlowAdmission {
+                on input AdmitOAuthBrowserFlow { flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows }
+                guard { self.lifecycle_phase == Phase::Released }
+                guard "released_without_credential" { self.credential_present == false && self.credential_published_at_millis == None }
+                guard "released_without_oauth_membership" { self.oauth_outstanding_flow_count == 0 }
+                guard "oauth_capacity_available" { self.oauth_outstanding_flow_count < max_outstanding_flows }
+                guard "oauth_global_capacity_available" { observed_global_outstanding_flows < max_outstanding_flows }
+                update {
+                    self.oauth_browser_flow_ids.insert(flow_id);
+                    self.oauth_browser_flow_providers.insert(flow_id, provider);
+                    self.oauth_browser_flow_redirect_uris.insert(flow_id, redirect_uri);
+                    self.oauth_browser_flow_expires_at_millis.insert(flow_id, expires_at_millis);
+                    self.oauth_outstanding_flow_count = self.oauth_outstanding_flow_count + 1;
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
             transition VerifyOAuthBrowserFlow {
                 per_phase [Valid, Expiring, Refreshing, ReauthRequired]
                 on input VerifyOAuthBrowserFlow { flow_id, provider, redirect_uri, now_millis }
@@ -657,6 +679,28 @@ macro_rules! auth_catalog_machine_dsl {
                     self.oauth_outstanding_flow_count = self.oauth_outstanding_flow_count + 1;
                 }
                 to Valid
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition ReopenReleasedForOAuthDeviceFlowAdmission {
+                on input AdmitOAuthDeviceFlow { flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows }
+                guard { self.lifecycle_phase == Phase::Released }
+                guard "released_without_credential" { self.credential_present == false && self.credential_published_at_millis == None }
+                guard "released_without_oauth_membership" { self.oauth_outstanding_flow_count == 0 }
+                guard "oauth_capacity_available" { self.oauth_outstanding_flow_count < max_outstanding_flows }
+                guard "oauth_global_capacity_available" { observed_global_outstanding_flows < max_outstanding_flows }
+                update {
+                    self.oauth_device_flow_ids.insert(flow_id);
+                    self.oauth_device_flow_providers.insert(flow_id, provider);
+                    self.oauth_device_flow_expires_at_millis.insert(flow_id, expires_at_millis);
+                    self.oauth_device_poll_ids.remove(flow_id);
+                    self.oauth_outstanding_flow_count = self.oauth_outstanding_flow_count + 1;
+                }
+                to ReauthRequired
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
                     credential_generation: self.credential_generation,

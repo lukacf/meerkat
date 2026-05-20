@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
-use meerkat_machine_schema::TypeRef;
 use meerkat_machine_schema::catalog::dsl::dsl_auth_machine;
+use meerkat_machine_schema::{TriggerMatch, TypeRef};
 
 #[test]
 fn auth_machine_declares_oauth_flow_lifecycle_state() {
@@ -159,6 +159,50 @@ fn auth_machine_oauth_durable_confirmation_has_generated_global_capacity_guard()
             "{} must confirm durable OAuth admission in generated authority",
             transition.name
         );
+    }
+}
+
+#[test]
+fn auth_machine_reopens_released_for_oauth_admission_through_generated_authority() {
+    let schema = dsl_auth_machine();
+    for (transition_name, input_name) in [
+        (
+            "ReopenReleasedForOAuthBrowserFlowAdmission",
+            "AdmitOAuthBrowserFlow",
+        ),
+        (
+            "ReopenReleasedForOAuthDeviceFlowAdmission",
+            "AdmitOAuthDeviceFlow",
+        ),
+    ] {
+        let transition = schema
+            .transitions
+            .iter()
+            .find(|transition| transition.name.as_str() == transition_name)
+            .unwrap_or_else(|| panic!("AuthMachine must declare transition `{transition_name}`"));
+        match &transition.on {
+            TriggerMatch::Input { variant, .. } => assert_eq!(variant.as_str(), input_name),
+            other => panic!("`{transition_name}` must be input-triggered, got {other:?}"),
+        }
+        assert_eq!(
+            transition.to.as_str(),
+            "ReauthRequired",
+            "`{transition_name}` must reopen the generated auth lifecycle before OAuth admission"
+        );
+        for guard in [
+            "released_without_credential",
+            "released_without_oauth_membership",
+            "oauth_capacity_available",
+            "oauth_global_capacity_available",
+        ] {
+            assert!(
+                transition
+                    .guards
+                    .iter()
+                    .any(|candidate| candidate.name == guard),
+                "`{transition_name}` must carry generated guard `{guard}`"
+            );
+        }
     }
 }
 

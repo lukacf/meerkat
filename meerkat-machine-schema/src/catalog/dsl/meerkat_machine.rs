@@ -1645,6 +1645,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             active_fence_token: Option<FenceToken>,
             current_run_id: Option<RunId>,
             pre_run_phase: Option<Enum<PreRunPhase>>,
+            runtime_stop_deferred: bool,
             turn_phase: TurnPhase,
             primitive_kind: Option<Enum<TurnPrimitiveKind>>,
             admitted_content_shape: Option<Enum<ContentShape>>,
@@ -1982,6 +1983,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             active_fence_token = None,
             current_run_id = None,
             pre_run_phase = None,
+            runtime_stop_deferred = false,
             turn_phase = TurnPhase::Ready,
             primitive_kind = None,
             admitted_content_shape = None,
@@ -3229,6 +3231,12 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         invariant running_has_current_run {
             self.lifecycle_phase != Phase::Running || self.current_run_id != None
+        }
+
+        invariant deferred_stop_requires_active_runtime_phase {
+            self.runtime_stop_deferred == false
+            || self.lifecycle_phase == Phase::Running
+            || self.lifecycle_phase == Phase::Attached
         }
 
         invariant current_run_only_while_running_or_retired {
@@ -4520,7 +4528,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.lifecycle_phase == Phase::Attached
                 || self.lifecycle_phase == Phase::Running
             }
-            update {}
+            update {
+                self.runtime_stop_deferred = false;
+            }
             to Retired
             emit RuntimeRetired { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
@@ -4544,6 +4554,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.current_run_id = None;
                 self.active_fence_token = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
             }
             to Idle
@@ -4560,6 +4571,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
             }
             to Initializing
@@ -4572,6 +4584,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
             }
             to Idle
@@ -4584,6 +4597,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
             }
             to Retired
@@ -4595,6 +4609,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input StopRuntimeExecutor { reason }
             guard { self.lifecycle_phase == Phase::Attached }
             update {
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
             }
             to Attached
@@ -4606,6 +4621,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input StopRuntimeExecutor { reason }
             guard { self.lifecycle_phase == Phase::Running }
             update {
+                if self.current_run_id != None {
+                    self.runtime_stop_deferred = true;
+                } else {
+                    self.runtime_stop_deferred = false;
+                }
                 self.silent_intent_overrides = EmptySet;
             }
             to Running
@@ -4624,6 +4644,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
@@ -4636,6 +4657,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
@@ -4646,6 +4668,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RuntimeExecutorExited
             guard { self.lifecycle_phase == Phase::Idle }
             update {
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
@@ -4658,6 +4681,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
@@ -4668,6 +4692,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RuntimeExecutorExited
             guard { self.lifecycle_phase == Phase::Stopped }
             update {
+                self.runtime_stop_deferred = false;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
             to Stopped
@@ -4681,6 +4706,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
@@ -4699,6 +4725,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
@@ -4763,6 +4790,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_fence_token = fence_token;
                 self.current_run_id = current_run_id;
                 self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = silent_intent_overrides;
             }
             to Initializing
@@ -4782,6 +4810,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_fence_token = fence_token;
                 self.current_run_id = current_run_id;
                 self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = silent_intent_overrides;
             }
             to Idle
@@ -4801,6 +4830,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_fence_token = fence_token;
                 self.current_run_id = current_run_id;
                 self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = silent_intent_overrides;
             }
             to Attached
@@ -4820,6 +4850,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_fence_token = fence_token;
                 self.current_run_id = current_run_id;
                 self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = silent_intent_overrides;
             }
             to Running
@@ -4842,6 +4873,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_fence_token = fence_token;
                 self.current_run_id = current_run_id;
                 self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = silent_intent_overrides;
             }
             to Retired
@@ -4861,6 +4893,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_fence_token = fence_token;
                 self.current_run_id = current_run_id;
                 self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = silent_intent_overrides;
             }
             to Stopped
@@ -4880,6 +4913,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_fence_token = fence_token;
                 self.current_run_id = current_run_id;
                 self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = silent_intent_overrides;
             }
             to Destroyed

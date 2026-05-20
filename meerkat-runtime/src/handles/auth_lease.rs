@@ -574,19 +574,6 @@ impl RuntimeAuthLeaseHandle {
             Self::oauth_global_outstanding_flow_count(&guard),
         );
         let action = Self::audit_action_for(&input);
-        if create_if_missing
-            && guard.authorities.get(&lease_key).is_some_and(|authority| {
-                let state = authority.state();
-                state.lifecycle_phase == auth_dsl::AuthLifecyclePhase::Released
-                    && !state.credential_present
-                    && !has_oauth_membership(state)
-            })
-        {
-            // Release has already been accepted by AuthMachine; drop only the
-            // empty terminal registry slot so OAuth admission can create a new
-            // generated owner instead of treating the projection as authority.
-            guard.authorities.remove(&lease_key);
-        }
         if create_if_missing && !guard.authorities.contains_key(&lease_key) {
             let mut authority = auth_dsl::AuthMachineAuthority::new();
             auth_dsl::AuthMachineMutator::apply(
@@ -822,7 +809,6 @@ impl RuntimeAuthLeaseHandle {
             {
                 map_phase(state.lifecycle_phase)
             } else {
-                guard.authorities.remove(lease_key);
                 AuthLeasePhase::Released
             }
         } else {

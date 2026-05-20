@@ -3,15 +3,15 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for OccurrenceLifecycleMachine.
 
-CONSTANTS ClaimTokenValues, DeliveryReceiptStageValues, DeliveryReceiptValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OverlapPolicyValues, ScheduleIdValues, StringValues
+CONSTANTS ClaimTokenValues, DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OverlapPolicyValues, ScheduleIdValues, SessionIdValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
 OptionClaimTokenValues == {None} \cup {Some(x) : x \in ClaimTokenValues}
 OptionDeliveryReceiptStageValues == {None} \cup {Some(x) : x \in DeliveryReceiptStageValues}
-OptionDeliveryReceiptValues == {None} \cup {Some(x) : x \in DeliveryReceiptValues}
 OptionOccurrenceFailureClassValues == {None} \cup {Some(x) : x \in OccurrenceFailureClassValues}
+OptionSessionIdValues == {None} \cup {Some(x) : x \in SessionIdValues}
 OptionStringValues == {None} \cup {Some(x) : x \in StringValues}
 OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
 
@@ -28,9 +28,9 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision
+VARIABLES phase, model_step_count, occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision
 
-vars == << phase, model_step_count, occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+vars == << phase, model_step_count, occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 is_live_claim_phase(arg_phase) == ((arg_phase = "Claimed") \/ (arg_phase = "Dispatching") \/ (arg_phase = "AwaitingCompletion"))
 
@@ -56,7 +56,15 @@ Init ==
     /\ claimed_at_utc_ms = None
     /\ claim_token = None
     /\ delivery_correlation_id = None
-    /\ last_receipt = None
+    /\ target_materialized_session_id = None
+    /\ receipt_recorded_at_utc_ms = None
+    /\ last_receipt_recorded_at_utc_ms = None
+    /\ last_receipt_attempt = None
+    /\ last_receipt_stage = None
+    /\ last_receipt_failure_class = None
+    /\ last_receipt_detail = None
+    /\ last_receipt_correlation_id = None
+    /\ last_receipt_materialized_session_id = None
     /\ runtime_outcome_key = None
     /\ receipt_stage = None
     /\ receipt_failure_class = None
@@ -72,9 +80,9 @@ TerminalStutter ==
     /\ phase = "Completed" \/ phase = "Skipped" \/ phase = "Misfired" \/ phase = "Superseded" \/ phase = "DeliveryFailed"
     /\ UNCHANGED vars
 
-PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revision, arg_occurrence_ordinal, arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_misfire_policy_key, arg_overlap_policy, arg_overlap_policy_key, arg_missing_target_policy, arg_missing_target_policy_key, arg_due_at_utc_ms, arg_misfire_deadline_utc_ms) ==
+PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revision, arg_occurrence_ordinal, arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_misfire_policy_key, arg_overlap_policy, arg_overlap_policy_key, arg_missing_target_policy, arg_missing_target_policy_key, arg_target_materialized_session_id, arg_due_at_utc_ms, arg_misfire_deadline_utc_ms) ==
     /\ phase = "Pending"
-    /\ ((attempt_count = 0) /\ (claimed_by = None) /\ (claim_token = None) /\ (delivery_correlation_id = None) /\ (completed_at_utc_ms = None) /\ (superseded_by_revision = None) /\ (arg_misfire_deadline_utc_ms >= arg_due_at_utc_ms))
+    /\ ((attempt_count = 0) /\ (claimed_by = None) /\ (claim_token = None) /\ (delivery_correlation_id = None) /\ (target_materialized_session_id = None) /\ (completed_at_utc_ms = None) /\ (superseded_by_revision = None) /\ (arg_misfire_deadline_utc_ms >= arg_due_at_utc_ms))
     /\ phase' = "Pending"
     /\ model_step_count' = model_step_count + 1
     /\ occurrence_id' = arg_occurrence_id
@@ -96,7 +104,15 @@ PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revis
     /\ claimed_at_utc_ms' = None
     /\ claim_token' = None
     /\ delivery_correlation_id' = None
-    /\ last_receipt' = None
+    /\ target_materialized_session_id' = arg_target_materialized_session_id
+    /\ receipt_recorded_at_utc_ms' = None
+    /\ last_receipt_recorded_at_utc_ms' = None
+    /\ last_receipt_attempt' = None
+    /\ last_receipt_stage' = None
+    /\ last_receipt_failure_class' = None
+    /\ last_receipt_detail' = None
+    /\ last_receipt_correlation_id' = None
+    /\ last_receipt_materialized_session_id' = None
     /\ runtime_outcome_key' = None
     /\ receipt_stage' = None
     /\ receipt_failure_class' = None
@@ -114,7 +130,7 @@ ClassifyDuePendingFuture(now_utc_ms) ==
     /\ (now_utc_ms < due_at_utc_ms)
     /\ phase' = "Pending"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClassifyDuePendingMisfire(now_utc_ms) ==
@@ -122,7 +138,7 @@ ClassifyDuePendingMisfire(now_utc_ms) ==
     /\ ((due_at_utc_ms <= now_utc_ms) /\ (misfire_deadline_utc_ms < now_utc_ms))
     /\ phase' = "Pending"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClassifyDuePendingClaimEligible(now_utc_ms) ==
@@ -130,7 +146,7 @@ ClassifyDuePendingClaimEligible(now_utc_ms) ==
     /\ ((due_at_utc_ms <= now_utc_ms) /\ (now_utc_ms <= misfire_deadline_utc_ms))
     /\ phase' = "Pending"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClassifyDueClaimedLeaseExpired(now_utc_ms) ==
@@ -138,7 +154,7 @@ ClassifyDueClaimedLeaseExpired(now_utc_ms) ==
     /\ ((lease_expires_at_utc_ms # None) /\ ((IF "value" \in DOMAIN lease_expires_at_utc_ms THEN lease_expires_at_utc_ms["value"] ELSE None) <= now_utc_ms))
     /\ phase' = "Claimed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClassifyDueDispatchingLeaseExpired(now_utc_ms) ==
@@ -146,7 +162,7 @@ ClassifyDueDispatchingLeaseExpired(now_utc_ms) ==
     /\ ((lease_expires_at_utc_ms # None) /\ ((IF "value" \in DOMAIN lease_expires_at_utc_ms THEN lease_expires_at_utc_ms["value"] ELSE None) <= now_utc_ms))
     /\ phase' = "Dispatching"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClassifyDueAwaitingCompletionLeaseExpired(now_utc_ms) ==
@@ -154,7 +170,7 @@ ClassifyDueAwaitingCompletionLeaseExpired(now_utc_ms) ==
     /\ ((lease_expires_at_utc_ms # None) /\ ((IF "value" \in DOMAIN lease_expires_at_utc_ms THEN lease_expires_at_utc_ms["value"] ELSE None) <= now_utc_ms))
     /\ phase' = "AwaitingCompletion"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClassifyDueClaimedLeaseCurrent(now_utc_ms) ==
@@ -162,7 +178,7 @@ ClassifyDueClaimedLeaseCurrent(now_utc_ms) ==
     /\ ((lease_expires_at_utc_ms = None) \/ (now_utc_ms < (IF "value" \in DOMAIN lease_expires_at_utc_ms THEN lease_expires_at_utc_ms["value"] ELSE None)))
     /\ phase' = "Claimed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClassifyDueDispatchingLeaseCurrent(now_utc_ms) ==
@@ -170,7 +186,7 @@ ClassifyDueDispatchingLeaseCurrent(now_utc_ms) ==
     /\ ((lease_expires_at_utc_ms = None) \/ (now_utc_ms < (IF "value" \in DOMAIN lease_expires_at_utc_ms THEN lease_expires_at_utc_ms["value"] ELSE None)))
     /\ phase' = "Dispatching"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClassifyDueAwaitingCompletionLeaseCurrent(now_utc_ms) ==
@@ -178,148 +194,204 @@ ClassifyDueAwaitingCompletionLeaseCurrent(now_utc_ms) ==
     /\ ((lease_expires_at_utc_ms = None) \/ (now_utc_ms < (IF "value" \in DOMAIN lease_expires_at_utc_ms THEN lease_expires_at_utc_ms["value"] ELSE None)))
     /\ phase' = "AwaitingCompletion"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClassifyDueCompletedNoAction(now_utc_ms) ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClassifyDueSkippedNoAction(now_utc_ms) ==
     /\ phase = "Skipped"
     /\ phase' = "Skipped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClassifyDueMisfiredNoAction(now_utc_ms) ==
     /\ phase = "Misfired"
     /\ phase' = "Misfired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClassifyDueSupersededNoAction(now_utc_ms) ==
     /\ phase = "Superseded"
     /\ phase' = "Superseded"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClassifyDueDeliveryFailedNoAction(now_utc_ms) ==
     /\ phase = "DeliveryFailed"
     /\ phase' = "DeliveryFailed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
-SyncTargetSnapshotPending(arg_target_binding_key) ==
+SyncTargetSnapshotPending(arg_target_binding_key, arg_target_materialized_session_id) ==
     /\ phase = "Pending"
     /\ phase' = "Pending"
     /\ model_step_count' = model_step_count + 1
     /\ target_binding_key' = arg_target_binding_key
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ target_materialized_session_id' = arg_target_materialized_session_id
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
-SyncTargetSnapshotClaimed(arg_target_binding_key) ==
+SyncTargetSnapshotClaimed(arg_target_binding_key, arg_target_materialized_session_id) ==
     /\ phase = "Claimed"
     /\ phase' = "Claimed"
     /\ model_step_count' = model_step_count + 1
     /\ target_binding_key' = arg_target_binding_key
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ target_materialized_session_id' = arg_target_materialized_session_id
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
-RecordReceiptPending(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key) ==
+RecordReceiptPending(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key) ==
     /\ phase = "Pending"
-    /\ ((receipt_stage = Some(stage)) /\ (receipt_failure_class = arg_failure_class) /\ (receipt_detail = detail))
+    /\ ((receipt_stage # None) /\ (receipt_recorded_at_utc_ms # None) /\ (receipt_detail = detail) /\ (delivery_correlation_id = correlation_id) /\ (target_materialized_session_id = materialized_session_id))
     /\ phase' = "Pending"
     /\ model_step_count' = model_step_count + 1
-    /\ last_receipt' = Some(receipt)
+    /\ last_receipt_recorded_at_utc_ms' = receipt_recorded_at_utc_ms
+    /\ last_receipt_attempt' = Some(attempt_count)
+    /\ last_receipt_stage' = receipt_stage
+    /\ last_receipt_failure_class' = receipt_failure_class
+    /\ last_receipt_detail' = detail
+    /\ last_receipt_correlation_id' = correlation_id
+    /\ last_receipt_materialized_session_id' = materialized_session_id
     /\ runtime_outcome_key' = arg_runtime_outcome_key
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
-RecordReceiptClaimed(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key) ==
+RecordReceiptClaimed(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key) ==
     /\ phase = "Claimed"
-    /\ ((receipt_stage = Some(stage)) /\ (receipt_failure_class = arg_failure_class) /\ (receipt_detail = detail))
+    /\ ((receipt_stage # None) /\ (receipt_recorded_at_utc_ms # None) /\ (receipt_detail = detail) /\ (delivery_correlation_id = correlation_id) /\ (target_materialized_session_id = materialized_session_id))
     /\ phase' = "Claimed"
     /\ model_step_count' = model_step_count + 1
-    /\ last_receipt' = Some(receipt)
+    /\ last_receipt_recorded_at_utc_ms' = receipt_recorded_at_utc_ms
+    /\ last_receipt_attempt' = Some(attempt_count)
+    /\ last_receipt_stage' = receipt_stage
+    /\ last_receipt_failure_class' = receipt_failure_class
+    /\ last_receipt_detail' = detail
+    /\ last_receipt_correlation_id' = correlation_id
+    /\ last_receipt_materialized_session_id' = materialized_session_id
     /\ runtime_outcome_key' = arg_runtime_outcome_key
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
-RecordReceiptDispatching(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key) ==
+RecordReceiptDispatching(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key) ==
     /\ phase = "Dispatching"
-    /\ ((receipt_stage = Some(stage)) /\ (receipt_failure_class = arg_failure_class) /\ (receipt_detail = detail))
+    /\ ((receipt_stage # None) /\ (receipt_recorded_at_utc_ms # None) /\ (receipt_detail = detail) /\ (delivery_correlation_id = correlation_id) /\ (target_materialized_session_id = materialized_session_id))
     /\ phase' = "Dispatching"
     /\ model_step_count' = model_step_count + 1
-    /\ last_receipt' = Some(receipt)
+    /\ last_receipt_recorded_at_utc_ms' = receipt_recorded_at_utc_ms
+    /\ last_receipt_attempt' = Some(attempt_count)
+    /\ last_receipt_stage' = receipt_stage
+    /\ last_receipt_failure_class' = receipt_failure_class
+    /\ last_receipt_detail' = detail
+    /\ last_receipt_correlation_id' = correlation_id
+    /\ last_receipt_materialized_session_id' = materialized_session_id
     /\ runtime_outcome_key' = arg_runtime_outcome_key
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
-RecordReceiptAwaitingCompletion(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key) ==
+RecordReceiptAwaitingCompletion(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key) ==
     /\ phase = "AwaitingCompletion"
-    /\ ((receipt_stage = Some(stage)) /\ (receipt_failure_class = arg_failure_class) /\ (receipt_detail = detail))
+    /\ ((receipt_stage # None) /\ (receipt_recorded_at_utc_ms # None) /\ (receipt_detail = detail) /\ (delivery_correlation_id = correlation_id) /\ (target_materialized_session_id = materialized_session_id))
     /\ phase' = "AwaitingCompletion"
     /\ model_step_count' = model_step_count + 1
-    /\ last_receipt' = Some(receipt)
+    /\ last_receipt_recorded_at_utc_ms' = receipt_recorded_at_utc_ms
+    /\ last_receipt_attempt' = Some(attempt_count)
+    /\ last_receipt_stage' = receipt_stage
+    /\ last_receipt_failure_class' = receipt_failure_class
+    /\ last_receipt_detail' = detail
+    /\ last_receipt_correlation_id' = correlation_id
+    /\ last_receipt_materialized_session_id' = materialized_session_id
     /\ runtime_outcome_key' = arg_runtime_outcome_key
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
-RecordReceiptCompleted(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key) ==
+RecordReceiptCompleted(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key) ==
     /\ phase = "Completed"
-    /\ ((receipt_stage = Some(stage)) /\ (receipt_failure_class = arg_failure_class) /\ (receipt_detail = detail))
+    /\ ((receipt_stage # None) /\ (receipt_recorded_at_utc_ms # None) /\ (receipt_detail = detail) /\ (delivery_correlation_id = correlation_id) /\ (target_materialized_session_id = materialized_session_id))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ last_receipt' = Some(receipt)
+    /\ last_receipt_recorded_at_utc_ms' = receipt_recorded_at_utc_ms
+    /\ last_receipt_attempt' = Some(attempt_count)
+    /\ last_receipt_stage' = receipt_stage
+    /\ last_receipt_failure_class' = receipt_failure_class
+    /\ last_receipt_detail' = detail
+    /\ last_receipt_correlation_id' = correlation_id
+    /\ last_receipt_materialized_session_id' = materialized_session_id
     /\ runtime_outcome_key' = arg_runtime_outcome_key
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
-RecordReceiptSkipped(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key) ==
+RecordReceiptSkipped(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key) ==
     /\ phase = "Skipped"
-    /\ ((receipt_stage = Some(stage)) /\ (receipt_failure_class = arg_failure_class) /\ (receipt_detail = detail))
+    /\ ((receipt_stage # None) /\ (receipt_recorded_at_utc_ms # None) /\ (receipt_detail = detail) /\ (delivery_correlation_id = correlation_id) /\ (target_materialized_session_id = materialized_session_id))
     /\ phase' = "Skipped"
     /\ model_step_count' = model_step_count + 1
-    /\ last_receipt' = Some(receipt)
+    /\ last_receipt_recorded_at_utc_ms' = receipt_recorded_at_utc_ms
+    /\ last_receipt_attempt' = Some(attempt_count)
+    /\ last_receipt_stage' = receipt_stage
+    /\ last_receipt_failure_class' = receipt_failure_class
+    /\ last_receipt_detail' = detail
+    /\ last_receipt_correlation_id' = correlation_id
+    /\ last_receipt_materialized_session_id' = materialized_session_id
     /\ runtime_outcome_key' = arg_runtime_outcome_key
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
-RecordReceiptMisfired(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key) ==
+RecordReceiptMisfired(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key) ==
     /\ phase = "Misfired"
-    /\ ((receipt_stage = Some(stage)) /\ (receipt_failure_class = arg_failure_class) /\ (receipt_detail = detail))
+    /\ ((receipt_stage # None) /\ (receipt_recorded_at_utc_ms # None) /\ (receipt_detail = detail) /\ (delivery_correlation_id = correlation_id) /\ (target_materialized_session_id = materialized_session_id))
     /\ phase' = "Misfired"
     /\ model_step_count' = model_step_count + 1
-    /\ last_receipt' = Some(receipt)
+    /\ last_receipt_recorded_at_utc_ms' = receipt_recorded_at_utc_ms
+    /\ last_receipt_attempt' = Some(attempt_count)
+    /\ last_receipt_stage' = receipt_stage
+    /\ last_receipt_failure_class' = receipt_failure_class
+    /\ last_receipt_detail' = detail
+    /\ last_receipt_correlation_id' = correlation_id
+    /\ last_receipt_materialized_session_id' = materialized_session_id
     /\ runtime_outcome_key' = arg_runtime_outcome_key
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
-RecordReceiptSuperseded(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key) ==
+RecordReceiptSuperseded(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key) ==
     /\ phase = "Superseded"
-    /\ ((receipt_stage = Some(stage)) /\ (receipt_failure_class = arg_failure_class) /\ (receipt_detail = detail))
+    /\ ((receipt_stage # None) /\ (receipt_recorded_at_utc_ms # None) /\ (receipt_detail = detail) /\ (delivery_correlation_id = correlation_id) /\ (target_materialized_session_id = materialized_session_id))
     /\ phase' = "Superseded"
     /\ model_step_count' = model_step_count + 1
-    /\ last_receipt' = Some(receipt)
+    /\ last_receipt_recorded_at_utc_ms' = receipt_recorded_at_utc_ms
+    /\ last_receipt_attempt' = Some(attempt_count)
+    /\ last_receipt_stage' = receipt_stage
+    /\ last_receipt_failure_class' = receipt_failure_class
+    /\ last_receipt_detail' = detail
+    /\ last_receipt_correlation_id' = correlation_id
+    /\ last_receipt_materialized_session_id' = materialized_session_id
     /\ runtime_outcome_key' = arg_runtime_outcome_key
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
-RecordReceiptDeliveryFailed(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key) ==
+RecordReceiptDeliveryFailed(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key) ==
     /\ phase = "DeliveryFailed"
-    /\ ((receipt_stage = Some(stage)) /\ (receipt_failure_class = arg_failure_class) /\ (receipt_detail = detail))
+    /\ ((receipt_stage # None) /\ (receipt_recorded_at_utc_ms # None) /\ (receipt_detail = detail) /\ (delivery_correlation_id = correlation_id) /\ (target_materialized_session_id = materialized_session_id))
     /\ phase' = "DeliveryFailed"
     /\ model_step_count' = model_step_count + 1
-    /\ last_receipt' = Some(receipt)
+    /\ last_receipt_recorded_at_utc_ms' = receipt_recorded_at_utc_ms
+    /\ last_receipt_attempt' = Some(attempt_count)
+    /\ last_receipt_stage' = receipt_stage
+    /\ last_receipt_failure_class' = receipt_failure_class
+    /\ last_receipt_detail' = detail
+    /\ last_receipt_correlation_id' = correlation_id
+    /\ last_receipt_materialized_session_id' = materialized_session_id
     /\ runtime_outcome_key' = arg_runtime_outcome_key
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ClaimPending(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token) ==
@@ -332,7 +404,14 @@ ClaimPending(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token) 
     /\ claimed_at_utc_ms' = Some(at_utc_ms)
     /\ claim_token' = Some(arg_claim_token)
     /\ delivery_correlation_id' = None
-    /\ last_receipt' = None
+    /\ receipt_recorded_at_utc_ms' = None
+    /\ last_receipt_recorded_at_utc_ms' = None
+    /\ last_receipt_attempt' = None
+    /\ last_receipt_stage' = None
+    /\ last_receipt_failure_class' = None
+    /\ last_receipt_detail' = None
+    /\ last_receipt_correlation_id' = None
+    /\ last_receipt_materialized_session_id' = None
     /\ runtime_outcome_key' = None
     /\ receipt_stage' = None
     /\ receipt_failure_class' = None
@@ -342,7 +421,7 @@ ClaimPending(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token) 
     /\ dispatched_at_utc_ms' = None
     /\ completed_at_utc_ms' = None
     /\ attempt_count' = (attempt_count) + 1
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, target_materialized_session_id, superseded_by_revision >>
 
 
 DispatchStartedFromClaimed(correlation_id, at_utc_ms) ==
@@ -350,11 +429,12 @@ DispatchStartedFromClaimed(correlation_id, at_utc_ms) ==
     /\ phase' = "Dispatching"
     /\ model_step_count' = model_step_count + 1
     /\ delivery_correlation_id' = correlation_id
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
     /\ receipt_stage' = Some("DispatchStarted")
     /\ receipt_failure_class' = None
     /\ receipt_detail' = None
     /\ dispatched_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, last_receipt, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 AwaitCompletionFromDispatching(at_utc_ms) ==
@@ -362,18 +442,19 @@ AwaitCompletionFromDispatching(at_utc_ms) ==
     /\ phase' = "AwaitingCompletion"
     /\ model_step_count' = model_step_count + 1
     /\ dispatched_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 CompleteFromDispatchingOrAwaiting(at_utc_ms) ==
     /\ phase = "Dispatching" \/ phase = "AwaitingCompletion"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
     /\ receipt_stage' = Some("Completed")
     /\ receipt_failure_class' = None
     /\ receipt_detail' = None
     /\ completed_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, failure_class, failure_detail, dispatched_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, failure_class, failure_detail, dispatched_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 SkipFromPendingOrLive(detail, arg_failure_class, at_utc_ms) ==
@@ -384,13 +465,14 @@ SkipFromPendingOrLive(detail, arg_failure_class, at_utc_ms) ==
     /\ lease_expires_at_utc_ms' = None
     /\ claim_token' = None
     /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
     /\ receipt_stage' = Some("Skipped")
     /\ receipt_failure_class' = arg_failure_class
     /\ receipt_detail' = detail
     /\ failure_class' = arg_failure_class
     /\ failure_detail' = detail
     /\ completed_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_at_utc_ms, last_receipt, runtime_outcome_key, dispatched_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_at_utc_ms, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, dispatched_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 MisfireFromPendingOrLive(detail, arg_failure_class, at_utc_ms) ==
@@ -401,38 +483,41 @@ MisfireFromPendingOrLive(detail, arg_failure_class, at_utc_ms) ==
     /\ lease_expires_at_utc_ms' = None
     /\ claim_token' = None
     /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
     /\ receipt_stage' = Some("Misfired")
     /\ receipt_failure_class' = arg_failure_class
     /\ receipt_detail' = detail
     /\ failure_class' = arg_failure_class
     /\ failure_detail' = detail
     /\ completed_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_at_utc_ms, last_receipt, runtime_outcome_key, dispatched_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_at_utc_ms, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, dispatched_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 SupersedePendingOrLive(arg_superseded_by_revision, at_utc_ms) ==
     /\ phase = "Pending" \/ phase = "Claimed" \/ phase = "Dispatching" \/ phase = "AwaitingCompletion"
     /\ phase' = "Superseded"
     /\ model_step_count' = model_step_count + 1
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
     /\ receipt_stage' = Some("Superseded")
     /\ receipt_failure_class' = None
     /\ receipt_detail' = None
     /\ completed_at_utc_ms' = Some(at_utc_ms)
     /\ superseded_by_revision' = Some(arg_superseded_by_revision)
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, failure_class, failure_detail, dispatched_at_utc_ms, attempt_count >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, failure_class, failure_detail, dispatched_at_utc_ms, attempt_count >>
 
 
 DeliveryFailedFromClaimedOrLive(arg_failure_class, detail, at_utc_ms) ==
     /\ phase = "Claimed" \/ phase = "Dispatching" \/ phase = "AwaitingCompletion"
     /\ phase' = "DeliveryFailed"
     /\ model_step_count' = model_step_count + 1
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
     /\ receipt_stage' = Some("DeliveryFailed")
     /\ receipt_failure_class' = Some(arg_failure_class)
     /\ receipt_detail' = detail
     /\ failure_class' = Some(arg_failure_class)
     /\ failure_detail' = detail
     /\ completed_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, last_receipt, runtime_outcome_key, dispatched_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, dispatched_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 LeaseExpiredFromClaimed(at_utc_ms) ==
@@ -444,11 +529,12 @@ LeaseExpiredFromClaimed(at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ claim_token' = None
     /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
     /\ receipt_stage' = Some("LeaseExpired")
     /\ receipt_failure_class' = Some("LeaseLost")
     /\ receipt_detail' = Some("lease expired before completion")
     /\ dispatched_at_utc_ms' = None
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, last_receipt, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 LeaseExpiredFromDispatching(at_utc_ms) ==
@@ -460,11 +546,12 @@ LeaseExpiredFromDispatching(at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ claim_token' = None
     /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
     /\ receipt_stage' = Some("LeaseExpired")
     /\ receipt_failure_class' = Some("LeaseLost")
     /\ receipt_detail' = Some("lease expired before completion")
     /\ dispatched_at_utc_ms' = None
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, last_receipt, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 LeaseExpiredFromAwaitingCompletion(at_utc_ms) ==
@@ -476,11 +563,12 @@ LeaseExpiredFromAwaitingCompletion(at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ claim_token' = None
     /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
     /\ receipt_stage' = Some("LeaseExpired")
     /\ receipt_failure_class' = Some("LeaseLost")
     /\ receipt_detail' = Some("lease expired before completion")
     /\ dispatched_at_utc_ms' = None
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, last_receipt, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ReleaseLeaseForPausedScheduleFromClaimed(at_utc_ms) ==
@@ -492,11 +580,12 @@ ReleaseLeaseForPausedScheduleFromClaimed(at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ claim_token' = None
     /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
     /\ receipt_stage' = Some("LeaseExpired")
     /\ receipt_failure_class' = Some("LeaseLost")
     /\ receipt_detail' = Some("lease released because schedule was paused before dispatch")
     /\ dispatched_at_utc_ms' = None
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, last_receipt, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ReleaseLeaseForPausedScheduleFromDispatching(at_utc_ms) ==
@@ -508,11 +597,12 @@ ReleaseLeaseForPausedScheduleFromDispatching(at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ claim_token' = None
     /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
     /\ receipt_stage' = Some("LeaseExpired")
     /\ receipt_failure_class' = Some("LeaseLost")
     /\ receipt_detail' = Some("lease released because schedule was paused before dispatch")
     /\ dispatched_at_utc_ms' = None
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, last_receipt, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 ReleaseLeaseForPausedScheduleFromAwaitingCompletion(at_utc_ms) ==
@@ -524,15 +614,16 @@ ReleaseLeaseForPausedScheduleFromAwaitingCompletion(at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ claim_token' = None
     /\ delivery_correlation_id' = None
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
     /\ receipt_stage' = Some("LeaseExpired")
     /\ receipt_failure_class' = Some("LeaseLost")
     /\ receipt_detail' = Some("lease released because schedule was paused before dispatch")
     /\ dispatched_at_utc_ms' = None
-    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, last_receipt, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, failure_class, failure_detail, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
 Next ==
-    \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_schedule_id \in ScheduleIdValues : \E arg_schedule_revision \in 0..2 : \E arg_occurrence_ordinal \in 0..2 : \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_misfire_policy_key \in StringValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_overlap_policy_key \in StringValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : \E arg_missing_target_policy_key \in StringValues : \E arg_due_at_utc_ms \in 0..2 : \E arg_misfire_deadline_utc_ms \in 0..2 : PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revision, arg_occurrence_ordinal, arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_misfire_policy_key, arg_overlap_policy, arg_overlap_policy_key, arg_missing_target_policy, arg_missing_target_policy_key, arg_due_at_utc_ms, arg_misfire_deadline_utc_ms)
+    \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_schedule_id \in ScheduleIdValues : \E arg_schedule_revision \in 0..2 : \E arg_occurrence_ordinal \in 0..2 : \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_misfire_policy_key \in StringValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_overlap_policy_key \in StringValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : \E arg_missing_target_policy_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : \E arg_due_at_utc_ms \in 0..2 : \E arg_misfire_deadline_utc_ms \in 0..2 : PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revision, arg_occurrence_ordinal, arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_misfire_policy_key, arg_overlap_policy, arg_overlap_policy_key, arg_missing_target_policy, arg_missing_target_policy_key, arg_target_materialized_session_id, arg_due_at_utc_ms, arg_misfire_deadline_utc_ms)
     \/ \E now_utc_ms \in 0..2 : ClassifyDuePendingFuture(now_utc_ms)
     \/ \E now_utc_ms \in 0..2 : ClassifyDuePendingMisfire(now_utc_ms)
     \/ \E now_utc_ms \in 0..2 : ClassifyDuePendingClaimEligible(now_utc_ms)
@@ -547,17 +638,17 @@ Next ==
     \/ \E now_utc_ms \in 0..2 : ClassifyDueMisfiredNoAction(now_utc_ms)
     \/ \E now_utc_ms \in 0..2 : ClassifyDueSupersededNoAction(now_utc_ms)
     \/ \E now_utc_ms \in 0..2 : ClassifyDueDeliveryFailedNoAction(now_utc_ms)
-    \/ \E arg_target_binding_key \in StringValues : SyncTargetSnapshotPending(arg_target_binding_key)
-    \/ \E arg_target_binding_key \in StringValues : SyncTargetSnapshotClaimed(arg_target_binding_key)
-    \/ \E receipt \in DeliveryReceiptValues : \E stage \in DeliveryReceiptStageValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E detail \in OptionStringValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptPending(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key)
-    \/ \E receipt \in DeliveryReceiptValues : \E stage \in DeliveryReceiptStageValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E detail \in OptionStringValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptClaimed(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key)
-    \/ \E receipt \in DeliveryReceiptValues : \E stage \in DeliveryReceiptStageValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E detail \in OptionStringValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptDispatching(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key)
-    \/ \E receipt \in DeliveryReceiptValues : \E stage \in DeliveryReceiptStageValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E detail \in OptionStringValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptAwaitingCompletion(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key)
-    \/ \E receipt \in DeliveryReceiptValues : \E stage \in DeliveryReceiptStageValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E detail \in OptionStringValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptCompleted(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key)
-    \/ \E receipt \in DeliveryReceiptValues : \E stage \in DeliveryReceiptStageValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E detail \in OptionStringValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptSkipped(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key)
-    \/ \E receipt \in DeliveryReceiptValues : \E stage \in DeliveryReceiptStageValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E detail \in OptionStringValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptMisfired(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key)
-    \/ \E receipt \in DeliveryReceiptValues : \E stage \in DeliveryReceiptStageValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E detail \in OptionStringValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptSuperseded(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key)
-    \/ \E receipt \in DeliveryReceiptValues : \E stage \in DeliveryReceiptStageValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E detail \in OptionStringValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptDeliveryFailed(receipt, stage, arg_failure_class, detail, arg_runtime_outcome_key)
+    \/ \E arg_target_binding_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : SyncTargetSnapshotPending(arg_target_binding_key, arg_target_materialized_session_id)
+    \/ \E arg_target_binding_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : SyncTargetSnapshotClaimed(arg_target_binding_key, arg_target_materialized_session_id)
+    \/ \E correlation_id \in OptionStringValues : \E detail \in OptionStringValues : \E materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptPending(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key)
+    \/ \E correlation_id \in OptionStringValues : \E detail \in OptionStringValues : \E materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptClaimed(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key)
+    \/ \E correlation_id \in OptionStringValues : \E detail \in OptionStringValues : \E materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptDispatching(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key)
+    \/ \E correlation_id \in OptionStringValues : \E detail \in OptionStringValues : \E materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptAwaitingCompletion(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key)
+    \/ \E correlation_id \in OptionStringValues : \E detail \in OptionStringValues : \E materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptCompleted(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key)
+    \/ \E correlation_id \in OptionStringValues : \E detail \in OptionStringValues : \E materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptSkipped(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key)
+    \/ \E correlation_id \in OptionStringValues : \E detail \in OptionStringValues : \E materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptMisfired(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key)
+    \/ \E correlation_id \in OptionStringValues : \E detail \in OptionStringValues : \E materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptSuperseded(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key)
+    \/ \E correlation_id \in OptionStringValues : \E detail \in OptionStringValues : \E materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : RecordReceiptDeliveryFailed(correlation_id, detail, materialized_session_id, arg_runtime_outcome_key)
     \/ \E owner_id \in StringValues : \E at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : ClaimPending(owner_id, at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token)
     \/ \E correlation_id \in OptionStringValues : \E at_utc_ms \in 0..2 : DispatchStartedFromClaimed(correlation_id, at_utc_ms)
     \/ \E at_utc_ms \in 0..2 : AwaitCompletionFromDispatching(at_utc_ms)

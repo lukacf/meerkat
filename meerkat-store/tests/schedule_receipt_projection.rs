@@ -4,10 +4,9 @@
 use chrono::{Duration, Utc};
 use meerkat_core::{ContentInput, SessionId};
 use meerkat_schedule::{
-    CreateScheduleRequest, DeliveryReceipt, DeliveryReceiptStage, MisfirePolicy,
-    MissingTargetPolicy, Occurrence, OccurrenceFilter, OccurrenceLifecycleInput, OccurrenceOrdinal,
-    OverlapPolicy, Schedule, ScheduleStore, ScheduledSessionAction, SessionTargetBinding,
-    TargetBinding, TriggerSpec,
+    CreateScheduleRequest, MisfirePolicy, MissingTargetPolicy, Occurrence, OccurrenceFilter,
+    OccurrenceLifecycleInput, OccurrenceOrdinal, OverlapPolicy, Schedule, ScheduleStore,
+    ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
 };
 use meerkat_store::SqliteScheduleStore;
 use std::collections::BTreeMap;
@@ -80,12 +79,7 @@ async fn assert_append_receipt_updates_occurrence_projection(
     let occurrence = sample_in_flight_occurrence(&schedule);
     store.put_occurrence(occurrence.clone()).await?;
 
-    let mut receipt = DeliveryReceipt::new(
-        occurrence.occurrence_id.clone(),
-        occurrence.attempt_count,
-        DeliveryReceiptStage::DispatchStarted,
-    );
-    receipt.correlation_id = Some("dispatch-attempt-1".to_string());
+    let receipt = occurrence.delivery_receipt_from_authority(None)?;
 
     store.append_receipt(receipt.clone()).await?;
 

@@ -1372,7 +1372,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
             NamedTypeBinding::string("ClaimToken"),
-            NamedTypeBinding::string("DeliveryReceipt"),
+            NamedTypeBinding::string("SessionId"),
             NamedTypeBinding::string_enum(
                 "DeliveryReceiptStage",
                 &[

@@ -30,8 +30,62 @@ fn policy_key<T: Serialize>(prefix: &str, value: &T) -> String {
     semantic_json_key(prefix, value)
 }
 
-fn receipt_machine_value(receipt: &DeliveryReceipt) -> String {
-    serde_json::to_string(receipt).unwrap_or_default()
+pub(crate) fn target_materialized_session_id(target: &TargetBinding) -> Option<SessionId> {
+    let TargetBinding::Session(binding) = target else {
+        return None;
+    };
+    match binding.as_ref() {
+        SessionTargetBinding::MaterializeOnDemandSession {
+            bound_session_id, ..
+        } => bound_session_id.clone(),
+        SessionTargetBinding::ExactSession { .. }
+        | SessionTargetBinding::ResumableSession { .. } => None,
+    }
+}
+
+#[derive(Serialize)]
+struct DeliveryReceiptAuthorityKey<'a> {
+    schema: &'static str,
+    occurrence_id: &'a str,
+    attempt: u32,
+    stage: &'static str,
+    recorded_at_utc_ms: u64,
+    correlation_id: Option<&'a str>,
+    detail: Option<&'a str>,
+    failure_class: Option<&'static str>,
+    runtime_outcome_key: Option<&'a str>,
+    materialized_session_id: Option<String>,
+}
+
+pub(crate) fn delivery_receipt_id_from_authority(
+    occurrence_id: &OccurrenceId,
+    attempt: u32,
+    stage: DeliveryReceiptStage,
+    recorded_at_utc_ms: u64,
+    correlation_id: Option<&str>,
+    detail: Option<&str>,
+    failure_class: Option<OccurrenceFailureClass>,
+    runtime_outcome_key: Option<&str>,
+    materialized_session_id: Option<&SessionId>,
+) -> Uuid {
+    let materialized_session_id = materialized_session_id.map(|id| id.0.to_string());
+    let occurrence_id = occurrence_id.to_string();
+    let key = DeliveryReceiptAuthorityKey {
+        schema: "meerkat.schedule.delivery_receipt.v1",
+        occurrence_id: &occurrence_id,
+        attempt,
+        stage: delivery_receipt_stage_to_wire(stage),
+        recorded_at_utc_ms,
+        correlation_id,
+        detail,
+        failure_class: failure_class
+            .map(failure_class_to_machine)
+            .map(occurrence_failure_class_to_wire),
+        runtime_outcome_key,
+        materialized_session_id,
+    };
+    let key = serde_json::to_vec(&key).unwrap_or_default();
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, &key)
 }
 
 fn datetime_to_machine_millis(dt: DateTime<Utc>, field: &'static str) -> Result<u64, String> {
@@ -282,6 +336,22 @@ fn occurrence_receipt_stage_to_wire(stage: occ_dsl::DeliveryReceiptStage) -> &'s
     }
 }
 
+fn delivery_receipt_stage_to_wire(stage: DeliveryReceiptStage) -> &'static str {
+    match stage {
+        DeliveryReceiptStage::Planned => "planned",
+        DeliveryReceiptStage::Claimed => "claimed",
+        DeliveryReceiptStage::DispatchStarted => "dispatch_started",
+        DeliveryReceiptStage::DispatchAccepted => "dispatch_accepted",
+        DeliveryReceiptStage::AwaitingCompletion => "awaiting_completion",
+        DeliveryReceiptStage::Completed => "completed",
+        DeliveryReceiptStage::Skipped => "skipped",
+        DeliveryReceiptStage::Misfired => "misfired",
+        DeliveryReceiptStage::Superseded => "superseded",
+        DeliveryReceiptStage::DeliveryFailed => "delivery_failed",
+        DeliveryReceiptStage::LeaseExpired => "lease_expired",
+    }
+}
+
 fn occurrence_receipt_stage_from_wire(
     stage: &str,
 ) -> Result<occ_dsl::DeliveryReceiptStage, String> {
@@ -354,6 +424,39 @@ fn failure_class_to_machine(failure_class: OccurrenceFailureClass) -> occ_dsl::F
     }
 }
 
+fn failure_class_from_machine(failure_class: occ_dsl::FailureClass) -> OccurrenceFailureClass {
+    match failure_class {
+        occ_dsl::FailureClass::TargetMaterializationFailed => {
+            OccurrenceFailureClass::TargetMaterializationFailed
+        }
+        occ_dsl::FailureClass::TargetMissing => OccurrenceFailureClass::TargetMissing,
+        occ_dsl::FailureClass::TargetBusy => OccurrenceFailureClass::TargetBusy,
+        occ_dsl::FailureClass::RuntimeRejected => OccurrenceFailureClass::RuntimeRejected,
+        occ_dsl::FailureClass::MobRejected => OccurrenceFailureClass::MobRejected,
+        occ_dsl::FailureClass::LeaseLost => OccurrenceFailureClass::LeaseLost,
+        occ_dsl::FailureClass::TransportError => OccurrenceFailureClass::TransportError,
+        occ_dsl::FailureClass::InternalError => OccurrenceFailureClass::InternalError,
+    }
+}
+
+fn receipt_stage_from_machine(stage: occ_dsl::DeliveryReceiptStage) -> DeliveryReceiptStage {
+    match stage {
+        occ_dsl::DeliveryReceiptStage::Planned => DeliveryReceiptStage::Planned,
+        occ_dsl::DeliveryReceiptStage::Claimed => DeliveryReceiptStage::Claimed,
+        occ_dsl::DeliveryReceiptStage::DispatchStarted => DeliveryReceiptStage::DispatchStarted,
+        occ_dsl::DeliveryReceiptStage::DispatchAccepted => DeliveryReceiptStage::DispatchAccepted,
+        occ_dsl::DeliveryReceiptStage::AwaitingCompletion => {
+            DeliveryReceiptStage::AwaitingCompletion
+        }
+        occ_dsl::DeliveryReceiptStage::Completed => DeliveryReceiptStage::Completed,
+        occ_dsl::DeliveryReceiptStage::Skipped => DeliveryReceiptStage::Skipped,
+        occ_dsl::DeliveryReceiptStage::Misfired => DeliveryReceiptStage::Misfired,
+        occ_dsl::DeliveryReceiptStage::Superseded => DeliveryReceiptStage::Superseded,
+        occ_dsl::DeliveryReceiptStage::DeliveryFailed => DeliveryReceiptStage::DeliveryFailed,
+        occ_dsl::DeliveryReceiptStage::LeaseExpired => DeliveryReceiptStage::LeaseExpired,
+    }
+}
+
 fn schedule_machine_schema_identity() -> (String, u32) {
     let schema = sched_dsl::ScheduleLifecycleMachineState::schema();
     (schema.machine.to_string(), schema.version)
@@ -419,6 +522,108 @@ fn validate_occurrence_machine_recovery(
                 "generated OccurrenceLifecycleMachine rejected recovered machine_state: {source:?}"
             )
         })
+}
+
+fn session_id_from_machine(value: &occ_dsl::SessionId) -> Result<SessionId, String> {
+    SessionId::parse(&value.0)
+        .map_err(|source| format!("invalid machine SessionId `{}`: {source}", value.0))
+}
+
+fn optional_session_id_to_machine(value: Option<SessionId>) -> Option<occ_dsl::SessionId> {
+    value.map(|id| occ_dsl::SessionId(id.0.to_string()))
+}
+
+fn last_receipt_from_machine_projection(
+    machine: &occ_dsl::OccurrenceLifecycleMachineState,
+    runtime_outcome: Option<RuntimeDeliveryOutcome>,
+) -> Result<Option<DeliveryReceipt>, String> {
+    let has_last_receipt = machine.last_receipt_stage.is_some()
+        || machine.last_receipt_recorded_at_utc_ms.is_some()
+        || machine.last_receipt_attempt.is_some()
+        || machine.last_receipt_failure_class.is_some()
+        || machine.last_receipt_detail.is_some()
+        || machine.last_receipt_correlation_id.is_some()
+        || machine.last_receipt_materialized_session_id.is_some()
+        || machine.runtime_outcome_key.is_some();
+    if !has_last_receipt {
+        if runtime_outcome.is_some() {
+            return Err(
+                "runtime_outcome projection exists without machine receipt authority".into(),
+            );
+        }
+        return Ok(None);
+    }
+
+    let stage = machine
+        .last_receipt_stage
+        .ok_or_else(|| "machine receipt authority missing last receipt stage".to_string())?;
+    let recorded_at_utc_ms = machine.last_receipt_recorded_at_utc_ms.ok_or_else(|| {
+        "machine receipt authority missing last receipt recorded timestamp".to_string()
+    })?;
+    let recorded_at_utc_ms_i64 = i64::try_from(recorded_at_utc_ms).map_err(|_| {
+        format!(
+            "machine receipt recorded timestamp `{recorded_at_utc_ms}` cannot be represented as i64"
+        )
+    })?;
+    let recorded_at_utc =
+        DateTime::from_timestamp_millis(recorded_at_utc_ms_i64).ok_or_else(|| {
+            format!("machine receipt recorded timestamp `{recorded_at_utc_ms}` is invalid")
+        })?;
+    let attempt = machine
+        .last_receipt_attempt
+        .ok_or_else(|| "machine receipt authority missing last receipt attempt".to_string())
+        .and_then(|attempt| {
+            u32::try_from(attempt).map_err(|_| {
+                format!("machine receipt attempt `{attempt}` cannot be represented as u32")
+            })
+        })?;
+    let occurrence_id = OccurrenceId::parse(&machine.occurrence_id.0).map_err(|source| {
+        format!(
+            "machine receipt authority emitted invalid occurrence id `{}`: {source}",
+            machine.occurrence_id.0
+        )
+    })?;
+    let stage = receipt_stage_from_machine(stage);
+    let failure_class = machine
+        .last_receipt_failure_class
+        .map(failure_class_from_machine);
+    let materialized_session_id = machine
+        .last_receipt_materialized_session_id
+        .as_ref()
+        .map(session_id_from_machine)
+        .transpose()?;
+    let runtime_outcome_key = runtime_outcome
+        .as_ref()
+        .map(|outcome| semantic_json_key("runtime_outcome", outcome));
+    if runtime_outcome_key != machine.runtime_outcome_key {
+        return Err(format!(
+            "runtime_outcome projection key `{runtime_outcome_key:?}` does not match machine receipt key `{:?}`",
+            machine.runtime_outcome_key
+        ));
+    }
+    let receipt_id = delivery_receipt_id_from_authority(
+        &occurrence_id,
+        attempt,
+        stage,
+        recorded_at_utc_ms,
+        machine.last_receipt_correlation_id.as_deref(),
+        machine.last_receipt_detail.as_deref(),
+        failure_class,
+        machine.runtime_outcome_key.as_deref(),
+        materialized_session_id.as_ref(),
+    );
+    Ok(Some(DeliveryReceipt {
+        receipt_id,
+        occurrence_id,
+        attempt,
+        stage,
+        recorded_at_utc,
+        correlation_id: machine.last_receipt_correlation_id.clone(),
+        detail: machine.last_receipt_detail.clone(),
+        failure_class,
+        runtime_outcome,
+        materialized_session_id,
+    }))
 }
 
 pub(crate) fn validate_schedule_machine_projection(schedule: &Schedule) -> Result<(), String> {
@@ -546,6 +751,9 @@ pub(crate) fn validate_occurrence_machine_projection(
     }
     if trigger_stable_key(&occurrence.trigger_snapshot) != machine.trigger_key
         || occurrence.target_snapshot.stable_key() != machine.target_binding_key
+        || optional_session_id_to_machine(target_materialized_session_id(
+            &occurrence.target_snapshot,
+        )) != machine.target_materialized_session_id.clone()
     {
         return Err(format!(
             "occurrence {} target snapshot projection does not match machine_state",
@@ -608,17 +816,8 @@ pub(crate) fn validate_occurrence_machine_projection(
         ));
     }
     if occurrence.delivery_correlation_id != machine.delivery_correlation_id
-        || occurrence
-            .last_receipt
-            .as_ref()
-            .map(receipt_machine_value)
-            .map(occ_dsl::DeliveryReceipt)
-            != machine.last_receipt.clone()
-        || occurrence
-            .runtime_outcome
-            .as_ref()
-            .map(|outcome| semantic_json_key("runtime_outcome", outcome))
-            != machine.runtime_outcome_key
+        || occurrence.last_receipt
+            != last_receipt_from_machine_projection(machine, occurrence.runtime_outcome.clone())?
     {
         return Err(format!(
             "occurrence {} delivery projection does not match machine_state",
@@ -1964,7 +2163,15 @@ struct OccurrenceMachineStateWire {
     claimed_at_utc_ms: Option<u64>,
     claim_token: Option<String>,
     delivery_correlation_id: Option<String>,
-    last_receipt: Option<String>,
+    target_materialized_session_id: Option<String>,
+    receipt_recorded_at_utc_ms: Option<u64>,
+    last_receipt_recorded_at_utc_ms: Option<u64>,
+    last_receipt_attempt: Option<u64>,
+    last_receipt_stage: Option<String>,
+    last_receipt_failure_class: Option<String>,
+    last_receipt_detail: Option<String>,
+    last_receipt_correlation_id: Option<String>,
+    last_receipt_materialized_session_id: Option<String>,
     runtime_outcome_key: Option<String>,
     receipt_stage: Option<String>,
     receipt_failure_class: Option<String>,
@@ -2006,7 +2213,27 @@ impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateW
             claimed_at_utc_ms: state.claimed_at_utc_ms,
             claim_token: state.claim_token.as_ref().map(|token| token.0.clone()),
             delivery_correlation_id: state.delivery_correlation_id.clone(),
-            last_receipt: state.last_receipt.as_ref().map(|receipt| receipt.0.clone()),
+            target_materialized_session_id: state
+                .target_materialized_session_id
+                .as_ref()
+                .map(|session_id| session_id.0.clone()),
+            receipt_recorded_at_utc_ms: state.receipt_recorded_at_utc_ms,
+            last_receipt_recorded_at_utc_ms: state.last_receipt_recorded_at_utc_ms,
+            last_receipt_attempt: state.last_receipt_attempt,
+            last_receipt_stage: state
+                .last_receipt_stage
+                .map(occurrence_receipt_stage_to_wire)
+                .map(str::to_string),
+            last_receipt_failure_class: state
+                .last_receipt_failure_class
+                .map(occurrence_failure_class_to_wire)
+                .map(str::to_string),
+            last_receipt_detail: state.last_receipt_detail.clone(),
+            last_receipt_correlation_id: state.last_receipt_correlation_id.clone(),
+            last_receipt_materialized_session_id: state
+                .last_receipt_materialized_session_id
+                .as_ref()
+                .map(|session_id| session_id.0.clone()),
             runtime_outcome_key: state.runtime_outcome_key.clone(),
             receipt_stage: state
                 .receipt_stage
@@ -2058,7 +2285,27 @@ impl TryFrom<OccurrenceMachineStateWire> for occ_dsl::OccurrenceLifecycleMachine
             claimed_at_utc_ms: wire.claimed_at_utc_ms,
             claim_token: wire.claim_token.map(occ_dsl::ClaimToken),
             delivery_correlation_id: wire.delivery_correlation_id,
-            last_receipt: wire.last_receipt.map(occ_dsl::DeliveryReceipt),
+            target_materialized_session_id: wire
+                .target_materialized_session_id
+                .map(occ_dsl::SessionId),
+            receipt_recorded_at_utc_ms: wire.receipt_recorded_at_utc_ms,
+            last_receipt_recorded_at_utc_ms: wire.last_receipt_recorded_at_utc_ms,
+            last_receipt_attempt: wire.last_receipt_attempt,
+            last_receipt_stage: wire
+                .last_receipt_stage
+                .as_deref()
+                .map(occurrence_receipt_stage_from_wire)
+                .transpose()?,
+            last_receipt_failure_class: wire
+                .last_receipt_failure_class
+                .as_deref()
+                .map(occurrence_failure_class_from_wire)
+                .transpose()?,
+            last_receipt_detail: wire.last_receipt_detail,
+            last_receipt_correlation_id: wire.last_receipt_correlation_id,
+            last_receipt_materialized_session_id: wire
+                .last_receipt_materialized_session_id
+                .map(occ_dsl::SessionId),
             runtime_outcome_key: wire.runtime_outcome_key,
             receipt_stage: wire
                 .receipt_stage

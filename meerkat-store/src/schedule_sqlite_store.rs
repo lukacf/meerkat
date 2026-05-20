@@ -258,8 +258,8 @@ impl SqliteScheduleStore {
             let mut conn = open_connection(&path)?;
             ensure_schedule_schema(&conn)?;
             let tx = begin_immediate_transaction(&mut conn)?;
-            record_occurrence_receipt_in_txn(&tx, &receipt)?;
-            write_receipt_in_txn(&tx, &receipt)?;
+            let canonical_receipt = record_occurrence_receipt_in_txn(&tx, &receipt)?;
+            write_receipt_in_txn(&tx, &canonical_receipt)?;
             tx.commit()?;
             Ok(())
         })
@@ -348,11 +348,11 @@ impl SqliteScheduleStore {
                                 StoreError::Internal(error.to_string())
                             })?
                             .into_occurrence();
-                        let receipt = updated
-                            .delivery_receipt_from_authority(None, None, None)
-                            .map_err(|error: OccurrenceLifecycleError| {
+                        let receipt = updated.delivery_receipt_from_authority(None).map_err(
+                            |error: OccurrenceLifecycleError| {
                                 StoreError::Internal(error.to_string())
-                            })?;
+                            },
+                        )?;
                         updated = updated
                             .apply(OccurrenceLifecycleInput::RecordReceipt {
                                 runtime_outcome: receipt.runtime_outcome.clone(),
@@ -719,7 +719,7 @@ fn expire_occurrence_lease_for_sqlite(
         .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
         .into_occurrence();
     let receipt = expired
-        .delivery_receipt_from_authority(None, None, None)
+        .delivery_receipt_from_authority(None)
         .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?;
     let expired = expired
         .apply(OccurrenceLifecycleInput::RecordReceipt {
@@ -790,7 +790,7 @@ fn supersede_pending_occurrences_in_txn(
 fn record_occurrence_receipt_in_txn(
     tx: &rusqlite::Transaction<'_>,
     receipt: &DeliveryReceipt,
-) -> Result<(), StoreError> {
+) -> Result<DeliveryReceipt, StoreError> {
     let occurrence_id = receipt.occurrence_id.to_string();
     let Some(bytes) = tx
         .query_row(
@@ -813,7 +813,11 @@ fn record_occurrence_receipt_in_txn(
         })
         .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
         .into_occurrence();
-    write_occurrence_in_txn(tx, &occurrence)
+    let canonical_receipt = occurrence.last_receipt.clone().ok_or_else(|| {
+        StoreError::Internal("generated occurrence authority did not produce a receipt".to_string())
+    })?;
+    write_occurrence_in_txn(tx, &occurrence)?;
+    Ok(canonical_receipt)
 }
 
 fn schedule_phase_label(phase: meerkat_schedule::SchedulePhase) -> &'static str {

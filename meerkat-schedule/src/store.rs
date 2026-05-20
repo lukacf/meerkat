@@ -117,7 +117,7 @@ pub(crate) fn expire_occurrence_lease(
     let expired = occurrence
         .apply(OccurrenceLifecycleInput::LeaseExpired { at_utc })?
         .into_occurrence();
-    let receipt = expired.delivery_receipt_from_authority(None, None, None)?;
+    let receipt = expired.delivery_receipt_from_authority(None)?;
     let expired = expired
         .apply(OccurrenceLifecycleInput::RecordReceipt {
             runtime_outcome: receipt.runtime_outcome.clone(),
@@ -531,11 +531,16 @@ impl ScheduleStore for MemoryScheduleStore {
             })
             .map_err(|error| ScheduleStoreError::Internal(error.to_string()))?
             .into_occurrence();
+        let canonical_receipt = updated.last_receipt.clone().ok_or_else(|| {
+            ScheduleStoreError::Internal(
+                "generated occurrence authority did not produce a receipt".to_string(),
+            )
+        })?;
         state
             .receipts
             .entry(receipt.occurrence_id.clone())
             .or_default()
-            .push(receipt);
+            .push(canonical_receipt);
         state
             .occurrences
             .insert(updated.occurrence_id.clone(), updated);
@@ -610,7 +615,7 @@ impl ScheduleStore for MemoryScheduleStore {
                         .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
                         .into_occurrence();
                     let receipt = updated
-                        .delivery_receipt_from_authority(None, None, None)
+                        .delivery_receipt_from_authority(None)
                         .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
                     state
                         .receipts

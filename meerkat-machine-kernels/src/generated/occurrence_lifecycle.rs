@@ -40,34 +40,6 @@ impl std::fmt::Display for ClaimToken {
         f.write_str(&self.0)
     }
 }
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct DeliveryReceipt(pub String);
-impl From<String> for DeliveryReceipt {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for DeliveryReceipt {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for DeliveryReceipt {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -512,6 +484,34 @@ impl std::fmt::Display for ScheduleId {
         f.write_str(&self.0)
     }
 }
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct SessionId(pub String);
+impl From<String> for SessionId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for SessionId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -553,7 +553,15 @@ pub struct State {
     pub claimed_at_utc_ms: Option<u64>,
     pub claim_token: Option<ClaimToken>,
     pub delivery_correlation_id: Option<String>,
-    pub last_receipt: Option<DeliveryReceipt>,
+    pub target_materialized_session_id: Option<SessionId>,
+    pub receipt_recorded_at_utc_ms: Option<u64>,
+    pub last_receipt_recorded_at_utc_ms: Option<u64>,
+    pub last_receipt_attempt: Option<u64>,
+    pub last_receipt_stage: Option<DeliveryReceiptStage>,
+    pub last_receipt_failure_class: Option<OccurrenceFailureClass>,
+    pub last_receipt_detail: Option<String>,
+    pub last_receipt_correlation_id: Option<String>,
+    pub last_receipt_materialized_session_id: Option<SessionId>,
     pub runtime_outcome_key: Option<String>,
     pub receipt_stage: Option<DeliveryReceiptStage>,
     pub receipt_failure_class: Option<OccurrenceFailureClass>,
@@ -588,19 +596,20 @@ pub mod inputs {
         pub overlap_policy_key: String,
         pub missing_target_policy: MissingTargetPolicy,
         pub missing_target_policy_key: String,
+        pub target_materialized_session_id: Option<SessionId>,
         pub due_at_utc_ms: u64,
         pub misfire_deadline_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SyncTargetSnapshot {
         pub target_binding_key: String,
+        pub target_materialized_session_id: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordReceipt {
-        pub receipt: DeliveryReceipt,
-        pub stage: DeliveryReceiptStage,
-        pub failure_class: Option<OccurrenceFailureClass>,
+        pub correlation_id: Option<String>,
         pub detail: Option<String>,
+        pub materialized_session_id: Option<SessionId>,
         pub runtime_outcome_key: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -920,7 +929,15 @@ pub fn initial_state() -> State {
         claimed_at_utc_ms: None,
         claim_token: None,
         delivery_correlation_id: None,
-        last_receipt: None,
+        target_materialized_session_id: None,
+        receipt_recorded_at_utc_ms: None,
+        last_receipt_recorded_at_utc_ms: None,
+        last_receipt_attempt: None,
+        last_receipt_stage: None,
+        last_receipt_failure_class: None,
+        last_receipt_detail: None,
+        last_receipt_correlation_id: None,
+        last_receipt_materialized_session_id: None,
         runtime_outcome_key: None,
         receipt_stage: None,
         receipt_failure_class: None,

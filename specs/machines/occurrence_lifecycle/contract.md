@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `2`
+- Version: `3`
 - Rust owner: `self` / `catalog::dsl::occurrence_lifecycle`
 
 ## State
@@ -26,7 +26,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `claimed_at_utc_ms`: `Option<u64>`
 - `claim_token`: `Option<ClaimToken>`
 - `delivery_correlation_id`: `Option<String>`
-- `last_receipt`: `Option<DeliveryReceipt>`
+- `target_materialized_session_id`: `Option<SessionId>`
+- `receipt_recorded_at_utc_ms`: `Option<u64>`
+- `last_receipt_recorded_at_utc_ms`: `Option<u64>`
+- `last_receipt_attempt`: `Option<u64>`
+- `last_receipt_stage`: `Option<DeliveryReceiptStage>`
+- `last_receipt_failure_class`: `Option<OccurrenceFailureClass>`
+- `last_receipt_detail`: `Option<String>`
+- `last_receipt_correlation_id`: `Option<String>`
+- `last_receipt_materialized_session_id`: `Option<SessionId>`
 - `runtime_outcome_key`: `Option<String>`
 - `receipt_stage`: `Option<DeliveryReceiptStage>`
 - `receipt_failure_class`: `Option<OccurrenceFailureClass>`
@@ -39,9 +47,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `superseded_by_revision`: `Option<u64>`
 
 ## Inputs
-- `PlanOccurrence`(occurrence_id: OccurrenceId, schedule_id: ScheduleId, schedule_revision: u64, occurrence_ordinal: u64, trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, due_at_utc_ms: u64, misfire_deadline_utc_ms: u64)
-- `SyncTargetSnapshot`(target_binding_key: String)
-- `RecordReceipt`(receipt: DeliveryReceipt, stage: DeliveryReceiptStage, failure_class: Option<OccurrenceFailureClass>, detail: Option<String>, runtime_outcome_key: Option<String>)
+- `PlanOccurrence`(occurrence_id: OccurrenceId, schedule_id: ScheduleId, schedule_revision: u64, occurrence_ordinal: u64, trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, misfire_policy_key: String, overlap_policy: OverlapPolicy, overlap_policy_key: String, missing_target_policy: MissingTargetPolicy, missing_target_policy_key: String, target_materialized_session_id: Option<SessionId>, due_at_utc_ms: u64, misfire_deadline_utc_ms: u64)
+- `SyncTargetSnapshot`(target_binding_key: String, target_materialized_session_id: Option<SessionId>)
+- `RecordReceipt`(correlation_id: Option<String>, detail: Option<String>, materialized_session_id: Option<SessionId>, runtime_outcome_key: Option<String>)
 - `ClassifyDue`(now_utc_ms: u64)
 - `Claim`(owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken)
 - `DispatchStarted`(correlation_id: Option<String>, at_utc_ms: u64)
@@ -84,7 +92,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Transitions
 ### `PlanOccurrenceFromPending`
 - From: `Pending`
-- On: `PlanOccurrence`(occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms)
+- On: `PlanOccurrence`(occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, target_materialized_session_id, due_at_utc_ms, misfire_deadline_utc_ms)
 - Guards:
   - ``
 - To: `Pending`
@@ -193,73 +201,73 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SyncTargetSnapshotPending`
 - From: `Pending`
-- On: `SyncTargetSnapshot`(target_binding_key)
+- On: `SyncTargetSnapshot`(target_binding_key, target_materialized_session_id)
 - To: `Pending`
 
 ### `SyncTargetSnapshotClaimed`
 - From: `Claimed`
-- On: `SyncTargetSnapshot`(target_binding_key)
+- On: `SyncTargetSnapshot`(target_binding_key, target_materialized_session_id)
 - To: `Claimed`
 
 ### `RecordReceiptPending`
 - From: `Pending`
-- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- On: `RecordReceipt`(correlation_id, detail, materialized_session_id, runtime_outcome_key)
 - Guards:
   - ``
 - To: `Pending`
 
 ### `RecordReceiptClaimed`
 - From: `Claimed`
-- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- On: `RecordReceipt`(correlation_id, detail, materialized_session_id, runtime_outcome_key)
 - Guards:
   - ``
 - To: `Claimed`
 
 ### `RecordReceiptDispatching`
 - From: `Dispatching`
-- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- On: `RecordReceipt`(correlation_id, detail, materialized_session_id, runtime_outcome_key)
 - Guards:
   - ``
 - To: `Dispatching`
 
 ### `RecordReceiptAwaitingCompletion`
 - From: `AwaitingCompletion`
-- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- On: `RecordReceipt`(correlation_id, detail, materialized_session_id, runtime_outcome_key)
 - Guards:
   - ``
 - To: `AwaitingCompletion`
 
 ### `RecordReceiptCompleted`
 - From: `Completed`
-- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- On: `RecordReceipt`(correlation_id, detail, materialized_session_id, runtime_outcome_key)
 - Guards:
   - ``
 - To: `Completed`
 
 ### `RecordReceiptSkipped`
 - From: `Skipped`
-- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- On: `RecordReceipt`(correlation_id, detail, materialized_session_id, runtime_outcome_key)
 - Guards:
   - ``
 - To: `Skipped`
 
 ### `RecordReceiptMisfired`
 - From: `Misfired`
-- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- On: `RecordReceipt`(correlation_id, detail, materialized_session_id, runtime_outcome_key)
 - Guards:
   - ``
 - To: `Misfired`
 
 ### `RecordReceiptSuperseded`
 - From: `Superseded`
-- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- On: `RecordReceipt`(correlation_id, detail, materialized_session_id, runtime_outcome_key)
 - Guards:
   - ``
 - To: `Superseded`
 
 ### `RecordReceiptDeliveryFailed`
 - From: `DeliveryFailed`
-- On: `RecordReceipt`(receipt, stage, failure_class, detail, runtime_outcome_key)
+- On: `RecordReceipt`(correlation_id, detail, materialized_session_id, runtime_outcome_key)
 - Guards:
   - ``
 - To: `DeliveryFailed`

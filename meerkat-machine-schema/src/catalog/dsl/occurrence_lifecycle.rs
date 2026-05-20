@@ -3,7 +3,7 @@ use meerkat_machine_dsl::machine;
 
 machine! {
     machine OccurrenceLifecycleMachine {
-        version: 2,
+        version: 3,
         rust: "self" / "catalog::dsl::occurrence_lifecycle",
 
         state {
@@ -27,7 +27,15 @@ machine! {
             claimed_at_utc_ms: Option<u64>,
             claim_token: Option<ClaimToken>,
             delivery_correlation_id: Option<String>,
-            last_receipt: Option<DeliveryReceipt>,
+            target_materialized_session_id: Option<SessionId>,
+            receipt_recorded_at_utc_ms: Option<u64>,
+            last_receipt_recorded_at_utc_ms: Option<u64>,
+            last_receipt_attempt: Option<u64>,
+            last_receipt_stage: Option<Enum<DeliveryReceiptStage>>,
+            last_receipt_failure_class: Option<Enum<OccurrenceFailureClass>>,
+            last_receipt_detail: Option<String>,
+            last_receipt_correlation_id: Option<String>,
+            last_receipt_materialized_session_id: Option<SessionId>,
             runtime_outcome_key: Option<String>,
             receipt_stage: Option<Enum<DeliveryReceiptStage>>,
             receipt_failure_class: Option<Enum<OccurrenceFailureClass>>,
@@ -60,7 +68,15 @@ machine! {
             claimed_at_utc_ms = None,
             claim_token = None,
             delivery_correlation_id = None,
-            last_receipt = None,
+            target_materialized_session_id = None,
+            receipt_recorded_at_utc_ms = None,
+            last_receipt_recorded_at_utc_ms = None,
+            last_receipt_attempt = None,
+            last_receipt_stage = None,
+            last_receipt_failure_class = None,
+            last_receipt_detail = None,
+            last_receipt_correlation_id = None,
+            last_receipt_materialized_session_id = None,
             runtime_outcome_key = None,
             receipt_stage = None,
             receipt_failure_class = None,
@@ -101,15 +117,15 @@ machine! {
                 overlap_policy_key: String,
                 missing_target_policy: Enum<MissingTargetPolicy>,
                 missing_target_policy_key: String,
+                target_materialized_session_id: Option<SessionId>,
                 due_at_utc_ms: u64,
                 misfire_deadline_utc_ms: u64,
             },
-            SyncTargetSnapshot { target_binding_key: String },
+            SyncTargetSnapshot { target_binding_key: String, target_materialized_session_id: Option<SessionId> },
             RecordReceipt {
-                receipt: DeliveryReceipt,
-                stage: Enum<DeliveryReceiptStage>,
-                failure_class: Option<Enum<OccurrenceFailureClass>>,
+                correlation_id: Option<String>,
                 detail: Option<String>,
+                materialized_session_id: Option<SessionId>,
                 runtime_outcome_key: Option<String>
             },
             ClassifyDue { now_utc_ms: u64 },
@@ -205,6 +221,7 @@ machine! {
                 overlap_policy_key,
                 missing_target_policy,
                 missing_target_policy_key,
+                target_materialized_session_id,
                 due_at_utc_ms,
                 misfire_deadline_utc_ms
             }
@@ -214,6 +231,7 @@ machine! {
                 && self.claimed_by == None
                 && self.claim_token == None
                 && self.delivery_correlation_id == None
+                && self.target_materialized_session_id == None
                 && self.completed_at_utc_ms == None
                 && self.superseded_by_revision == None
                 && misfire_deadline_utc_ms >= due_at_utc_ms
@@ -231,6 +249,7 @@ machine! {
                 self.overlap_policy_key = overlap_policy_key;
                 self.missing_target_policy = missing_target_policy;
                 self.missing_target_policy_key = missing_target_policy_key;
+                self.target_materialized_session_id = target_materialized_session_id;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.misfire_deadline_utc_ms = misfire_deadline_utc_ms;
                 self.claimed_by = None;
@@ -238,7 +257,14 @@ machine! {
                 self.claimed_at_utc_ms = None;
                 self.claim_token = None;
                 self.delivery_correlation_id = None;
-                self.last_receipt = None;
+                self.receipt_recorded_at_utc_ms = None;
+                self.last_receipt_recorded_at_utc_ms = None;
+                self.last_receipt_attempt = None;
+                self.last_receipt_stage = None;
+                self.last_receipt_failure_class = None;
+                self.last_receipt_detail = None;
+                self.last_receipt_correlation_id = None;
+                self.last_receipt_materialized_session_id = None;
                 self.runtime_outcome_key = None;
                 self.receipt_stage = None;
                 self.receipt_failure_class = None;
@@ -402,19 +428,21 @@ machine! {
         // writes the full target snapshot only after this input is accepted.
 
         transition SyncTargetSnapshotPending {
-            on input SyncTargetSnapshot { target_binding_key }
+            on input SyncTargetSnapshot { target_binding_key, target_materialized_session_id }
             guard { self.lifecycle_phase == Phase::Pending }
             update {
                 self.target_binding_key = target_binding_key;
+                self.target_materialized_session_id = target_materialized_session_id;
             }
             to Pending
         }
 
         transition SyncTargetSnapshotClaimed {
-            on input SyncTargetSnapshot { target_binding_key }
+            on input SyncTargetSnapshot { target_binding_key, target_materialized_session_id }
             guard { self.lifecycle_phase == Phase::Claimed }
             update {
                 self.target_binding_key = target_binding_key;
+                self.target_materialized_session_id = target_materialized_session_id;
             }
             to Claimed
         }
@@ -422,135 +450,207 @@ machine! {
         // --- Receipt/result projection ---
 
         transition RecordReceiptPending {
-            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
             guard {
                 self.lifecycle_phase == Phase::Pending
-                && self.receipt_stage == Some(stage)
-                && self.receipt_failure_class == failure_class
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
                 && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
             }
             update {
-                self.last_receipt = Some(receipt);
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
                 self.runtime_outcome_key = runtime_outcome_key;
             }
             to Pending
         }
 
         transition RecordReceiptClaimed {
-            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
             guard {
                 self.lifecycle_phase == Phase::Claimed
-                && self.receipt_stage == Some(stage)
-                && self.receipt_failure_class == failure_class
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
                 && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
             }
             update {
-                self.last_receipt = Some(receipt);
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
                 self.runtime_outcome_key = runtime_outcome_key;
             }
             to Claimed
         }
 
         transition RecordReceiptDispatching {
-            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
             guard {
                 self.lifecycle_phase == Phase::Dispatching
-                && self.receipt_stage == Some(stage)
-                && self.receipt_failure_class == failure_class
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
                 && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
             }
             update {
-                self.last_receipt = Some(receipt);
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
                 self.runtime_outcome_key = runtime_outcome_key;
             }
             to Dispatching
         }
 
         transition RecordReceiptAwaitingCompletion {
-            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
             guard {
                 self.lifecycle_phase == Phase::AwaitingCompletion
-                && self.receipt_stage == Some(stage)
-                && self.receipt_failure_class == failure_class
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
                 && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
             }
             update {
-                self.last_receipt = Some(receipt);
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
                 self.runtime_outcome_key = runtime_outcome_key;
             }
             to AwaitingCompletion
         }
 
         transition RecordReceiptCompleted {
-            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
             guard {
                 self.lifecycle_phase == Phase::Completed
-                && self.receipt_stage == Some(stage)
-                && self.receipt_failure_class == failure_class
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
                 && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
             }
             update {
-                self.last_receipt = Some(receipt);
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
                 self.runtime_outcome_key = runtime_outcome_key;
             }
             to Completed
         }
 
         transition RecordReceiptSkipped {
-            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
             guard {
                 self.lifecycle_phase == Phase::Skipped
-                && self.receipt_stage == Some(stage)
-                && self.receipt_failure_class == failure_class
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
                 && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
             }
             update {
-                self.last_receipt = Some(receipt);
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
                 self.runtime_outcome_key = runtime_outcome_key;
             }
             to Skipped
         }
 
         transition RecordReceiptMisfired {
-            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
             guard {
                 self.lifecycle_phase == Phase::Misfired
-                && self.receipt_stage == Some(stage)
-                && self.receipt_failure_class == failure_class
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
                 && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
             }
             update {
-                self.last_receipt = Some(receipt);
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
                 self.runtime_outcome_key = runtime_outcome_key;
             }
             to Misfired
         }
 
         transition RecordReceiptSuperseded {
-            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
             guard {
                 self.lifecycle_phase == Phase::Superseded
-                && self.receipt_stage == Some(stage)
-                && self.receipt_failure_class == failure_class
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
                 && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
             }
             update {
-                self.last_receipt = Some(receipt);
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
                 self.runtime_outcome_key = runtime_outcome_key;
             }
             to Superseded
         }
 
         transition RecordReceiptDeliveryFailed {
-            on input RecordReceipt { receipt, stage, failure_class, detail, runtime_outcome_key }
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
             guard {
                 self.lifecycle_phase == Phase::DeliveryFailed
-                && self.receipt_stage == Some(stage)
-                && self.receipt_failure_class == failure_class
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
                 && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
             }
             update {
-                self.last_receipt = Some(receipt);
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
                 self.runtime_outcome_key = runtime_outcome_key;
             }
             to DeliveryFailed
@@ -571,7 +671,14 @@ machine! {
                 self.claimed_at_utc_ms = Some(at_utc_ms);
                 self.claim_token = Some(claim_token);
                 self.delivery_correlation_id = None;
-                self.last_receipt = None;
+                self.receipt_recorded_at_utc_ms = None;
+                self.last_receipt_recorded_at_utc_ms = None;
+                self.last_receipt_attempt = None;
+                self.last_receipt_stage = None;
+                self.last_receipt_failure_class = None;
+                self.last_receipt_detail = None;
+                self.last_receipt_correlation_id = None;
+                self.last_receipt_materialized_session_id = None;
                 self.runtime_outcome_key = None;
                 self.receipt_stage = None;
                 self.receipt_failure_class = None;
@@ -594,6 +701,7 @@ machine! {
             update {
                 self.delivery_correlation_id = correlation_id;
                 self.dispatched_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
                 self.receipt_stage = Some(DeliveryReceiptStage::DispatchStarted);
                 self.receipt_failure_class = None;
                 self.receipt_detail = None;
@@ -621,6 +729,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
             update {
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
                 self.receipt_stage = Some(DeliveryReceiptStage::Completed);
                 self.receipt_failure_class = None;
                 self.receipt_detail = None;
@@ -643,6 +752,7 @@ machine! {
                 self.failure_detail = detail;
                 self.failure_class = failure_class;
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
                 self.receipt_stage = Some(DeliveryReceiptStage::Skipped);
                 self.receipt_failure_class = failure_class;
                 self.receipt_detail = detail;
@@ -669,6 +779,7 @@ machine! {
                 self.failure_detail = detail;
                 self.failure_class = failure_class;
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
                 self.receipt_stage = Some(DeliveryReceiptStage::Misfired);
                 self.receipt_failure_class = failure_class;
                 self.receipt_detail = detail;
@@ -694,6 +805,7 @@ machine! {
             update {
                 self.superseded_by_revision = Some(superseded_by_revision);
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
                 self.receipt_stage = Some(DeliveryReceiptStage::Superseded);
                 self.receipt_failure_class = None;
                 self.receipt_detail = None;
@@ -716,6 +828,7 @@ machine! {
                 self.failure_class = Some(failure_class);
                 self.failure_detail = detail;
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
                 self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
                 self.receipt_failure_class = Some(failure_class);
                 self.receipt_detail = detail;
@@ -736,6 +849,7 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.claimed_at_utc_ms = None;
                 self.dispatched_at_utc_ms = None;
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
                 self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
                 self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
                 self.receipt_detail = Some("lease expired before completion");
@@ -754,6 +868,7 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.claimed_at_utc_ms = None;
                 self.dispatched_at_utc_ms = None;
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
                 self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
                 self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
                 self.receipt_detail = Some("lease expired before completion");
@@ -772,6 +887,7 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.claimed_at_utc_ms = None;
                 self.dispatched_at_utc_ms = None;
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
                 self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
                 self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
                 self.receipt_detail = Some("lease expired before completion");
@@ -790,6 +906,7 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.claimed_at_utc_ms = None;
                 self.dispatched_at_utc_ms = None;
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
                 self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
                 self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
                 self.receipt_detail = Some("lease released because schedule was paused before dispatch");
@@ -808,6 +925,7 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.claimed_at_utc_ms = None;
                 self.dispatched_at_utc_ms = None;
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
                 self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
                 self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
                 self.receipt_detail = Some("lease released because schedule was paused before dispatch");
@@ -826,6 +944,7 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.claimed_at_utc_ms = None;
                 self.dispatched_at_utc_ms = None;
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
                 self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
                 self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
                 self.receipt_detail = Some("lease released because schedule was paused before dispatch");
@@ -862,8 +981,8 @@ impl<T: Into<String>> From<T> for ClaimToken {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliveryReceipt(pub String);
-impl<T: Into<String>> From<T> for DeliveryReceipt {
+pub struct SessionId(pub String);
+impl<T: Into<String>> From<T> for SessionId {
     fn from(s: T) -> Self {
         Self(s.into())
     }

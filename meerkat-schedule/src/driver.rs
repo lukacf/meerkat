@@ -233,7 +233,7 @@ impl ScheduleDriver {
                     .await?;
                 if let Some(released) = released {
                     let receipt = released
-                        .delivery_receipt_from_authority(None, None, None)
+                        .delivery_receipt_from_authority(None)
                         .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
                     self.store.append_receipt(receipt).await?;
                 }
@@ -336,11 +336,7 @@ impl ScheduleDriver {
         // The delivery adapter's receipt is transport metadata; the recorded
         // public receipt class is projected from OccurrenceLifecycleMachine.
         let dispatch_receipt = dispatching
-            .delivery_receipt_from_authority(
-                None,
-                dispatch.receipt.runtime_outcome.clone(),
-                dispatch.materialized_session_id.clone(),
-            )
+            .delivery_receipt_from_authority(dispatch.receipt.runtime_outcome.clone())
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
         dispatching = dispatching
             .apply(OccurrenceLifecycleInput::RecordReceipt {
@@ -511,8 +507,8 @@ async fn terminalize_occurrence_inner(
     store: Arc<dyn ScheduleStore>,
     occurrence: Occurrence,
     lifecycle: OccurrenceLifecycleInput,
-    receipt: Option<DeliveryReceipt>,
-    materialized_session_id: Option<SessionId>,
+    _receipt: Option<DeliveryReceipt>,
+    _materialized_session_id: Option<SessionId>,
     runtime_outcome: Option<RuntimeDeliveryOutcome>,
 ) -> Result<bool, ScheduleDomainError> {
     let Some(mut updated) = store
@@ -527,7 +523,7 @@ async fn terminalize_occurrence_inner(
         return Ok(false);
     };
     let final_receipt = updated
-        .delivery_receipt_from_authority(receipt, runtime_outcome.clone(), materialized_session_id)
+        .delivery_receipt_from_authority(runtime_outcome.clone())
         .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
     updated = updated
         .apply(OccurrenceLifecycleInput::RecordReceipt {

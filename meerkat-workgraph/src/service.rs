@@ -7,8 +7,8 @@ use crate::store::{WorkGraphEventFilter, WorkGraphStore};
 use crate::types::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
     LinkWorkItemsRequest, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkEdge,
-    WorkEdgeKind, WorkGraphEvent, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem,
-    WorkItemFilter, WorkItemId, WorkNamespace,
+    WorkGraphEvent, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter,
+    WorkItemId, WorkNamespace,
 };
 
 const REQUIRED_REFRESH_ATTEMPTS: usize = 3;
@@ -281,9 +281,25 @@ impl WorkGraphService {
             .await?;
         let commit = WorkGraphMachine::close_item(item, request, now)?;
         let closed = commit.item().clone();
-        let dependent_refreshes = self
-            .dependent_refresh_commits_after_blocker_change(&closed, now)
+        let existing_edges = self
+            .store
+            .list_edges(&closed.realm_id, &closed.namespace)
             .await?;
+        let existing_items = self
+            .store
+            .list_items(WorkItemFilter {
+                realm_id: Some(closed.realm_id.clone()),
+                namespace: Some(closed.namespace.clone()),
+                include_terminal: true,
+                ..WorkItemFilter::default()
+            })
+            .await?;
+        let dependent_refreshes = WorkGraphMachine::dependent_refreshes_after_blocker_change(
+            &closed,
+            &existing_items,
+            &existing_edges,
+            now,
+        )?;
         self.store
             .update_item_with_dependent_refreshes(commit, dependent_refreshes)
             .await
@@ -337,8 +353,12 @@ impl WorkGraphService {
             })
             .await?;
         let commit = WorkGraphMachine::link_edge(edge, &existing_items, &existing_edges, now)?;
-        let item_refresh =
-            link_item_refresh_commit(commit.edge(), &existing_items, &existing_edges, now)?;
+        let item_refresh = WorkGraphMachine::link_item_refresh_commit(
+            commit.edge(),
+            &existing_items,
+            &existing_edges,
+            now,
+        )?;
         self.store
             .insert_edge_with_item_refresh(commit, item_refresh)
             .await
@@ -474,46 +494,6 @@ impl WorkGraphService {
         Ok(ready_ids)
     }
 
-    async fn dependent_refresh_commits_after_blocker_change(
-        &self,
-        blocker: &WorkItem,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Vec<crate::WorkGraphItemCommit>, WorkGraphError> {
-        let edges = self
-            .store
-            .list_edges(&blocker.realm_id, &blocker.namespace)
-            .await?;
-        let mut all_items = self
-            .store
-            .list_items(WorkItemFilter {
-                realm_id: Some(blocker.realm_id.clone()),
-                namespace: Some(blocker.namespace.clone()),
-                include_terminal: true,
-                ..WorkItemFilter::default()
-            })
-            .await?
-            .into_iter()
-            .map(|item| (item.id.clone(), item))
-            .collect::<BTreeMap<_, _>>();
-        all_items.insert(blocker.id.clone(), blocker.clone());
-        let mut commits = Vec::new();
-        for edge in edges
-            .iter()
-            .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.from_id == blocker.id)
-        {
-            let Some(item) = all_items.get(&edge.to_id) else {
-                continue;
-            };
-            let unresolved_blockers = unresolved_blocker_count(item, &all_items, &edges)?;
-            if let Some(commit) =
-                WorkGraphMachine::refresh_eligibility(item.clone(), unresolved_blockers, now)?
-            {
-                commits.push(commit);
-            }
-        }
-        Ok(commits)
-    }
-
     async fn refresh_item_eligibility_with_retries(
         &self,
         realm_id: &str,
@@ -590,7 +570,8 @@ impl WorkGraphService {
             .map(|item| (item.id.clone(), item))
             .collect::<BTreeMap<_, _>>();
         let edges = self.store.list_edges(realm_id, namespace).await?;
-        let unresolved_blockers = unresolved_blocker_count(&item, &all_items, &edges)?;
+        let unresolved_blockers =
+            WorkGraphMachine::unresolved_blocker_count_for_item(&item, &all_items, &edges)?;
         if let Some(commit) = WorkGraphMachine::refresh_eligibility(item, unresolved_blockers, now)?
         {
             self.store.update_item_cas(commit).await?;
@@ -617,52 +598,8 @@ impl WorkGraphService {
             .map(|item| (item.id.clone(), item))
             .collect::<BTreeMap<_, _>>();
         let edges = self.store.list_edges(realm_id, namespace).await?;
-        unresolved_blocker_count(item, &all_items, &edges)
+        WorkGraphMachine::unresolved_blocker_count_for_item(item, &all_items, &edges)
     }
-}
-
-fn unresolved_blocker_count(
-    item: &WorkItem,
-    all_items: &BTreeMap<WorkItemId, WorkItem>,
-    edges: &[WorkEdge],
-) -> Result<u64, WorkGraphError> {
-    let mut count = 0_u64;
-    for edge in edges
-        .iter()
-        .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.to_id == item.id)
-    {
-        let Some(blocker) = all_items.get(&edge.from_id) else {
-            count = count.saturating_add(1);
-            continue;
-        };
-        if !WorkGraphMachine::blocker_satisfies_dependency(blocker)? {
-            count = count.saturating_add(1);
-        }
-    }
-    Ok(count)
-}
-
-fn link_item_refresh_commit(
-    edge: &WorkEdge,
-    existing_items: &[WorkItem],
-    existing_edges: &[WorkEdge],
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<Option<crate::WorkGraphItemCommit>, WorkGraphError> {
-    if edge.kind != WorkEdgeKind::Blocks {
-        return Ok(None);
-    }
-    let all_items = existing_items
-        .iter()
-        .cloned()
-        .map(|item| (item.id.clone(), item))
-        .collect::<BTreeMap<_, _>>();
-    let Some(item) = all_items.get(&edge.to_id).cloned() else {
-        return Ok(None);
-    };
-    let mut edges = existing_edges.to_vec();
-    edges.push(edge.clone());
-    let unresolved_blockers = unresolved_blocker_count(&item, &all_items, &edges)?;
-    WorkGraphMachine::refresh_eligibility(item, unresolved_blockers, now)
 }
 
 #[cfg(test)]
@@ -678,9 +615,9 @@ mod tests {
         WorkGraphEventKind, WorkItem, WorkItemFilter, WorkOwner, WorkOwnerKey,
     };
     use crate::{
-        CreateWorkItemRequest, MemoryWorkGraphStore, UpdateWorkItemRequest, WorkGraphEdgeCommit,
-        WorkGraphItemCommit, WorkGraphMachine, WorkGraphService, WorkGraphStore,
-        WorkGraphStoreKind, WorkItemId, WorkNamespace,
+        CreateWorkItemRequest, MemoryWorkGraphStore, UpdateWorkItemRequest,
+        WorkGraphDependentRefreshes, WorkGraphEdgeCommit, WorkGraphItemCommit, WorkGraphMachine,
+        WorkGraphService, WorkGraphStore, WorkGraphStoreKind, WorkItemId, WorkNamespace,
     };
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
@@ -789,13 +726,6 @@ mod tests {
             self.inner.list_items(filter).await
         }
 
-        async fn insert_edge(
-            &self,
-            commit: WorkGraphEdgeCommit,
-        ) -> Result<WorkEdge, crate::WorkGraphError> {
-            self.inner.insert_edge(commit).await
-        }
-
         async fn insert_edge_with_item_refresh(
             &self,
             edge_commit: WorkGraphEdgeCommit,
@@ -812,10 +742,10 @@ mod tests {
         async fn update_item_with_dependent_refreshes(
             &self,
             item_commit: WorkGraphItemCommit,
-            dependent_refreshes: Vec<WorkGraphItemCommit>,
+            dependent_refreshes: WorkGraphDependentRefreshes,
         ) -> Result<WorkItem, crate::WorkGraphError> {
-            for dependent_refresh in &dependent_refreshes {
-                self.maybe_fail_refresh_update(dependent_refresh)?;
+            for dependent_refresh in dependent_refreshes.clone().into_commits() {
+                self.maybe_fail_refresh_update(&dependent_refresh)?;
             }
             self.inner
                 .update_item_with_dependent_refreshes(item_commit, dependent_refreshes)
@@ -959,46 +889,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ready_fails_when_generated_eligibility_refresh_cannot_commit() {
-        let store = Arc::new(RefreshConflictStore::new());
-        let service =
-            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
-        let blocker = service
-            .create(create_req("blocker"))
-            .await
-            .expect("blocker");
-        let blocked = service
-            .create(create_req("blocked"))
-            .await
-            .expect("blocked");
-        let now = store.get_store_time_utc().await.expect("time");
-        let edge = WorkEdge {
-            realm_id: "realm".to_string(),
-            namespace: WorkNamespace::default(),
-            kind: WorkEdgeKind::Blocks,
-            from_id: blocker.id.clone(),
-            to_id: blocked.id.clone(),
-            created_at: now,
-        };
-        let commit =
-            WorkGraphMachine::link_edge(edge, &[blocker.clone(), blocked.clone()], &[], now)
-                .expect("generated edge commit");
-        store
-            .insert_edge(commit)
-            .await
-            .expect("generated edge insert");
-
-        store.fail_refresh_updates(super::REQUIRED_REFRESH_ATTEMPTS);
-        let error = service
-            .ready(Default::default())
-            .await
-            .expect_err("ready must fail closed without generated eligibility refresh");
-
-        assert!(matches!(error, crate::WorkGraphError::StaleRevision { .. }));
-    }
-
-    #[tokio::test]
-    async fn snapshot_refreshes_items_before_returning_ready_ids() {
+    async fn raw_blocking_edge_insert_fails_without_generated_eligibility_refresh() {
         let store = Arc::new(MemoryWorkGraphStore::new());
         let service =
             WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
@@ -1022,10 +913,42 @@ mod tests {
         let commit =
             WorkGraphMachine::link_edge(edge, &[blocker.clone(), blocked.clone()], &[], now)
                 .expect("generated edge commit");
-        store
-            .insert_edge(commit)
+        let error = store
+            .insert_edge_with_item_refresh(commit, None)
             .await
-            .expect("generated edge insert");
+            .expect_err("blocking edge insert must include generated dependent refresh");
+
+        assert!(matches!(error, crate::WorkGraphError::Conflict(_)));
+        let edges = store
+            .list_edges("realm", &WorkNamespace::default())
+            .await
+            .expect("edges");
+        assert!(edges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn snapshot_refreshes_items_before_returning_ready_ids() {
+        let store = Arc::new(MemoryWorkGraphStore::new());
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let blocker = service
+            .create(create_req("blocker"))
+            .await
+            .expect("blocker");
+        let blocked = service
+            .create(create_req("blocked"))
+            .await
+            .expect("blocked");
+        service
+            .link(LinkWorkItemsRequest {
+                realm_id: None,
+                namespace: None,
+                kind: WorkEdgeKind::Blocks,
+                from_id: blocker.id.clone(),
+                to_id: blocked.id.clone(),
+            })
+            .await
+            .expect("link");
 
         let snapshot = service
             .snapshot(Default::default())
@@ -1264,26 +1187,25 @@ mod tests {
             .create(create_req("dependent"))
             .await
             .expect("dependent");
-        let now = store.get_store_time_utc().await.expect("time");
-        let edge = WorkEdge {
-            realm_id: "realm".to_string(),
-            namespace: WorkNamespace::default(),
-            kind: WorkEdgeKind::Blocks,
-            from_id: blocker.id.clone(),
-            to_id: dependent.id.clone(),
-            created_at: now,
-        };
-        let commit =
-            WorkGraphMachine::link_edge(edge, &[blocker.clone(), dependent.clone()], &[], now)
-                .expect("generated edge commit");
-        store
-            .insert_edge(commit)
+        service
+            .link(LinkWorkItemsRequest {
+                realm_id: None,
+                namespace: None,
+                kind: WorkEdgeKind::Blocks,
+                from_id: blocker.id.clone(),
+                to_id: dependent.id.clone(),
+            })
             .await
-            .expect("generated edge insert");
+            .expect("link");
+        let dependent = store
+            .get_item("realm", &WorkNamespace::default(), &dependent.id)
+            .await
+            .expect("get dependent")
+            .expect("dependent exists");
 
         let error = service
             .claim(ClaimWorkItemRequest {
-                id: dependent.id,
+                id: dependent.id.clone(),
                 realm_id: None,
                 namespace: None,
                 expected_revision: dependent.revision,

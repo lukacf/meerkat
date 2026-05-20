@@ -21,7 +21,8 @@ mod types;
 
 pub use error::WorkGraphError;
 pub use machine::{
-    WorkGraphEdgeCommit, WorkGraphItemCommit, WorkGraphMachine, WorkGraphPublicErrorClass,
+    WorkGraphDependentRefreshes, WorkGraphEdgeCommit, WorkGraphItemCommit, WorkGraphMachine,
+    WorkGraphPublicErrorClass,
 };
 pub use rest_contract::{
     WORKGRAPH_REST_PATHS, WorkGraphRestOperationDescriptor, WorkGraphRestPathDescriptor,

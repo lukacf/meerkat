@@ -101,6 +101,42 @@ impl WorkGraphEdgeCommit {
         }
         Ok(())
     }
+
+    pub(crate) fn validate_item_refresh(
+        &self,
+        item_refresh: Option<&WorkGraphItemCommit>,
+        current_items: &[WorkItem],
+        current_edges: &[WorkEdge],
+    ) -> Result<(), WorkGraphError> {
+        validate_link_item_refresh(&self.edge, item_refresh, current_items, current_edges)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkGraphDependentRefreshes {
+    topology: WorkGraphTopologyBasis,
+    commits: Vec<WorkGraphItemCommit>,
+}
+
+impl WorkGraphDependentRefreshes {
+    pub(crate) fn into_commits(self) -> Vec<WorkGraphItemCommit> {
+        self.commits
+    }
+
+    pub(crate) fn validate_topology(
+        &self,
+        current_items: &[WorkItem],
+        current_edges: &[WorkEdge],
+    ) -> Result<(), WorkGraphError> {
+        let current = topology_basis(current_items, current_edges)?;
+        if current != self.topology {
+            return Err(WorkGraphError::Conflict(
+                "current WorkGraph topology differs from generated dependent refresh authority snapshot"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,6 +330,14 @@ impl WorkGraphMachine {
             now,
             Some(previous),
         )?))
+    }
+
+    pub(crate) fn unresolved_blocker_count_for_item(
+        item: &WorkItem,
+        all_items: &BTreeMap<WorkItemId, WorkItem>,
+        edges: &[WorkEdge],
+    ) -> Result<u64, WorkGraphError> {
+        unresolved_blocker_count(item, all_items, edges)
     }
 
     pub(crate) fn claim_item_with_unresolved_blockers(
@@ -502,6 +546,52 @@ impl WorkGraphMachine {
         let event_authority = Self::validate_link(&edge, existing_items, existing_edges)?;
         let topology = topology_basis(existing_items, existing_edges)?;
         edge_commit_from_authority(edge, topology, &event_authority, now)
+    }
+
+    pub(crate) fn link_item_refresh_commit(
+        edge: &WorkEdge,
+        existing_items: &[WorkItem],
+        existing_edges: &[WorkEdge],
+        now: DateTime<Utc>,
+    ) -> Result<Option<WorkGraphItemCommit>, WorkGraphError> {
+        if edge.kind != WorkEdgeKind::Blocks {
+            return Ok(None);
+        }
+        let all_items = item_map(existing_items);
+        let Some(item) = all_items.get(&edge.to_id).cloned() else {
+            return Ok(None);
+        };
+        let mut edges = existing_edges.to_vec();
+        edges.push(edge.clone());
+        let unresolved_blockers = unresolved_blocker_count(&item, &all_items, &edges)?;
+        Self::refresh_eligibility(item, unresolved_blockers, now)
+    }
+
+    pub(crate) fn dependent_refreshes_after_blocker_change(
+        blocker: &WorkItem,
+        existing_items: &[WorkItem],
+        existing_edges: &[WorkEdge],
+        now: DateTime<Utc>,
+    ) -> Result<WorkGraphDependentRefreshes, WorkGraphError> {
+        let topology = topology_basis(existing_items, existing_edges)?;
+        let mut all_items = item_map(existing_items);
+        all_items.insert(blocker.id.clone(), blocker.clone());
+        let mut commits = Vec::new();
+        for edge in existing_edges
+            .iter()
+            .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.from_id == blocker.id)
+        {
+            let Some(item) = all_items.get(&edge.to_id) else {
+                continue;
+            };
+            let unresolved_blockers = unresolved_blocker_count(item, &all_items, existing_edges)?;
+            if let Some(commit) =
+                WorkGraphMachine::refresh_eligibility(item.clone(), unresolved_blockers, now)?
+            {
+                commits.push(commit);
+            }
+        }
+        Ok(WorkGraphDependentRefreshes { topology, commits })
     }
 }
 
@@ -830,6 +920,93 @@ fn topology_basis(
             .map(|edge| work_edge_key(edge.kind, &edge.from_id, &edge.to_id))
             .collect(),
     })
+}
+
+fn item_map(existing_items: &[WorkItem]) -> BTreeMap<WorkItemId, WorkItem> {
+    existing_items
+        .iter()
+        .cloned()
+        .map(|item| (item.id.clone(), item))
+        .collect()
+}
+
+fn validate_link_item_refresh(
+    edge: &WorkEdge,
+    item_refresh: Option<&WorkGraphItemCommit>,
+    current_items: &[WorkItem],
+    current_edges: &[WorkEdge],
+) -> Result<(), WorkGraphError> {
+    if edge.kind != WorkEdgeKind::Blocks {
+        if item_refresh.is_some() {
+            return Err(WorkGraphError::Conflict(
+                "generated WorkGraph edge refresh supplied for non-blocking topology".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let all_items = item_map(current_items);
+    let Some(item) = all_items.get(&edge.to_id) else {
+        return Err(WorkGraphError::Store(format!(
+            "generated WorkGraph edge {:?} from {} to {} targets missing item",
+            edge.kind, edge.from_id, edge.to_id
+        )));
+    };
+    let mut edges = current_edges.to_vec();
+    edges.push(edge.clone());
+    let unresolved_blockers = unresolved_blocker_count(item, &all_items, &edges)?;
+    if item.machine_state.unresolved_blocker_count == unresolved_blockers {
+        if item_refresh.is_some() {
+            return Err(WorkGraphError::Conflict(
+                "generated WorkGraph edge refresh was supplied when readiness facts were unchanged"
+                    .to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let Some(refresh) = item_refresh else {
+        return Err(WorkGraphError::Conflict(
+            "generated WorkGraph edge commit missing required dependent readiness refresh"
+                .to_string(),
+        ));
+    };
+    let refreshed = refresh.item();
+    if refreshed.realm_id != item.realm_id
+        || refreshed.namespace != item.namespace
+        || refreshed.id != item.id
+    {
+        return Err(WorkGraphError::Conflict(
+            "generated WorkGraph edge refresh targets a different work item".to_string(),
+        ));
+    }
+    if refreshed.machine_state.unresolved_blocker_count != unresolved_blockers {
+        return Err(WorkGraphError::Conflict(
+            "generated WorkGraph edge refresh carries stale dependent readiness facts".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn unresolved_blocker_count(
+    item: &WorkItem,
+    all_items: &BTreeMap<WorkItemId, WorkItem>,
+    edges: &[WorkEdge],
+) -> Result<u64, WorkGraphError> {
+    let mut count = 0_u64;
+    for edge in edges
+        .iter()
+        .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.to_id == item.id)
+    {
+        let Some(blocker) = all_items.get(&edge.from_id) else {
+            count = count.saturating_add(1);
+            continue;
+        };
+        if !WorkGraphMachine::blocker_satisfies_dependency(blocker)? {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
 }
 
 fn generated_item_keys(

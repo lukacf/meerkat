@@ -13,7 +13,9 @@ use crate::types::{
     WorkEdge, WorkGraphEvent, WorkGraphEventKind, WorkItem, WorkItemFilter, WorkItemId,
     WorkNamespace,
 };
-use crate::{WorkGraphEdgeCommit, WorkGraphItemCommit, WorkGraphMachine};
+use crate::{
+    WorkGraphDependentRefreshes, WorkGraphEdgeCommit, WorkGraphItemCommit, WorkGraphMachine,
+};
 
 pub(crate) mod private {
     pub trait Sealed {}
@@ -82,8 +84,6 @@ pub trait WorkGraphStore: private::Sealed + Send + Sync {
 
     async fn list_items(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError>;
 
-    async fn insert_edge(&self, commit: WorkGraphEdgeCommit) -> Result<WorkEdge, WorkGraphError>;
-
     async fn insert_edge_with_item_refresh(
         &self,
         edge_commit: WorkGraphEdgeCommit,
@@ -93,7 +93,7 @@ pub trait WorkGraphStore: private::Sealed + Send + Sync {
     async fn update_item_with_dependent_refreshes(
         &self,
         item_commit: WorkGraphItemCommit,
-        dependent_refreshes: Vec<WorkGraphItemCommit>,
+        dependent_refreshes: WorkGraphDependentRefreshes,
     ) -> Result<WorkItem, WorkGraphError>;
 
     async fn list_edges(
@@ -148,10 +148,6 @@ impl WorkGraphStore for DisabledWorkGraphStore {
         Err(unsupported(self.kind()))
     }
 
-    async fn insert_edge(&self, _commit: WorkGraphEdgeCommit) -> Result<WorkEdge, WorkGraphError> {
-        Err(unsupported(self.kind()))
-    }
-
     async fn insert_edge_with_item_refresh(
         &self,
         _edge_commit: WorkGraphEdgeCommit,
@@ -163,7 +159,7 @@ impl WorkGraphStore for DisabledWorkGraphStore {
     async fn update_item_with_dependent_refreshes(
         &self,
         _item_commit: WorkGraphItemCommit,
-        _dependent_refreshes: Vec<WorkGraphItemCommit>,
+        _dependent_refreshes: WorkGraphDependentRefreshes,
     ) -> Result<WorkItem, WorkGraphError> {
         Err(unsupported(self.kind()))
     }
@@ -282,10 +278,6 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         Ok(items)
     }
 
-    async fn insert_edge(&self, commit: WorkGraphEdgeCommit) -> Result<WorkEdge, WorkGraphError> {
-        self.insert_edge_with_item_refresh(commit, None).await
-    }
-
     async fn insert_edge_with_item_refresh(
         &self,
         edge_commit: WorkGraphEdgeCommit,
@@ -310,6 +302,7 @@ impl WorkGraphStore for MemoryWorkGraphStore {
             .cloned()
             .collect::<Vec<_>>();
         edge_commit.validate_topology(&current_items, &current_edges)?;
+        edge_commit.validate_item_refresh(item_refresh.as_ref(), &current_items, &current_edges)?;
         let item_update = item_refresh
             .map(|commit| prepare_memory_item_update(&guard, commit))
             .transpose()?;
@@ -334,11 +327,30 @@ impl WorkGraphStore for MemoryWorkGraphStore {
     async fn update_item_with_dependent_refreshes(
         &self,
         item_commit: WorkGraphItemCommit,
-        dependent_refreshes: Vec<WorkGraphItemCommit>,
+        dependent_refreshes: WorkGraphDependentRefreshes,
     ) -> Result<WorkItem, WorkGraphError> {
+        let item_scope = item_commit.item().clone();
         let mut guard = self.inner.write().await;
+        let current_items = guard
+            .items
+            .values()
+            .filter(|item| {
+                item.realm_id == item_scope.realm_id && item.namespace == item_scope.namespace
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let current_edges = guard
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.realm_id == item_scope.realm_id && edge.namespace == item_scope.namespace
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        dependent_refreshes.validate_topology(&current_items, &current_edges)?;
         let primary = prepare_memory_item_update(&guard, item_commit)?;
         let dependent_updates = dependent_refreshes
+            .into_commits()
             .into_iter()
             .map(|commit| prepare_memory_item_update(&guard, commit))
             .collect::<Result<Vec<_>, _>>()?;
@@ -604,10 +616,6 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         self.with_connection(|conn| list_sqlite_items(conn, &filter))
     }
 
-    async fn insert_edge(&self, commit: WorkGraphEdgeCommit) -> Result<WorkEdge, WorkGraphError> {
-        self.insert_edge_with_item_refresh(commit, None).await
-    }
-
     async fn insert_edge_with_item_refresh(
         &self,
         edge_commit: WorkGraphEdgeCommit,
@@ -630,6 +638,11 @@ impl WorkGraphStore for SqliteWorkGraphStore {
             let current_edges =
                 list_sqlite_edges(&tx, &edge_scope.realm_id, &edge_scope.namespace)?;
             edge_commit.validate_topology(&current_items, &current_edges)?;
+            edge_commit.validate_item_refresh(
+                item_refresh.as_ref(),
+                &current_items,
+                &current_edges,
+            )?;
             let (edge, event) = edge_commit.into_parts();
             insert_edge_tx(&tx, &edge)?;
             insert_event_tx(&tx, &event)?;
@@ -645,14 +658,27 @@ impl WorkGraphStore for SqliteWorkGraphStore {
     async fn update_item_with_dependent_refreshes(
         &self,
         item_commit: WorkGraphItemCommit,
-        dependent_refreshes: Vec<WorkGraphItemCommit>,
+        dependent_refreshes: WorkGraphDependentRefreshes,
     ) -> Result<WorkItem, WorkGraphError> {
+        let item_scope = item_commit.item().clone();
         self.with_connection(|conn| {
             let tx = conn
                 .transaction()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            let current_items = list_sqlite_items(
+                &tx,
+                &WorkItemFilter {
+                    realm_id: Some(item_scope.realm_id.clone()),
+                    namespace: Some(item_scope.namespace.clone()),
+                    include_terminal: true,
+                    ..WorkItemFilter::default()
+                },
+            )?;
+            let current_edges =
+                list_sqlite_edges(&tx, &item_scope.realm_id, &item_scope.namespace)?;
+            dependent_refreshes.validate_topology(&current_items, &current_edges)?;
             let item = apply_update_commit_tx(&tx, item_commit)?;
-            for dependent_refresh in dependent_refreshes {
+            for dependent_refresh in dependent_refreshes.into_commits() {
                 apply_update_commit_tx(&tx, dependent_refresh)?;
             }
             tx.commit()
@@ -1060,10 +1086,10 @@ mod tests {
     use crate::WorkGraphMachine;
     use crate::types::WorkEdge;
     use crate::{
-        ClaimWorkItemRequest, CreateWorkItemRequest, LinkWorkItemsRequest, MemoryWorkGraphStore,
-        ReleaseWorkItemRequest, WorkEdgeKind, WorkGraphEdgeCommit, WorkGraphError,
-        WorkGraphEventFilter, WorkGraphService, WorkGraphStore, WorkItem, WorkItemFilter,
-        WorkNamespace, WorkOwner, WorkOwnerKey,
+        ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest, LinkWorkItemsRequest,
+        MemoryWorkGraphStore, ReleaseWorkItemRequest, WorkEdgeKind, WorkGraphEdgeCommit,
+        WorkGraphError, WorkGraphEventFilter, WorkGraphItemCommit, WorkGraphService,
+        WorkGraphStore, WorkItem, WorkItemFilter, WorkNamespace, WorkOwner, WorkOwnerKey,
     };
 
     fn test_edge(from: &WorkItem, to: &WorkItem, now: chrono::DateTime<Utc>) -> WorkEdge {
@@ -1080,6 +1106,16 @@ mod tests {
     fn link_commit(edge: &WorkEdge, items: &[WorkItem]) -> WorkGraphEdgeCommit {
         WorkGraphMachine::link_edge(edge.clone(), items, &[], edge.created_at)
             .expect("generated link commit")
+    }
+
+    fn link_refresh_commit(
+        edge: &WorkEdge,
+        items: &[WorkItem],
+        edges: &[WorkEdge],
+        now: chrono::DateTime<Utc>,
+    ) -> Option<WorkGraphItemCommit> {
+        WorkGraphMachine::link_item_refresh_commit(edge, items, edges, now)
+            .expect("generated link refresh commit")
     }
 
     fn owner(id: &str) -> WorkOwner {
@@ -1252,16 +1288,140 @@ mod tests {
             WorkGraphMachine::link_edge(first_edge, &items, &[], now).expect("first edge commit");
         let stale_second_commit = WorkGraphMachine::link_edge(second_edge, &items, &[], now)
             .expect("second edge commit from stale empty topology");
+        let first_refresh = link_refresh_commit(first_commit.edge(), &items, &[], now);
 
         store
-            .insert_edge(first_commit)
+            .insert_edge_with_item_refresh(first_commit, first_refresh)
             .await
             .expect("first edge insert");
         let error = store
-            .insert_edge(stale_second_commit)
+            .insert_edge_with_item_refresh(stale_second_commit, None)
             .await
             .expect_err("store must reject stale topology commit");
         assert!(matches!(error, WorkGraphError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn memory_store_rejects_dependent_refresh_from_stale_topology() {
+        let store = MemoryWorkGraphStore::new();
+        let now = Utc::now();
+        let blocker = store
+            .insert_item(
+                WorkGraphMachine::create_item(
+                    create_request("blocker"),
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    now,
+                )
+                .expect("create blocker"),
+            )
+            .await
+            .expect("insert blocker");
+        let first_dependent = store
+            .insert_item(
+                WorkGraphMachine::create_item(
+                    create_request("first dependent"),
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    now,
+                )
+                .expect("create first dependent"),
+            )
+            .await
+            .expect("insert first dependent");
+        let second_dependent = store
+            .insert_item(
+                WorkGraphMachine::create_item(
+                    create_request("second dependent"),
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    now,
+                )
+                .expect("create second dependent"),
+            )
+            .await
+            .expect("insert second dependent");
+        let items = vec![
+            blocker.clone(),
+            first_dependent.clone(),
+            second_dependent.clone(),
+        ];
+        let first_edge = test_edge(&blocker, &first_dependent, now);
+        let first_commit = link_commit(&first_edge, &items);
+        let first_refresh = link_refresh_commit(first_commit.edge(), &items, &[], now);
+        store
+            .insert_edge_with_item_refresh(first_commit, first_refresh)
+            .await
+            .expect("insert first edge");
+
+        let existing_items = store
+            .list_items(WorkItemFilter {
+                realm_id: Some("realm".to_string()),
+                namespace: Some(WorkNamespace::default()),
+                include_terminal: true,
+                ..WorkItemFilter::default()
+            })
+            .await
+            .expect("items before close");
+        let existing_edges = store
+            .list_edges("realm", &WorkNamespace::default())
+            .await
+            .expect("edges before close");
+        let close_commit = WorkGraphMachine::close_item(
+            blocker.clone(),
+            CloseWorkItemRequest {
+                id: blocker.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: blocker.revision,
+                status: None,
+            },
+            now,
+        )
+        .expect("close commit");
+        let dependent_refreshes = WorkGraphMachine::dependent_refreshes_after_blocker_change(
+            close_commit.item(),
+            &existing_items,
+            &existing_edges,
+            now,
+        )
+        .expect("dependent refreshes");
+
+        let items_after_first_edge = store
+            .list_items(WorkItemFilter {
+                realm_id: Some("realm".to_string()),
+                namespace: Some(WorkNamespace::default()),
+                include_terminal: true,
+                ..WorkItemFilter::default()
+            })
+            .await
+            .expect("items after first edge");
+        let second_edge = test_edge(&blocker, &second_dependent, now);
+        let second_commit =
+            WorkGraphMachine::link_edge(second_edge, &items_after_first_edge, &existing_edges, now)
+                .expect("second edge commit");
+        let second_refresh = link_refresh_commit(
+            second_commit.edge(),
+            &items_after_first_edge,
+            &existing_edges,
+            now,
+        );
+        store
+            .insert_edge_with_item_refresh(second_commit, second_refresh)
+            .await
+            .expect("insert second edge");
+
+        let error = store
+            .update_item_with_dependent_refreshes(close_commit, dependent_refreshes)
+            .await
+            .expect_err("dependent refresh basis must match current topology");
+        assert!(matches!(error, WorkGraphError::Conflict(_)));
+        let stored_blocker = store
+            .get_item("realm", &WorkNamespace::default(), &blocker.id)
+            .await
+            .expect("get blocker")
+            .expect("blocker exists");
+        assert_eq!(stored_blocker.status, crate::WorkStatus::Open);
     }
 
     #[tokio::test]
@@ -1352,8 +1512,9 @@ mod tests {
         let items = vec![from.clone(), to.clone()];
         let edge = test_edge(&from, &to, now);
         let commit = link_commit(&edge, &items);
+        let refresh = link_refresh_commit(commit.edge(), &items, &[], now);
         store
-            .insert_edge(commit.clone())
+            .insert_edge_with_item_refresh(commit.clone(), refresh)
             .await
             .expect("insert edge");
         let events_before_duplicate = store
@@ -1368,7 +1529,7 @@ mod tests {
             .expect("events before duplicate");
 
         let error = store
-            .insert_edge(commit)
+            .insert_edge_with_item_refresh(commit, None)
             .await
             .expect_err("duplicate edge should fail");
         assert!(matches!(error, WorkGraphError::Conflict(_)));
@@ -1763,8 +1924,9 @@ mod tests {
         let items = vec![from.clone(), to.clone()];
         let edge = test_edge(&from, &to, now);
         let commit = link_commit(&edge, &items);
+        let refresh = link_refresh_commit(commit.edge(), &items, &[], now);
         store
-            .insert_edge(commit.clone())
+            .insert_edge_with_item_refresh(commit.clone(), refresh)
             .await
             .expect("insert edge");
         let events_before_duplicate = store
@@ -1779,7 +1941,7 @@ mod tests {
             .expect("events before duplicate");
 
         let error = store
-            .insert_edge(commit)
+            .insert_edge_with_item_refresh(commit, None)
             .await
             .expect_err("duplicate edge should fail");
         assert!(matches!(error, WorkGraphError::Conflict(_)));

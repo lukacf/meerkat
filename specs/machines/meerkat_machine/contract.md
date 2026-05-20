@@ -113,6 +113,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `completion_runtime_injected_cursor`: `u64`
 - `surface_request_phases`: `Map<String, SurfaceRequestPhase>`
 - `surface_request_terminal_policies`: `Map<String, SurfaceRequestTerminalPolicy>`
+- `live_refresh_result_sequence`: `u64`
+- `live_refresh_status_by_channel`: `Map<String, LiveRefreshPublicStatus>`
 - `known_surfaces`: `Set<String>`
 - `active_surfaces`: `Set<String>`
 - `visible_surfaces`: `Set<String>`
@@ -314,6 +316,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PublishSurfaceRequest`(request_key: String)
 - `PublishOrCancelSurfaceRequest`(request_key: String)
 - `FinishSurfaceRequestUnpublished`(request_key: String)
+- `RecordLiveRefreshQueued`(channel_id: String)
 - `SpawnDrain`(mode: DrainMode)
 - `StopDrain`
 - `StageVisibilityFilter`(filter: ToolFilter)
@@ -470,6 +473,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SurfaceRequestCancelledBeforePublish`(request_key: String)
 - `SurfaceRequestCompleted`(request_key: String)
 - `SurfaceRequestSupersededByCancel`(request_key: String)
+- `LiveRefreshResultResolved`(channel_id: String, status: LiveRefreshPublicStatus, refresh_enqueued: Bool, sequence: u64)
 - `EnqueueClassifiedEntry`
 - `PeerIngressClassified`(class: PeerIngressInputClass, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
 - `PeerResponseReplyClassified`(response_terminality: PeerIngressResponseTerminality)
@@ -7331,6 +7335,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `request_terminal`
 - Emits: `SurfaceRequestCompleted`
 - To: `Initializing`
+
+### `RecordLiveRefreshQueuedIdle`
+- From: `Idle`
+- On: `RecordLiveRefreshQueued`(channel_id)
+- Guards:
+  - `channel_id_present`
+- Emits: `LiveRefreshResultResolved`
+- To: `Idle`
+
+### `RecordLiveRefreshQueuedAttached`
+- From: `Attached`
+- On: `RecordLiveRefreshQueued`(channel_id)
+- Guards:
+  - `channel_id_present`
+- Emits: `LiveRefreshResultResolved`
+- To: `Attached`
+
+### `RecordLiveRefreshQueuedRunning`
+- From: `Running`
+- On: `RecordLiveRefreshQueued`(channel_id)
+- Guards:
+  - `channel_id_present`
+- Emits: `LiveRefreshResultResolved`
+- To: `Running`
+
+### `RecordLiveRefreshQueuedRetired`
+- From: `Retired`
+- On: `RecordLiveRefreshQueued`(channel_id)
+- Guards:
+  - `channel_id_present`
+- Emits: `LiveRefreshResultResolved`
+- To: `Retired`
+
+### `RecordLiveRefreshQueuedStopped`
+- From: `Stopped`
+- On: `RecordLiveRefreshQueued`(channel_id)
+- Guards:
+  - `channel_id_present`
+- Emits: `LiveRefreshResultResolved`
+- To: `Stopped`
 
 ### `ResolveWaitAllAdmissionDuplicateRejectedIdle`
 - From: `Idle`

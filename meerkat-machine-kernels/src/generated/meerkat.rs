@@ -2181,6 +2181,52 @@ impl std::fmt::Display for InteractionStreamState {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveRefreshPublicStatus {
+    #[default]
+    #[serde(rename = "Queued")]
+    Queued,
+}
+impl LiveRefreshPublicStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveRefreshPublicStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Queued" => Ok(Self::Queued),
+            other => Err(format!("invalid LiveRefreshPublicStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveRefreshPublicStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveRefreshPublicStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LlmRetryFailureKind {
     #[default]
     #[serde(rename = "RateLimited")]
@@ -6501,6 +6547,8 @@ pub struct State {
     pub surface_request_phases: std::collections::BTreeMap<String, SurfaceRequestPhase>,
     pub surface_request_terminal_policies:
         std::collections::BTreeMap<String, SurfaceRequestTerminalPolicy>,
+    pub live_refresh_result_sequence: u64,
+    pub live_refresh_status_by_channel: std::collections::BTreeMap<String, LiveRefreshPublicStatus>,
     pub known_surfaces: std::collections::BTreeSet<String>,
     pub active_surfaces: std::collections::BTreeSet<String>,
     pub visible_surfaces: std::collections::BTreeSet<String>,
@@ -7286,6 +7334,10 @@ pub mod inputs {
         pub request_key: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveRefreshQueued {
+        pub channel_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnDrain {
         pub mode: DrainMode,
     }
@@ -7684,6 +7736,7 @@ pub enum Input {
     PublishSurfaceRequest(inputs::PublishSurfaceRequest),
     PublishOrCancelSurfaceRequest(inputs::PublishOrCancelSurfaceRequest),
     FinishSurfaceRequestUnpublished(inputs::FinishSurfaceRequestUnpublished),
+    RecordLiveRefreshQueued(inputs::RecordLiveRefreshQueued),
     SpawnDrain(inputs::SpawnDrain),
     StopDrain(inputs::StopDrain),
     StageVisibilityFilter(inputs::StageVisibilityFilter),
@@ -7907,6 +7960,7 @@ impl Input {
             Self::PublishSurfaceRequest(_) => InputKind::PublishSurfaceRequest,
             Self::PublishOrCancelSurfaceRequest(_) => InputKind::PublishOrCancelSurfaceRequest,
             Self::FinishSurfaceRequestUnpublished(_) => InputKind::FinishSurfaceRequestUnpublished,
+            Self::RecordLiveRefreshQueued(_) => InputKind::RecordLiveRefreshQueued,
             Self::SpawnDrain(_) => InputKind::SpawnDrain,
             Self::StopDrain(_) => InputKind::StopDrain,
             Self::StageVisibilityFilter(_) => InputKind::StageVisibilityFilter,
@@ -8113,6 +8167,7 @@ pub enum InputKind {
     PublishSurfaceRequest,
     PublishOrCancelSurfaceRequest,
     FinishSurfaceRequestUnpublished,
+    RecordLiveRefreshQueued,
     SpawnDrain,
     StopDrain,
     StageVisibilityFilter,
@@ -8597,6 +8652,13 @@ pub mod effects {
         pub request_key: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveRefreshResultResolved {
+        pub channel_id: String,
+        pub status: LiveRefreshPublicStatus,
+        pub refresh_enqueued: bool,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnqueueClassifiedEntry {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerIngressClassified {
@@ -8804,6 +8866,7 @@ pub enum Effect {
     SurfaceRequestCancelledBeforePublish(effects::SurfaceRequestCancelledBeforePublish),
     SurfaceRequestCompleted(effects::SurfaceRequestCompleted),
     SurfaceRequestSupersededByCancel(effects::SurfaceRequestSupersededByCancel),
+    LiveRefreshResultResolved(effects::LiveRefreshResultResolved),
     EnqueueClassifiedEntry(effects::EnqueueClassifiedEntry),
     PeerIngressClassified(effects::PeerIngressClassified),
     PeerResponseReplyClassified(effects::PeerResponseReplyClassified),
@@ -8911,6 +8974,7 @@ pub enum EffectKind {
     SurfaceRequestCancelledBeforePublish,
     SurfaceRequestCompleted,
     SurfaceRequestSupersededByCancel,
+    LiveRefreshResultResolved,
     EnqueueClassifiedEntry,
     PeerIngressClassified,
     PeerResponseReplyClassified,
@@ -9729,6 +9793,11 @@ pub enum TransitionId {
     FinishSurfaceRequestUnpublishedPendingInitializing,
     FinishSurfaceRequestUnpublishedCancelledInitializing,
     FinishSurfaceRequestUnpublishedTerminalInitializing,
+    RecordLiveRefreshQueuedIdle,
+    RecordLiveRefreshQueuedAttached,
+    RecordLiveRefreshQueuedRunning,
+    RecordLiveRefreshQueuedRetired,
+    RecordLiveRefreshQueuedStopped,
     ResolveWaitAllAdmissionDuplicateRejectedIdle,
     ResolveWaitAllAdmissionDuplicateRejectedAttached,
     ResolveWaitAllAdmissionDuplicateRejectedRunning,
@@ -10143,6 +10212,8 @@ pub fn initial_state() -> State {
         completion_runtime_injected_cursor: 0,
         surface_request_phases: Default::default(),
         surface_request_terminal_policies: Default::default(),
+        live_refresh_result_sequence: 0,
+        live_refresh_status_by_channel: Default::default(),
         known_surfaces: Default::default(),
         active_surfaces: Default::default(),
         visible_surfaces: Default::default(),

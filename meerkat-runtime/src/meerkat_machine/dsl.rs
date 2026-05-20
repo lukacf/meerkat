@@ -1652,6 +1652,15 @@ pub enum RuntimeEffectKind {
     StopRuntimeExecutor,
 }
 
+/// Typed public result class for `live/refresh` after the adapter command
+/// queue accepts a refresh handoff. The RPC surface may only project this
+/// value from a generated `LiveRefreshResultResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveRefreshPublicStatus {
+    #[default]
+    Queued,
+}
+
 /// Typed mirror of the public runtime lifecycle projection. The shell passes
 /// only the observed variant; generated transitions own the semantic facts
 /// derived from it.

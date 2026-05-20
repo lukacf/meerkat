@@ -464,6 +464,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "RetryableProviderError",
                 ],
             ),
+            NamedTypeBinding::string_enum("LiveRefreshPublicStatus", &["Queued"]),
             NamedTypeBinding::string("McpServerId"),
             NamedTypeBinding::string_enum(
                 "McpServerState",
@@ -962,6 +963,7 @@ runtime_internal_inputs!(
         ProgressReportedOp,
         QueueAccepted,
         RecordBoundarySeq,
+        RecordLiveRefreshQueued,
         RecoverAdmittedInput,
         PrioritizeInput,
         DeferInputBehindBacklog,

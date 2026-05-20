@@ -769,6 +769,15 @@ pub enum RuntimeEffectKind {
     StopRuntimeExecutor,
 }
 
+/// Typed public result class for `live/refresh` after the adapter command
+/// queue accepts a refresh handoff. The RPC surface may only project this
+/// value from a generated `LiveRefreshResultResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveRefreshPublicStatus {
+    #[default]
+    Queued,
+}
+
 /// Typed mirror of the public runtime lifecycle projection. The shell passes
 /// only the observed variant; generated transitions own the semantic facts
 /// derived from it (terminality, input admission, queue admission, and ingress
@@ -1761,6 +1770,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             surface_request_phases: Map<String, Enum<SurfaceRequestPhase>>,
             surface_request_terminal_policies: Map<String, Enum<SurfaceRequestTerminalPolicy>>,
 
+            // --- Live refresh public result authority ---
+            //
+            // `live/refresh` observes adapter command-queue acceptance in the
+            // shell, then submits that observation here. The generated effect
+            // below owns the public `Queued` result class and the compatibility
+            // `refresh_enqueued` mirror.
+            live_refresh_result_sequence: u64,
+            live_refresh_status_by_channel: Map<String, Enum<LiveRefreshPublicStatus>>,
+
             // --- External tool surface substate ---
             known_surfaces: Set<String>,
             active_surfaces: Set<String>,
@@ -2042,6 +2060,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             // Surface request lifecycle substate
             surface_request_phases = EmptyMap,
             surface_request_terminal_policies = EmptyMap,
+            // Live refresh public result authority
+            live_refresh_result_sequence = 0,
+            live_refresh_status_by_channel = EmptyMap,
             // External tool surface substate
             known_surfaces = EmptySet,
             active_surfaces = EmptySet,
@@ -2471,6 +2492,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             PublishSurfaceRequest { request_key: String },
             PublishOrCancelSurfaceRequest { request_key: String },
             FinishSurfaceRequestUnpublished { request_key: String },
+            RecordLiveRefreshQueued { channel_id: String },
             // Comms drain inputs
             SpawnDrain { mode: DrainMode },
             StopDrain,
@@ -2866,6 +2888,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             SurfaceRequestCancelledBeforePublish { request_key: String },
             SurfaceRequestCompleted { request_key: String },
             SurfaceRequestSupersededByCancel { request_key: String },
+            LiveRefreshResultResolved {
+                channel_id: String,
+                status: Enum<LiveRefreshPublicStatus>,
+                refresh_enqueued: bool,
+                sequence: u64,
+            },
             EnqueueClassifiedEntry,
             PeerIngressClassified {
                 class: Enum<PeerIngressInputClass>,
@@ -3036,6 +3064,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition SurfaceRequestCancelledBeforePublish => local,
         disposition SurfaceRequestCompleted => local,
         disposition SurfaceRequestSupersededByCancel => local,
+        disposition LiveRefreshResultResolved => local,
         disposition EnqueueClassifiedEntry => local,
         disposition PeerIngressClassified => local,
         disposition PeerResponseReplyClassified => local,
@@ -11114,6 +11143,31 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Initializing
             emit SurfaceRequestCompleted { request_key: request_key }
+        }
+
+        // RecordLiveRefreshQueued: generated public-result authority for
+        // `live/refresh` once the adapter command queue has accepted the
+        // refresh handoff. The shell observes queue acceptance but cannot
+        // construct `status: queued` or the compatibility
+        // `refresh_enqueued` fact without this generated effect.
+        transition RecordLiveRefreshQueued {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveRefreshQueued { channel_id }
+            guard "channel_id_present" { channel_id != "" }
+            update {
+                self.live_refresh_result_sequence += 1;
+                self.live_refresh_status_by_channel.insert(
+                    channel_id,
+                    LiveRefreshPublicStatus::Queued
+                );
+            }
+            to Idle
+            emit LiveRefreshResultResolved {
+                channel_id: channel_id,
+                status: LiveRefreshPublicStatus::Queued,
+                refresh_enqueued: true,
+                sequence: self.live_refresh_result_sequence
+            }
         }
 
         // ResolveWaitAllAdmission: generated wait-all admission/result-class

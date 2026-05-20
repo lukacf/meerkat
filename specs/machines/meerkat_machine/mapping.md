@@ -2393,6 +2393,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FinishSurfaceRequestUnpublishedTerminalInitializing`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
+- `RecordLiveRefreshQueuedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `recycle_and_compaction`
+- `RecordLiveRefreshQueuedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`, `live_topology_and_supervision`
+- `RecordLiveRefreshQueuedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`
+- `RecordLiveRefreshQueuedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `recycle_and_compaction`
+- `RecordLiveRefreshQueuedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`, `live_topology_and_supervision`
 - `ResolveWaitAllAdmissionDuplicateRejectedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -3338,6 +3353,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `SurfaceRequestSupersededByCancel`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `LiveRefreshResultResolved`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `EnqueueClassifiedEntry`

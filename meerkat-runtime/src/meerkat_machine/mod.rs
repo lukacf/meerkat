@@ -1264,6 +1264,19 @@ pub struct MachineSessionControlAuthority {
     _private: (),
 }
 
+/// Generated authority output for the public `live/refresh` success result.
+///
+/// Constructed only from a `MeerkatMachineEffect::LiveRefreshResultResolved`
+/// emitted after the live adapter command queue has accepted the refresh
+/// handoff. RPC/SDK surfaces project this value to their wire result instead
+/// of classifying the public status from host queue mechanics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveRefreshResultAuthority {
+    pub status: dsl::LiveRefreshPublicStatus,
+    pub refresh_enqueued: bool,
+    pub sequence: u64,
+}
+
 /// Session-scoped execution kernel for the Meerkat runtime.
 ///
 /// Owns per-session runtime state (driver, ops registry, completion waiters,

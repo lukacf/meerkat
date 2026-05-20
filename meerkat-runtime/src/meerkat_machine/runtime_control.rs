@@ -1,6 +1,46 @@
 use super::*;
 
 impl MeerkatMachine {
+    pub async fn resolve_live_refresh_queued_result(
+        &self,
+        session_id: &SessionId,
+        channel_id: impl Into<String>,
+    ) -> Result<LiveRefreshResultAuthority, RuntimeDriverError> {
+        let channel_id = channel_id.into();
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveRefreshQueued {
+                    channel_id: channel_id.clone(),
+                },
+                "RecordLiveRefreshQueued",
+            )
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+
+        effects
+            .as_slice()
+            .iter()
+            .find_map(|effect| match effect {
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveRefreshResultResolved {
+                    channel_id: effect_channel_id,
+                    status,
+                    refresh_enqueued,
+                    sequence,
+                } if *effect_channel_id == channel_id => Some(LiveRefreshResultAuthority {
+                    status: *status,
+                    refresh_enqueued: *refresh_enqueued,
+                    sequence: *sequence,
+                }),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "RecordLiveRefreshQueued for channel '{channel_id}' emitted no LiveRefreshResultResolved effect"
+                ))
+            })
+    }
+
     pub(super) async fn cancel_after_boundary_inner(
         &self,
         session_id: &SessionId,

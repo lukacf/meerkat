@@ -701,6 +701,7 @@ meerkat_machine_runtime_internal_inputs!(
     ],
     LiveTopologyReconfiguration => [
         CompleteUntilChangedSwitchTurnReconfigure,
+        RecordLiveRefreshQueued,
     ],
     InteractionStreamLifecycle => [
         InteractionStreamAttached,

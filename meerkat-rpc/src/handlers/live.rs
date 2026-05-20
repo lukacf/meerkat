@@ -30,6 +30,22 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::{LiveOpenPrecheckError, SessionRuntime};
 
+fn live_refresh_result_from_machine_authority(
+    authority: &meerkat_runtime::meerkat_machine::LiveRefreshResultAuthority,
+) -> Result<LiveRefreshResult, String> {
+    match authority.status {
+        meerkat_runtime::meerkat_machine::dsl::LiveRefreshPublicStatus::Queued
+            if authority.refresh_enqueued =>
+        {
+            Ok(LiveRefreshResult::queued())
+        }
+        other => Err(format!(
+            "LiveRefreshResultResolved emitted unsupported status {other:?} with refresh_enqueued={}",
+            authority.refresh_enqueued
+        )),
+    }
+}
+
 /// P1#4: pinned audio format for the live WebSocket transport.
 ///
 /// Today every realtime provider we ship ([`OpenAiRealtimeSession`]) negotiates
@@ -696,17 +712,39 @@ pub async fn handle_live_refresh(
         .send_command(&channel_id, LiveAdapterCommand::Refresh { snapshot })
         .await
     {
-        // R7 + R4-5: typed `LiveRefreshResult { status: queued,
-        // refresh_enqueued: true }`. The host has accepted the command
-        // onto the adapter's mpsc queue, but the adapter pump applies it
-        // asynchronously — the realtime stream is the source of truth for
-        // the actual outcome (failures appear as `Error` observations).
-        // The `refresh_enqueued` field is preserved for back-compat with
-        // R7-era clients; new code should route on the typed `status`
-        // discriminator. See doc-comment on `handle_live_refresh`.
+        // R7 + Dogma #1: host queue acceptance is an observation only. The
+        // public `status: queued` discriminator and the back-compat
+        // `refresh_enqueued` mirror are emitted by generated MeerkatMachine
+        // authority before the RPC surface projects the wire payload.
         Ok(()) => {
-            let body = serde_json::to_value(LiveRefreshResult::queued())
-                .unwrap_or_else(|_| serde_json::json!({"refresh_enqueued": true}));
+            let authority = match runtime
+                .runtime_adapter()
+                .resolve_live_refresh_queued_result(&session_id, channel_id.as_str())
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live refresh queued authority rejected result: {error}"),
+                    );
+                }
+            };
+            let result = match live_refresh_result_from_machine_authority(&authority) {
+                Ok(result) => result,
+                Err(error) => return RpcResponse::error(id, error::INTERNAL_ERROR, error),
+            };
+            let body = match serde_json::to_value(result) {
+                Ok(body) => body,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live refresh queued authority projection failed: {error}"),
+                    );
+                }
+            };
             RpcResponse::success(id, body)
         }
         Err(LiveAdapterHostError::ChannelNotFound(_)) => RpcResponse::error(
@@ -1599,14 +1637,19 @@ mod tests {
     /// true` (back-compat) and must NOT contain a `refreshed` key.
     ///
     /// R4-5 (P3): the same payload now also carries the typed
-    /// `status: "queued"` discriminator from `LiveRefreshResult`.
+    /// `status: "queued"` discriminator projected from generated authority.
     #[test]
     fn live_refresh_success_reply_is_refresh_enqueued_not_refreshed() {
-        // Mirror of the typed payload `handle_live_refresh`'s Ok arm now
-        // emits — `LiveRefreshResult::queued()` round-trips through the same
-        // serde shape the handler ships on the wire.
-        let reply = serde_json::to_value(LiveRefreshResult::queued())
-            .expect("LiveRefreshResult must round-trip through serde");
+        let authority = meerkat_runtime::meerkat_machine::LiveRefreshResultAuthority {
+            status: meerkat_runtime::meerkat_machine::dsl::LiveRefreshPublicStatus::Queued,
+            refresh_enqueued: true,
+            sequence: 1,
+        };
+        let reply = serde_json::to_value(
+            live_refresh_result_from_machine_authority(&authority)
+                .expect("generated queued authority should project to wire"),
+        )
+        .expect("LiveRefreshResult must round-trip through serde");
         assert_eq!(
             reply.get("refresh_enqueued"),
             Some(&serde_json::json!(true)),

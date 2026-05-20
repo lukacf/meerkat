@@ -624,12 +624,13 @@ pub struct LiveStatusResult {
 /// realtime stream is the source of truth for the actual refresh outcome
 /// (failures surface as `LiveAdapterObservation::Error`).
 ///
-/// Today every refresh path is `Queued`. The enum is `#[non_exhaustive]` so
-/// a future revision can add `AppliedSync` (e.g. when a oneshot ack from the
-/// adapter pump back through the command channel lands, or when a refresh
-/// is detected as a no-op against the currently-applied snapshot) without
-/// breaking the wire shape. SDK consumers route on the string value and
-/// treat unknown values as "outcome unknown — observe the realtime stream".
+/// Today generated runtime authority emits only `Queued`. The enum is
+/// `#[non_exhaustive]` so a future revision can add `AppliedSync` (e.g. when
+/// a oneshot ack from the adapter pump back through the command channel
+/// lands, or when a refresh is detected as a no-op against the currently-
+/// applied snapshot) without breaking the wire shape. SDK consumers route on
+/// the string value and treat unknown values as "outcome unknown — observe
+/// the realtime stream".
 ///
 /// Serializes as a plain string (no envelope) so [`LiveRefreshResult`] can
 /// place this typed status alongside the back-compat `refresh_enqueued`
@@ -660,16 +661,17 @@ pub enum LiveRefreshStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveRefreshResult {
-    /// Typed refresh status. Today: always [`LiveRefreshStatus::Queued`].
+    /// Typed refresh status emitted by generated runtime authority.
+    /// Today: always [`LiveRefreshStatus::Queued`].
     pub status: LiveRefreshStatus,
-    /// Back-compat mirror of the legacy untyped reply field. Always `true`
-    /// when paired with `status: queued`. New code should route on `status`.
+    /// Back-compat mirror of the generated queued-authority result. Always
+    /// `true` when paired with `status: queued`. New code should route on
+    /// `status`.
     pub refresh_enqueued: bool,
 }
 
 impl LiveRefreshResult {
-    /// Construct a `Queued` result — the only outcome the host's
-    /// `send_command` path produces today.
+    /// Project the generated `Queued` authority result to the wire shape.
     pub fn queued() -> Self {
         Self {
             status: LiveRefreshStatus::Queued,

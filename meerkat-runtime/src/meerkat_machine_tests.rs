@@ -15079,6 +15079,45 @@ fn registered_dsl_authority_for_visibility_tests() -> mm_dsl::MeerkatMachineAuth
 }
 
 #[test]
+fn live_refresh_queued_result_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    let transition = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveRefreshQueued {
+            channel_id: "live-channel-1".to_string(),
+        },
+    )
+    .expect("machine authority should accept queued live-refresh observation");
+
+    assert_eq!(
+        authority.state().live_refresh_result_sequence,
+        1,
+        "machine authority should assign the public result sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_refresh_status_by_channel
+            .get("live-channel-1"),
+        Some(&mm_dsl::LiveRefreshPublicStatus::Queued),
+        "machine state should retain the public result class by channel"
+    );
+    assert!(
+        transition.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::LiveRefreshResultResolved {
+                channel_id,
+                status: mm_dsl::LiveRefreshPublicStatus::Queued,
+                refresh_enqueued: true,
+                sequence: 1,
+            } if channel_id == "live-channel-1"
+        )),
+        "machine authority must emit the typed public result effect"
+    );
+}
+
+#[test]
 fn request_deferred_tools_rejects_empty_dsl_authority_witness() {
     let mut authority = registered_dsl_authority_for_visibility_tests();
     let witnesses = [(

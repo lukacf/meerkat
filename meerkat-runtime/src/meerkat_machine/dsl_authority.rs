@@ -124,6 +124,20 @@ pub(crate) fn observed_runtime_lifecycle_state(
     }
 }
 
+pub(crate) fn runtime_state_from_observed_lifecycle_state(
+    state: mm_dsl::RuntimeLifecycleObservedState,
+) -> RuntimeState {
+    match state {
+        mm_dsl::RuntimeLifecycleObservedState::Initializing => RuntimeState::Initializing,
+        mm_dsl::RuntimeLifecycleObservedState::Idle => RuntimeState::Idle,
+        mm_dsl::RuntimeLifecycleObservedState::Attached => RuntimeState::Attached,
+        mm_dsl::RuntimeLifecycleObservedState::Running => RuntimeState::Running,
+        mm_dsl::RuntimeLifecycleObservedState::Retired => RuntimeState::Retired,
+        mm_dsl::RuntimeLifecycleObservedState::Stopped => RuntimeState::Stopped,
+        mm_dsl::RuntimeLifecycleObservedState::Destroyed => RuntimeState::Destroyed,
+    }
+}
+
 #[allow(clippy::expect_used)]
 pub(crate) fn new_initialized_authority(context: &'static str) -> mm_dsl::MeerkatMachineAuthority {
     let mut authority = mm_dsl::MeerkatMachineAuthority::new();

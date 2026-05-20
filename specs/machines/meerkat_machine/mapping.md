@@ -1019,6 +1019,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyRuntimeLifecycleDestroyedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+- `ClassifyRuntimeDurabilityInitializingIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+- `ClassifyRuntimeDurabilityIdleIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `recycle_and_compaction`
+- `ClassifyRuntimeDurabilityAttachedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `recycle_and_compaction`
+- `ClassifyRuntimeDurabilityRunningIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `recycle_and_compaction`
+- `ClassifyRuntimeDurabilityRetiredIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `recycle_and_compaction`
+- `ClassifyRuntimeDurabilityStoppedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `recycle_and_compaction`
+- `ClassifyRuntimeDurabilityDestroyedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
 - `ClassifyRuntimeLoopQueueInitializingIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
@@ -3244,6 +3265,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RuntimeLifecycleStateClassified`
   - anchors: `meerkat_machine`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
+- `RuntimeLifecycleDurabilityClassified`
+  - anchors: `meerkat_machine`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
 - `RuntimeLoopQueueAdmissionClassified`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`

@@ -186,6 +186,45 @@ pub fn classify_runtime_lifecycle_state(
         })
 }
 
+/// Classify the store-visible durable runtime lifecycle state through
+/// generated MeerkatMachine authority. The caller supplies only the live
+/// observed state; generated feedback decides the recovery projection.
+pub fn classify_runtime_lifecycle_durable_state(
+    state: RuntimeState,
+) -> Result<RuntimeState, String> {
+    let observed_state = dsl_authority::observed_runtime_lifecycle_state(state);
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ClassifyRuntimeLifecycleDurability {
+            state: observed_state,
+        },
+    )
+    .map_err(|err| {
+        format!(
+            "MeerkatMachine rejected runtime lifecycle durability classification for {state}: {err}"
+        )
+    })?;
+
+    transition
+        .into_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::RuntimeLifecycleDurabilityClassified {
+                state,
+                durable_state,
+            } if state == observed_state => Some(
+                dsl_authority::runtime_state_from_observed_lifecycle_state(durable_state),
+            ),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!(
+                "MeerkatMachine emitted no runtime lifecycle durability classification for {state}"
+            )
+        })
+}
+
 /// Classify runtime-loop queue admission through generated MeerkatMachine
 /// authority. The caller provides the observed runtime state and the structural
 /// fact that a current run id is bound; generated feedback decides whether the
@@ -653,11 +692,11 @@ pub(crate) use driver::{
     commit_runtime_loop_run, fail_machine_run, fail_runtime_loop_run,
     machine_apply_run_return_projection, machine_batch_primitive_projections,
     machine_batch_runtime_semantics, machine_begin_run, machine_commit_prepared_destroy,
-    machine_commit_service_turn_terminal_receipt, machine_input_boundary,
-    machine_prepare_bindings_projection, machine_prepare_destroy, machine_recover_ephemeral_driver,
-    machine_recover_persistent_driver, machine_recycle_preserving_work, machine_reset,
-    machine_retire, machine_select_runtime_loop_batch, machine_stop_runtime,
-    prepare_runtime_loop_batch_start, rollback_runtime_loop_run_after_boundary_commit_failure,
+    machine_commit_service_turn_terminal_receipt, machine_prepare_bindings_projection,
+    machine_prepare_destroy, machine_recover_ephemeral_driver, machine_recover_persistent_driver,
+    machine_recycle_preserving_work, machine_reset, machine_retire,
+    machine_select_runtime_loop_batch, machine_stop_runtime, prepare_runtime_loop_batch_start,
+    rollback_runtime_loop_run_after_boundary_commit_failure,
 };
 
 pub(crate) mod driver;

@@ -118,6 +118,18 @@ mod tests {
             idle_queue.run_binding,
             dsl::RuntimeLoopRunBinding::AllocateNew
         );
+
+        assert_eq!(
+            meerkat_machine::classify_runtime_lifecycle_durable_state(RuntimeState::Attached)
+                .expect("attached durability classification"),
+            RuntimeState::Idle,
+            "generated durability classification owns the process-local Attached recovery projection"
+        );
+        assert_eq!(
+            meerkat_machine::classify_runtime_lifecycle_durable_state(RuntimeState::Running)
+                .expect("running durability classification"),
+            RuntimeState::Running
+        );
     }
 
     #[test]

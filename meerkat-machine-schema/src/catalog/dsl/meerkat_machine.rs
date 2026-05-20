@@ -2330,6 +2330,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             ClassifyRuntimeLifecycleState {
                 state: Enum<RuntimeLifecycleObservedState>,
             },
+            ClassifyRuntimeLifecycleDurability {
+                state: Enum<RuntimeLifecycleObservedState>,
+            },
             ClassifyRuntimeLoopQueueAdmission {
                 state: Enum<RuntimeLifecycleObservedState>,
                 current_run_bound: bool,
@@ -2862,6 +2865,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 prepare_admission: Enum<RuntimePrepareAdmission>,
                 ingress_admission: Enum<RuntimeIngressAdmission>,
             },
+            RuntimeLifecycleDurabilityClassified {
+                state: Enum<RuntimeLifecycleObservedState>,
+                durable_state: Enum<RuntimeLifecycleObservedState>,
+            },
             RuntimeLoopQueueAdmissionClassified {
                 state: Enum<RuntimeLifecycleObservedState>,
                 current_run_bound: bool,
@@ -3071,6 +3078,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InputPublicTerminalOutcomeResolved => local,
         disposition InputBehavioralTerminalityResolved => local,
         disposition RuntimeLifecycleStateClassified => local,
+        disposition RuntimeLifecycleDurabilityClassified => local,
         disposition RuntimeLoopQueueAdmissionClassified => local,
         disposition PostAdmissionSignal => local,
         disposition ReadyForRun => local,
@@ -5785,6 +5793,95 @@ macro_rules! meerkat_catalog_machine_dsl {
                 queue_admission: RuntimeQueueAdmission::BlocksQueue,
                 prepare_admission: RuntimePrepareAdmission::Destroyed,
                 ingress_admission: RuntimeIngressAdmission::Destroyed
+            }
+        }
+
+        // ClassifyRuntimeLifecycleDurability: generated authority for the
+        // store-visible recovery lifecycle projection. Live `Attached` is
+        // process-local executor attachment; the machine maps it to durable
+        // `Idle` for persistence while all other lifecycle states preserve
+        // their observed variant.
+        transition ClassifyRuntimeDurabilityInitializing {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "initializing_state" { state == RuntimeLifecycleObservedState::Initializing }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Initializing
+            }
+        }
+
+        transition ClassifyRuntimeDurabilityIdle {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "idle_state" { state == RuntimeLifecycleObservedState::Idle }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Idle
+            }
+        }
+
+        transition ClassifyRuntimeDurabilityAttached {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "attached_state" { state == RuntimeLifecycleObservedState::Attached }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Idle
+            }
+        }
+
+        transition ClassifyRuntimeDurabilityRunning {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "running_state" { state == RuntimeLifecycleObservedState::Running }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Running
+            }
+        }
+
+        transition ClassifyRuntimeDurabilityRetired {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "retired_state" { state == RuntimeLifecycleObservedState::Retired }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Retired
+            }
+        }
+
+        transition ClassifyRuntimeDurabilityStopped {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "stopped_state" { state == RuntimeLifecycleObservedState::Stopped }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Stopped
+            }
+        }
+
+        transition ClassifyRuntimeDurabilityDestroyed {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "destroyed_state" { state == RuntimeLifecycleObservedState::Destroyed }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Destroyed
             }
         }
 

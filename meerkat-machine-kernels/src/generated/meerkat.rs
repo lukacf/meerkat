@@ -7059,6 +7059,10 @@ pub mod inputs {
         pub state: RuntimeLifecycleObservedState,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyRuntimeLifecycleDurability {
+        pub state: RuntimeLifecycleObservedState,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyRuntimeLoopQueueAdmission {
         pub state: RuntimeLifecycleObservedState,
         pub current_run_bound: bool,
@@ -7792,6 +7796,7 @@ pub enum Input {
     ResolveInputPublicTerminalOutcome(inputs::ResolveInputPublicTerminalOutcome),
     ClassifyInputTerminality(inputs::ClassifyInputTerminality),
     ClassifyRuntimeLifecycleState(inputs::ClassifyRuntimeLifecycleState),
+    ClassifyRuntimeLifecycleDurability(inputs::ClassifyRuntimeLifecycleDurability),
     ClassifyRuntimeLoopQueueAdmission(inputs::ClassifyRuntimeLoopQueueAdmission),
     Prepare(inputs::Prepare),
     Commit(inputs::Commit),
@@ -8005,6 +8010,9 @@ impl Input {
             }
             Self::ClassifyInputTerminality(_) => InputKind::ClassifyInputTerminality,
             Self::ClassifyRuntimeLifecycleState(_) => InputKind::ClassifyRuntimeLifecycleState,
+            Self::ClassifyRuntimeLifecycleDurability(_) => {
+                InputKind::ClassifyRuntimeLifecycleDurability
+            }
             Self::ClassifyRuntimeLoopQueueAdmission(_) => {
                 InputKind::ClassifyRuntimeLoopQueueAdmission
             }
@@ -8225,6 +8233,7 @@ pub enum InputKind {
     ResolveInputPublicTerminalOutcome,
     ClassifyInputTerminality,
     ClassifyRuntimeLifecycleState,
+    ClassifyRuntimeLifecycleDurability,
     ClassifyRuntimeLoopQueueAdmission,
     Prepare,
     Commit,
@@ -8634,6 +8643,11 @@ pub mod effects {
         pub ingress_admission: RuntimeIngressAdmission,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeLifecycleDurabilityClassified {
+        pub state: RuntimeLifecycleObservedState,
+        pub durable_state: RuntimeLifecycleObservedState,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeLoopQueueAdmissionClassified {
         pub state: RuntimeLifecycleObservedState,
         pub current_run_bound: bool,
@@ -8979,6 +8993,7 @@ pub enum Effect {
     InputPublicTerminalOutcomeResolved(effects::InputPublicTerminalOutcomeResolved),
     InputBehavioralTerminalityResolved(effects::InputBehavioralTerminalityResolved),
     RuntimeLifecycleStateClassified(effects::RuntimeLifecycleStateClassified),
+    RuntimeLifecycleDurabilityClassified(effects::RuntimeLifecycleDurabilityClassified),
     RuntimeLoopQueueAdmissionClassified(effects::RuntimeLoopQueueAdmissionClassified),
     PostAdmissionSignal(effects::PostAdmissionSignal),
     ReadyForRun(effects::ReadyForRun),
@@ -9090,6 +9105,7 @@ pub enum EffectKind {
     InputPublicTerminalOutcomeResolved,
     InputBehavioralTerminalityResolved,
     RuntimeLifecycleStateClassified,
+    RuntimeLifecycleDurabilityClassified,
     RuntimeLoopQueueAdmissionClassified,
     PostAdmissionSignal,
     ReadyForRun,
@@ -9494,6 +9510,13 @@ pub enum TransitionId {
     ClassifyRuntimeLifecycleRetiredIdle,
     ClassifyRuntimeLifecycleStoppedIdle,
     ClassifyRuntimeLifecycleDestroyedIdle,
+    ClassifyRuntimeDurabilityInitializingIdle,
+    ClassifyRuntimeDurabilityIdleIdle,
+    ClassifyRuntimeDurabilityAttachedIdle,
+    ClassifyRuntimeDurabilityRunningIdle,
+    ClassifyRuntimeDurabilityRetiredIdle,
+    ClassifyRuntimeDurabilityStoppedIdle,
+    ClassifyRuntimeDurabilityDestroyedIdle,
     ClassifyRuntimeLoopQueueInitializingIdle,
     ClassifyRuntimeLoopQueueIdleIdle,
     ClassifyRuntimeLoopQueueAttachedIdle,

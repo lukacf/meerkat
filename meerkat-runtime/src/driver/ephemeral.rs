@@ -2549,17 +2549,22 @@ impl EphemeralRuntimeDriver {
         resolved: crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
         let runtime_phase = self.runtime_phase_snapshot();
-        match runtime_phase {
-            RuntimeState::Retired | RuntimeState::Stopped => {
-                return Err(RuntimeDriverError::NotReady {
+        let lifecycle_facts = crate::meerkat_machine::classify_runtime_lifecycle_state(
+            runtime_phase,
+        )
+        .map_err(|err| {
+            RuntimeDriverError::Internal(format!(
+                "generated runtime lifecycle admission classification failed: {err}"
+            ))
+        })?;
+        if !lifecycle_facts.can_accept_input() {
+            return match lifecycle_facts.ingress_admission {
+                mm_dsl::RuntimeIngressAdmission::Destroyed => Err(RuntimeDriverError::Destroyed),
+                mm_dsl::RuntimeIngressAdmission::Open
+                | mm_dsl::RuntimeIngressAdmission::NotReady => Err(RuntimeDriverError::NotReady {
                     state: runtime_phase,
-                });
-            }
-            RuntimeState::Destroyed => return Err(RuntimeDriverError::Destroyed),
-            RuntimeState::Initializing
-            | RuntimeState::Idle
-            | RuntimeState::Attached
-            | RuntimeState::Running => {}
+                }),
+            };
         }
 
         let input_id = input.id().clone();

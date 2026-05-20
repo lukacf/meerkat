@@ -1082,12 +1082,11 @@ pub(crate) fn slice_starts_with(seq: &[InputId], prefix: &[InputId]) -> bool {
 pub(crate) fn machine_input_boundary(
     driver: &DriverEntry,
     work_id: &InputId,
-) -> meerkat_core::lifecycle::run_primitive::RunApplyBoundary {
+) -> Option<meerkat_core::lifecycle::run_primitive::RunApplyBoundary> {
     driver
         .driver_ingress()
         .runtime_semantics(work_id)
         .map(|semantics| semantics.boundary)
-        .unwrap_or(meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart)
 }
 
 pub(crate) fn machine_input_execution_kind(
@@ -1175,7 +1174,9 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
         if !should_drive_loop(first) {
             return Vec::new();
         }
-        let target_boundary = machine_input_boundary(driver, first);
+        let Some(target_boundary) = machine_input_boundary(driver, first) else {
+            return vec![first.clone()];
+        };
         let Some(target_execution_kind) = machine_input_execution_kind(driver, first) else {
             return vec![first.clone()];
         };
@@ -1184,7 +1185,7 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
         return steer
             .iter()
             .take_while(|id| {
-                machine_input_boundary(driver, id) == target_boundary
+                machine_input_boundary(driver, id) == Some(target_boundary)
                     && machine_input_execution_kind(driver, id) == Some(target_execution_kind)
                     && machine_input_peer_response_terminal_apply_intent(driver, id)
                         == target_peer_response_terminal_apply_intent
@@ -2018,6 +2019,20 @@ mod tests {
             machine_batch_execution_kind(&driver, &[unstamped_input]),
             None,
             "missing runtime semantics must not locally default to ContentTurn"
+        );
+    }
+
+    #[test]
+    fn machine_input_boundary_requires_admitted_semantics() {
+        let driver = DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(
+            crate::identifiers::LogicalRuntimeId::new("boundary-test"),
+        ));
+        let unstamped_input = InputId::new();
+
+        assert_eq!(
+            machine_input_boundary(&driver, &unstamped_input),
+            None,
+            "missing runtime semantics must not locally default to RunStart"
         );
     }
 

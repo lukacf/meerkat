@@ -99,19 +99,20 @@ impl PersistentRuntimeDriver {
         self.inner.is_idle()
     }
 
-    /// Map runtime state for persistence.
-    ///
-    /// Attached must never be persisted — on recovery, the executor is
-    /// re-attached by the surface. Map Attached to Idle for store operations.
-    fn runtime_state_for_persistence(&self) -> RuntimeState {
+    /// Ask generated MeerkatMachine authority for the store-visible lifecycle.
+    fn runtime_state_for_persistence(&self) -> Result<RuntimeState, RuntimeDriverError> {
         Self::runtime_state_for_persistence_from_inner(&self.inner)
     }
 
-    fn runtime_state_for_persistence_from_inner(inner: &EphemeralRuntimeDriver) -> RuntimeState {
-        match inner.runtime_state() {
-            RuntimeState::Attached => RuntimeState::Idle,
-            other => other,
-        }
+    fn runtime_state_for_persistence_from_inner(
+        inner: &EphemeralRuntimeDriver,
+    ) -> Result<RuntimeState, RuntimeDriverError> {
+        crate::meerkat_machine::classify_runtime_lifecycle_durable_state(inner.runtime_state())
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!(
+                    "generated runtime lifecycle durability classification failed: {err}"
+                ))
+            })
     }
 
     async fn commit_lifecycle_with_rollback(
@@ -392,7 +393,7 @@ impl PersistentRuntimeDriver {
             }
         };
         let input_states = self.inner.stored_input_states_snapshot()?;
-        let target_state = self.runtime_state_for_persistence();
+        let target_state = self.runtime_state_for_persistence()?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(
@@ -424,7 +425,7 @@ impl PersistentRuntimeDriver {
             }
         };
         let input_states = self.inner.stored_input_states_snapshot()?;
-        let target_state = self.runtime_state_for_persistence();
+        let target_state = self.runtime_state_for_persistence()?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(
@@ -449,7 +450,7 @@ impl PersistentRuntimeDriver {
     ) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
         let report = self.inner.finalize_retire();
-        let target_state = self.runtime_state_for_persistence();
+        let target_state = self.runtime_state_for_persistence()?;
         self.commit_lifecycle_with_rollback(checkpoint, target_state, "retire")
             .await?;
         self.inner.sync_control_projection_from_dsl_authority();
@@ -467,7 +468,7 @@ impl PersistentRuntimeDriver {
                 return Err(err);
             }
         };
-        let target_state = self.runtime_state_for_persistence();
+        let target_state = self.runtime_state_for_persistence()?;
         self.commit_lifecycle_with_rollback(checkpoint, target_state, "reset")
             .await?;
         self.inner.sync_control_projection_from_dsl_authority();
@@ -499,7 +500,7 @@ impl PersistentRuntimeDriver {
     ) -> Result<(), RuntimeDriverError> {
         self.commit_lifecycle_with_rollback(
             checkpoint,
-            self.runtime_state_for_persistence(),
+            self.runtime_state_for_persistence()?,
             "destroy",
         )
         .await
@@ -600,7 +601,7 @@ impl PersistentRuntimeDriver {
             .store
             .commit_machine_lifecycle(
                 &self.runtime_id,
-                MachineLifecycleCommit::new(self.runtime_state_for_persistence()),
+                MachineLifecycleCommit::new(self.runtime_state_for_persistence()?),
                 &input_states,
             )
             .await
@@ -631,7 +632,7 @@ impl PersistentRuntimeDriver {
             .store
             .commit_machine_lifecycle(
                 &self.runtime_id,
-                MachineLifecycleCommit::new(self.runtime_state_for_persistence()),
+                MachineLifecycleCommit::new(self.runtime_state_for_persistence()?),
                 &input_states,
             )
             .await
@@ -670,7 +671,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         .await?;
 
         let input_states = staged.stored_input_states_snapshot()?;
-        let recovered_runtime_state = Self::runtime_state_for_persistence_from_inner(&staged);
+        let recovered_runtime_state = Self::runtime_state_for_persistence_from_inner(&staged)?;
         self.store
             .commit_machine_lifecycle(
                 &self.runtime_id,

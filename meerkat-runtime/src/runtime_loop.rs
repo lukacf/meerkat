@@ -936,12 +936,6 @@ async fn process_queue(
             // staging failure.
             let staged_ids: Vec<_> = staged_inputs.iter().map(|(id, _)| id.clone()).collect();
 
-            // The checked-in Meerkat machine now owns runtime-loop batch
-            // boundary classification over the stored ingress metadata.
-            let boundary = staged_inputs
-                .first()
-                .map(|(id, _)| crate::meerkat_machine::machine_input_boundary(&d, id))
-                .unwrap_or(RunApplyBoundary::RunStart);
             let contributing_input_ids = staged_inputs
                 .iter()
                 .map(|(staged_input_id, _)| staged_input_id.clone())
@@ -951,12 +945,23 @@ async fn process_queue(
             let projections =
                 crate::meerkat_machine::machine_batch_primitive_projections(&d, &staged_inputs);
             let primitive = match semantics {
-                Some(semantics) => try_projected_inputs_to_primitive_with_boundary(
-                    &staged_inputs,
-                    &projections,
-                    boundary,
-                    &semantics,
-                ),
+                Some(semantics) => {
+                    let boundary = semantics.first().map(|semantics| semantics.boundary).ok_or(
+                        meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                            field: "runtime_boundary",
+                            reason: "runtime-stamped boundary missing for staged inputs",
+                        },
+                    );
+                    match boundary {
+                        Ok(boundary) => try_projected_inputs_to_primitive_with_boundary(
+                            &staged_inputs,
+                            &projections,
+                            boundary,
+                            &semantics,
+                        ),
+                        Err(error) => Err(error),
+                    }
+                }
                 None => Err(
                     meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
                         field: "execution_kind",

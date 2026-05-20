@@ -1253,7 +1253,12 @@ async fn save_seeded_tokens_with_lifecycle(harness: &AuthHarness, tokens: &Persi
             meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
         )
         .expect("seed AuthMachine lifecycle");
-    let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(tokens, transition);
+    let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+        &harness.token_key(),
+        tokens,
+        &transition,
+    )
+    .expect("mark seeded tokens with AuthMachine lifecycle");
     harness
         .token_store
         .save(&harness.token_key(), &marked)

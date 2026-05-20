@@ -96,14 +96,12 @@ fn default_auth_binding() -> AuthBindingRef {
     }
 }
 
-fn generated_auth_transition_for_test(expires_at: u64) -> AuthLeaseTransition {
+fn generated_auth_transition_for_test(
+    lease_key: &LeaseKey,
+    expires_at: u64,
+) -> AuthLeaseTransition {
     let handle = meerkat_runtime::RuntimeAuthLeaseHandle::new();
-    let lease_key = LeaseKey::new(
-        RealmId::parse("test").unwrap(),
-        BindingId::parse("auth_transition").unwrap(),
-        None,
-    );
-    handle.acquire_lease(&lease_key, expires_at).unwrap()
+    handle.acquire_lease(lease_key, expires_at).unwrap()
 }
 
 fn mark_tokens_lifecycle_published_for_test(
@@ -111,39 +109,15 @@ fn mark_tokens_lifecycle_published_for_test(
     generation: u64,
     credential_published_at_millis: Option<u64>,
 ) -> PersistedTokens {
-    let mut marked = tokens.clone();
-    let mut marker = serde_json::json!({
-        "published": true,
-        "version": 2,
-        "generation": generation,
-        "expires_at": meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
-    });
-    if let Some(credential_published_at_millis) = credential_published_at_millis
-        && let Some(marker) = marker.as_object_mut()
-    {
-        marker.insert(
-            "credential_published_at_millis".to_string(),
-            serde_json::json!(credential_published_at_millis),
-        );
-    }
-    match &mut marked.metadata {
-        serde_json::Value::Object(map) => {
-            map.insert("meerkat_auth_lifecycle".to_string(), marker);
-        }
-        serde_json::Value::Null => {
-            let mut metadata = serde_json::Map::new();
-            metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
-            marked.metadata = serde_json::Value::Object(metadata);
-        }
-        _ => {
-            let previous = std::mem::replace(&mut marked.metadata, serde_json::Value::Null);
-            let mut metadata = serde_json::Map::new();
-            metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
-            metadata.insert("meerkat_previous_metadata".to_string(), previous);
-            marked.metadata = serde_json::Value::Object(metadata);
-        }
-    }
-    marked
+    let _ = (generation, credential_published_at_millis);
+    let key = TokenKey::from_auth_binding(&default_auth_binding());
+    let lease_key = LeaseKey::from_auth_binding(&default_auth_binding());
+    let transition = generated_auth_transition_for_test(
+        &lease_key,
+        meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
+    );
+    meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, tokens, &transition)
+        .expect("runtime AuthMachine transition marks fixture tokens")
 }
 
 struct StaticAuthLeaseHandle {
@@ -162,7 +136,7 @@ impl StaticAuthLeaseHandle {
     fn valid_for_tokens(tokens: &PersistedTokens) -> Arc<Self> {
         Arc::new(Self {
             expires_at: tokens.expires_at.map(|ts| ts.timestamp().max(0) as u64),
-            credential_published_at_millis: Some(1_000),
+            credential_published_at_millis: None,
         })
     }
 }
@@ -173,7 +147,7 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
         _lease_key: &LeaseKey,
         expires_at: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(generated_auth_transition_for_test(expires_at))
+        Ok(generated_auth_transition_for_test(_lease_key, expires_at))
     }
 
     fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -190,7 +164,10 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
         new_expires_at: u64,
         _now: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(generated_auth_transition_for_test(new_expires_at))
+        Ok(generated_auth_transition_for_test(
+            _lease_key,
+            new_expires_at,
+        ))
     }
 
     fn refresh_failed(
@@ -251,7 +228,7 @@ impl AuthLeaseHandle for BootstrappingAuthLeaseHandle {
         snapshot.phase = Some(AuthLeasePhase::Valid);
         snapshot.expires_at = (expires_at != u64::MAX).then_some(expires_at);
         snapshot.credential_present = true;
-        let transition = generated_auth_transition_for_test(expires_at);
+        let transition = generated_auth_transition_for_test(_lease_key, expires_at);
         snapshot.generation = transition.generation();
         snapshot.credential_published_at_millis = transition.credential_published_at_millis();
         Ok(transition)

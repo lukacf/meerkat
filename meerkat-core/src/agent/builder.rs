@@ -1119,7 +1119,12 @@ mod tests {
                     credential_published_at_millis: None,
                 },
             );
-            Ok(AuthLeaseTransition::__from_test_authority(generation, None))
+            Ok(AuthLeaseTransition::__from_test_authority(
+                lease_key.clone(),
+                expires_at,
+                generation,
+                None,
+            ))
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {

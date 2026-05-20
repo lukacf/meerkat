@@ -33,9 +33,13 @@ impl AuthLeaseLifecyclePublicationObligation {
 
     pub fn into_auth_lease_transition(
         &self,
+        lease_key: meerkat_core::handles::LeaseKey,
+        expires_at: u64,
     ) -> Result<meerkat_core::handles::AuthLeaseTransition, String> {
         meerkat_core::handles::AuthLeaseTransition::from_generated_auth_lease_publication(
             self,
+            lease_key,
+            expires_at,
             self.credential_generation,
             self.credential_published_at_millis,
         )

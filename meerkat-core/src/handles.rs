@@ -1112,13 +1112,23 @@ impl AuthLeaseRestoreSnapshot {
 /// that published it without taking a later snapshot.
 /// `credential_published_at_millis` is the durable credential publication
 /// timestamp attached to acquired/refreshed credential material.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseTransition {
+    lease_key: LeaseKey,
+    expires_at: u64,
     generation: u64,
     credential_published_at_millis: Option<u64>,
 }
 
 impl AuthLeaseTransition {
+    pub fn lease_key(&self) -> &LeaseKey {
+        &self.lease_key
+    }
+
+    pub fn expires_at(&self) -> u64 {
+        self.expires_at
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -1130,10 +1140,14 @@ impl AuthLeaseTransition {
     #[cfg(test)]
     #[doc(hidden)]
     pub(crate) fn __from_test_authority(
+        lease_key: LeaseKey,
+        expires_at: u64,
         generation: u64,
         credential_published_at_millis: Option<u64>,
     ) -> Self {
         Self {
+            lease_key,
+            expires_at,
             generation,
             credential_published_at_millis,
         }
@@ -1147,6 +1161,8 @@ impl AuthLeaseTransition {
     /// authorize the exact generation/publication facts requested here.
     pub fn from_generated_auth_lease_publication(
         source: &(impl GeneratedAuthLeaseTransitionSource + ?Sized),
+        lease_key: LeaseKey,
+        expires_at: u64,
         generation: u64,
         credential_published_at_millis: Option<u64>,
     ) -> Result<Self, String> {
@@ -1161,6 +1177,8 @@ impl AuthLeaseTransition {
             ));
         }
         let request = GeneratedAuthLeaseTransitionRequest {
+            lease_key,
+            expires_at,
             generation,
             credential_published_at_millis,
         };
@@ -1184,6 +1202,8 @@ impl AuthLeaseTransition {
             ));
         }
         Ok(Self {
+            lease_key: grant.lease_key,
+            expires_at: grant.expires_at,
             generation,
             credential_published_at_millis,
         })
@@ -1197,13 +1217,23 @@ pub enum GeneratedAuthLeaseTransitionSourceKind {
 }
 
 #[doc(hidden)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct GeneratedAuthLeaseTransitionRequest {
+    lease_key: LeaseKey,
+    expires_at: u64,
     generation: u64,
     credential_published_at_millis: Option<u64>,
 }
 
 impl GeneratedAuthLeaseTransitionRequest {
+    pub fn lease_key(&self) -> &LeaseKey {
+        &self.lease_key
+    }
+
+    pub fn expires_at(&self) -> u64 {
+        self.expires_at
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -1214,9 +1244,11 @@ impl GeneratedAuthLeaseTransitionRequest {
 }
 
 #[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedAuthLeaseTransitionGrant {
     source_kind: GeneratedAuthLeaseTransitionSourceKind,
+    lease_key: LeaseKey,
+    expires_at: u64,
     generation: u64,
     credential_published_at_millis: Option<u64>,
 }
@@ -1228,6 +1260,8 @@ impl GeneratedAuthLeaseTransitionGrant {
     ) -> Self {
         Self {
             source_kind,
+            lease_key: request.lease_key.clone(),
+            expires_at: request.expires_at,
             generation: request.generation,
             credential_published_at_millis: request.credential_published_at_millis,
         }

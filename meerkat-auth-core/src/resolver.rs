@@ -911,8 +911,12 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
     }
 
     let transition = publish_managed_store_tokens_refresh_lifecycle(env, binding, refreshed)?;
-    let committed =
-        meerkat_core::mark_tokens_lifecycle_published_for_transition(refreshed, transition);
+    let committed = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+        &previous.key,
+        refreshed,
+        &transition,
+    )
+    .map_err(|err| ProviderAuthError::SourceResolutionFailed(err.to_string()))?;
     if let Err(save_error) = previous.store.save(&previous.key, &committed).await {
         let mut rollback_errors = Vec::new();
         if let Err(err) = auth_lease.release_credential_lifecycle(&lease_key) {
@@ -933,9 +937,11 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
         };
         if let Some(restored_transition) = restored_transition {
             restored_previous = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &previous.key,
                 &previous.tokens,
-                restored_transition,
-            );
+                &restored_transition,
+            )
+            .map_err(|err| ProviderAuthError::SourceResolutionFailed(err.to_string()))?;
         }
         if let Err(err) = previous.store.save(&previous.key, &restored_previous).await {
             rollback_errors.push(format!("TokenStore rollback save failed: {err}"));
@@ -1275,14 +1281,12 @@ mod tests {
     use meerkat_llm_core::provider_runtime::{ProviderRuntimeCatalog, ValidatedBinding};
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn generated_auth_transition_for_test(expires_at: u64) -> AuthLeaseTransition {
+    fn generated_auth_transition_for_test(
+        lease_key: &LeaseKey,
+        expires_at: u64,
+    ) -> AuthLeaseTransition {
         let handle = meerkat_runtime::RuntimeAuthLeaseHandle::new();
-        let lease_key = LeaseKey::new(
-            meerkat_core::connection::RealmId::parse("test").unwrap(),
-            meerkat_core::connection::BindingId::parse("auth_transition").unwrap(),
-            None,
-        );
-        handle.acquire_lease(&lease_key, expires_at).unwrap()
+        handle.acquire_lease(lease_key, expires_at).unwrap()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1610,7 +1614,7 @@ mod tests {
                 Some(expires_at)
             };
             snapshot.credential_present = true;
-            let transition = generated_auth_transition_for_test(expires_at);
+            let transition = generated_auth_transition_for_test(_lease_key, expires_at);
             snapshot.generation = transition.generation();
             snapshot.credential_published_at_millis = transition.credential_published_at_millis();
             Ok(transition)
@@ -1644,7 +1648,7 @@ mod tests {
                 Some(new_expires_at)
             };
             snapshot.credential_present = true;
-            let transition = generated_auth_transition_for_test(new_expires_at);
+            let transition = generated_auth_transition_for_test(_lease_key, new_expires_at);
             snapshot.generation = transition.generation();
             snapshot.credential_published_at_millis = transition.credential_published_at_millis();
             Ok(transition)
@@ -1687,7 +1691,10 @@ mod tests {
             let snapshot = captured.snapshot();
             *self.snapshot.lock().expect("snapshot lock") = snapshot.clone();
             Ok(snapshot.credential_present.then(|| {
-                generated_auth_transition_for_test(snapshot.expires_at.unwrap_or(u64::MAX))
+                generated_auth_transition_for_test(
+                    captured.lease_key(),
+                    snapshot.expires_at.unwrap_or(u64::MAX),
+                )
             }))
         }
 
@@ -1704,6 +1711,7 @@ mod tests {
             _expires_at: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
             Ok(generated_auth_transition_for_test(
+                _lease_key,
                 self.snapshot.expires_at.unwrap_or(u64::MAX),
             ))
         }
@@ -1723,6 +1731,7 @@ mod tests {
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
             Ok(generated_auth_transition_for_test(
+                _lease_key,
                 self.snapshot.expires_at.unwrap_or(u64::MAX),
             ))
         }

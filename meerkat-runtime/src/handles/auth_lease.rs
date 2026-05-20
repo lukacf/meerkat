@@ -236,12 +236,19 @@ fn map_auth_machine_error(
 
 fn apply_restore_input(
     authority: &mut auth_dsl::AuthMachineAuthority,
+    lease_key: &LeaseKey,
     input: auth_dsl::AuthMachineInput,
     context: &'static str,
 ) -> Result<(AuthLeasePhase, AuthLeaseTransition), DslTransitionError> {
     let transition = auth_dsl::AuthMachineMutator::apply(authority, input)
         .map_err(|err| map_auth_machine_error(err, context))?;
-    let auth_transition = auth_lease_transition_from_generated_publication(&transition, context)?;
+    let expires_at = authority.state().expires_at.unwrap_or(u64::MAX);
+    let auth_transition = auth_lease_transition_from_generated_publication(
+        lease_key,
+        expires_at,
+        &transition,
+        context,
+    )?;
     Ok((
         map_phase(authority.state().lifecycle_phase),
         auth_transition,
@@ -258,10 +265,12 @@ fn apply_restore_input_to_registry(
         .authorities
         .entry(lease_key.clone())
         .or_insert_with(auth_dsl::AuthMachineAuthority::new);
-    apply_restore_input(authority, input, context)
+    apply_restore_input(authority, lease_key, input, context)
 }
 
 fn auth_lease_transition_from_generated_publication(
+    lease_key: &LeaseKey,
+    expires_at: u64,
     transition: &auth_dsl::AuthMachineTransition,
     context: &'static str,
 ) -> Result<AuthLeaseTransition, DslTransitionError> {
@@ -278,7 +287,7 @@ fn auth_lease_transition_from_generated_publication(
     }
     obligations
         .remove(0)
-        .into_auth_lease_transition()
+        .into_auth_lease_transition(lease_key.clone(), expires_at)
         .map_err(|err| {
             DslTransitionError::new(
                 context,
@@ -486,8 +495,13 @@ impl RuntimeAuthLeaseHandle {
             let from_phase = map_phase(entry.state().lifecycle_phase);
             let transition = auth_dsl::AuthMachineMutator::apply(entry, input)
                 .map_err(|err| map_auth_machine_error(err, context))?;
-            let auth_transition =
-                auth_lease_transition_from_generated_publication(&transition, context)?;
+            let expires_at = entry.state().expires_at.unwrap_or(u64::MAX);
+            let auth_transition = auth_lease_transition_from_generated_publication(
+                lease_key,
+                expires_at,
+                &transition,
+                context,
+            )?;
             let to_phase = map_phase(entry.state().lifecycle_phase);
             (from_phase, to_phase, auth_transition)
         };
@@ -1405,6 +1419,7 @@ mod tests {
         let acquired_transition = acquired_transition
             .lock()
             .unwrap()
+            .clone()
             .expect("release hook should reacquire the lease");
         let snap = h.snapshot(&key);
         assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
@@ -1454,6 +1469,7 @@ mod tests {
         let acquired_transition = acquired_transition
             .lock()
             .unwrap()
+            .clone()
             .expect("release hook should reacquire before newer release");
         let snap = h.snapshot(&key);
         assert_eq!(

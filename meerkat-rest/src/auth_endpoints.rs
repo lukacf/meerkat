@@ -320,10 +320,24 @@ async fn mark_token_commit_lifecycle_published_unlocked(
     commit: &TokenCommitSnapshot,
     tokens: &PersistedTokens,
 ) -> Result<(), (StatusCode, String)> {
-    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+    let committed_tokens = match meerkat_core::mark_tokens_lifecycle_published_for_transition(
+        &commit.key,
         tokens,
-        commit.lifecycle_transition,
-    );
+        &commit.lifecycle_transition,
+    ) {
+        Ok(committed_tokens) => committed_tokens,
+        Err(e) => {
+            let message = match rollback_token_commit(token_store, auth_lease, commit).await {
+                Ok(()) => format!(
+                    "AuthMachine lifecycle marker handoff failed: {e}; token commit rolled back"
+                ),
+                Err(rollback_error) => format!(
+                    "AuthMachine lifecycle marker handoff failed: {e}; token commit rollback failed: {rollback_error}"
+                ),
+            };
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+        }
+    };
     if let Err(e) = token_store.save(&commit.key, &committed_tokens).await {
         let message = match rollback_token_commit(token_store, auth_lease, commit).await {
             Ok(()) => {
@@ -406,9 +420,11 @@ async fn rollback_token_commit(
                 if let Some(restored_transition) = restored_transition {
                     let restored_previous =
                         meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                            &commit.key,
                             previous,
-                            restored_transition,
-                        );
+                            &restored_transition,
+                        )
+                        .map_err(|e| format!("AuthMachine rollback marker handoff failed: {e}"))?;
                     token_store
                         .save(&commit.key, &restored_previous)
                         .await
@@ -458,8 +474,6 @@ async fn save_prepared_tokens_after_terminal_consume_unlocked(
                 ));
             }
         };
-    let committed_tokens =
-        meerkat_core::mark_tokens_lifecycle_published_for_transition(tokens, transition);
     let commit = TokenCommitSnapshot {
         key: prepared.key,
         lease_key: prepared.lease_key,
@@ -467,6 +481,24 @@ async fn save_prepared_tokens_after_terminal_consume_unlocked(
         previous_lifecycle,
         previous_lifecycle_restore,
         lifecycle_transition: transition,
+    };
+    let committed_tokens = match meerkat_core::mark_tokens_lifecycle_published_for_transition(
+        &commit.key,
+        tokens,
+        &commit.lifecycle_transition,
+    ) {
+        Ok(committed_tokens) => committed_tokens,
+        Err(e) => {
+            let message = match rollback_token_commit(token_store, auth_lease, &commit).await {
+                Ok(()) => format!(
+                    "AuthMachine lifecycle marker handoff failed after OAuth consume: {e}; AuthMachine lifecycle rolled back"
+                ),
+                Err(rollback_error) => format!(
+                    "AuthMachine lifecycle marker handoff failed after OAuth consume: {e}; AuthMachine lifecycle rollback failed: {rollback_error}"
+                ),
+            };
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+        }
     };
     if let Err(e) = token_store.save(&commit.key, &committed_tokens).await {
         let message = match rollback_token_commit(token_store, auth_lease, &commit).await {
@@ -1814,14 +1846,12 @@ mod tests {
         }
     }
 
-    fn generated_auth_transition_for_test(expires_at: u64) -> AuthLeaseTransition {
+    fn generated_auth_transition_for_test(
+        lease_key: &LeaseKey,
+        expires_at: u64,
+    ) -> AuthLeaseTransition {
         let handle = RuntimeAuthLeaseHandle::new();
-        let lease_key = LeaseKey::new(
-            RealmId::parse("test").unwrap(),
-            BindingId::parse("auth_transition").unwrap(),
-            None,
-        );
-        handle.acquire_lease(&lease_key, expires_at).unwrap()
+        handle.acquire_lease(lease_key, expires_at).unwrap()
     }
 
     fn mark_tokens_lifecycle_published_for_test(
@@ -1829,39 +1859,15 @@ mod tests {
         generation: u64,
         credential_published_at_millis: Option<u64>,
     ) -> PersistedTokens {
-        let mut marked = tokens.clone();
-        let mut marker = serde_json::json!({
-            "published": true,
-            "version": 2,
-            "generation": generation,
-            "expires_at": meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
-        });
-        if let Some(credential_published_at_millis) = credential_published_at_millis
-            && let Some(marker) = marker.as_object_mut()
-        {
-            marker.insert(
-                "credential_published_at_millis".to_string(),
-                serde_json::json!(credential_published_at_millis),
-            );
-        }
-        match &mut marked.metadata {
-            serde_json::Value::Object(map) => {
-                map.insert("meerkat_auth_lifecycle".to_string(), marker);
-            }
-            serde_json::Value::Null => {
-                let mut metadata = serde_json::Map::new();
-                metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
-                marked.metadata = serde_json::Value::Object(metadata);
-            }
-            _ => {
-                let previous = std::mem::replace(&mut marked.metadata, serde_json::Value::Null);
-                let mut metadata = serde_json::Map::new();
-                metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
-                metadata.insert("meerkat_previous_metadata".to_string(), previous);
-                marked.metadata = serde_json::Value::Object(metadata);
-            }
-        }
-        marked
+        let _ = (generation, credential_published_at_millis);
+        let key = TokenKey::from_auth_binding(&openai_auth_binding());
+        let lease_key = LeaseKey::from_auth_binding(&openai_auth_binding());
+        let transition = generated_auth_transition_for_test(
+            &lease_key,
+            meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
+        );
+        meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, tokens, &transition)
+            .expect("runtime AuthMachine transition marks fixture tokens")
     }
 
     fn api_key_tokens() -> PersistedTokens {
@@ -1924,7 +1930,10 @@ mod tests {
             new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(generated_auth_transition_for_test(new_expires_at))
+            Ok(generated_auth_transition_for_test(
+                _lease_key,
+                new_expires_at,
+            ))
         }
 
         fn refresh_failed(
@@ -1962,7 +1971,7 @@ mod tests {
             _lease_key: &LeaseKey,
             expires_at: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(generated_auth_transition_for_test(expires_at))
+            Ok(generated_auth_transition_for_test(_lease_key, expires_at))
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -1979,7 +1988,10 @@ mod tests {
             new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(generated_auth_transition_for_test(new_expires_at))
+            Ok(generated_auth_transition_for_test(
+                _lease_key,
+                new_expires_at,
+            ))
         }
 
         fn refresh_failed(

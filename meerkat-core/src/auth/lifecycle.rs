@@ -90,6 +90,24 @@ pub struct TokenLifecyclePublication {
     pub credential_published_at_millis: Option<u64>,
 }
 
+#[derive(Debug, Error)]
+pub enum TokenLifecycleMarkerError {
+    #[error(
+        "AuthMachine lifecycle transition belongs to `{transition_key}`, not token key `{token_key}`"
+    )]
+    LeaseKeyMismatch {
+        token_key: String,
+        transition_key: String,
+    },
+    #[error(
+        "AuthMachine lifecycle transition expires_at {transition_expires_at} does not match token expires_at {token_expires_at}"
+    )]
+    ExpiresAtMismatch {
+        token_expires_at: u64,
+        transition_expires_at: u64,
+    },
+}
+
 fn mark_tokens_lifecycle_published_inner(
     tokens: &PersistedTokens,
     generation: Option<u64>,
@@ -144,14 +162,30 @@ fn mark_tokens_lifecycle_published(tokens: &PersistedTokens) -> PersistedTokens 
 }
 
 pub fn mark_tokens_lifecycle_published_for_transition(
+    key: &TokenKey,
     tokens: &PersistedTokens,
-    transition: AuthLeaseTransition,
-) -> PersistedTokens {
-    mark_tokens_lifecycle_published_inner(
+    transition: &AuthLeaseTransition,
+) -> Result<PersistedTokens, TokenLifecycleMarkerError> {
+    let token_lease_key =
+        LeaseKey::new(key.realm.clone(), key.binding.clone(), key.profile.clone());
+    if transition.lease_key() != &token_lease_key {
+        return Err(TokenLifecycleMarkerError::LeaseKeyMismatch {
+            token_key: token_lease_key.to_string(),
+            transition_key: transition.lease_key().to_string(),
+        });
+    }
+    let token_expires_at = persisted_token_expires_at_epoch_secs(tokens);
+    if transition.expires_at() != token_expires_at {
+        return Err(TokenLifecycleMarkerError::ExpiresAtMismatch {
+            token_expires_at,
+            transition_expires_at: transition.expires_at(),
+        });
+    }
+    Ok(mark_tokens_lifecycle_published_inner(
         tokens,
         Some(transition.generation()),
         transition.credential_published_at_millis(),
-    )
+    ))
 }
 
 pub fn tokens_lifecycle_published(tokens: &PersistedTokens) -> bool {
@@ -385,28 +419,8 @@ pub fn oauth_status_projection_snapshot_from_newer_marker(
     snapshot: &AuthLeaseSnapshot,
     tokens: &PersistedTokens,
 ) -> Option<AuthLeaseSnapshot> {
-    if !snapshot.credential_present {
-        return None;
-    }
-    let publication = tokens_lifecycle_publication_with_explicit_expiry(tokens)?;
-    if publication.expires_at != persisted_token_expires_at_epoch_secs(tokens) {
-        return None;
-    }
-    let snapshot_published_at = snapshot.credential_published_at_millis?;
-    let token_published_at = publication.credential_published_at_millis?;
-    if token_published_at < snapshot_published_at {
-        return None;
-    }
-    if token_published_at == snapshot_published_at {
-        return None;
-    }
-    Some(AuthLeaseSnapshot {
-        phase: Some(AuthLeasePhase::Valid),
-        expires_at: (publication.expires_at != u64::MAX).then_some(publication.expires_at),
-        credential_present: true,
-        generation: publication.generation.unwrap_or(snapshot.generation),
-        credential_published_at_millis: Some(token_published_at),
-    })
+    let _ = (snapshot, tokens);
+    None
 }
 
 #[cfg(test)]
@@ -462,7 +476,12 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((lease_key.clone(), expires_at));
-            Ok(AuthLeaseTransition::__from_test_authority(1, None))
+            Ok(AuthLeaseTransition::__from_test_authority(
+                lease_key.clone(),
+                expires_at,
+                1,
+                None,
+            ))
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -475,11 +494,16 @@ mod tests {
 
         fn complete_refresh(
             &self,
-            _lease_key: &LeaseKey,
-            _new_expires_at: u64,
+            lease_key: &LeaseKey,
+            new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition::__from_test_authority(1, None))
+            Ok(AuthLeaseTransition::__from_test_authority(
+                lease_key.clone(),
+                new_expires_at,
+                1,
+                None,
+            ))
         }
 
         fn refresh_failed(

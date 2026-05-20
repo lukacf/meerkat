@@ -292,14 +292,12 @@ mod tests {
     use meerkat_core::handles::{AuthLeaseSnapshot, AuthLeaseTransition};
     use std::sync::Mutex;
 
-    fn generated_auth_transition_for_test(expires_at: u64) -> AuthLeaseTransition {
+    fn generated_auth_transition_for_test(
+        lease_key: &LeaseKey,
+        expires_at: u64,
+    ) -> AuthLeaseTransition {
         let handle = meerkat_runtime::RuntimeAuthLeaseHandle::new();
-        let lease_key = LeaseKey::new(
-            RealmId::parse("test").unwrap(),
-            BindingId::parse("auth_transition").unwrap(),
-            None,
-        );
-        handle.acquire_lease(&lease_key, expires_at).unwrap()
+        handle.acquire_lease(lease_key, expires_at).unwrap()
     }
 
     struct SnapshotRaceAuthLeaseHandle {
@@ -327,6 +325,7 @@ mod tests {
     impl SnapshotRaceAuthLeaseHandle {
         fn accept_valid_transition(
             &self,
+            lease_key: &LeaseKey,
             expires_at: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
             let accepted_generation = {
@@ -345,7 +344,7 @@ mod tests {
                 generation: accepted_generation + 1,
                 credential_published_at_millis: None,
             };
-            let transition = generated_auth_transition_for_test(expires_at);
+            let transition = generated_auth_transition_for_test(lease_key, expires_at);
             assert_eq!(transition.generation(), accepted_generation);
             Ok(transition)
         }
@@ -361,7 +360,7 @@ mod tests {
             _lease_key: &LeaseKey,
             expires_at: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            self.accept_valid_transition(expires_at)
+            self.accept_valid_transition(_lease_key, expires_at)
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -378,7 +377,7 @@ mod tests {
             new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            self.accept_valid_transition(new_expires_at)
+            self.accept_valid_transition(_lease_key, new_expires_at)
         }
 
         fn refresh_failed(

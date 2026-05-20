@@ -89,6 +89,11 @@ struct LocalBatchWiringEndpoint {
     removal_key: String,
 }
 
+struct PeerMessageDeliveryPlan {
+    sender_comms: Arc<dyn CoreCommsRuntime>,
+    command: CommsCommand,
+}
+
 struct SupervisorPrivateTrustInstall {
     peer_id: String,
     epoch: u64,
@@ -3301,10 +3306,23 @@ impl MobActor {
                     handling_mode,
                     reply_tx,
                 } => {
-                    let result =
-                        Box::pin(self.handle_send_peer_message(from, to, content, handling_mode))
-                            .await;
-                    let _ = reply_tx.send(result);
+                    match Box::pin(self.prepare_send_peer_message(from, to, content, handling_mode))
+                        .await
+                    {
+                        Ok(plan) => {
+                            tokio::spawn(async move {
+                                let result = plan
+                                    .sender_comms
+                                    .send(plan.command)
+                                    .await
+                                    .map_err(MobError::from);
+                                let _ = reply_tx.send(result);
+                            });
+                        }
+                        Err(error) => {
+                            let _ = reply_tx.send(Err(error));
+                        }
+                    }
                 }
                 #[cfg(feature = "runtime-adapter")]
                 MobCommand::KickoffOutcomeResolved {
@@ -6539,13 +6557,13 @@ impl MobActor {
         })
     }
 
-    async fn handle_send_peer_message(
+    async fn prepare_send_peer_message(
         &mut self,
         from: MeerkatId,
         to: MeerkatId,
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
-    ) -> Result<meerkat_core::comms::SendReceipt, MobError> {
+    ) -> Result<PeerMessageDeliveryPlan, MobError> {
         self.require_state(&[MobState::Running])?;
         if from == to {
             return Err(MobError::WiringError(format!(
@@ -6608,15 +6626,15 @@ impl MobActor {
             }
         };
 
-        sender_comms
-            .send(CommsCommand::PeerMessage {
+        Ok(PeerMessageDeliveryPlan {
+            sender_comms,
+            command: CommsCommand::PeerMessage {
                 to: route,
                 body,
                 blocks,
                 handling_mode,
-            })
-            .await
-            .map_err(MobError::from)
+            },
+        })
     }
 
     async fn rollback_wire_members_batch(

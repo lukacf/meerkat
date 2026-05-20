@@ -189,6 +189,7 @@ struct MockCommsBehavior {
     fail_send_peer_retired: bool,
     fail_send_peer_unwired: bool,
     peer_lifecycle_delay_ms: u64,
+    peer_message_delay_ms: u64,
 }
 
 struct MockCommsRuntime {
@@ -506,6 +507,36 @@ impl CoreCommsRuntime for MockCommsRuntime {
                     envelope_id: uuid::Uuid::new_v4(),
                     interaction_id: InteractionId(uuid::Uuid::new_v4()),
                     stream_reserved: false,
+                })
+            }
+            CommsCommand::PeerMessage { to, .. } => {
+                {
+                    let trusted = self.trusted_peers.read().await;
+                    let peer_id = to.peer_id.as_str();
+                    if !trusted.contains_key(&peer_id) {
+                        return Err(SendError::PeerNotFound(to.label()));
+                    }
+                }
+
+                let delay_ms = self
+                    .behavior
+                    .read()
+                    .expect("poisoned behavior lock in mock runtime")
+                    .peer_message_delay_ms;
+                self.sent_intents
+                    .write()
+                    .await
+                    .push("peer_message_started".to_string());
+                if delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                self.sent_intents
+                    .write()
+                    .await
+                    .push("peer_message".to_string());
+                Ok(SendReceipt::PeerMessageSent {
+                    envelope_id: uuid::Uuid::new_v4(),
+                    acked: false,
                 })
             }
             unsupported => Err(SendError::Unsupported(format!(
@@ -24525,6 +24556,93 @@ fn assert_peer_response_terminal_consumed(
         ),
         "peer_response_terminal should be consumed after the runtime context append apply: {terminal:?}"
     );
+}
+
+#[tokio::test]
+async fn test_peer_message_delivery_backpressure_does_not_block_actor_mailbox() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service
+        .set_comms_behavior(
+            &test_comms_name("lead", "l-backpressure"),
+            MockCommsBehavior {
+                peer_message_delay_ms: 500,
+                ..MockCommsBehavior::default()
+            },
+        )
+        .await;
+
+    let sid_l = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-backpressure"),
+            None,
+        )
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-backpressure"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+
+    handle
+        .wire(
+            AgentIdentity::from("l-backpressure"),
+            MeerkatId::from("w-backpressure"),
+        )
+        .await
+        .expect("wire should succeed");
+
+    let send_handle = handle.clone();
+    let delivery = tokio::spawn(async move {
+        send_handle
+            .send_peer_message(
+                AgentIdentity::from("l-backpressure"),
+                AgentIdentity::from("w-backpressure"),
+                "slow peer message",
+                meerkat_core::types::HandlingMode::Queue,
+            )
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if service
+                .sent_intents(&sid_l)
+                .await
+                .iter()
+                .any(|intent| intent == "peer_message_started")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("peer message delivery should enter the slow comms send path");
+    assert!(
+        !delivery.is_finished(),
+        "mock peer delivery should still be waiting on artificial backpressure"
+    );
+
+    let members = tokio::time::timeout(Duration::from_millis(100), handle.list_members())
+        .await
+        .expect("actor mailbox commands must not queue behind peer delivery backpressure");
+    assert_eq!(members.len(), 2);
+
+    let receipt = tokio::time::timeout(Duration::from_secs(2), delivery)
+        .await
+        .expect("peer delivery should finish after the artificial delay")
+        .expect("delivery task should join")
+        .expect("peer message should succeed");
+    assert_eq!(receipt.from, AgentIdentity::from("l-backpressure"));
+    assert_eq!(receipt.to, AgentIdentity::from("w-backpressure"));
 }
 
 #[tokio::test]

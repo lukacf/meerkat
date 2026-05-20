@@ -81,6 +81,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdmitOAuthBrowserFlowReauthRequired`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`
+- `ReopenReleasedForOAuthBrowserFlowAdmission`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
 - `VerifyOAuthBrowserFlowValid`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`
@@ -127,6 +130,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
 - `AdmitOAuthDeviceFlowReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `ReopenReleasedForOAuthDeviceFlowAdmission`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
 - `ConfirmOAuthDurableAdmissionValid`

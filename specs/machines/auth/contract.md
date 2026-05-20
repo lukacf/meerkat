@@ -207,6 +207,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 
+### `ReopenReleasedForOAuthBrowserFlowAdmission`
+- From: `Released`
+- On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
+- Guards:
+  - `released_without_credential`
+  - `released_without_oauth_membership`
+  - `oauth_capacity_available`
+  - `oauth_global_capacity_available`
+- Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
 ### `VerifyOAuthBrowserFlowValid`
 - From: `Valid`
 - On: `VerifyOAuthBrowserFlow`(flow_id, provider, redirect_uri, now_millis)
@@ -362,6 +373,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
 - Guards:
   - `device_flow_absent`
+  - `oauth_capacity_available`
+  - `oauth_global_capacity_available`
+- Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
+### `ReopenReleasedForOAuthDeviceFlowAdmission`
+- From: `Released`
+- On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows)
+- Guards:
+  - `released_without_credential`
+  - `released_without_oauth_membership`
   - `oauth_capacity_available`
   - `oauth_global_capacity_available`
 - Emits: `EmitLifecycleEvent`

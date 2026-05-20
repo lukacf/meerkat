@@ -12,6 +12,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `active_fence_token`: `Option<FenceToken>`
 - `current_run_id`: `Option<RunId>`
 - `pre_run_phase`: `Option<PreRunPhase>`
+- `runtime_stop_deferred`: `Bool`
 - `turn_phase`: `TurnPhase`
 - `primitive_kind`: `Option<TurnPrimitiveKind>`
 - `admitted_content_shape`: `Option<ContentShape>`
@@ -516,6 +517,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Invariants
 - `fence_requires_bound_runtime`
 - `running_has_current_run`
+- `deferred_stop_requires_active_runtime_phase`
 - `current_run_only_while_running_or_retired`
 - `current_run_has_pre_run_phase`
 - `staged_surface_ops_are_known_and_sequenced`
@@ -4509,6 +4511,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `DrainQueuedRun`(run_id)
 - Emits: `SubmitRunPrimitive`
+- To: `Running`
+
+### `StartConversationRunIdleWithBinding`
+- From: `Idle`
+- On: `StartConversationRun`(run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries)
+- Guards:
+  - `runtime_binding_present`
+  - `turn_resettable`
+  - `conversation_shape_matches_primitive`
+- Emits: `TurnRunStarted`
 - To: `Running`
 
 ### `StartConversationRunInitializing`

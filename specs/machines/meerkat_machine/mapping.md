@@ -1397,6 +1397,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DrainQueuedRunRetired`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
+- `StartConversationRunIdleWithBinding`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`
 - `StartConversationRunInitializing`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
@@ -3480,6 +3483,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `running_has_current_run`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`
+- `deferred_stop_requires_active_runtime_phase`
+  - anchors: `meerkat_machine`
+  - scenarios: `retire-reset-destroy`
 - `current_run_only_while_running_or_retired`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `recycle_and_compaction`

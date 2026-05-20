@@ -705,67 +705,105 @@ mod tests {
     }
 
     #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+    struct OwnerOnlyPeerCommsHandle {
+        owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    }
+
+    #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+    impl meerkat_core::handles::PeerCommsHandle for OwnerOnlyPeerCommsHandle {
+        fn generated_peer_projection_trust_owner(
+            &self,
+        ) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+            self.owner.as_ref().map(Arc::clone)
+        }
+
+        fn classify_external_envelope(
+            &self,
+            _facts: meerkat_core::interaction::PeerIngressEnvelopeFacts,
+        ) -> Result<
+            meerkat_core::interaction::PeerIngressAdmission,
+            meerkat_core::handles::DslTransitionError,
+        > {
+            Err(meerkat_core::handles::DslTransitionError::no_matching(
+                "test_owner_only_peer_comms_handle::classify_external_envelope",
+                "no session machine handle installed",
+            ))
+        }
+
+        fn classify_plain_event(
+            &self,
+            _facts: meerkat_core::interaction::PeerIngressPlainEventFacts,
+        ) -> Result<
+            meerkat_core::interaction::PeerIngressAdmission,
+            meerkat_core::handles::DslTransitionError,
+        > {
+            Err(meerkat_core::handles::DslTransitionError::no_matching(
+                "test_owner_only_peer_comms_handle::classify_plain_event",
+                "no session machine handle installed",
+            ))
+        }
+
+        fn resolve_peer_ingress_receive(
+            &self,
+            _facts: meerkat_core::interaction::PeerIngressReceiveFacts,
+        ) -> Result<
+            meerkat_core::interaction::PeerIngressReceiveAuthority,
+            meerkat_core::handles::DslTransitionError,
+        > {
+            Err(meerkat_core::handles::DslTransitionError::no_matching(
+                "test_owner_only_peer_comms_handle::resolve_peer_ingress_receive",
+                "no session machine handle installed",
+            ))
+        }
+
+        fn resolve_peer_ingress_dequeue(
+            &self,
+            _facts: meerkat_core::interaction::PeerIngressDequeueFacts,
+        ) -> Result<
+            meerkat_core::interaction::PeerIngressDequeueAuthority,
+            meerkat_core::handles::DslTransitionError,
+        > {
+            Err(meerkat_core::handles::DslTransitionError::no_matching(
+                "test_owner_only_peer_comms_handle::resolve_peer_ingress_dequeue",
+                "no session machine handle installed",
+            ))
+        }
+
+        fn set_peer_ingress_context(
+            &self,
+            _keep_alive: bool,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            Err(meerkat_core::handles::DslTransitionError::no_matching(
+                "test_owner_only_peer_comms_handle::set_peer_ingress_context",
+                "no session machine handle installed",
+            ))
+        }
+    }
+
+    #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
     async fn add_generated_peer_projection_trust(
-        runtime: &dyn meerkat_core::agent::CommsRuntime,
+        runtime: &CommsRuntime,
         peer: meerkat_core::comms::TrustedPeerDescriptor,
         context: &'static str,
     ) {
         let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
-        let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
-        authority
-            .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
-            .expect("Initialize signal");
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut authority,
-            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
-                session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
-                    "sdk-test-comms-reconcile",
-                ),
-            },
+        let (_dsl, obligation) = meerkat_runtime::test_peer_projection_reconcile_obligation(
+            "sdk-test-comms-reconcile",
+            meerkat_core::agent::CommsRuntime::peer_id(runtime)
+                .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable")),
+            std::collections::BTreeSet::from([endpoint.clone()]),
+        );
+        let authority = meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+            &obligation,
+            &endpoint,
         )
-        .expect("RegisterSession input");
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut authority,
-            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
-                endpoint: meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
-                    "local",
-                    runtime
-                        .peer_id()
-                        .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable"))
-                        .to_string(),
-                    "inproc://local",
-                    [0x7f; 32],
-                ),
-            },
-        )
-        .expect("PublishLocalEndpoint input");
-        let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut authority,
-            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
-                epoch: 1,
-                endpoints: std::collections::BTreeSet::from([endpoint.clone()]),
-            },
-        )
-        .expect("ApplyMobPeerOverlay input");
-        let obligation =
-            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
-                &transition,
-                meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
-                    std::sync::Arc::new(std::sync::Mutex::new(authority)),
-                ),
-            )
-            .pop()
-            .expect("generated reconcile obligation");
+        .expect("generated peer projection add authority");
+        runtime.install_peer_comms_handle(Arc::new(OwnerOnlyPeerCommsHandle {
+            owner: authority.source_owner_token(),
+        }));
         meerkat_core::agent::CommsRuntime::apply_trust_mutation(
             runtime,
-            meerkat_core::comms::CommsTrustMutation::AddTrustedPeer {
-                authority: meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
-                    &obligation,
-                    &endpoint,
-                )
-                .expect("generated peer projection add authority"),
-                peer,
-            },
+            meerkat_core::comms::CommsTrustMutation::AddTrustedPeer { authority, peer },
         )
         .await
         .unwrap_or_else(|error| panic!("{context}: {error}"));

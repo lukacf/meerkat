@@ -912,56 +912,20 @@ mod tests {
     }
 
     async fn add_generated_peer_projection_trust(
-        runtime: &dyn CoreCommsRuntime,
+        runtime: &CommsRuntime,
         peer: TrustedPeerDescriptor,
         context: &'static str,
     ) {
         let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
-        let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
-        authority
-            .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
-            .expect("Initialize signal");
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut authority,
-            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
-                session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
-                    "comms-mcp-tools-test-reconcile",
-                ),
-            },
-        )
-        .expect("RegisterSession input");
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut authority,
-            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
-                endpoint: meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
-                    "local",
-                    runtime
-                        .peer_id()
-                        .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable"))
-                        .to_string(),
-                    "inproc://local",
-                    [0x7f; 32],
-                ),
-            },
-        )
-        .expect("PublishLocalEndpoint input");
-        let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut authority,
-            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
-                epoch: 1,
-                endpoints: std::collections::BTreeSet::from([endpoint.clone()]),
-            },
-        )
-        .expect("ApplyMobPeerOverlay input");
-        let obligation =
-            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
-                &transition,
-                meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
-                    Arc::new(std::sync::Mutex::new(authority)),
-                ),
-            )
-            .pop()
-            .expect("generated reconcile obligation");
+        let (dsl, obligation) = meerkat_runtime::test_peer_projection_reconcile_obligation(
+            "comms-mcp-tools-test-reconcile",
+            runtime
+                .peer_id()
+                .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable")),
+            std::collections::BTreeSet::from([endpoint.clone()]),
+        );
+        runtime
+            .install_peer_comms_handle(Arc::new(meerkat_runtime::RuntimePeerCommsHandle::new(dsl)));
         CoreCommsRuntime::apply_trust_mutation(
             runtime,
             CommsTrustMutation::AddTrustedPeer {

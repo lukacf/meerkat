@@ -7927,6 +7927,52 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // 30. Turn execution absorption
+        transition StartConversationRunIdleWithBinding {
+            on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "runtime_binding_present" { self.active_runtime_id != None }
+            guard "turn_resettable" {
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
+            }
+            guard "conversation_shape_matches_primitive" {
+                primitive_kind == TurnPrimitiveKind::ConversationTurn
+                && (admitted_content_shape == ContentShape::Conversation
+                    || admitted_content_shape == ContentShape::ConversationAndContext
+                    || admitted_content_shape == ContentShape::Context
+                    || admitted_content_shape == ContentShape::Empty)
+            }
+            update {
+                self.current_run_id = Some(run_id);
+                self.pre_run_phase = Some(PreRunPhase::Attached);
+                self.turn_phase = TurnPhase::ApplyingPrimitive;
+                self.primitive_kind = Some(primitive_kind);
+                self.admitted_content_shape = Some(admitted_content_shape);
+                self.vision_enabled = vision_enabled;
+                self.image_tool_results_enabled = image_tool_results_enabled;
+                self.tool_calls_pending = 0;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+                self.barrier_satisfied = false;
+                self.boundary_count = 0;
+                self.cancel_after_boundary = false;
+                self.terminal_outcome = None;
+                self.terminal_cause_kind = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
+                self.extraction_attempts = 0;
+                self.max_extraction_retries = max_extraction_retries;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
+            }
+            to Running
+            emit TurnRunStarted { run_id: run_id }
+        }
         transition StartConversationRunInitializing {
             on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
             guard { self.lifecycle_phase == Phase::Initializing }

@@ -74,69 +74,34 @@ fn install_ephemeral_peer_request_response_authority(runtime: &Arc<CommsRuntime>
 }
 
 fn test_comms_reconcile_obligation(
+    session_id: &'static str,
     local_peer_id: meerkat_core::comms::PeerId,
     direct_peer_endpoints: BTreeSet<meerkat_runtime::meerkat_machine::dsl::PeerEndpoint>,
-) -> meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
-    let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
-    authority
-        .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
-        .expect("Initialize signal");
-    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-        &mut authority,
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
-            session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
-                "mob-contract-test-comms-reconcile",
-            ),
-        },
+) -> (
+    Arc<meerkat_runtime::HandleDslAuthority>,
+    meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation,
+) {
+    meerkat_runtime::test_peer_projection_reconcile_obligation(
+        session_id,
+        local_peer_id,
+        direct_peer_endpoints,
     )
-    .expect("RegisterSession input");
-    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-        &mut authority,
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
-            endpoint: meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
-                "local",
-                local_peer_id.to_string(),
-                "inproc://local",
-                [0x7f; 32],
-            ),
-        },
-    )
-    .expect("PublishLocalEndpoint input");
-    let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-        &mut authority,
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
-            epoch: 1,
-            endpoints: direct_peer_endpoints,
-        },
-    )
-    .expect("ApplyMobPeerOverlay input");
-    let mut obligations =
-        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
-            &transition,
-            meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
-                Arc::new(std::sync::Mutex::new(authority)),
-            ),
-        );
-    assert_eq!(
-        obligations.len(),
-        1,
-        "test reconcile effect must produce one generated obligation"
-    );
-    obligations.pop().expect("obligation count checked")
 }
 
 async fn apply_generated_peer_projection_trust(
-    runtime: &dyn CoreCommsRuntime,
+    runtime: &CommsRuntime,
     peer: TrustedPeerDescriptor,
     context: &'static str,
 ) {
     let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
-    let obligation = test_comms_reconcile_obligation(
+    let (dsl, obligation) = test_comms_reconcile_obligation(
+        "mob-contract-test-comms-reconcile",
         runtime
             .peer_id()
             .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable")),
         BTreeSet::from([endpoint.clone()]),
     );
+    runtime.install_peer_comms_handle(Arc::new(meerkat_runtime::RuntimePeerCommsHandle::new(dsl)));
     CoreCommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
@@ -153,16 +118,18 @@ async fn apply_generated_peer_projection_trust(
 }
 
 async fn remove_generated_peer_projection_trust(
-    runtime: &dyn CoreCommsRuntime,
+    runtime: &CommsRuntime,
     peer_id: &str,
     context: &'static str,
 ) -> bool {
-    let obligation = test_comms_reconcile_obligation(
+    let (dsl, obligation) = test_comms_reconcile_obligation(
+        "mob-contract-test-comms-reconcile-remove",
         runtime
             .peer_id()
             .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable")),
         BTreeSet::new(),
     );
+    runtime.install_peer_comms_handle(Arc::new(meerkat_runtime::RuntimePeerCommsHandle::new(dsl)));
     let result = CoreCommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::RemoveTrustedPeer {

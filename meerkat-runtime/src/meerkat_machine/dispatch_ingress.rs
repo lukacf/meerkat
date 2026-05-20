@@ -46,6 +46,30 @@ impl MeerkatMachine {
         session_id: &SessionId,
         input: &Input,
     ) -> Result<bool, RuntimeDriverError> {
+        self.input_requires_active_pre_admission_with_wake_policy(session_id, input, false)
+            .await
+    }
+
+    /// Preview generated admission feedback for no-wake shell capacity mechanics.
+    ///
+    /// This mirrors `accept_input_without_wake`: the shell supplies only the
+    /// command mode, while generated `ResolveAdmissionPlan` owns the semantic
+    /// pre-admission answer.
+    pub async fn input_requires_active_pre_admission_without_wake(
+        &self,
+        session_id: &SessionId,
+        input: &Input,
+    ) -> Result<bool, RuntimeDriverError> {
+        self.input_requires_active_pre_admission_with_wake_policy(session_id, input, true)
+            .await
+    }
+
+    async fn input_requires_active_pre_admission_with_wake_policy(
+        &self,
+        session_id: &SessionId,
+        input: &Input,
+        without_wake: bool,
+    ) -> Result<bool, RuntimeDriverError> {
         let driver = {
             let sessions = self.sessions.read().await;
             sessions
@@ -70,7 +94,11 @@ impl MeerkatMachine {
         Self::reject_visible_terminal_ingress(visible_state)?;
 
         let driver = driver.lock().await;
-        let resolved = driver.resolve_admission(input)?;
+        let resolved = if without_wake {
+            driver.resolve_admission_without_wake(input)?
+        } else {
+            driver.resolve_admission(input)?
+        };
         Ok(resolved.requires_active_runtime_pre_admission())
     }
 

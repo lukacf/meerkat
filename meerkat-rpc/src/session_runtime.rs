@@ -4489,19 +4489,6 @@ impl SessionRuntime {
         let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
         let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
         let staged_session_existed = self.staged_sessions.contains(session_id).await;
-        let runtime_is_already_running = self
-            .runtime_adapter
-            .runtime_state(session_id)
-            .await
-            .is_ok_and(|state| matches!(state, meerkat_runtime::RuntimeState::Running));
-        let mut pre_admission = if runtime_is_already_running {
-            Some(RuntimePreAdmissionGuard::new(
-                self.reserve_or_join_active_turn(session_id).await?,
-            ))
-        } else {
-            None
-        };
-        let cleanup_protects_active_admission = pre_admission.is_none();
 
         if self.live_session_is_stale(session_id).await? {
             self.discard_stale_live_session(session_id).await;
@@ -4509,6 +4496,43 @@ impl SessionRuntime {
         self.ensure_runtime_executor(session_id).await?;
 
         let mut pre_admission_registration = None;
+        let should_pre_admit = match self
+            .runtime_adapter
+            .input_requires_active_pre_admission_without_wake(session_id, &input)
+            .await
+        {
+            Ok(should_pre_admit) => should_pre_admit,
+            Err(error) => {
+                self.unregister_new_runtime_registration_if_idle(
+                    &self.runtime_adapter,
+                    session_id,
+                    runtime_was_registered,
+                    staged_session_existed,
+                    true,
+                )
+                .await;
+                return Err(runtime_driver_error_to_rpc(error));
+            }
+        };
+        let cleanup_protects_active_admission = !should_pre_admit;
+        let mut pre_admission = if should_pre_admit {
+            match self.reserve_or_join_active_turn(session_id).await {
+                Ok(admission) => Some(RuntimePreAdmissionGuard::new(admission)),
+                Err(err) => {
+                    self.unregister_new_runtime_registration_if_idle(
+                        &self.runtime_adapter,
+                        session_id,
+                        runtime_was_registered,
+                        staged_session_existed,
+                        cleanup_protects_active_admission,
+                    )
+                    .await;
+                    return Err(err);
+                }
+            }
+        } else {
+            None
+        };
         if let Some(admission) = pre_admission.as_mut() {
             let admission_guard =
                 match Self::take_runtime_pre_admission_guard(admission, session_id) {
@@ -13258,6 +13282,59 @@ mod tests {
         assert!(
             runtime.runtime_adapter.contains_session(&session_id).await,
             "queued external event must protect the new runtime registration from stale cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_event_without_wake_uses_generated_pre_admission_feedback() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize before external event queue".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize runtime session");
+
+        let _capacity_filler = runtime
+            .service
+            .reserve_create_session_admission()
+            .await
+            .expect("fill active capacity");
+        let accepted = runtime
+            .accept_external_event_via_runtime(
+                &session_id,
+                "review.event".to_string(),
+                serde_json::json!({"status": "queued"}),
+                None,
+            )
+            .await
+            .expect("generated pre-admission feedback should allow without-wake queueing");
+        assert!(
+            matches!(accepted, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "external event should be accepted: {accepted:?}"
+        );
+        let pending_pre_admissions = runtime
+            .runtime_pre_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .map_or(0, Vec::len);
+        assert_eq!(
+            pending_pre_admissions, 0,
+            "without-wake external event must not stage active runtime pre-admission"
         );
     }
 

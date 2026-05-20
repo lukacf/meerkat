@@ -28,12 +28,14 @@ pub struct PeerProjectionFreshnessAuthority {
     authority: Option<
         std::sync::Arc<std::sync::Mutex<crate::meerkat_machine::dsl::MeerkatMachineAuthority>>,
     >,
+    source_owner_token: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl std::fmt::Debug for PeerProjectionFreshnessAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PeerProjectionFreshnessAuthority")
             .field("present", &self.authority.is_some())
+            .field("owner_present", &self.source_owner_token.is_some())
             .finish()
     }
 }
@@ -44,13 +46,25 @@ impl PeerProjectionFreshnessAuthority {
             std::sync::Mutex<crate::meerkat_machine::dsl::MeerkatMachineAuthority>,
         >,
     ) -> Self {
+        let source_owner_token = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generated_authority_owner_token();
         Self {
             authority: Some(authority),
+            source_owner_token: Some(source_owner_token),
         }
     }
 
     fn missing() -> Self {
-        Self { authority: None }
+        Self {
+            authority: None,
+            source_owner_token: None,
+        }
+    }
+
+    fn source_owner_token(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
+        self.source_owner_token.as_ref().map(std::sync::Arc::clone)
     }
 
     fn validate_peer_projection_epoch(&self, expected_epoch: u64) -> Result<(), String> {
@@ -192,6 +206,7 @@ impl CommsTrustReconcileObligation {
                 token: &'static (dyn std::any::Any + Send + Sync),
                 source_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,
                 source_epoch: u64,
+                source_owner_token: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
                 trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,
                 operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation,
                 peer_id: String,
@@ -216,6 +231,7 @@ impl CommsTrustReconcileObligation {
                         generated_authority_bridge_token(),
                         meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
                         self.peer_projection_epoch,
+                        self.peer_projection_freshness_authority.source_owner_token(),
                         meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
                         meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicAdd,
                         generated_peer_id,
@@ -237,6 +253,7 @@ impl CommsTrustReconcileObligation {
                         generated_authority_bridge_token(),
                         meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
                         self.peer_projection_epoch,
+                        self.peer_projection_freshness_authority.source_owner_token(),
                         meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
                         meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicRemove,
                         peer_id.to_string(),

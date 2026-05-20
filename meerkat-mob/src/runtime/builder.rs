@@ -114,6 +114,63 @@ fn apply_seeded_mob_input_collect_transition(
     Ok(transition)
 }
 
+fn seeded_mob_topology_freshness_authority<P>(
+    authority: &crate::machines::mob_machine::MobMachineAuthority,
+    topology_epoch: &Arc<std::sync::atomic::AtomicU64>,
+) -> P
+where
+    P: SeededMobTopologyFreshness,
+{
+    topology_epoch.store(
+        authority.state().topology_epoch,
+        std::sync::atomic::Ordering::Release,
+    );
+    P::from_live_seeded_topology_epoch(
+        Arc::clone(topology_epoch),
+        authority.generated_authority_owner_token(),
+    )
+}
+
+trait SeededMobTopologyFreshness {
+    fn from_live_seeded_topology_epoch(
+        topology_epoch: Arc<std::sync::atomic::AtomicU64>,
+        source_owner_token: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Self;
+}
+
+impl SeededMobTopologyFreshness
+    for crate::generated::protocol_mob_member_trust_wiring::MobTopologyFreshnessAuthority
+{
+    fn from_live_seeded_topology_epoch(
+        topology_epoch: Arc<std::sync::atomic::AtomicU64>,
+        source_owner_token: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Self {
+        Self::from_live_topology_epoch(topology_epoch, source_owner_token)
+    }
+}
+
+impl SeededMobTopologyFreshness
+    for crate::generated::protocol_mob_member_trust_unwiring::MobTopologyFreshnessAuthority
+{
+    fn from_live_seeded_topology_epoch(
+        topology_epoch: Arc<std::sync::atomic::AtomicU64>,
+        source_owner_token: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Self {
+        Self::from_live_topology_epoch(topology_epoch, source_owner_token)
+    }
+}
+
+impl SeededMobTopologyFreshness
+    for crate::generated::protocol_mob_external_peer_trust_repair::MobTopologyFreshnessAuthority
+{
+    fn from_live_seeded_topology_epoch(
+        topology_epoch: Arc<std::sync::atomic::AtomicU64>,
+        source_owner_token: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Self {
+        Self::from_live_topology_epoch(topology_epoch, source_owner_token)
+    }
+}
+
 fn apply_seeded_mob_signal(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     signal: crate::machines::mob_machine::MobMachineSignal,
@@ -142,6 +199,7 @@ fn seeded_effects_include_wiring_graph_change(
 
 fn resume_member_repair_authority_from_transition(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    topology_epoch: &Arc<std::sync::atomic::AtomicU64>,
     transition: &crate::machines::mob_machine::MobMachineTransition,
     edge: &crate::machines::mob_machine::WiringEdge,
     peer_id: &str,
@@ -174,36 +232,37 @@ fn resume_member_repair_authority_from_transition(
     )?;
     crate::generated::protocol_mob_member_trust_wiring::extract_obligations_with_freshness(
         &handoff_transition,
-        crate::generated::protocol_mob_member_trust_wiring::MobTopologyFreshnessAuthority::from_authority(authority),
+        seeded_mob_topology_freshness_authority(authority, topology_epoch),
     )
-        .into_iter()
-        .find_map(|obligation| {
-            if obligation.edge() != edge
-                || (obligation.a_peer_id().0 != peer_id && obligation.b_peer_id().0 != peer_id)
-            {
-                return None;
-            }
-            let identity = if obligation.a_peer_id().0 == peer_id {
-                edge.a.0.as_str()
-            } else {
-                edge.b.0.as_str()
-            };
-            crate::generated::protocol_mob_member_trust_wiring::repair_authority_for_identity(
-                &obligation,
-                identity,
-                peer_id,
-            )
-            .ok()
-        })
-        .ok_or_else(|| {
-            MobError::WiringError(format!(
-                "{context} produced no generated member trust handoff for peer '{peer_id}'"
-            ))
-        })
+    .into_iter()
+    .find_map(|obligation| {
+        if obligation.edge() != edge
+            || (obligation.a_peer_id().0 != peer_id && obligation.b_peer_id().0 != peer_id)
+        {
+            return None;
+        }
+        let identity = if obligation.a_peer_id().0 == peer_id {
+            edge.a.0.as_str()
+        } else {
+            edge.b.0.as_str()
+        };
+        crate::generated::protocol_mob_member_trust_wiring::repair_authority_for_identity(
+            &obligation,
+            identity,
+            peer_id,
+        )
+        .ok()
+    })
+    .ok_or_else(|| {
+        MobError::WiringError(format!(
+            "{context} produced no generated member trust handoff for peer '{peer_id}'"
+        ))
+    })
 }
 
 fn resume_external_repair_authority_from_transition(
     authority: &crate::machines::mob_machine::MobMachineAuthority,
+    topology_epoch: &Arc<std::sync::atomic::AtomicU64>,
     transition: &crate::machines::mob_machine::MobMachineTransition,
     edge: &crate::machines::mob_machine::ExternalPeerEdge,
     peer_id: &str,
@@ -214,7 +273,7 @@ fn resume_external_repair_authority_from_transition(
     let repair_obligation =
         crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations_with_freshness(
             transition,
-            crate::generated::protocol_mob_external_peer_trust_repair::MobTopologyFreshnessAuthority::from_authority(authority),
+            seeded_mob_topology_freshness_authority(authority, topology_epoch),
         )
         .into_iter()
         .find(|obligation| obligation.edge() == edge);
@@ -277,6 +336,7 @@ async fn apply_resume_trusted_peer_remove(
 
 fn resume_member_observed_cleanup_authority(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    topology_epoch: &Arc<std::sync::atomic::AtomicU64>,
     edge: &crate::machines::mob_machine::WiringEdge,
     local_identity: &crate::ids::AgentIdentity,
     local_peer_id: &PeerId,
@@ -315,25 +375,25 @@ fn resume_member_observed_cleanup_authority(
     )?;
     crate::generated::protocol_mob_member_trust_unwiring::extract_obligations_with_freshness(
         &transition,
-        crate::generated::protocol_mob_member_trust_unwiring::MobTopologyFreshnessAuthority::from_authority(authority),
+        seeded_mob_topology_freshness_authority(authority, topology_epoch),
     )
-        .into_iter()
-        .find_map(|obligation| {
-            if obligation.edge() != edge {
-                return None;
-            }
-            crate::generated::protocol_mob_member_trust_unwiring::unwiring_authority_for_identity(
-                &obligation,
-                peer_identity.as_str(),
-                &peer_id.to_string(),
-            )
-            .ok()
-        })
-        .ok_or_else(|| {
-            MobError::WiringError(format!(
-                "{context} produced no generated observed cleanup authority for peer '{peer_id}'"
-            ))
-        })
+    .into_iter()
+    .find_map(|obligation| {
+        if obligation.edge() != edge {
+            return None;
+        }
+        crate::generated::protocol_mob_member_trust_unwiring::unwiring_authority_for_identity(
+            &obligation,
+            peer_identity.as_str(),
+            &peer_id.to_string(),
+        )
+        .ok()
+    })
+    .ok_or_else(|| {
+        MobError::WiringError(format!(
+            "{context} produced no generated observed cleanup authority for peer '{peer_id}'"
+        ))
+    })
 }
 
 fn apply_seeded_member_session_binding(
@@ -1466,6 +1526,10 @@ impl MobBuilder {
         };
         // session_service is still live here (not consumed until start_runtime_with_components)
 
+        let seeded_topology_epoch = Arc::new(std::sync::atomic::AtomicU64::new(
+            wiring.dsl_authority.state().topology_epoch,
+        ));
+
         if resumed_state == MobState::Running {
             Self::reconcile_resume(
                 &definition,
@@ -1477,6 +1541,7 @@ impl MobBuilder {
                 default_llm_client.clone(),
                 &tool_bundles,
                 wiring.dsl_authority.as_mut(),
+                &seeded_topology_epoch,
                 &preview_handle,
                 &default_external_tools_provider,
                 &spawn_member_customizer,
@@ -1605,6 +1670,7 @@ impl MobBuilder {
         default_llm_client: Option<Arc<dyn LlmClient>>,
         tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         dsl_authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+        topology_epoch: &Arc<std::sync::atomic::AtomicU64>,
         tool_handle: &MobHandle,
         default_external_tools_provider: &Option<crate::ExternalToolsProvider>,
         spawn_member_customizer: &Option<Arc<dyn super::SpawnMemberCustomizer>>,
@@ -2072,6 +2138,7 @@ impl MobBuilder {
                     {
                         match resume_member_observed_cleanup_authority(
                             dsl_authority,
+                            topology_epoch,
                             edge,
                             &entry.agent_identity,
                             local_peer_id,
@@ -2194,6 +2261,7 @@ impl MobBuilder {
                         )?;
                         resume_member_repair_authority_from_transition(
                             dsl_authority,
+                            topology_epoch,
                             &transition,
                             edge,
                             &spec_peer_id,
@@ -2211,6 +2279,7 @@ impl MobBuilder {
                         )?;
                         resume_external_repair_authority_from_transition(
                             dsl_authority,
+                            topology_epoch,
                             &transition,
                             edge,
                             &spec_peer_id,
@@ -2486,6 +2555,7 @@ impl MobBuilder {
         let dsl_topology_epoch = Arc::new(std::sync::atomic::AtomicU64::new(
             dsl_authority.state().topology_epoch,
         ));
+        let dsl_authority_owner_token = dsl_authority.generated_authority_owner_token();
 
         let actor = MobActor {
             definition,
@@ -2524,6 +2594,7 @@ impl MobBuilder {
             spawn_policy,
             dsl_authority: *dsl_authority,
             dsl_topology_epoch,
+            dsl_authority_owner_token,
             machine_state_watch_tx,
             phase_watch_tx: phase_watch_tx_actor,
             default_external_tools_provider,

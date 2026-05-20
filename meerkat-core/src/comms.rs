@@ -9,6 +9,7 @@ use crate::interaction::{InteractionId, ResponseStatus};
 use crate::types::{ContentBlock, HandlingMode};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::{
@@ -359,6 +360,7 @@ pub struct TrustedPeerDescriptor {
 pub struct CommsTrustMutationAuthority {
     source_kind: GeneratedCommsTrustAuthoritySourceKind,
     source_epoch: u64,
+    source_owner_token: Option<Arc<dyn Any + Send + Sync>>,
     trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
     operation: GeneratedCommsTrustAuthorityOperation,
     peer_id: String,
@@ -395,6 +397,7 @@ impl CommsTrustMutationAuthority {
     fn from_generated_parts(
         source_kind: GeneratedCommsTrustAuthoritySourceKind,
         source_epoch: u64,
+        source_owner_token: Option<Arc<dyn Any + Send + Sync>>,
         trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
         operation: GeneratedCommsTrustAuthorityOperation,
         peer_id: impl Into<String>,
@@ -433,6 +436,7 @@ impl CommsTrustMutationAuthority {
         Ok(Self {
             source_kind,
             source_epoch,
+            source_owner_token,
             trust_row_owner_kind,
             operation,
             peer_id,
@@ -602,6 +606,36 @@ impl CommsTrustMutationAuthority {
         self.source_epoch
     }
 
+    pub fn source_owner_token(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.source_owner_token.as_ref().map(Arc::clone)
+    }
+
+    pub fn validate_source_owner_token(
+        &self,
+        expected: Option<&Arc<dyn Any + Send + Sync>>,
+    ) -> Result<(), String> {
+        let Some(actual) = self.source_owner_token.as_ref() else {
+            return Err(format!(
+                "trust authority from {:?} did not carry a generated owner token",
+                self.source_kind,
+            ));
+        };
+        let Some(expected) = expected else {
+            return Err(format!(
+                "trust authority from {:?} requires the target runtime's generated owner token",
+                self.source_kind,
+            ));
+        };
+        if Arc::ptr_eq(actual, expected) {
+            Ok(())
+        } else {
+            Err(format!(
+                "trust authority from {:?} was minted by a different generated owner",
+                self.source_kind,
+            ))
+        }
+    }
+
     pub fn trust_row_owner_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind {
         self.trust_row_owner_kind
     }
@@ -694,6 +728,7 @@ pub(crate) extern "Rust" fn runtime_generated_comms_trust_authority_build(
     token: &'static (dyn std::any::Any + Send + Sync),
     source_kind: GeneratedCommsTrustAuthoritySourceKind,
     source_epoch: u64,
+    source_owner_token: Option<Arc<dyn Any + Send + Sync>>,
     trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
     operation: GeneratedCommsTrustAuthorityOperation,
     peer_id: String,
@@ -705,6 +740,7 @@ pub(crate) extern "Rust" fn runtime_generated_comms_trust_authority_build(
     CommsTrustMutationAuthority::from_generated_parts(
         source_kind,
         source_epoch,
+        source_owner_token,
         trust_row_owner_kind,
         operation,
         peer_id,
@@ -724,6 +760,7 @@ pub(crate) extern "Rust" fn mob_generated_comms_trust_authority_build(
     token: &'static (dyn std::any::Any + Send + Sync),
     source_kind: GeneratedCommsTrustAuthoritySourceKind,
     source_epoch: u64,
+    source_owner_token: Option<Arc<dyn Any + Send + Sync>>,
     trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
     operation: GeneratedCommsTrustAuthorityOperation,
     peer_id: String,
@@ -735,6 +772,7 @@ pub(crate) extern "Rust" fn mob_generated_comms_trust_authority_build(
     CommsTrustMutationAuthority::from_generated_parts(
         source_kind,
         source_epoch,
+        source_owner_token,
         trust_row_owner_kind,
         operation,
         peer_id,
@@ -1660,6 +1698,7 @@ mod tests {
         let err = CommsTrustMutationAuthority::from_generated_parts(
             GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
             1,
+            None,
             GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
             GeneratedCommsTrustAuthorityOperation::PublicAdd,
             requested_peer_id.to_string(),

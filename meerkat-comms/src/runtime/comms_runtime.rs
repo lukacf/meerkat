@@ -322,6 +322,7 @@ impl CoreCommsRuntime for CommsRuntime {
     ) -> Result<CommsTrustMutationResult, SendError> {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                self.validate_public_trust_authority_owner(&authority)?;
                 authority
                     .validate_public_add(self.peer_id(), &peer)
                     .map_err(SendError::Validation)?;
@@ -330,6 +331,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                self.validate_public_trust_authority_owner(&authority)?;
                 let parsed_peer_id = meerkat_core::comms::PeerId::parse(&peer_id)
                     .map_err(|err| SendError::Validation(err.to_string()))?;
                 authority
@@ -1255,6 +1257,7 @@ pub struct CommsRuntime {
     subscriber_registry: crate::event_injector::SubscriberRegistry,
     interaction_stream_registry: InteractionStreamRegistry,
     peer_comms_handle: crate::classify::PeerCommsHandleSlot,
+    peer_projection_trust_owner: parking_lot::RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
     require_peer_comms_machine_authority: Arc<AtomicBool>,
     /// Narrow notify that fires only for actionable peer input (messages/requests).
     /// Set during construction when classified inbox is used.
@@ -1396,6 +1399,7 @@ impl CommsRuntime {
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
+            peer_projection_trust_owner: parking_lot::RwLock::new(None),
             require_peer_comms_machine_authority,
             actionable_notify,
             blob_store: None,
@@ -1504,6 +1508,7 @@ impl CommsRuntime {
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
+            peer_projection_trust_owner: parking_lot::RwLock::new(None),
             require_peer_comms_machine_authority,
             actionable_notify,
             blob_store: None,
@@ -1592,6 +1597,7 @@ impl CommsRuntime {
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
+            peer_projection_trust_owner: parking_lot::RwLock::new(None),
             require_peer_comms_machine_authority,
             actionable_notify,
             blob_store: None,
@@ -1637,7 +1643,23 @@ impl CommsRuntime {
         &self,
         handle: Arc<dyn meerkat_core::handles::PeerCommsHandle>,
     ) {
+        *self.peer_projection_trust_owner.write() = handle.generated_peer_projection_trust_owner();
         *self.peer_comms_handle.write() = Some(handle);
+    }
+
+    fn validate_public_trust_authority_owner(
+        &self,
+        authority: &meerkat_core::comms::CommsTrustMutationAuthority,
+    ) -> Result<(), SendError> {
+        if authority.source_kind()
+            != GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection
+        {
+            return Ok(());
+        }
+        let expected = self.peer_projection_trust_owner.read();
+        authority
+            .validate_source_owner_token(expected.as_ref())
+            .map_err(SendError::Validation)
     }
 
     /// Mark this runtime as requiring peer-comms machine authority.
@@ -3007,6 +3029,13 @@ mod tests {
         .expect("generated peer projection remove authority")
     }
 
+    fn install_test_projection_owner(
+        runtime: &CommsRuntime,
+        authority: &meerkat_core::comms::CommsTrustMutationAuthority,
+    ) {
+        *runtime.peer_projection_trust_owner.write() = authority.source_owner_token();
+    }
+
     async fn try_add_trusted_peer_with_generated_authority(
         runtime: &CommsRuntime,
         peer: TrustedPeerDescriptor,
@@ -3014,6 +3043,7 @@ mod tests {
         let authority =
             try_test_projection_add_authority(&local_descriptor_for_runtime(runtime), &peer, 0)
                 .map_err(SendError::Validation)?;
+        install_test_projection_owner(runtime, &authority);
         CoreCommsRuntime::apply_trust_mutation(
             runtime,
             CommsTrustMutation::AddTrustedPeer { authority, peer },
@@ -3035,14 +3065,13 @@ mod tests {
         runtime: &CommsRuntime,
         peer: &TrustedPeerDescriptor,
     ) -> Result<bool, SendError> {
+        let authority =
+            test_projection_remove_authority(&local_descriptor_for_runtime(runtime), peer, 0);
+        install_test_projection_owner(runtime, &authority);
         let result = CoreCommsRuntime::apply_trust_mutation(
             runtime,
             CommsTrustMutation::RemoveTrustedPeer {
-                authority: test_projection_remove_authority(
-                    &local_descriptor_for_runtime(runtime),
-                    peer,
-                    0,
-                ),
+                authority,
                 peer_id: peer.peer_id.to_string(),
             },
         )
@@ -3080,6 +3109,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generated_peer_projection_trust_requires_canonical_owner() {
+        let runtime = CommsRuntime::inproc_only("trust-owner-mismatch").expect("runtime");
+        let local = local_descriptor_for_runtime(&runtime);
+        let peer_key = Keypair::generate().public_key();
+        let descriptor = trusted_descriptor("peer", peer_key, "inproc://peer");
+
+        let authority = test_projection_add_authority(&local, &descriptor, 3);
+        let missing_owner = CoreCommsRuntime::apply_trust_mutation(
+            &runtime,
+            CommsTrustMutation::AddTrustedPeer {
+                peer: descriptor.clone(),
+                authority: authority.clone(),
+            },
+        )
+        .await
+        .expect_err("generated authority without runtime owner must fail closed");
+        assert!(
+            matches!(missing_owner, SendError::Validation(ref message) if message.contains("requires the target runtime's generated owner token")),
+            "unexpected missing-owner rejection: {missing_owner:?}"
+        );
+
+        let foreign_owner = test_projection_add_authority(&local, &descriptor, 4);
+        install_test_projection_owner(&runtime, &foreign_owner);
+        let mismatched_owner = CoreCommsRuntime::apply_trust_mutation(
+            &runtime,
+            CommsTrustMutation::AddTrustedPeer {
+                peer: descriptor,
+                authority,
+            },
+        )
+        .await
+        .expect_err("foreign generated owner must fail closed");
+        assert!(
+            matches!(mismatched_owner, SendError::Validation(ref message) if message.contains("different generated owner")),
+            "unexpected owner-mismatch rejection: {mismatched_owner:?}"
+        );
+        assert!(
+            runtime.peers().await.is_empty(),
+            "owner mismatch must not mutate peer directory projection"
+        );
+    }
+
+    #[tokio::test]
     async fn generated_trust_mutation_updates_projection() {
         let runtime = CommsRuntime::inproc_only("trust-mutator-generated").expect("runtime");
         let local = local_descriptor_for_runtime(&runtime);
@@ -3088,6 +3160,7 @@ mod tests {
         let peer_id = descriptor.peer_id.to_string();
 
         let add_authority = test_projection_add_authority(&local, &descriptor, 7);
+        install_test_projection_owner(&runtime, &add_authority);
         let add_authority_replay = add_authority.clone();
         let add = CoreCommsRuntime::apply_trust_mutation(
             &runtime,
@@ -3113,11 +3186,13 @@ mod tests {
             matches!(replay, SendError::Validation(ref message) if message.contains("already consumed")),
             "unexpected replay rejection: {replay:?}"
         );
+        let wrong_operation_authority = test_projection_add_authority(&local, &descriptor, 9);
+        install_test_projection_owner(&runtime, &wrong_operation_authority);
         let wrong_operation = CoreCommsRuntime::apply_trust_mutation(
             &runtime,
             CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
-                authority: test_projection_add_authority(&local, &descriptor, 9),
+                authority: wrong_operation_authority,
             },
         )
         .await
@@ -3132,11 +3207,13 @@ mod tests {
             "wrong-operation authority must not mutate trust projection",
         );
 
+        let remove_authority = test_projection_remove_authority(&local, &descriptor, 8);
+        install_test_projection_owner(&runtime, &remove_authority);
         let remove = CoreCommsRuntime::apply_trust_mutation(
             &runtime,
             CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
-                authority: test_projection_remove_authority(&local, &descriptor, 8),
+                authority: remove_authority,
             },
         )
         .await
@@ -3176,11 +3253,13 @@ mod tests {
             "MeerkatMachine peer projection must not see MobMachine-owned trust as its canonical rows",
         );
 
+        let remove_authority = test_projection_remove_authority(&local, &descriptor, 8);
+        install_test_projection_owner(&runtime, &remove_authority);
         let remove = CoreCommsRuntime::apply_trust_mutation(
             &runtime,
             CommsTrustMutation::RemoveTrustedPeer {
                 peer_id,
-                authority: test_projection_remove_authority(&local, &descriptor, 8),
+                authority: remove_authority,
             },
         )
         .await
@@ -3270,11 +3349,13 @@ mod tests {
         let drifted_descriptor =
             trusted_descriptor("peer", peer_key, "inproc://peer-drifted-address");
 
+        let add_authority = test_projection_add_authority(&local, &descriptor, 11);
+        install_test_projection_owner(&runtime, &add_authority);
         let err = CoreCommsRuntime::apply_trust_mutation(
             &runtime,
             CommsTrustMutation::AddTrustedPeer {
                 peer: drifted_descriptor,
-                authority: test_projection_add_authority(&local, &descriptor, 11),
+                authority: add_authority,
             },
         )
         .await
@@ -3312,11 +3393,13 @@ mod tests {
             "private trust must not be exported as public reconciliation truth"
         );
 
+        let remove_authority = test_projection_remove_authority(&local, &descriptor, 12);
+        install_test_projection_owner(&runtime, &remove_authority);
         let err = CoreCommsRuntime::apply_trust_mutation(
             &runtime,
             CommsTrustMutation::RemoveTrustedPeer {
                 peer_id,
-                authority: test_projection_remove_authority(&local, &descriptor, 12),
+                authority: remove_authority,
             },
         )
         .await
@@ -7256,14 +7339,13 @@ mod tests {
             receiver.public_key(),
             &format!("inproc://rm-pubkey-receiver-{suffix}"),
         );
+        let remove_authority =
+            test_projection_remove_authority(&local_descriptor_for_runtime(&sender), &peer, 0);
+        install_test_projection_owner(&sender, &remove_authority);
         let result = CoreCommsRuntime::apply_trust_mutation(
             &sender,
             CommsTrustMutation::RemoveTrustedPeer {
-                authority: test_projection_remove_authority(
-                    &local_descriptor_for_runtime(&sender),
-                    &peer,
-                    0,
-                ),
+                authority: remove_authority,
                 peer_id: peer_pubkey_string,
             },
         )

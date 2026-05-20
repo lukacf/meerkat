@@ -28,27 +28,29 @@ pub extern "Rust" fn generated_authority_bridge_token_is_valid(
 #[derive(Debug, Clone)]
 pub struct MobTopologyFreshnessAuthority {
     topology_epoch: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    source_owner_token: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl MobTopologyFreshnessAuthority {
-    pub fn from_authority(authority: &crate::machines::mob_machine::MobMachineAuthority) -> Self {
-        Self::from_live_topology_epoch(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
-            authority.state().topology_epoch,
-        )))
-    }
-
-    pub fn from_live_topology_epoch(
+    pub(crate) fn from_live_topology_epoch(
         topology_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        source_owner_token: std::sync::Arc<dyn std::any::Any + Send + Sync>,
     ) -> Self {
         Self {
             topology_epoch: Some(topology_epoch),
+            source_owner_token: Some(source_owner_token),
         }
     }
 
     fn missing() -> Self {
         Self {
             topology_epoch: None,
+            source_owner_token: None,
         }
+    }
+
+    fn source_owner_token(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
+        self.source_owner_token.as_ref().map(std::sync::Arc::clone)
     }
 
     fn validate_topology_epoch(
@@ -138,6 +140,7 @@ impl MobMemberTrustUnwiringObligation {
                 token: &'static (dyn std::any::Any + Send + Sync),
                 source_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,
                 source_epoch: u64,
+                source_owner_token: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
                 trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,
                 operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation,
                 peer_id: String,
@@ -159,6 +162,7 @@ impl MobMemberTrustUnwiringObligation {
                         generated_authority_bridge_token(),
                         meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustUnwiring,
                         self.epoch,
+                        self.mob_topology_freshness_authority.source_owner_token(),
                         meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring,
                         meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicRemove,
                         peer_id.to_string(),

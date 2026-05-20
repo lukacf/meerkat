@@ -553,6 +553,10 @@ fn emit_peer_projection_freshness_authority(out: &mut String) -> Result<()> {
         out,
         "    authority: Option<std::sync::Arc<std::sync::Mutex<crate::meerkat_machine::dsl::MeerkatMachineAuthority>>>,"
     )?;
+    writeln!(
+        out,
+        "    source_owner_token: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,"
+    )?;
     writeln!(out, "}}")?;
     writeln!(out)?;
     writeln!(
@@ -565,7 +569,7 @@ fn emit_peer_projection_freshness_authority(out: &mut String) -> Result<()> {
     )?;
     writeln!(
         out,
-        "        f.debug_struct(\"PeerProjectionFreshnessAuthority\").field(\"present\", &self.authority.is_some()).finish()"
+        "        f.debug_struct(\"PeerProjectionFreshnessAuthority\").field(\"present\", &self.authority.is_some()).field(\"owner_present\", &self.source_owner_token.is_some()).finish()"
     )?;
     writeln!(out, "    }}")?;
     writeln!(out, "}}")?;
@@ -575,11 +579,31 @@ fn emit_peer_projection_freshness_authority(out: &mut String) -> Result<()> {
         out,
         "    pub fn from_authority(authority: std::sync::Arc<std::sync::Mutex<crate::meerkat_machine::dsl::MeerkatMachineAuthority>>) -> Self {{"
     )?;
-    writeln!(out, "        Self {{ authority: Some(authority) }}")?;
+    writeln!(
+        out,
+        "        let source_owner_token = authority.lock().unwrap_or_else(std::sync::PoisonError::into_inner).generated_authority_owner_token();"
+    )?;
+    writeln!(
+        out,
+        "        Self {{ authority: Some(authority), source_owner_token: Some(source_owner_token) }}"
+    )?;
     writeln!(out, "    }}")?;
     writeln!(out)?;
     writeln!(out, "    fn missing() -> Self {{")?;
-    writeln!(out, "        Self {{ authority: None }}")?;
+    writeln!(
+        out,
+        "        Self {{ authority: None, source_owner_token: None }}"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "    fn source_owner_token(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {{"
+    )?;
+    writeln!(
+        out,
+        "        self.source_owner_token.as_ref().map(std::sync::Arc::clone)"
+    )?;
     writeln!(out, "    }}")?;
     writeln!(out)?;
     writeln!(
@@ -621,31 +645,38 @@ fn emit_mob_topology_freshness_authority(out: &mut String) -> Result<()> {
         out,
         "    topology_epoch: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,"
     )?;
+    writeln!(
+        out,
+        "    source_owner_token: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,"
+    )?;
     writeln!(out, "}}")?;
     writeln!(out)?;
     writeln!(out, "impl MobTopologyFreshnessAuthority {{")?;
     writeln!(
         out,
-        "    pub fn from_authority(authority: &crate::machines::mob_machine::MobMachineAuthority) -> Self {{"
+        "    pub(crate) fn from_live_topology_epoch(topology_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>, source_owner_token: std::sync::Arc<dyn std::any::Any + Send + Sync>) -> Self {{"
     )?;
     writeln!(
         out,
-        "        Self::from_live_topology_epoch(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(authority.state().topology_epoch)))"
-    )?;
-    writeln!(out, "    }}")?;
-    writeln!(out)?;
-    writeln!(
-        out,
-        "    pub fn from_live_topology_epoch(topology_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {{"
-    )?;
-    writeln!(
-        out,
-        "        Self {{ topology_epoch: Some(topology_epoch) }}"
+        "        Self {{ topology_epoch: Some(topology_epoch), source_owner_token: Some(source_owner_token) }}"
     )?;
     writeln!(out, "    }}")?;
     writeln!(out)?;
     writeln!(out, "    fn missing() -> Self {{")?;
-    writeln!(out, "        Self {{ topology_epoch: None }}")?;
+    writeln!(
+        out,
+        "        Self {{ topology_epoch: None, source_owner_token: None }}"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "    fn source_owner_token(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {{"
+    )?;
+    writeln!(
+        out,
+        "        self.source_owner_token.as_ref().map(std::sync::Arc::clone)"
+    )?;
     writeln!(out, "    }}")?;
     writeln!(out)?;
     writeln!(
@@ -794,6 +825,10 @@ fn emit_comms_trust_bridge(out: &mut String, protocol: &EffectHandoffProtocol) -
     writeln!(out, "                source_epoch: u64,")?;
     writeln!(
         out,
+        "                source_owner_token: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,"
+    )?;
+    writeln!(
+        out,
         "                trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,"
     )?;
     writeln!(
@@ -934,6 +969,14 @@ fn emit_comms_trust_bridge_call(
         "                        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{source_kind},"
     )?;
     writeln!(out, "                        {source_epoch_expr},")?;
+    let owner_token_expr = if source_kind == "MeerkatMachinePeerProjection" {
+        "self.peer_projection_freshness_authority.source_owner_token()"
+    } else if source_kind.starts_with("MobMachine") {
+        "self.mob_topology_freshness_authority.source_owner_token()"
+    } else {
+        "None"
+    };
+    writeln!(out, "                        {owner_token_expr},")?;
     writeln!(
         out,
         "                        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{row_owner_kind},"

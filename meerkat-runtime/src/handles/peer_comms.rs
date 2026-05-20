@@ -347,6 +347,12 @@ fn classification_from_effect(
 }
 
 impl PeerCommsHandle for RuntimePeerCommsHandle {
+    fn generated_peer_projection_trust_owner(
+        &self,
+    ) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        Some(self.dsl.generated_authority_owner_token())
+    }
+
     fn classify_external_envelope(
         &self,
         facts: PeerIngressEnvelopeFacts,

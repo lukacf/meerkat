@@ -902,6 +902,17 @@ pub trait ExternalToolSurfaceHandle: Send + Sync {
 /// this session DSL handle fails closed rather than deriving machine facts in
 /// the transport shell.
 pub trait PeerCommsHandle: Send + Sync {
+    /// Return the generated owner token for peer-projection trust handoffs.
+    ///
+    /// Comms trust stores use this as an identity check before applying a
+    /// `MeerkatMachinePeerProjection` mutation, so a handoff minted from a
+    /// different machine instance cannot mutate this runtime's trust projection.
+    fn generated_peer_projection_trust_owner(
+        &self,
+    ) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
+        None
+    }
+
     /// Fire the `ClassifyExternalEnvelope` signal and return machine-owned
     /// admission facts for the parsed envelope.
     fn classify_external_envelope(

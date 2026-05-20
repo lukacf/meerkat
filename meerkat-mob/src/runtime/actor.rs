@@ -657,6 +657,7 @@ pub(super) struct MobActor {
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
     pub(super) dsl_authority: mob_dsl::MobMachineAuthority,
     pub(super) dsl_topology_epoch: Arc<std::sync::atomic::AtomicU64>,
+    pub(super) dsl_authority_owner_token: Arc<dyn std::any::Any + Send + Sync>,
     /// Read-only MobMachine state projection for handle-side status/list
     /// surfaces. The actor is the sole writer; handles can borrow the latest
     /// state without enqueueing behind long shell cleanup work.
@@ -2380,7 +2381,7 @@ impl MobActor {
     ) -> Result<MemberTrustHandoff, MobError> {
         let obligation = crate::generated::protocol_mob_member_trust_wiring::extract_obligations_with_freshness(
             transition,
-            crate::generated::protocol_mob_member_trust_wiring::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone()),
+            crate::generated::protocol_mob_member_trust_wiring::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone(), Arc::clone(&self.dsl_authority_owner_token)),
         )
         .into_iter()
         .find(|obligation| obligation.edge() == edge)
@@ -2416,14 +2417,14 @@ impl MobActor {
         let wiring_obligation =
             crate::generated::protocol_mob_external_peer_trust_wiring::extract_obligations_with_freshness(
                 transition,
-                crate::generated::protocol_mob_external_peer_trust_wiring::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone()),
+                crate::generated::protocol_mob_external_peer_trust_wiring::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone(), Arc::clone(&self.dsl_authority_owner_token)),
             )
             .into_iter()
             .find(|obligation| obligation.edge() == edge);
         let repair_obligation =
             crate::generated::protocol_mob_external_peer_trust_repair::extract_obligations_with_freshness(
                 transition,
-                crate::generated::protocol_mob_external_peer_trust_repair::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone()),
+                crate::generated::protocol_mob_external_peer_trust_repair::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone(), Arc::clone(&self.dsl_authority_owner_token)),
             )
             .into_iter()
             .find(|obligation| obligation.edge() == edge);
@@ -2476,7 +2477,7 @@ impl MobActor {
     ) -> Result<MemberTrustHandoff, MobError> {
         let obligation = crate::generated::protocol_mob_member_trust_unwiring::extract_obligations_with_freshness(
             transition,
-            crate::generated::protocol_mob_member_trust_unwiring::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone()),
+            crate::generated::protocol_mob_member_trust_unwiring::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone(), Arc::clone(&self.dsl_authority_owner_token)),
         )
         .into_iter()
         .find(|obligation| obligation.edge() == edge)
@@ -9082,7 +9083,7 @@ impl MobActor {
         let Some(obligation) =
             crate::generated::protocol_mob_external_peer_reciprocal_trust::extract_obligations_with_freshness(
                 &transition,
-                crate::generated::protocol_mob_external_peer_reciprocal_trust::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone()),
+                crate::generated::protocol_mob_external_peer_reciprocal_trust::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone(), Arc::clone(&self.dsl_authority_owner_token)),
             )
             .into_iter()
             .find(|obligation| obligation.key() == &key)
@@ -9132,7 +9133,7 @@ impl MobActor {
         let obligation =
             crate::generated::protocol_mob_external_peer_trust_unwiring::extract_obligations_with_freshness(
                 &transition,
-                crate::generated::protocol_mob_external_peer_trust_unwiring::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone()),
+                crate::generated::protocol_mob_external_peer_trust_unwiring::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone(), Arc::clone(&self.dsl_authority_owner_token)),
             )
             .into_iter()
             .find(|obligation| obligation.edge() == edge)

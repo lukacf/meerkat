@@ -27251,10 +27251,14 @@ async fn test_stale_member_trust_obligation_cannot_readd_local_trust_when_machin
         current_machine_state,
     )
     .expect("recover current unwired machine state");
+    let current_topology_epoch = Arc::new(AtomicU64::new(current_authority.state().topology_epoch));
     let stale_obligation =
         crate::generated::protocol_mob_member_trust_wiring::extract_obligations_with_freshness(
             &stale_transition,
-            crate::generated::protocol_mob_member_trust_wiring::MobTopologyFreshnessAuthority::from_authority(&current_authority),
+            crate::generated::protocol_mob_member_trust_wiring::MobTopologyFreshnessAuthority::from_live_topology_epoch(
+                current_topology_epoch,
+                current_authority.generated_authority_owner_token(),
+            ),
         )
         .pop()
         .expect("generated stale member wiring obligation");
@@ -27399,10 +27403,14 @@ async fn test_stale_external_peer_trust_obligation_cannot_readd_trust_when_machi
         current_machine_state,
     )
     .expect("recover current external-unwired machine state");
+    let current_topology_epoch = Arc::new(AtomicU64::new(current_authority.state().topology_epoch));
     let stale_obligation =
         crate::generated::protocol_mob_external_peer_trust_wiring::extract_obligations_with_freshness(
             &stale_transition,
-            crate::generated::protocol_mob_external_peer_trust_wiring::MobTopologyFreshnessAuthority::from_authority(&current_authority),
+            crate::generated::protocol_mob_external_peer_trust_wiring::MobTopologyFreshnessAuthority::from_live_topology_epoch(
+                current_topology_epoch,
+                current_authority.generated_authority_owner_token(),
+            ),
         )
         .pop()
         .expect("generated stale external wiring obligation");

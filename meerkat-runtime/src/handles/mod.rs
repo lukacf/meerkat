@@ -280,6 +280,14 @@ impl HandleDslAuthority {
         )
     }
 
+    pub fn generated_authority_owner_token(&self) -> Arc<dyn std::any::Any + Send + Sync> {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.generated_authority_owner_token()
+    }
+
     /// Run `body` under the shared authority's mutex. The closure observes
     /// the DSL state atomically with any side effects it performs on the
     /// handle's external state (e.g. installing an observer before any

@@ -3436,77 +3436,85 @@ mod tests {
             .await
             .expect_err("raw add must fail closed");
         assert!(matches!(raw_add, SendError::Unsupported(_)));
-        let external_edge = meerkat_mob::machines::mob_machine::ExternalPeerEdge::new(
-            meerkat_mob::machines::mob_machine::AgentIdentity("local".to_string()),
-            meerkat_mob::machines::mob_machine::ExternalPeerEndpoint::from(&peer),
-        );
-        let external_key = meerkat_mob::machines::mob_machine::ExternalPeerKey::new(
-            external_edge.local.clone(),
-            external_edge.endpoint.name.clone(),
-        );
-        let mut mob_authority = meerkat_mob::machines::mob_machine::MobMachineAuthority::new();
-        let local_identity = meerkat_mob::machines::mob_machine::AgentIdentity("local".to_string());
-        meerkat_mob::machines::mob_machine::MobMachineMutator::apply(
-            &mut mob_authority,
-            meerkat_mob::machines::mob_machine::MobMachineInput::Spawn {
-                agent_identity: local_identity.clone(),
-                agent_runtime_id: meerkat_mob::machines::mob_machine::AgentRuntimeId(
-                    "local-runtime".to_string(),
-                ),
-                fence_token: meerkat_mob::machines::mob_machine::FenceToken(1),
-                generation: meerkat_mob::machines::mob_machine::Generation(1),
-                external_addressable: true,
-                bridge_session_id: meerkat_mob::machines::mob_machine::SessionId(
-                    "local-session".to_string(),
-                ),
-                replacing: None,
-            },
-        )
-        .expect("spawn local member");
-        let local_descriptor = TrustedPeerDescriptor::unsigned_with_pubkey(
-            "local".to_string(),
-            runtime.peer_id.to_string(),
-            runtime.public_key_bytes,
-            runtime.address.clone(),
-        )
-        .expect("valid local descriptor");
-        meerkat_mob::machines::mob_machine::MobMachineMutator::apply(
-            &mut mob_authority,
-            meerkat_mob::machines::mob_machine::MobMachineInput::RegisterMemberPeer {
-                agent_identity: local_identity,
-                peer_endpoint: meerkat_mob::machines::mob_machine::MemberPeerEndpoint::from(
-                    &local_descriptor,
-                ),
-            },
-        )
-        .expect("register local member peer");
-        let wiring_transition = meerkat_mob::machines::mob_machine::MobMachineMutator::apply(
-            &mut mob_authority,
-            meerkat_mob::machines::mob_machine::MobMachineInput::WireExternalPeer {
-                key: external_key.clone(),
-                edge: external_edge.clone(),
-            },
-        )
-        .expect("wire external peer");
+        let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
+        let projection_authority = std::sync::Arc::new(std::sync::Mutex::new(
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new(),
+        ));
+        {
+            let mut authority = projection_authority
+                .lock()
+                .expect("projection authority lock should not be poisoned");
+            authority
+                .apply_signal(
+                    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
+                )
+                .expect("Initialize signal");
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                    session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                        "mob-mcp-local-comms-test",
+                    ),
+                },
+            )
+            .expect("RegisterSession input");
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+                    endpoint: meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+                        "local",
+                        runtime.peer_id.to_string(),
+                        runtime.address.clone(),
+                        runtime.public_key_bytes,
+                    ),
+                },
+            )
+            .expect("PublishLocalEndpoint input");
+        }
+        let wiring_transition = {
+            let mut authority = projection_authority
+                .lock()
+                .expect("projection authority lock should not be poisoned");
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                    epoch: 1,
+                    endpoints: BTreeSet::from([endpoint.clone()]),
+                },
+            )
+            .expect("ApplyMobPeerOverlay input")
+        };
         let wiring_obligation =
-            meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::extract_obligations_with_freshness(
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
                 &wiring_transition,
-                meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::MobTopologyFreshnessAuthority::from_authority(&mob_authority),
+                meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                    std::sync::Arc::clone(&projection_authority),
+                ),
             )
             .pop()
             .expect("generated wiring obligation");
+        let add_authority =
+            meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+                &wiring_obligation,
+                &endpoint,
+            )
+            .expect("generated wiring obligation covers peer");
         let wrong_runtime = LocalCommsRuntime::new("wrong-target");
+        let wrong_target_obligation =
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &wiring_transition,
+                meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                    std::sync::Arc::clone(&projection_authority),
+                ),
+            )
+            .pop()
+            .expect("generated wiring obligation for wrong target");
         let wrong_target_error = wrong_runtime
             .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
                 peer: peer.clone(),
-                authority: meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::wiring_authority_for_peer(
-                    &meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::extract_obligations_with_freshness(
-                        &wiring_transition,
-                        meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::MobTopologyFreshnessAuthority::from_authority(&mob_authority),
-                    )
-                    .pop()
-                    .expect("generated wiring obligation for wrong target"),
-                    &peer_id,
+                authority: meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+                    &wrong_target_obligation,
+                    &endpoint,
                 )
                 .expect("generated wiring obligation covers peer"),
             })
@@ -3520,11 +3528,7 @@ mod tests {
         let added = runtime
             .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
                 peer: peer.clone(),
-                authority: meerkat_mob::generated::protocol_mob_external_peer_trust_wiring::wiring_authority_for_peer(
-                    &wiring_obligation,
-                    &peer_id,
-                )
-                .expect("generated wiring obligation covers peer"),
+                authority: add_authority,
             })
             .await
             .expect("authorized add succeeds");
@@ -3536,18 +3540,25 @@ mod tests {
             .await
             .expect_err("raw remove must fail closed");
         assert!(matches!(raw_remove, SendError::Unsupported(_)));
-        let unwiring_transition = meerkat_mob::machines::mob_machine::MobMachineMutator::apply(
-            &mut mob_authority,
-            meerkat_mob::machines::mob_machine::MobMachineInput::UnwireExternalPeer {
-                key: external_key,
-                edge: external_edge,
-            },
-        )
-        .expect("unwire external peer");
+        let unwiring_transition = {
+            let mut authority = projection_authority
+                .lock()
+                .expect("projection authority lock should not be poisoned");
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                    epoch: 2,
+                    endpoints: BTreeSet::new(),
+                },
+            )
+            .expect("ApplyMobPeerOverlay remove input")
+        };
         let unwiring_obligation =
-            meerkat_mob::generated::protocol_mob_external_peer_trust_unwiring::extract_obligations_with_freshness(
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
                 &unwiring_transition,
-                meerkat_mob::generated::protocol_mob_external_peer_trust_unwiring::MobTopologyFreshnessAuthority::from_authority(&mob_authority),
+                meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                    std::sync::Arc::clone(&projection_authority),
+                ),
             )
             .pop()
             .expect("generated unwiring obligation");
@@ -3556,7 +3567,7 @@ mod tests {
             .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
                 authority:
-                    meerkat_mob::generated::protocol_mob_external_peer_trust_unwiring::unwiring_authority_for_peer(
+                    meerkat_runtime::protocol_comms_trust_reconcile::removal_authority_for_peer_id(
                         &unwiring_obligation,
                         &peer_id,
                     )

@@ -2006,7 +2006,7 @@ mod tests {
         let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
         let actionable_notify = Arc::new(Notify::new());
         let notify = Arc::new(Notify::new());
-        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         let (tx, _rx) = mpsc::channel::<InboxItem>(1);
@@ -2075,7 +2075,7 @@ mod tests {
         let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
         let actionable_notify = Arc::new(Notify::new());
         let notify = Arc::new(Notify::new());
-        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         let (tx, _rx) = mpsc::channel::<InboxItem>(1);

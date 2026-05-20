@@ -177,6 +177,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
         pub struct #authority_name {
             state: #state_name,
+            authority_owner_token: std::sync::Arc<dyn std::any::Any + Send + Sync>,
         }
 
         #[derive(Clone, Debug)]
@@ -194,7 +195,10 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
         impl #authority_name {
             pub fn new() -> Self {
-                Self { state: #state_name::default() }
+                Self {
+                    state: #state_name::default(),
+                    authority_owner_token: std::sync::Arc::new(()),
+                }
             }
 
             pub fn state(&self) -> &#state_name {
@@ -202,7 +206,10 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             }
 
             pub fn recover_from_state(state: #state_name) -> Result<Self, #error_name> {
-                let authority = Self { state };
+                let authority = Self {
+                    state,
+                    authority_owner_token: std::sync::Arc::new(()),
+                };
                 authority.validate_recovered_state()?;
                 Ok(authority)
             }
@@ -215,7 +222,14 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             pub fn fork(&self) -> Self {
                 Self {
                     state: self.state.clone(),
+                    authority_owner_token: std::sync::Arc::new(()),
                 }
+            }
+
+            pub fn generated_authority_owner_token(
+                &self,
+            ) -> std::sync::Arc<dyn std::any::Any + Send + Sync> {
+                std::sync::Arc::clone(&self.authority_owner_token)
             }
 
             pub fn snapshot(&self) -> #authority_snapshot_name {

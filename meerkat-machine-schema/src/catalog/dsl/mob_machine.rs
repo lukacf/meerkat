@@ -359,6 +359,7 @@ macro_rules! mob_catalog_machine_dsl {
             AuthorizeMemberTrustWiring { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             AuthorizeMemberTrustUnwiring { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             AuthorizeMemberTrustCleanup { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
+            AuthorizeMemberTrustCleanupObserved { edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId },
             AuthorizeExternalPeerReciprocalTrust { key: ExternalPeerKey, agent_identity: AgentIdentity },
             UnwireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
             SessionIngressDetachedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
@@ -707,6 +708,23 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.topology_epoch += 1;
+            }
+            to Running
+        }
+
+        transition RecoverRosterMemberAddressabilityRunning {
+            on signal RecoverRosterMember { agent_identity, agent_runtime_id, fence_token, external_addressable }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            update {
+                if external_addressable {
+                    self.externally_addressable_runtime_ids.insert(agent_runtime_id);
+                } else {
+                    self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                }
+                self.member_restore_failures.remove(agent_identity);
             }
             to Running
         }
@@ -1827,6 +1845,22 @@ macro_rules! mob_catalog_machine_dsl {
                 edge: edge,
                 a_peer_id: self.member_peer_ids.get_cloned(a_identity).get("value"),
                 b_peer_id: self.member_peer_ids.get_cloned(b_identity).get("value"),
+                epoch: self.topology_epoch
+            }
+        }
+
+        transition AuthorizeMemberTrustCleanupObservedRunning {
+            on input AuthorizeMemberTrustCleanupObserved { edge, a_identity, a_peer_id, b_identity, b_peer_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "edge_currently_wired" { self.wiring_edges.contains(edge) == true }
+            guard "cleanup_has_restore_failure" { self.member_restore_failures.contains_key(a_identity) == true || self.member_restore_failures.contains_key(b_identity) == true }
+            update {}
+            to Running
+            emit MemberTrustUnwiringRequested {
+                edge: edge,
+                a_peer_id: a_peer_id,
+                b_peer_id: b_peer_id,
                 epoch: self.topology_epoch
             }
         }
@@ -3663,6 +3697,14 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Stopped }
             update {}
             to Stopped
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retiring }
+        }
+
+        transition RetireAllCompleted {
+            on input RetireAll
+            guard { self.lifecycle_phase == Phase::Completed }
+            update {}
+            to Completed
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retiring }
         }
 

@@ -1056,7 +1056,11 @@ impl MobMachineState {
         let status = if restore_failure.is_some() {
             MobMemberLifecycleStatus::Broken
         } else if let Some(runtime_id) = self.identity_to_runtime.get(agent_identity) {
-            if self.member_state_markers.get(runtime_id) == Some(&MobMemberState::Retiring) {
+            if self.member_state_markers.get(runtime_id) == Some(&MobMemberState::Retiring)
+                || self
+                    .pending_session_ingress_detach_runtime_ids
+                    .contains(runtime_id)
+            {
                 MobMemberLifecycleStatus::Retiring
             } else if self.live_runtime_ids.contains(runtime_id) {
                 MobMemberLifecycleStatus::Active

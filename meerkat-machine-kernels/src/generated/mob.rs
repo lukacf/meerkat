@@ -2245,6 +2245,14 @@ pub mod inputs {
         pub b_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMemberTrustCleanupObserved {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub a_peer_id: PeerId,
+        pub b_identity: AgentIdentity,
+        pub b_peer_id: PeerId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeExternalPeerReciprocalTrust {
         pub key: ExternalPeerKey,
         pub agent_identity: AgentIdentity,
@@ -2410,6 +2418,7 @@ pub enum Input {
     AuthorizeMemberTrustWiring(inputs::AuthorizeMemberTrustWiring),
     AuthorizeMemberTrustUnwiring(inputs::AuthorizeMemberTrustUnwiring),
     AuthorizeMemberTrustCleanup(inputs::AuthorizeMemberTrustCleanup),
+    AuthorizeMemberTrustCleanupObserved(inputs::AuthorizeMemberTrustCleanupObserved),
     AuthorizeExternalPeerReciprocalTrust(inputs::AuthorizeExternalPeerReciprocalTrust),
     UnwireExternalPeer(inputs::UnwireExternalPeer),
     SessionIngressDetachedForMobDestroy(inputs::SessionIngressDetachedForMobDestroy),
@@ -2484,6 +2493,9 @@ impl Input {
             Self::AuthorizeMemberTrustWiring(_) => InputKind::AuthorizeMemberTrustWiring,
             Self::AuthorizeMemberTrustUnwiring(_) => InputKind::AuthorizeMemberTrustUnwiring,
             Self::AuthorizeMemberTrustCleanup(_) => InputKind::AuthorizeMemberTrustCleanup,
+            Self::AuthorizeMemberTrustCleanupObserved(_) => {
+                InputKind::AuthorizeMemberTrustCleanupObserved
+            }
             Self::AuthorizeExternalPeerReciprocalTrust(_) => {
                 InputKind::AuthorizeExternalPeerReciprocalTrust
             }
@@ -2559,6 +2571,7 @@ pub enum InputKind {
     AuthorizeMemberTrustWiring,
     AuthorizeMemberTrustUnwiring,
     AuthorizeMemberTrustCleanup,
+    AuthorizeMemberTrustCleanupObserved,
     AuthorizeExternalPeerReciprocalTrust,
     UnwireExternalPeer,
     SessionIngressDetachedForMobDestroy,
@@ -3148,6 +3161,7 @@ pub enum TransitionId {
     EnsureMemberRunningExisting,
     EnsureMemberRunningMissing,
     RecoverRosterMemberRunning,
+    RecoverRosterMemberAddressabilityRunning,
     RecoverMemberSessionBindingFreshRunning,
     RecoverMemberSessionBindingReplacingRunning,
     RecoverMemberSessionBindingAlreadyCurrentRunning,
@@ -3238,6 +3252,7 @@ pub enum TransitionId {
     AuthorizeMemberTrustWiringRunning,
     AuthorizeMemberTrustUnwiringRunning,
     AuthorizeMemberTrustCleanupRunning,
+    AuthorizeMemberTrustCleanupObservedRunning,
     AuthorizeExternalPeerReciprocalTrustRunning,
     RecoverExternalPeerWiringRunning,
     RecoverExternalPeerWiringAlreadyRecovered,
@@ -3357,6 +3372,7 @@ pub enum TransitionId {
     RetireAbsentStopped,
     RetireAllRunning,
     RetireAllStopped,
+    RetireAllCompleted,
     CompleteSpawnRunning,
     DestroyFromAny,
     RespawnRunning,

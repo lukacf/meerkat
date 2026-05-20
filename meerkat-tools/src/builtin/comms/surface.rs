@@ -266,12 +266,9 @@ mod tests {
     async fn send_request_without_runtime_returns_typed_unavailable_reason() {
         let (router, trusted_peers) = make_tool_context();
         let surface = CommsToolSurface::new(router, trusted_peers);
-        let peer_id = surface.tool_context.trusted_peers.peers()[0]
-            .pubkey
-            .to_peer_id();
         let args_raw = serde_json::value::RawValue::from_string(
             serde_json::json!({
-                "peer_id": peer_id,
+                "peer_id": meerkat_core::comms::PeerId::new(),
                 "intent": "review",
                 "params": {"file": "main.rs"},
                 "handling_mode": "steer"

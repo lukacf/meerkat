@@ -10918,6 +10918,7 @@ async fn test_wait_one_returns_terminal_unknown_for_missing_member() {
 async fn test_wait_one_observes_retiring_member_as_non_terminal_until_archive() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let member_id = MeerkatId::from("wait-retiring");
+    service.set_flow_turn_never_terminal(true);
     let session_id = handle
         .spawn(ProfileName::from("worker"), member_id.clone(), None)
         .await
@@ -10925,6 +10926,7 @@ async fn test_wait_one_observes_retiring_member_as_non_terminal_until_archive() 
         .bridge_session_id()
         .expect("session-backed member")
         .clone();
+    service.set_flow_turn_never_terminal(false);
 
     service.set_archive_delay_ms(250);
     let retire = {
@@ -16558,6 +16560,14 @@ async fn test_wire_fails_when_comms_runtime_missing_without_side_effects() {
 #[tokio::test]
 async fn test_wire_fails_when_public_key_missing_without_side_effects() {
     let (handle, service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
     service
         .set_comms_behavior(
             &test_comms_name("worker", "w-1"),
@@ -16567,15 +16577,6 @@ async fn test_wire_fails_when_public_key_missing_without_side_effects() {
             },
         )
         .await;
-
-    handle
-        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
-        .await
-        .expect("spawn lead");
-    handle
-        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
-        .await
-        .expect("spawn worker");
 
     let result = handle
         .wire(AgentIdentity::from("l-1"), MeerkatId::from("w-1"))
@@ -31669,6 +31670,8 @@ struct MobRuntimeParitySnapshotSummary {
     external_peer_edges: BTreeSet<String>,
     external_peer_edges_by_key: BTreeMap<String, String>,
     identity_to_runtime: BTreeMap<String, String>,
+    member_peer_ids: BTreeMap<String, String>,
+    member_peer_endpoints: BTreeMap<String, String>,
     member_restore_failures: BTreeMap<String, String>,
     // W3-H-1: canonical identity→bridge-session binding map. Stubbed as an
     // empty BTreeMap for the parity evaluator; full projection through the
@@ -32355,6 +32358,8 @@ async fn mob_runtime_parity_snapshot_summary(
         external_peer_edges,
         external_peer_edges_by_key,
         identity_to_runtime,
+        member_peer_ids,
+        member_peer_endpoints,
         member_restore_failures,
         member_session_bindings,
         pending_spawn_sessions,
@@ -32384,6 +32389,14 @@ async fn mob_runtime_parity_snapshot_summary(
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
                     .collect::<BTreeMap<_, _>>(),
+                snap.member_peer_ids
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.member_peer_endpoints
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+                    .collect::<BTreeMap<_, _>>(),
                 snap.member_restore_failures
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), v))
@@ -32403,7 +32416,23 @@ async fn mob_runtime_parity_snapshot_summary(
                 snap.topology_epoch,
             )
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            (
+                false,
+                BTreeMap::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeSet::new(),
+                0,
+            )
+        });
 
     Some(MobRuntimeParitySnapshotSummary {
         phase: phase.as_str().to_string(),
@@ -32437,6 +32466,8 @@ async fn mob_runtime_parity_snapshot_summary(
         external_peer_edges,
         external_peer_edges_by_key,
         identity_to_runtime,
+        member_peer_ids,
+        member_peer_endpoints,
         member_restore_failures,
         member_session_bindings,
         pending_spawn_sessions,
@@ -32490,6 +32521,20 @@ fn mob_runtime_parity_field_value(
         "identity_to_runtime" => Some(MobRuntimeParityExprValue::Map(
             snapshot
                 .identity_to_runtime
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "member_peer_ids" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_peer_ids
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "member_peer_endpoints" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_peer_endpoints
                 .keys()
                 .map(|k| (k.clone(), 0u64))
                 .collect(),

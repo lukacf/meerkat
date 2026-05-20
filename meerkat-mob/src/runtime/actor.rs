@@ -130,6 +130,13 @@ struct PreparedDslTransition {
     transition: mob_dsl::MobMachineTransition,
 }
 
+struct BatchInstalledTrust {
+    comms: Arc<dyn CoreCommsRuntime>,
+    removal_key: String,
+    edge: mob_dsl::WiringEdge,
+    peer_identity: AgentIdentity,
+}
+
 #[derive(Debug, Clone)]
 enum WireTrustAuthority {
     GraphAdded(MemberTrustHandoff),
@@ -2457,6 +2464,47 @@ impl MobActor {
         self.member_trust_wiring_handoff_from_transition(&transition, edge, context, operation)
     }
 
+    fn authorize_member_trust_wiring_batch(
+        &mut self,
+        edges: &[(crate::event::MemberWireEdge, mob_dsl::WiringEdge)],
+        context: &str,
+    ) -> Result<Vec<MemberTrustHandoff>, MobError> {
+        let mut effects = Vec::new();
+        let mut handoffs = Vec::with_capacity(edges.len());
+        let mut phase_changed = false;
+        for (_, edge) in edges {
+            let input = mob_dsl::MobMachineInput::AuthorizeMemberTrustWiring {
+                edge: edge.clone(),
+                a_identity: edge.a.clone(),
+                b_identity: edge.b.clone(),
+            };
+            let input_debug = format!("{input:?}");
+            let transition = mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input)
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "DSL authority ({context}) rejected {input_debug}: {error}"
+                    ))
+                })?;
+            if transition.from_phase != transition.to_phase {
+                phase_changed = true;
+            }
+            let handoff = self.member_trust_wiring_handoff_from_transition(
+                &transition,
+                edge,
+                context,
+                MemberTrustOperation::Wiring,
+            )?;
+            effects.extend(transition.into_effects());
+            handoffs.push(handoff);
+        }
+        self.queue_routed_effects_from(&effects);
+        if phase_changed {
+            let _ = self.phase_watch_tx.send(self.state());
+        }
+        self.publish_machine_state_projection();
+        Ok(handoffs)
+    }
+
     fn authorize_member_trust_unwiring(
         &mut self,
         edge: &mob_dsl::WiringEdge,
@@ -4689,6 +4737,8 @@ impl MobActor {
                         external_peer_edges: dsl.external_peer_edges.clone(),
                         external_peer_edges_by_key: dsl.external_peer_edges_by_key.clone(),
                         identity_to_runtime: dsl.identity_to_runtime.clone(),
+                        member_peer_ids: dsl.member_peer_ids.clone(),
+                        member_peer_endpoints: dsl.member_peer_endpoints.clone(),
                         member_restore_failures: dsl.member_restore_failures.clone(),
                         member_session_bindings: dsl.member_session_bindings.clone(),
                         pending_spawn_sessions: dsl.pending_spawn_sessions.clone(),
@@ -4730,61 +4780,65 @@ impl MobActor {
                     let _ = reply_tx.send(self.machine_projection_for_identity(&agent_identity));
                 }
                 MobCommand::Stop { reply_tx } => {
-                    let result = match self.probe_command_admission(
-                        mob_dsl::MobMachineInput::Stop,
-                        MobState::Stopped,
-                        "stop_command_admission",
-                    ) {
-                        Ok(()) => {
-                            self.fail_all_pending_spawns("mob is stopping").await;
-                            self.notify_orchestrator_lifecycle(format!(
-                                "Mob '{}' is stopping.",
-                                self.definition.id
-                            ))
-                            .await;
-                            // Cancel checkpointer gates before stopping host loops so
-                            // in-flight saves that complete after the loop stops don't
-                            // race with subsequent external cleanup (e.g. DML deletes).
-                            self.provisioner.cancel_all_checkpointers().await;
-                            let mut stop_result: Result<(), MobError> = Ok(());
-                            let loop_result = self.stop_all_autonomous_members().await;
-                            if let Err(error) = loop_result {
-                                tracing::warn!(
-                                    mob_id = %self.definition.id,
-                                    error = %error,
-                                    "stop encountered autonomous loop cleanup error"
-                                );
+                    let result = if self.state() == MobState::Destroyed {
+                        Err(self.invalid_transition_to(MobState::Stopped))
+                    } else {
+                        match self.probe_command_admission(
+                            mob_dsl::MobMachineInput::Stop,
+                            MobState::Stopped,
+                            "stop_command_admission",
+                        ) {
+                            Ok(()) => {
+                                self.fail_all_pending_spawns("mob is stopping").await;
+                                self.notify_orchestrator_lifecycle(format!(
+                                    "Mob '{}' is stopping.",
+                                    self.definition.id
+                                ))
+                                .await;
+                                // Cancel checkpointer gates before stopping host loops so
+                                // in-flight saves that complete after the loop stops don't
+                                // race with subsequent external cleanup (e.g. DML deletes).
+                                self.provisioner.cancel_all_checkpointers().await;
+                                let mut stop_result: Result<(), MobError> = Ok(());
+                                let loop_result = self.stop_all_autonomous_members().await;
+                                if let Err(error) = loop_result {
+                                    tracing::warn!(
+                                        mob_id = %self.definition.id,
+                                        error = %error,
+                                        "stop encountered autonomous loop cleanup error"
+                                    );
+                                    if stop_result.is_ok() {
+                                        stop_result = Err(error);
+                                    }
+                                }
                                 if stop_result.is_ok() {
-                                    stop_result = Err(error);
+                                    if self.has_orchestrator
+                                        && let Err(error) = self.apply_dsl_signal(
+                                            mob_dsl::MobMachineSignal::StopOrchestrator,
+                                            "stop_orchestrator",
+                                        )
+                                    {
+                                        stop_result = Err(MobError::Internal(format!(
+                                            "orchestrator StopOrchestrator transition failed during stop: {error}"
+                                        )));
+                                    }
+                                    if stop_result.is_ok()
+                                        && let Err(error) = self.apply_command_admission(
+                                            mob_dsl::MobMachineInput::Stop,
+                                            MobState::Stopped,
+                                            "stop_input",
+                                        )
+                                    {
+                                        stop_result = Err(error);
+                                    }
                                 }
-                            }
-                            if stop_result.is_ok() {
-                                if self.has_orchestrator
-                                    && let Err(error) = self.apply_dsl_signal(
-                                        mob_dsl::MobMachineSignal::StopOrchestrator,
-                                        "stop_orchestrator",
-                                    )
-                                {
-                                    stop_result = Err(MobError::Internal(format!(
-                                        "orchestrator StopOrchestrator transition failed during stop: {error}"
-                                    )));
+                                if stop_result.is_err() {
+                                    self.provisioner.rearm_all_checkpointers().await;
                                 }
-                                if stop_result.is_ok()
-                                    && let Err(error) = self.apply_command_admission(
-                                        mob_dsl::MobMachineInput::Stop,
-                                        MobState::Stopped,
-                                        "stop_input",
-                                    )
-                                {
-                                    stop_result = Err(error);
-                                }
+                                stop_result
                             }
-                            if stop_result.is_err() {
-                                self.provisioner.rearm_all_checkpointers().await;
-                            }
-                            stop_result
+                            Err(error) => Err(error),
                         }
-                        Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
                 }
@@ -7165,10 +7219,14 @@ impl MobActor {
                     )
                     .await
                     {
+                        let rollback_handoff = self.authorize_member_trust_unwiring(
+                            &edge,
+                            "wire_members_repair_rollback_trust_authority",
+                        )?;
                         let _ = Self::apply_trusted_peer_remove(
                             local_comms.as_ref(),
                             peer_key.clone(),
-                            handoff.unwiring_authority_for(&peer_meerkat_id, &peer_key)?,
+                            rollback_handoff.unwiring_authority_for(&peer_meerkat_id, &peer_key)?,
                         )
                         .await;
                         return Err(MobError::from(error));
@@ -7839,12 +7897,11 @@ impl MobActor {
             .collect::<Vec<_>>();
         self.commit_prepared_dsl_input(prepared);
 
-        let mut installed_trust: Vec<(
-            Arc<dyn CoreCommsRuntime>,
-            String,
-            CommsTrustMutationAuthority,
-        )> = Vec::new();
-        for (event_edge, dsl_edge) in &to_add {
+        let handoffs = self
+            .authorize_member_trust_wiring_batch(&to_add, "wire_members_batch_trust_authority")?;
+
+        let mut installed_trust: Vec<BatchInstalledTrust> = Vec::new();
+        for ((event_edge, dsl_edge), handoff) in to_add.iter().zip(handoffs.iter()) {
             let left = endpoints.get(&event_edge.a).ok_or_else(|| {
                 MobError::WiringError(format!(
                     "wire_members_batch missing endpoint '{}'",
@@ -7857,15 +7914,6 @@ impl MobActor {
                     event_edge.b
                 ))
             })?;
-            let handoff = self.authorize_member_trust_wiring(
-                dsl_edge,
-                "wire_members_batch_trust_authority",
-                MemberTrustOperation::Wiring,
-            )?;
-            let rollback_handoff = self.authorize_member_trust_unwiring(
-                dsl_edge,
-                "wire_members_batch_trust_rollback_authority",
-            )?;
 
             handoff.require_peer_id_for(&event_edge.b, &right.removal_key)?;
             if let Err(error) = Self::apply_trusted_peer_add(
@@ -7879,11 +7927,12 @@ impl MobActor {
                     .await;
                 return Err(MobError::from(error));
             }
-            installed_trust.push((
-                left.comms.clone(),
-                right.removal_key.clone(),
-                rollback_handoff.unwiring_authority_for(&event_edge.b, &right.removal_key)?,
-            ));
+            installed_trust.push(BatchInstalledTrust {
+                comms: left.comms.clone(),
+                removal_key: right.removal_key.clone(),
+                edge: dsl_edge.clone(),
+                peer_identity: event_edge.b.clone(),
+            });
 
             handoff.require_peer_id_for(&event_edge.a, &left.removal_key)?;
             if let Err(error) = Self::apply_trusted_peer_add(
@@ -7897,11 +7946,12 @@ impl MobActor {
                     .await;
                 return Err(MobError::from(error));
             }
-            installed_trust.push((
-                right.comms.clone(),
-                left.removal_key.clone(),
-                rollback_handoff.unwiring_authority_for(&event_edge.a, &left.removal_key)?,
-            ));
+            installed_trust.push(BatchInstalledTrust {
+                comms: right.comms.clone(),
+                removal_key: left.removal_key.clone(),
+                edge: dsl_edge.clone(),
+                peer_identity: event_edge.a.clone(),
+            });
         }
 
         let event = NewMobEvent {
@@ -8020,16 +8070,43 @@ impl MobActor {
     async fn rollback_wire_members_batch(
         &mut self,
         added_edges: &[(crate::event::MemberWireEdge, mob_dsl::WiringEdge)],
-        installed_trust: Vec<(
-            Arc<dyn CoreCommsRuntime>,
-            String,
-            CommsTrustMutationAuthority,
-        )>,
+        installed_trust: Vec<BatchInstalledTrust>,
     ) {
-        for (comms, removal_key, authority) in installed_trust.into_iter().rev() {
-            if let Err(error) =
-                Self::apply_trusted_peer_remove(comms.as_ref(), removal_key.clone(), authority)
-                    .await
+        for installed in installed_trust.into_iter().rev() {
+            let authority = match self.authorize_member_trust_unwiring(
+                &installed.edge,
+                "wire_members_batch_trust_rollback_authority",
+            ) {
+                Ok(handoff) => {
+                    match handoff
+                        .unwiring_authority_for(&installed.peer_identity, &installed.removal_key)
+                    {
+                        Ok(authority) => authority,
+                        Err(error) => {
+                            tracing::warn!(
+                                mob_id = %self.definition.id,
+                                %error,
+                                "wire_members_batch rollback: generated unwiring handoff could not mint trust authority"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        %error,
+                        "wire_members_batch rollback: failed to request generated unwiring handoff"
+                    );
+                    continue;
+                }
+            };
+            if let Err(error) = Self::apply_trusted_peer_remove(
+                installed.comms.as_ref(),
+                installed.removal_key.clone(),
+                authority,
+            )
+            .await
             {
                 tracing::warn!(
                     mob_id = %self.definition.id,
@@ -11419,6 +11496,9 @@ impl MobActor {
     async fn handle_rotate_supervisor(
         &self,
     ) -> Result<super::handle::SupervisorRotationReport, MobError> {
+        if self.state() == MobState::Destroyed {
+            return Err(self.invalid_transition_to(MobState::Destroyed));
+        }
         let loaded = self
             .load_supervisor_authority_snapshot_with_process_local_pending()
             .await?
@@ -14053,124 +14133,7 @@ impl MobActor {
                 }
             }
         }
-        if let Some(entry) = spawned_entry.as_ref() {
-            let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
-            let releasing = member_ref
-                .bridge_session_id()
-                .map(mob_dsl::SessionId::from_domain);
-            let session_id_for_route = releasing.clone().unwrap_or_default();
-            let prepared_retire = match self.prepare_dsl_input_transition(
-                mob_dsl::MobMachineInput::Retire {
-                    mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
-                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
-                    agent_identity: dsl_identity.clone(),
-                    generation: mob_dsl::Generation::from_domain(entry.generation),
-                    releasing,
-                    session_id: session_id_for_route.clone(),
-                },
-                "rollback_failed_spawn_mark_retiring",
-            ) {
-                Ok(prepared_retire) => prepared_retire,
-                Err(error) => {
-                    tracing::warn!(
-                        agent_identity = %agent_identity,
-                        %error,
-                        "spawn rollback could not mark runtime retired in DSL"
-                    );
-                    return Err(error);
-                }
-            };
-            Self::require_member_lifecycle_journal_effect(
-                &prepared_retire.transition,
-                mob_dsl::MobLifecycleJournalKind::MemberRetired,
-                &entry.agent_identity,
-                &entry.agent_runtime_id,
-                None,
-                entry.generation,
-                Some(session_id_for_route),
-                "rollback_failed_spawn_mark_retiring",
-            )?;
-            if !retire_event_already_present
-                && let Err(error) = self.append_retire_event_for_entry(entry).await
-            {
-                tracing::warn!(
-                    agent_identity = %agent_identity,
-                    %error,
-                    "spawn rollback could not append durable retired event"
-                );
-                return Err(error);
-            }
-            self.commit_prepared_dsl_transition(prepared_retire);
-            if let Some(session_id) = member_ref.bridge_session_id() {
-                self.discard_pending_routed_effects_for_session(session_id);
-            }
-        }
-
         let spawned_comms = self.provisioner_comms(member_ref).await;
-        let mut rollback = LifecycleRollback::new("spawn rollback");
-
-        if !wired_peers.is_empty() {
-            let spawned_entry = spawned_entry.as_ref().ok_or_else(|| {
-                MobError::WiringError(format!(
-                    "spawn rollback requires roster entry for '{agent_identity}'"
-                ))
-            })?;
-            let spawned_sender = self
-                .sender_runtime_for_entry(spawned_entry)
-                .await
-                .ok_or_else(|| {
-                    MobError::WiringError(format!(
-                        "spawn rollback requires sender runtime for '{agent_identity}'"
-                    ))
-                })?;
-            for peer_meerkat_id in &wired_peers {
-                let peer_spec = {
-                    let roster = self.roster.read().await;
-                    let peer_entry = roster.get(peer_meerkat_id).cloned().ok_or_else(|| {
-                        MobError::WiringError(format!(
-                            "spawn rollback requires roster entry for wired peer '{peer_meerkat_id}'"
-                        ))
-                    })?;
-                    drop(roster);
-                    match self
-                        .resolve_wiring_endpoint(&peer_entry, "spawn rollback")
-                        .await?
-                    {
-                        WiringEndpoint::Local { spec, .. }
-                        | WiringEndpoint::PeerOnly { spec, .. } => spec,
-                    }
-                };
-                self.notify_peer_retired(
-                    &peer_spec,
-                    agent_identity,
-                    spawned_entry,
-                    &spawned_sender,
-                )
-                .await?;
-                rollback.defer(
-                    format!(
-                        "compensating mob.peer_added '{agent_identity}' -> '{peer_meerkat_id}'"
-                    ),
-                    {
-                        let spawned_sender = spawned_sender.clone();
-                        let peer_spec = peer_spec.clone();
-                        let spawned_entry = spawned_entry.clone();
-                        let agent_identity = agent_identity.clone();
-                        let actor = &*self;
-                        move || async move {
-                            actor
-                                .notify_peer_added(
-                                    &spawned_sender,
-                                    &peer_spec,
-                                    &agent_identity,
-                                    &spawned_entry,
-                                )
-                                .await
-                        }
-                    },
-                );
-            }
-        }
 
         if let Some(spawned_entry) = spawned_entry.as_ref()
             && let Ok(spawned_endpoint) = self
@@ -14272,6 +14235,149 @@ impl MobActor {
                         )
                         .await;
                 }
+            }
+        }
+
+        if !cleanup_peers.is_empty() {
+            let rollback_inputs = cleanup_peers
+                .iter()
+                .filter(|peer_id| *peer_id != agent_identity)
+                .map(|peer_id| mob_dsl::MobMachineInput::UnwireMembers {
+                    edge: mob_dsl::WiringEdge::new(
+                        mob_dsl::AgentIdentity::from_domain(agent_identity),
+                        mob_dsl::AgentIdentity::from_domain(peer_id),
+                    ),
+                })
+                .collect::<Vec<_>>();
+            if !rollback_inputs.is_empty() {
+                match self.prepare_dsl_inputs(&rollback_inputs, "spawn_rollback_wiring_cleanup") {
+                    Ok(prepared) => self.commit_prepared_dsl_input(prepared),
+                    Err(error) => {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            %error,
+                            "spawn rollback could not clean generated wiring graph"
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(entry) = spawned_entry.as_ref() {
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+            let releasing = member_ref
+                .bridge_session_id()
+                .map(mob_dsl::SessionId::from_domain);
+            let session_id_for_route = releasing.clone().unwrap_or_default();
+            let prepared_retire = match self.prepare_dsl_input_transition(
+                mob_dsl::MobMachineInput::Retire {
+                    mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                    agent_identity: dsl_identity.clone(),
+                    generation: mob_dsl::Generation::from_domain(entry.generation),
+                    releasing,
+                    session_id: session_id_for_route.clone(),
+                },
+                "rollback_failed_spawn_mark_retiring",
+            ) {
+                Ok(prepared_retire) => prepared_retire,
+                Err(error) => {
+                    tracing::warn!(
+                        agent_identity = %agent_identity,
+                        %error,
+                        "spawn rollback could not mark runtime retired in DSL"
+                    );
+                    return Err(error);
+                }
+            };
+            Self::require_member_lifecycle_journal_effect(
+                &prepared_retire.transition,
+                mob_dsl::MobLifecycleJournalKind::MemberRetired,
+                &entry.agent_identity,
+                &entry.agent_runtime_id,
+                None,
+                entry.generation,
+                Some(session_id_for_route),
+                "rollback_failed_spawn_mark_retiring",
+            )?;
+            if !retire_event_already_present
+                && let Err(error) = self.append_retire_event_for_entry(entry).await
+            {
+                tracing::warn!(
+                    agent_identity = %agent_identity,
+                    %error,
+                    "spawn rollback could not append durable retired event"
+                );
+                return Err(error);
+            }
+            self.commit_prepared_dsl_transition(prepared_retire);
+            if let Some(session_id) = member_ref.bridge_session_id() {
+                self.discard_pending_routed_effects_for_session(session_id);
+            }
+        }
+
+        let mut rollback = LifecycleRollback::new("spawn rollback");
+
+        if !wired_peers.is_empty() {
+            let spawned_entry = spawned_entry.as_ref().ok_or_else(|| {
+                MobError::WiringError(format!(
+                    "spawn rollback requires roster entry for '{agent_identity}'"
+                ))
+            })?;
+            let spawned_sender = self
+                .sender_runtime_for_entry(spawned_entry)
+                .await
+                .ok_or_else(|| {
+                    MobError::WiringError(format!(
+                        "spawn rollback requires sender runtime for '{agent_identity}'"
+                    ))
+                })?;
+            for peer_meerkat_id in &wired_peers {
+                let peer_spec = {
+                    let roster = self.roster.read().await;
+                    let peer_entry = roster.get(peer_meerkat_id).cloned().ok_or_else(|| {
+                        MobError::WiringError(format!(
+                            "spawn rollback requires roster entry for wired peer '{peer_meerkat_id}'"
+                        ))
+                    })?;
+                    drop(roster);
+                    match self
+                        .resolve_wiring_endpoint(&peer_entry, "spawn rollback")
+                        .await?
+                    {
+                        WiringEndpoint::Local { spec, .. }
+                        | WiringEndpoint::PeerOnly { spec, .. } => spec,
+                    }
+                };
+                self.notify_peer_retired(
+                    &peer_spec,
+                    agent_identity,
+                    spawned_entry,
+                    &spawned_sender,
+                )
+                .await?;
+                rollback.defer(
+                    format!(
+                        "compensating mob.peer_added '{agent_identity}' -> '{peer_meerkat_id}'"
+                    ),
+                    {
+                        let spawned_sender = spawned_sender.clone();
+                        let peer_spec = peer_spec.clone();
+                        let spawned_entry = spawned_entry.clone();
+                        let agent_identity = agent_identity.clone();
+                        let actor = &*self;
+                        move || async move {
+                            actor
+                                .notify_peer_added(
+                                    &spawned_sender,
+                                    &peer_spec,
+                                    &agent_identity,
+                                    &spawned_entry,
+                                )
+                                .await
+                        }
+                    },
+                );
             }
         }
 

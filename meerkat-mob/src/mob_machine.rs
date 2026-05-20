@@ -304,11 +304,18 @@ pub enum MobMachineCatalogInput {
     Reconcile,
     Retire,
     RetireAbsent,
+    RequestPendingSessionIngressDetachForMobDestroy,
     Respawn,
     RetireAll,
     WireMembers,
     UnwireMembers,
     WireExternalPeer,
+    RegisterMemberPeer,
+    AuthorizeMemberTrustWiring,
+    AuthorizeMemberTrustUnwiring,
+    AuthorizeMemberTrustCleanup,
+    AuthorizeMemberTrustCleanupObserved,
+    AuthorizeExternalPeerReciprocalTrust,
     UnwireExternalPeer,
     SubmitWork,
     ResolveSubmitWorkRejection,
@@ -366,11 +373,18 @@ impl MobMachineCatalogInput {
         Self::Reconcile,
         Self::Retire,
         Self::RetireAbsent,
+        Self::RequestPendingSessionIngressDetachForMobDestroy,
         Self::Respawn,
         Self::RetireAll,
         Self::WireMembers,
         Self::UnwireMembers,
         Self::WireExternalPeer,
+        Self::RegisterMemberPeer,
+        Self::AuthorizeMemberTrustWiring,
+        Self::AuthorizeMemberTrustUnwiring,
+        Self::AuthorizeMemberTrustCleanup,
+        Self::AuthorizeMemberTrustCleanupObserved,
+        Self::AuthorizeExternalPeerReciprocalTrust,
         Self::UnwireExternalPeer,
         Self::SubmitWork,
         Self::ResolveSubmitWorkRejection,
@@ -429,11 +443,28 @@ impl MobMachineCatalogInput {
             Self::Reconcile => MobMachineInputVariant::Reconcile,
             Self::Retire => MobMachineInputVariant::Retire,
             Self::RetireAbsent => MobMachineInputVariant::RetireAbsent,
+            Self::RequestPendingSessionIngressDetachForMobDestroy => {
+                MobMachineInputVariant::RequestPendingSessionIngressDetachForMobDestroy
+            }
             Self::Respawn => MobMachineInputVariant::Respawn,
             Self::RetireAll => MobMachineInputVariant::RetireAll,
             Self::WireMembers => MobMachineInputVariant::WireMembers,
             Self::UnwireMembers => MobMachineInputVariant::UnwireMembers,
             Self::WireExternalPeer => MobMachineInputVariant::WireExternalPeer,
+            Self::RegisterMemberPeer => MobMachineInputVariant::RegisterMemberPeer,
+            Self::AuthorizeMemberTrustWiring => MobMachineInputVariant::AuthorizeMemberTrustWiring,
+            Self::AuthorizeMemberTrustUnwiring => {
+                MobMachineInputVariant::AuthorizeMemberTrustUnwiring
+            }
+            Self::AuthorizeMemberTrustCleanup => {
+                MobMachineInputVariant::AuthorizeMemberTrustCleanup
+            }
+            Self::AuthorizeMemberTrustCleanupObserved => {
+                MobMachineInputVariant::AuthorizeMemberTrustCleanupObserved
+            }
+            Self::AuthorizeExternalPeerReciprocalTrust => {
+                MobMachineInputVariant::AuthorizeExternalPeerReciprocalTrust
+            }
             Self::UnwireExternalPeer => MobMachineInputVariant::UnwireExternalPeer,
             Self::SubmitWork => MobMachineInputVariant::SubmitWork,
             Self::ResolveSubmitWorkRejection => MobMachineInputVariant::ResolveSubmitWorkRejection,
@@ -517,11 +548,20 @@ impl MobMachineCatalogInput {
             Self::Reconcile => "Reconcile",
             Self::Retire => "Retire",
             Self::RetireAbsent => "RetireAbsent",
+            Self::RequestPendingSessionIngressDetachForMobDestroy => {
+                "RequestPendingSessionIngressDetachForMobDestroy"
+            }
             Self::Respawn => "Respawn",
             Self::RetireAll => "RetireAll",
             Self::WireMembers => "WireMembers",
             Self::UnwireMembers => "UnwireMembers",
             Self::WireExternalPeer => "WireExternalPeer",
+            Self::RegisterMemberPeer => "RegisterMemberPeer",
+            Self::AuthorizeMemberTrustWiring => "AuthorizeMemberTrustWiring",
+            Self::AuthorizeMemberTrustUnwiring => "AuthorizeMemberTrustUnwiring",
+            Self::AuthorizeMemberTrustCleanup => "AuthorizeMemberTrustCleanup",
+            Self::AuthorizeMemberTrustCleanupObserved => "AuthorizeMemberTrustCleanupObserved",
+            Self::AuthorizeExternalPeerReciprocalTrust => "AuthorizeExternalPeerReciprocalTrust",
             Self::UnwireExternalPeer => "UnwireExternalPeer",
             Self::SubmitWork => "SubmitWork",
             Self::ResolveSubmitWorkRejection => "ResolveSubmitWorkRejection",
@@ -655,8 +695,10 @@ pub enum MobMachineRuntimeInternalReason {
     FlowProjectionAuthority,
     RuntimeRejectionFeedback,
     SessionIngressDetachFeedback,
+    SessionIngressDetachRequest,
     StartupKickoffLifecycle,
     RetireIdempotencyAuthority,
+    TrustHandoffAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -722,6 +764,10 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         reason: MobMachineRuntimeInternalReason::RetireIdempotencyAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RequestPendingSessionIngressDetachForMobDestroy,
+        reason: MobMachineRuntimeInternalReason::SessionIngressDetachRequest,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
         input: session_ingress_detached_for_mob_destroy_catalog_input(),
         reason: MobMachineRuntimeInternalReason::SessionIngressDetachFeedback,
     },
@@ -760,6 +806,30 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::KickoffClear,
         reason: MobMachineRuntimeInternalReason::StartupKickoffLifecycle,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RegisterMemberPeer,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeMemberTrustWiring,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeMemberTrustUnwiring,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeMemberTrustCleanup,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeMemberTrustCleanupObserved,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeExternalPeerReciprocalTrust,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
     },
 ];
 

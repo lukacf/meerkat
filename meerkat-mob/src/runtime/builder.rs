@@ -2,7 +2,7 @@ use super::*;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::comms::{
-    CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, SendError,
+    CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, PeerId, SendError,
     TrustedPeerDescriptor,
 };
 use std::collections::HashMap;
@@ -258,6 +258,84 @@ async fn apply_resume_trusted_peer_add(
     }
 }
 
+async fn apply_resume_trusted_peer_remove(
+    comms: &(dyn CoreCommsRuntime + '_),
+    peer_id: String,
+    authority: CommsTrustMutationAuthority,
+) -> Result<(), SendError> {
+    match comms
+        .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer { peer_id, authority })
+        .await?
+    {
+        CommsTrustMutationResult::Removed { .. } => Ok(()),
+        result => Err(unexpected_resume_trust_mutation_result(
+            "resume remove trusted peer",
+            result,
+        )),
+    }
+}
+
+fn resume_member_observed_cleanup_authority(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    edge: &crate::machines::mob_machine::WiringEdge,
+    local_identity: &crate::ids::AgentIdentity,
+    local_peer_id: &PeerId,
+    peer_identity: &crate::ids::AgentIdentity,
+    peer_id: &PeerId,
+    context: &'static str,
+) -> Result<CommsTrustMutationAuthority, MobError> {
+    let local_dsl = crate::machines::mob_machine::AgentIdentity::from_domain(local_identity);
+    let peer_dsl = crate::machines::mob_machine::AgentIdentity::from_domain(peer_identity);
+    let (a_peer_id, b_peer_id) = if edge.a == local_dsl && edge.b == peer_dsl {
+        (
+            crate::machines::mob_machine::PeerId::from(local_peer_id.to_string()),
+            crate::machines::mob_machine::PeerId::from(peer_id.to_string()),
+        )
+    } else if edge.a == peer_dsl && edge.b == local_dsl {
+        (
+            crate::machines::mob_machine::PeerId::from(peer_id.to_string()),
+            crate::machines::mob_machine::PeerId::from(local_peer_id.to_string()),
+        )
+    } else {
+        return Err(MobError::WiringError(format!(
+            "{context} edge does not connect '{}' and '{}'",
+            local_identity, peer_identity
+        )));
+    };
+    let transition = apply_seeded_mob_input_collect_transition(
+        authority,
+        crate::machines::mob_machine::MobMachineInput::AuthorizeMemberTrustCleanupObserved {
+            edge: edge.clone(),
+            a_identity: edge.a.clone(),
+            a_peer_id,
+            b_identity: edge.b.clone(),
+            b_peer_id,
+        },
+        context,
+    )?;
+    crate::generated::protocol_mob_member_trust_unwiring::extract_obligations_with_freshness(
+        &transition,
+        crate::generated::protocol_mob_member_trust_unwiring::MobTopologyFreshnessAuthority::from_authority(authority),
+    )
+        .into_iter()
+        .find_map(|obligation| {
+            if obligation.edge() != edge {
+                return None;
+            }
+            crate::generated::protocol_mob_member_trust_unwiring::unwiring_authority_for_identity(
+                &obligation,
+                peer_identity.as_str(),
+                &peer_id.to_string(),
+            )
+            .ok()
+        })
+        .ok_or_else(|| {
+            MobError::WiringError(format!(
+                "{context} produced no generated observed cleanup authority for peer '{peer_id}'"
+            ))
+        })
+}
+
 fn apply_seeded_member_session_binding(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     agent_identity: &crate::ids::AgentIdentity,
@@ -280,6 +358,28 @@ fn apply_seeded_member_session_binding(
             agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
             bridge_session_id: mob_dsl::SessionId::from_domain(bridge_session_id),
             replacing,
+        },
+        context,
+    )
+}
+
+fn apply_seeded_member_addressability(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    agent_identity: &crate::ids::AgentIdentity,
+    agent_runtime_id: &crate::ids::AgentRuntimeId,
+    fence_token: crate::ids::FenceToken,
+    external_addressable: bool,
+    context: &'static str,
+) -> Result<(), MobError> {
+    use crate::machines::mob_machine as mob_dsl;
+
+    apply_seeded_mob_signal(
+        authority,
+        mob_dsl::MobMachineSignal::RecoverRosterMember {
+            agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
+            fence_token: mob_dsl::FenceToken::from_domain(fence_token),
+            external_addressable,
         },
         context,
     )
@@ -1700,6 +1800,21 @@ impl MobBuilder {
                                     entry.agent_identity
                                 ))
                             })?;
+                        if let Err(error) = apply_seeded_member_addressability(
+                            dsl_authority,
+                            &entry.agent_identity,
+                            &entry.agent_runtime_id,
+                            entry.fence_token,
+                            profile.external_addressable,
+                            "resume_recovered_member_addressability",
+                        ) {
+                            record_restore_failure(format!(
+                                "MobMachine rejected recovered member addressability for '{}': {error}",
+                                entry.agent_identity
+                            ))
+                            .await;
+                            continue;
+                        }
                         if let Err(error) = apply_seeded_member_session_binding(
                             dsl_authority,
                             &entry.agent_identity,
@@ -1810,6 +1925,14 @@ impl MobBuilder {
                         entry.agent_identity
                     ))
                 })?;
+            apply_seeded_member_addressability(
+                dsl_authority,
+                &entry.agent_identity,
+                &entry.agent_runtime_id,
+                entry.fence_token,
+                profile.external_addressable,
+                "resume_fresh_member_addressability",
+            )?;
             apply_seeded_member_session_binding(
                 dsl_authority,
                 &entry.agent_identity,
@@ -1832,10 +1955,9 @@ impl MobBuilder {
         let entries = roster.list().cloned().collect::<Vec<_>>();
         let machine_wiring_edges = dsl_authority.state().wiring_edges.clone();
         let machine_external_peer_edges = dsl_authority.state().external_peer_edges.clone();
-        let broken_members = tool_handle
-            .restore_diagnostics
-            .read()
-            .await
+        let restore_diagnostics_snapshot = tool_handle.restore_diagnostics.read().await.clone();
+        seed_mob_authority_restore_failures(dsl_authority, &restore_diagnostics_snapshot)?;
+        let broken_members = restore_diagnostics_snapshot
             .keys()
             .cloned()
             .collect::<HashSet<_>>();
@@ -1890,6 +2012,11 @@ impl MobBuilder {
                 continue;
             }
             let local_comms = provisioner.comms_runtime(&entry.member_ref).await;
+            let current_peers = match local_comms.as_ref() {
+                Some(comms_a) => comms_a.peers().await,
+                None => Vec::new(),
+            };
+            let local_peer_id = local_comms.as_ref().and_then(|comms| comms.peer_id());
             let mut desired_trust = Vec::new();
 
             let local_dsl_identity =
@@ -1910,13 +2037,55 @@ impl MobBuilder {
                         peer_identity, entry.agent_identity
                     ))
                 })?;
-                if broken_members.contains(&peer_meerkat_id) {
-                    continue;
-                }
                 let name_b = format!(
                     "{}/{}/{}",
                     definition.id, peer_entry.role, peer_entry.agent_identity
                 );
+                if broken_members.contains(&peer_meerkat_id) {
+                    if let (Some(comms_a), Some(local_peer_id)) =
+                        (local_comms.as_ref(), local_peer_id.as_ref())
+                        && let Some(stale_peer) = current_peers
+                            .iter()
+                            .find(|peer| peer.name.as_str() == name_b)
+                            .cloned()
+                    {
+                        match resume_member_observed_cleanup_authority(
+                            dsl_authority,
+                            edge,
+                            &entry.agent_identity,
+                            local_peer_id,
+                            &peer_entry.agent_identity,
+                            &stale_peer.peer_id,
+                            "resume_member_trust_cleanup_observed",
+                        ) {
+                            Ok(authority) => {
+                                if let Err(error) = apply_resume_trusted_peer_remove(
+                                    comms_a.as_ref(),
+                                    stale_peer.peer_id.to_string(),
+                                    authority,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        agent_identity = %entry.agent_identity,
+                                        peer = %stale_peer.name,
+                                        %error,
+                                        "resume: failed to prune trust for broken member"
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    agent_identity = %entry.agent_identity,
+                                    peer = %peer_entry.agent_identity,
+                                    %error,
+                                    "resume: generated cleanup authority rejected broken member trust prune"
+                                );
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let fallback_peer_id = match provisioner.comms_runtime(&peer_entry.member_ref).await
                 {
                     Some(comms_b) => comms_b.public_key().ok_or_else(|| {
@@ -1985,7 +2154,6 @@ impl MobBuilder {
                     .await?;
                 continue;
             };
-            let current_peers = comms_a.peers().await;
             for desired in &desired_trust {
                 let spec_peer_id = desired.spec.peer_id.to_string();
                 if current_peers

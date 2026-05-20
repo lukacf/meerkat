@@ -1968,6 +1968,7 @@ impl MobHandle {
                 let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
                 let current_bridge_session_id =
                     Self::machine_bridge_session_id_for_identity(&domain_identity, machine_state);
+                let wired_to = Self::machine_wired_to_for_identity(&domain_identity, machine_state);
                 let material = MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
                     member_present: true,
                     machine_lifecycle: machine_state.member_lifecycle_for_identity(&dsl_identity),
@@ -1991,7 +1992,7 @@ impl MobHandle {
                     peer_id: entry.peer_id,
                     transport_public_key: entry.transport_public_key,
                     state,
-                    wired_to: entry.wired_to,
+                    wired_to,
                     external_peer_specs: entry.external_peer_specs,
                     labels: entry.labels,
                     status: snapshot.status,
@@ -2057,7 +2058,28 @@ impl MobHandle {
             Self::machine_bridge_session_id_for_identity(&entry.agent_identity, machine_state);
         entry.member_ref =
             Self::project_member_ref_session_binding(&entry.member_ref, current_bridge_session_id);
+        entry.wired_to = Self::machine_wired_to_for_identity(&entry.agent_identity, machine_state);
         entry
+    }
+
+    fn machine_wired_to_for_identity(
+        identity: &crate::ids::AgentIdentity,
+        machine_state: &mob_dsl::MobMachineState,
+    ) -> BTreeSet<crate::ids::AgentIdentity> {
+        let local = mob_dsl::AgentIdentity::from_domain(identity);
+        machine_state
+            .wiring_edges
+            .iter()
+            .filter_map(|edge| {
+                if edge.a == local {
+                    Some(crate::ids::AgentIdentity::from(edge.b.0.as_str()))
+                } else if edge.b == local {
+                    Some(crate::ids::AgentIdentity::from(edge.a.0.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn member_lifecycle_from_machine_state(
@@ -2067,6 +2089,74 @@ impl MobHandle {
         let domain_identity = crate::ids::AgentIdentity::from(identity.as_str());
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
         machine_state.member_lifecycle_for_identity(&dsl_identity)
+    }
+
+    async fn project_retiring_member_status_from_machine_state(
+        &self,
+        identity: &crate::ids::AgentIdentity,
+    ) -> Option<MobMemberSnapshot> {
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let lifecycle = Self::member_lifecycle_from_machine_state(identity, &machine_state);
+        if lifecycle.status != mob_dsl::MobMemberLifecycleStatus::Retiring {
+            return None;
+        }
+
+        let entry = {
+            let roster = self.roster.read().await;
+            roster.get(&MeerkatId::from(identity)).cloned()
+        };
+        let current_bridge_session_id =
+            Self::machine_bridge_session_id_for_identity(identity, &machine_state);
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        let machine_runtime = machine_state
+            .identity_to_runtime
+            .get(&dsl_identity)
+            .and_then(|runtime_id| {
+                let generation = runtime_id
+                    .0
+                    .strip_prefix(&format!("{identity}:"))
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(crate::ids::Generation::new)?;
+                let fence_token = machine_state
+                    .runtime_fence_tokens
+                    .get(runtime_id)
+                    .map(|token| crate::ids::FenceToken::new(token.0))?;
+                Some((
+                    crate::ids::AgentRuntimeId::new(identity.clone(), generation),
+                    fence_token,
+                ))
+            });
+
+        Some(
+            MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
+                member_present: entry.is_some(),
+                machine_lifecycle: lifecycle,
+                output_preview: None,
+                tokens_used: 0,
+                agent_runtime_id: entry
+                    .as_ref()
+                    .map(|entry| entry.agent_runtime_id.clone())
+                    .or_else(|| {
+                        machine_runtime
+                            .as_ref()
+                            .map(|(agent_runtime_id, _)| agent_runtime_id.clone())
+                    })
+                    .unwrap_or_else(|| crate::ids::AgentRuntimeId::initial(identity.clone())),
+                fence_token: entry
+                    .as_ref()
+                    .map(|entry| entry.fence_token)
+                    .or_else(|| {
+                        machine_runtime
+                            .as_ref()
+                            .map(|(_, fence_token)| *fence_token)
+                    })
+                    .unwrap_or(crate::ids::FenceToken::new(0)),
+                current_bridge_session_id,
+                peer_connectivity: None,
+                kickoff: entry.and_then(|entry| entry.kickoff),
+            })
+            .to_snapshot(),
+        )
     }
 
     fn project_roster_from_machine_state(
@@ -3597,12 +3687,19 @@ impl MobHandle {
         &self,
         identity: &AgentIdentity,
     ) -> Result<MobMemberSnapshot, MobError> {
-        let mut snapshot = self
-            .send_actor_command(|reply_tx| MobCommand::ProjectMemberStatus {
-                agent_identity: identity.clone(),
-                reply_tx,
-            })
-            .await?;
+        let mut snapshot = match self
+            .project_retiring_member_status_from_machine_state(identity)
+            .await
+        {
+            Some(snapshot) => snapshot,
+            None => {
+                self.send_actor_command(|reply_tx| MobCommand::ProjectMemberStatus {
+                    agent_identity: identity.clone(),
+                    reply_tx,
+                })
+                .await?
+            }
+        };
         snapshot.peer_connectivity = match tokio::time::timeout(
             Duration::from_secs(2),
             self.project_member_peer_connectivity(identity, &snapshot),

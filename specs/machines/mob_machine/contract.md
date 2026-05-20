@@ -134,6 +134,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeMemberTrustWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `AuthorizeMemberTrustUnwiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `AuthorizeMemberTrustCleanup`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
+- `AuthorizeMemberTrustCleanupObserved`(edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId)
 - `AuthorizeExternalPeerReciprocalTrust`(key: ExternalPeerKey, agent_identity: AgentIdentity)
 - `UnwireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
 - `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
@@ -311,6 +312,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `identity_not_recovered`
   - `runtime_not_recovered`
+- To: `Running`
+
+### `RecoverRosterMemberAddressabilityRunning`
+- From: `Running`
+- On: `RecoverRosterMember`(agent_identity, agent_runtime_id, fence_token, external_addressable)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_recovered`
+  - `fence_token_matches`
 - To: `Running`
 
 ### `RecoverMemberSessionBindingFreshRunning`
@@ -1018,6 +1028,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `edge_matches_members`
   - `a_member_peer_registered`
   - `b_member_peer_registered`
+- Emits: `MemberTrustUnwiringRequested`
+- To: `Running`
+
+### `AuthorizeMemberTrustCleanupObservedRunning`
+- From: `Running`
+- On: `AuthorizeMemberTrustCleanupObserved`(edge, a_identity, a_peer_id, b_identity, b_peer_id)
+- Guards:
+  - `edge_matches_members`
+  - `edge_currently_wired`
+  - `cleanup_has_restore_failure`
 - Emits: `MemberTrustUnwiringRequested`
 - To: `Running`
 
@@ -2177,6 +2197,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RetireAll`()
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Stopped`
+
+### `RetireAllCompleted`
+- From: `Completed`
+- On: `RetireAll`()
+- Emits: `EmitMemberLifecycleNotice`
+- To: `Completed`
 
 ### `CompleteSpawnRunning`
 - From: `Running`, `Stopped`

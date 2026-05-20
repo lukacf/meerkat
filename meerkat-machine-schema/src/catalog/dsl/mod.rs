@@ -1315,11 +1315,18 @@ runtime_internal_inputs!(
         RecordLoopBodyFrameCompleted,
         RecordLoopUntilConditionFailed,
         RecordLoopUntilConditionMet,
+        RequestPendingSessionIngressDetachForMobDestroy,
         ResolveCancelAllWorkRejection,
         ResolveSubmitWorkRejection,
+        RegisterMemberPeer,
         StartupMarkReady,
         SessionIngressDetachFailedForMobDestroy,
         SessionIngressDetachedForMobDestroy,
+        AuthorizeMemberTrustWiring,
+        AuthorizeMemberTrustUnwiring,
+        AuthorizeMemberTrustCleanup,
+        AuthorizeMemberTrustCleanupObserved,
+        AuthorizeExternalPeerReciprocalTrust,
     ]
 );
 

@@ -631,8 +631,9 @@ async fn discard_rebuilt_rest_session(
     session_id: &SessionId,
     runtime_was_registered: bool,
 ) {
-    let _ = state.session_service.discard_live_session(session_id).await;
-    unregister_rest_runtime_if_new(state, session_id, runtime_was_registered).await;
+    let lock = rest_runtime_registration_lock(state, session_id);
+    let _guard = lock.mutex().lock().await;
+    discard_rebuilt_rest_session_locked(state, session_id, runtime_was_registered).await;
 }
 
 async fn unregister_runtime_adapter_if_new(
@@ -701,7 +702,14 @@ async fn discard_rebuilt_rest_session_locked(
     session_id: &SessionId,
     runtime_was_registered: bool,
 ) {
-    let _ = state.session_service.discard_live_session(session_id).await;
+    if !state
+        .runtime_adapter
+        .list_active_inputs(session_id)
+        .await
+        .is_ok_and(|inputs| !inputs.is_empty())
+    {
+        let _ = state.session_service.discard_live_session(session_id).await;
+    }
     unregister_rest_runtime_if_new_idle_locked(state, session_id, runtime_was_registered).await;
 }
 
@@ -7871,9 +7879,11 @@ mod tests {
             decision: policy,
         });
         input_state.persisted_input = Some(persisted_input);
+        let mut seed = meerkat_runtime::input_state::InputStateSeed::new_accepted();
+        seed.recovery_lane = Some(meerkat_core::types::HandlingMode::Queue);
         let active_input = meerkat_runtime::input_state::StoredInputState {
             state: input_state,
-            seed: meerkat_runtime::input_state::InputStateSeed::new_accepted(),
+            seed,
         };
         state
             .runtime_adapter

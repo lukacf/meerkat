@@ -36,6 +36,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverRosterMemberRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `RecoverRosterMemberAddressabilityRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
 - `RecoverMemberSessionBindingFreshRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
@@ -304,6 +307,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `AuthorizeMemberTrustCleanupRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `AuthorizeMemberTrustCleanupObservedRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `AuthorizeExternalPeerReciprocalTrustRunning`
@@ -663,6 +669,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RetireAllStopped`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `RetireAllCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
 - `CompleteSpawnRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`

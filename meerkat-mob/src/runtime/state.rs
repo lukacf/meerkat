@@ -116,6 +116,14 @@ pub(crate) struct MobDslT2Snapshot {
         crate::machines::mob_machine::AgentIdentity,
         crate::machines::mob_machine::AgentRuntimeId,
     >,
+    pub member_peer_ids: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::PeerId,
+    >,
+    pub member_peer_endpoints: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::MemberPeerEndpoint,
+    >,
     pub member_restore_failures:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
     // W3-H-1: canonical identity→bridge-session binding map, projected from

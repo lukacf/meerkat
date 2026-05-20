@@ -141,13 +141,7 @@ impl MeerkatMachine {
                 }
                 {
                     let mut driver = driver_handle.lock().await;
-                    if let Err(err) = machine_prepare_bindings_projection(&mut driver) {
-                        if inserted_by_call {
-                            self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
-                                .await;
-                        }
-                        return Err(err);
-                    }
+                    machine_prepare_bindings_projection(&mut driver);
                 }
             } else {
                 let dsl_input = crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
@@ -171,16 +165,7 @@ impl MeerkatMachine {
                 };
                 {
                     let mut driver = driver_handle.lock().await;
-                    if let Err(err) = machine_prepare_bindings_projection(&mut driver) {
-                        drop(driver);
-                        self.restore_session_dsl_state(&session_id, staged.previous_snapshot)
-                            .await;
-                        if inserted_by_call {
-                            self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
-                                .await;
-                        }
-                        return Err(err);
-                    }
+                    machine_prepare_bindings_projection(&mut driver);
                 }
                 if let Err(reason) = self
                     .commit_session_dsl_transition(&session_id, staged, "PrepareBindings")

@@ -1958,24 +1958,6 @@ pub(crate) fn machine_build_replay_plan(
 pub(crate) async fn machine_stop_runtime(
     driver: &mut DriverEntry,
 ) -> Result<(), RuntimeDriverError> {
-    match driver.runtime_state() {
-        RuntimeState::Initializing
-        | RuntimeState::Idle
-        | RuntimeState::Attached
-        | RuntimeState::Running
-        | RuntimeState::Retired
-        | RuntimeState::Stopped => {}
-        from => {
-            return Err(RuntimeDriverError::Internal(
-                crate::runtime_state::RuntimeStateTransitionError {
-                    from,
-                    to: RuntimeState::Stopped,
-                }
-                .to_string(),
-            ));
-        }
-    }
-
     match driver {
         DriverEntry::Ephemeral(d) => {
             d.apply_runtime_executor_exited_authority()?;
@@ -2411,16 +2393,6 @@ mod tests {
 pub(crate) fn machine_prepare_destroy(
     driver: &mut DriverEntry,
 ) -> Result<PreparedDestroy, RuntimeDriverError> {
-    match driver.runtime_state() {
-        RuntimeState::Initializing
-        | RuntimeState::Idle
-        | RuntimeState::Attached
-        | RuntimeState::Running
-        | RuntimeState::Retired
-        | RuntimeState::Stopped
-        | RuntimeState::Destroyed => {}
-    }
-
     driver.prepare_destroy_lifecycle()
 }
 
@@ -2436,27 +2408,9 @@ pub(crate) async fn machine_commit_prepared_destroy(
 pub(crate) async fn machine_retire(
     driver: &mut DriverEntry,
 ) -> Result<RetireReport, RuntimeDriverError> {
-    match driver.runtime_state() {
-        RuntimeState::Idle
-        | RuntimeState::Attached
-        | RuntimeState::Running
-        | RuntimeState::Retired => {}
-        from => {
-            return Err(RuntimeDriverError::Internal(
-                crate::runtime_state::RuntimeStateTransitionError {
-                    from,
-                    to: RuntimeState::Retired,
-                }
-                .to_string(),
-            ));
-        }
-    }
-
     match driver {
         DriverEntry::Ephemeral(d) => {
-            // Retire legality and phase ownership live in the session DSL. The
-            // driver projection is the concrete cache used for drain gating.
-            d.set_control_projection(RuntimeState::Retired, None, None);
+            d.sync_control_projection_from_dsl_authority();
             Ok(d.finalize_retire())
         }
         DriverEntry::Persistent(d) => d.realize_retire_lifecycle().await,
@@ -2466,117 +2420,30 @@ pub(crate) async fn machine_retire(
 pub(crate) async fn machine_reset(
     driver: &mut DriverEntry,
 ) -> Result<ResetReport, RuntimeDriverError> {
-    match driver.runtime_state() {
-        RuntimeState::Initializing
-        | RuntimeState::Idle
-        | RuntimeState::Attached
-        | RuntimeState::Retired => {}
-        from => {
-            return Err(RuntimeDriverError::Internal(
-                crate::runtime_state::RuntimeStateTransitionError {
-                    from,
-                    to: RuntimeState::Idle,
-                }
-                .to_string(),
-            ));
-        }
-    }
-
     match driver {
         DriverEntry::Ephemeral(d) => {
-            // Reset is machine-owned; mirror the accepted DSL phase into the
-            // concrete projection before cleanup observes the lifecycle state.
-            d.set_control_projection(RuntimeState::Idle, None, None);
-            d.reset_cleanup()
+            let report = d.reset_cleanup()?;
+            d.sync_control_projection_from_dsl_authority();
+            Ok(report)
         }
         DriverEntry::Persistent(d) => d.realize_reset_lifecycle().await,
     }
 }
 
-pub(crate) fn machine_prepare_bindings_projection(
-    driver: &mut DriverEntry,
-) -> Result<(), RuntimeDriverError> {
-    match driver.runtime_state() {
-        RuntimeState::Initializing | RuntimeState::Idle => {
-            driver.set_control_projection(RuntimeState::Attached, None, None);
-            Ok(())
-        }
-        RuntimeState::Attached => {
-            driver.set_control_projection(RuntimeState::Attached, None, None);
-            Ok(())
-        }
-        RuntimeState::Running | RuntimeState::Retired | RuntimeState::Stopped => Ok(()),
-        from => Err(RuntimeDriverError::Internal(
-            crate::runtime_state::RuntimeStateTransitionError {
-                from,
-                to: RuntimeState::Attached,
-            }
-            .to_string(),
-        )),
-    }
-}
-
-pub(crate) fn machine_executor_attach_projection(
-    driver: &mut DriverEntry,
-) -> Result<bool, RuntimeDriverError> {
-    match driver.runtime_state() {
-        RuntimeState::Idle => {
-            driver.set_control_projection(RuntimeState::Attached, None, None);
-            Ok(true)
-        }
-        RuntimeState::Attached => {
-            driver.set_control_projection(RuntimeState::Attached, None, None);
-            Ok(false)
-        }
-        from => Err(RuntimeDriverError::Internal(
-            crate::runtime_state::RuntimeStateTransitionError {
-                from,
-                to: RuntimeState::Attached,
-            }
-            .to_string(),
-        )),
-    }
-}
-
-pub(crate) fn machine_unregister_session_projection(driver: &mut DriverEntry) {
-    if matches!(driver.runtime_state(), RuntimeState::Attached) {
-        driver.set_control_projection(RuntimeState::Idle, None, None);
-    }
+pub(crate) fn machine_prepare_bindings_projection(driver: &mut DriverEntry) {
+    driver.sync_control_projection_from_dsl_authority();
 }
 
 pub(crate) async fn machine_recycle_preserving_work(
     driver: &mut DriverEntry,
 ) -> Result<usize, RuntimeDriverError> {
-    let target_phase = match driver.runtime_state() {
-        RuntimeState::Idle | RuntimeState::Retired => RuntimeState::Idle,
-        RuntimeState::Attached => RuntimeState::Attached,
-        from => {
-            return Err(RuntimeDriverError::Internal(
-                crate::runtime_state::RuntimeStateTransitionError {
-                    from,
-                    to: RuntimeState::Idle,
-                }
-                .to_string(),
-            ));
-        }
-    };
-
-    if driver.current_run_id().is_some() {
-        return Err(RuntimeDriverError::Internal(
-            crate::runtime_state::RuntimeStateTransitionError {
-                from: driver.runtime_state(),
-                to: target_phase,
-            }
-            .to_string(),
-        ));
-    }
-
     match driver {
         DriverEntry::Ephemeral(driver) => {
-            driver.set_control_projection(target_phase, None, None);
-            driver.recycle_preserving_work()
+            let transferred = driver.recycle_preserving_work()?;
+            driver.sync_control_projection_from_dsl_authority();
+            Ok(transferred)
         }
-        DriverEntry::Persistent(driver) => driver.recycle_preserving_work(target_phase).await,
+        DriverEntry::Persistent(driver) => driver.recycle_preserving_work().await,
     }
 }
 

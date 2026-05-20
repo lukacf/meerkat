@@ -559,33 +559,12 @@ impl MeerkatMachine {
 
         let should_wake = {
             let mut driver_guard = driver.lock().await;
-            match machine_executor_attach_projection(&mut driver_guard) {
-                Ok(true) => {}
-                Ok(false) => {
-                    if repaired_dead_attachment {
-                        tracing::warn!(
-                            %session_id,
-                            "runtime driver remained attached without a live published loop; republishing attachment"
-                        );
-                    } else {
-                        tracing::debug!(
-                            %session_id,
-                            "runtime driver already attached before live loop publication; publishing attachment"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %session_id,
-                        error = %error,
-                        "failed to attach runtime driver before publishing loop attachment"
-                    );
-                    Self::restore_dsl_authority_snapshot(
-                        &dsl_authority,
-                        staged_registration.previous_snapshot,
-                    );
-                    return;
-                }
+            driver_guard.sync_control_projection_from_dsl_authority();
+            if repaired_dead_attachment {
+                tracing::warn!(
+                    %session_id,
+                    "runtime driver registration was repaired by generated executor-exit authority; publishing attachment"
+                );
             }
             !driver_guard.as_driver().active_input_ids().is_empty()
         };
@@ -693,12 +672,12 @@ impl MeerkatMachine {
                 loop_handle.abort();
             }
             if detach_after_abort {
-                let mut driver_guard = driver.lock().await;
-                machine_unregister_session_projection(&mut driver_guard);
                 Self::restore_dsl_authority_snapshot(
                     &dsl_authority,
                     staged_registration.previous_snapshot,
                 );
+                let mut driver_guard = driver.lock().await;
+                driver_guard.sync_control_projection_from_dsl_authority();
             }
             return;
         }
@@ -725,7 +704,7 @@ impl MeerkatMachine {
 
     async fn finalize_unregistered_session(&self, entry: RuntimeSessionEntry) {
         let mut driver = entry.driver.lock().await;
-        machine_unregister_session_projection(&mut driver);
+        driver.sync_control_projection_from_dsl_authority();
         drop(driver);
 
         let mut completions = entry.completions.lock().await;

@@ -145,7 +145,7 @@ impl PersistentRuntimeDriver {
             "service turn terminal receipt",
         )
         .await?;
-        self.inner.set_control_projection(target_state, None, None);
+        self.inner.sync_control_projection_from_dsl_authority();
         Ok(())
     }
 
@@ -388,11 +388,12 @@ impl PersistentRuntimeDriver {
             }
         };
         let input_states = self.inner.stored_input_states_snapshot()?;
+        let target_state = self.runtime_state_for_persistence();
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(
                 &self.runtime_id,
-                MachineLifecycleCommit::new(self.runtime_state_for_persistence()),
+                MachineLifecycleCommit::new(target_state),
                 &input_states,
             )
             .await
@@ -409,10 +410,7 @@ impl PersistentRuntimeDriver {
     /// work from durable runtime truth.
     ///
     /// Unlike `reset()`, this must not abandon queued/staged work.
-    pub(crate) async fn recycle_preserving_work(
-        &mut self,
-        target_phase: RuntimeState,
-    ) -> Result<usize, RuntimeDriverError> {
+    pub(crate) async fn recycle_preserving_work(&mut self) -> Result<usize, RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
         let transferred = match self.inner.recycle_preserving_work() {
             Ok(transferred) => transferred,
@@ -422,11 +420,12 @@ impl PersistentRuntimeDriver {
             }
         };
         let input_states = self.inner.stored_input_states_snapshot()?;
+        let target_state = self.runtime_state_for_persistence();
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(
                 &self.runtime_id,
-                MachineLifecycleCommit::new(target_phase),
+                MachineLifecycleCommit::new(target_state),
                 &input_states,
             )
             .await
@@ -437,7 +436,7 @@ impl PersistentRuntimeDriver {
             )));
         }
 
-        self.inner.set_control_projection(target_phase, None, None);
+        self.inner.sync_control_projection_from_dsl_authority();
         Ok(transferred)
     }
 
@@ -446,10 +445,10 @@ impl PersistentRuntimeDriver {
     ) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
         let report = self.inner.finalize_retire();
-        self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Retired, "retire")
+        let target_state = self.runtime_state_for_persistence();
+        self.commit_lifecycle_with_rollback(checkpoint, target_state, "retire")
             .await?;
-        self.inner
-            .set_control_projection(RuntimeState::Retired, None, None);
+        self.inner.sync_control_projection_from_dsl_authority();
         Ok(report)
     }
 
@@ -464,10 +463,10 @@ impl PersistentRuntimeDriver {
                 return Err(err);
             }
         };
-        self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Idle, "reset")
+        let target_state = self.runtime_state_for_persistence();
+        self.commit_lifecycle_with_rollback(checkpoint, target_state, "reset")
             .await?;
-        self.inner
-            .set_control_projection(RuntimeState::Idle, None, None);
+        self.inner.sync_control_projection_from_dsl_authority();
         Ok(report)
     }
 

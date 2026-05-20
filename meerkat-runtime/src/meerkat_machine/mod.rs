@@ -653,11 +653,10 @@ pub(crate) use driver::{
     commit_runtime_loop_run, fail_machine_run, fail_runtime_loop_run,
     machine_apply_run_return_projection, machine_batch_primitive_projections,
     machine_batch_runtime_semantics, machine_begin_run, machine_commit_prepared_destroy,
-    machine_commit_service_turn_terminal_receipt, machine_executor_attach_projection,
-    machine_input_boundary, machine_prepare_bindings_projection, machine_prepare_destroy,
-    machine_recover_ephemeral_driver, machine_recover_persistent_driver,
-    machine_recycle_preserving_work, machine_reset, machine_retire,
-    machine_select_runtime_loop_batch, machine_stop_runtime, machine_unregister_session_projection,
+    machine_commit_service_turn_terminal_receipt, machine_input_boundary,
+    machine_prepare_bindings_projection, machine_prepare_destroy, machine_recover_ephemeral_driver,
+    machine_recover_persistent_driver, machine_recycle_preserving_work, machine_reset,
+    machine_retire, machine_select_runtime_loop_batch, machine_stop_runtime,
     prepare_runtime_loop_batch_start, rollback_runtime_loop_run_after_boundary_commit_failure,
 };
 

@@ -262,13 +262,6 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let state = self
-                    .existing_session_runtime_state(&session_id)
-                    .await
-                    .unwrap_or(RuntimeState::Destroyed);
-                if matches!(state, RuntimeState::Destroyed | RuntimeState::Running) {
-                    return Err(RuntimeControlPlaneError::InvalidState { state });
-                }
                 let previous_dsl_state = self
                     .stage_session_dsl_input(
                         &session_id,

@@ -305,7 +305,32 @@ impl WorkGraphMachine {
         )
     }
 
-    pub fn refresh_eligibility(
+    pub(crate) fn refresh_eligibility(
+        item: WorkItem,
+        existing_items: &[WorkItem],
+        existing_edges: &[WorkEdge],
+        now: DateTime<Utc>,
+    ) -> Result<Option<WorkGraphItemCommit>, WorkGraphError> {
+        topology_basis(existing_items, existing_edges)?;
+        let all_items = item_map(existing_items);
+        let Some(topology_item) = all_items.get(&item.id) else {
+            return Err(WorkGraphError::Store(format!(
+                "work item {} is missing from generated WorkGraph topology authority snapshot",
+                item.id
+            )));
+        };
+        if topology_item.realm_id != item.realm_id || topology_item.namespace != item.namespace {
+            return Err(WorkGraphError::Store(format!(
+                "work item {} scope differs from generated WorkGraph topology authority snapshot",
+                item.id
+            )));
+        }
+        let unresolved_blocker_count =
+            unresolved_blocker_count(topology_item, &all_items, existing_edges)?;
+        Self::refresh_eligibility_with_count(item, unresolved_blocker_count, now)
+    }
+
+    fn refresh_eligibility_with_count(
         mut item: WorkItem,
         unresolved_blocker_count: u64,
         now: DateTime<Utc>,
@@ -564,7 +589,7 @@ impl WorkGraphMachine {
         let mut edges = existing_edges.to_vec();
         edges.push(edge.clone());
         let unresolved_blockers = unresolved_blocker_count(&item, &all_items, &edges)?;
-        Self::refresh_eligibility(item, unresolved_blockers, now)
+        Self::refresh_eligibility_with_count(item, unresolved_blockers, now)
     }
 
     pub(crate) fn dependent_refreshes_after_blocker_change(
@@ -585,9 +610,11 @@ impl WorkGraphMachine {
                 continue;
             };
             let unresolved_blockers = unresolved_blocker_count(item, &all_items, existing_edges)?;
-            if let Some(commit) =
-                WorkGraphMachine::refresh_eligibility(item.clone(), unresolved_blockers, now)?
-            {
+            if let Some(commit) = WorkGraphMachine::refresh_eligibility_with_count(
+                item.clone(),
+                unresolved_blockers,
+                now,
+            )? {
                 commits.push(commit);
             }
         }
@@ -1397,6 +1424,17 @@ mod tests {
         .0
     }
 
+    fn blocks_edge(from: &WorkItem, to: &WorkItem, now: DateTime<Utc>) -> WorkEdge {
+        WorkEdge {
+            realm_id: from.realm_id.clone(),
+            namespace: from.namespace.clone(),
+            kind: WorkEdgeKind::Blocks,
+            from_id: from.id.clone(),
+            to_id: to.id.clone(),
+            created_at: now,
+        }
+    }
+
     fn owner(id: &str) -> WorkOwner {
         WorkOwner::new(WorkOwnerKey::label(id).expect("owner key"))
     }
@@ -1829,12 +1867,15 @@ mod tests {
     #[test]
     fn refresh_event_kind_comes_from_generated_effect() {
         let now = Utc::now();
+        let blocker = create("blocker", now);
         let item = create("refresh", now);
-        let (_, event, _) = WorkGraphMachine::refresh_eligibility(item, 1, now)
-            .expect("refresh transition")
-            .expect("changed")
-            .into_update_parts()
-            .expect("update parts");
+        let edge = blocks_edge(&blocker, &item, now);
+        let (_, event, _) =
+            WorkGraphMachine::refresh_eligibility(item.clone(), &[blocker, item], &[edge], now)
+                .expect("refresh transition")
+                .expect("changed")
+                .into_update_parts()
+                .expect("update parts");
 
         assert_eq!(event.kind, WorkGraphEventKind::Updated);
         assert_eq!(
@@ -1844,14 +1885,44 @@ mod tests {
     }
 
     #[test]
+    fn refresh_eligibility_derives_blocker_count_from_topology() {
+        let now = Utc::now();
+        let blocker = create("blocker", now);
+        let item = create("blocked", now);
+        assert!(
+            WorkGraphMachine::refresh_eligibility(
+                item.clone(),
+                &[blocker.clone(), item.clone()],
+                &[],
+                now,
+            )
+            .expect("refresh without blockers")
+            .is_none()
+        );
+
+        let edge = blocks_edge(&blocker, &item, now);
+        let (blocked_projection, _, _) =
+            WorkGraphMachine::refresh_eligibility(item.clone(), &[blocker, item], &[edge], now)
+                .expect("refresh from topology")
+                .expect("changed")
+                .into_update_parts()
+                .expect("update parts");
+
+        assert_eq!(blocked_projection.machine_state.unresolved_blocker_count, 1);
+    }
+
+    #[test]
     fn claim_event_kind_uses_generated_claim_effect_after_refresh() {
         let now = Utc::now();
+        let blocker = create("blocker", now);
         let item = create("claim after refresh", now);
-        let (blocked_projection, _, _) = WorkGraphMachine::refresh_eligibility(item, 1, now)
-            .expect("refresh transition")
-            .expect("changed")
-            .into_update_parts()
-            .expect("update parts");
+        let edge = blocks_edge(&blocker, &item, now);
+        let (blocked_projection, _, _) =
+            WorkGraphMachine::refresh_eligibility(item.clone(), &[blocker, item], &[edge], now)
+                .expect("refresh transition")
+                .expect("changed")
+                .into_update_parts()
+                .expect("update parts");
         let (_, event, _) = WorkGraphMachine::claim_item_with_unresolved_blockers(
             blocked_projection,
             0,

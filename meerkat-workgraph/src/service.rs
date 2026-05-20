@@ -565,14 +565,9 @@ impl WorkGraphService {
                 include_terminal: true,
                 ..WorkItemFilter::default()
             })
-            .await?
-            .into_iter()
-            .map(|item| (item.id.clone(), item))
-            .collect::<BTreeMap<_, _>>();
+            .await?;
         let edges = self.store.list_edges(realm_id, namespace).await?;
-        let unresolved_blockers =
-            WorkGraphMachine::unresolved_blocker_count_for_item(&item, &all_items, &edges)?;
-        if let Some(commit) = WorkGraphMachine::refresh_eligibility(item, unresolved_blockers, now)?
+        if let Some(commit) = WorkGraphMachine::refresh_eligibility(item, &all_items, &edges, now)?
         {
             self.store.update_item_cas(commit).await?;
         }

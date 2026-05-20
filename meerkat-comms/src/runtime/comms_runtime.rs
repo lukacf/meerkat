@@ -16,9 +16,9 @@ use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, CommsTrustMutation, CommsTrustMutationResult, EventStream,
-    GeneratedCommsTrustAuthoritySourceKind, InputStreamMode, PeerAddress, PeerCapabilitySet,
-    PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName, PeerRoute, PeerSendability,
-    SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
+    GeneratedCommsTrustAuthoritySourceKind, InputStreamMode, PeerCapabilitySet, PeerDirectoryEntry,
+    PeerDirectorySource, PeerId, PeerName, PeerRoute, PeerSendability, SendAndStreamError,
+    SendError, SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
 };
 use meerkat_core::config::PlainEventSource;
 #[cfg(not(target_arch = "wasm32"))]
@@ -155,22 +155,6 @@ fn peer_id_from_pubkey(pubkey: &crate::identity::PubKey) -> meerkat_core::comms:
 
 fn parse_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
     meerkat_core::comms::PeerAddress::parse(raw).map_err(|err| err.to_string())
-}
-
-/// Build a core-seam [`TrustedPeerDescriptor`] for an inproc peer with a
-/// known signing [`PubKey`].
-///
-/// The test-oriented pair helper uses this to seed mutual trust without
-/// going through the wire format — the derived `PeerId` comes from the
-/// same UUIDv5 derivation the router uses at lookup time.
-fn descriptor_for_inproc_peer(name: &str, pubkey: PubKey) -> Result<TrustedPeerDescriptor, String> {
-    let peer_name = PeerName::new(name.to_string())?;
-    Ok(TrustedPeerDescriptor {
-        peer_id: crate::router::peer_id_from_pubkey(&pubkey),
-        name: peer_name,
-        address: PeerAddress::new(meerkat_core::comms::PeerTransport::Inproc, name),
-        pubkey: *pubkey.as_bytes(),
-    })
 }
 
 /// Convert a core-seam [`TrustedPeerDescriptor`] into the comms-internal
@@ -1534,38 +1518,6 @@ impl CommsRuntime {
             crate::PeerMeta::default(),
         );
         Ok(runtime)
-    }
-
-    /// Construct two inproc-only `CommsRuntime` instances with mutual trust
-    /// already seeded, so each can send to the other without the caller
-    /// touching `TrustedPeers` directly.
-    ///
-    /// Trust is seeded through the canonical `CommsRuntime::add_trusted_peer`
-    /// path so both the `TrustedPeers` RwLock and the classified inbox's
-    /// sibling `trusted_peers` BTreeSet stay in sync — the receive-side
-    /// admission gate drops untrusted envelopes with `UntrustedSender`
-    /// (W1-B), so seeding must touch both stores, not just the RwLock.
-    ///
-    /// This is a test-infrastructure helper intended for integration-scope
-    /// reservation / correlation tests. Production code should establish
-    /// trust through the normal identity-exchange flows.
-    pub async fn inproc_pair_with_mutual_trust(
-        name_a: &str,
-        name_b: &str,
-    ) -> Result<(Arc<Self>, Arc<Self>), CommsRuntimeError> {
-        let a = Arc::new(Self::inproc_only(name_a)?);
-        let b = Arc::new(Self::inproc_only(name_b)?);
-        let descriptor_for_a = descriptor_for_inproc_peer(name_b, b.public_key())
-            .map_err(CommsRuntimeError::TrustLoadError)?;
-        let descriptor_for_b = descriptor_for_inproc_peer(name_a, a.public_key())
-            .map_err(CommsRuntimeError::TrustLoadError)?;
-        meerkat_core::agent::CommsRuntime::add_trusted_peer(a.as_ref(), descriptor_for_a)
-            .await
-            .map_err(|err| CommsRuntimeError::TrustLoadError(err.to_string()))?;
-        meerkat_core::agent::CommsRuntime::add_trusted_peer(b.as_ref(), descriptor_for_b)
-            .await
-            .map_err(|err| CommsRuntimeError::TrustLoadError(err.to_string()))?;
-        Ok((a, b))
     }
 
     #[cfg(not(target_arch = "wasm32"))]

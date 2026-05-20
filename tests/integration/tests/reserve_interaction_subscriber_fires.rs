@@ -1,11 +1,9 @@
 //! Integration-scope test for the coverage-matrix cell:
 //!   TurnDriven × NonRealtime × Request × ReserveInteraction × SubscriberStream
 //!
-//! Covers the reservation-contract end-to-end between two mutually-trusted
-//! in-process `CommsRuntime` instances. Uses the public
-//! `CommsRuntime::inproc_pair_with_mutual_trust` helper landed alongside
-//! W1-C so integration tests can drive real peer traffic without reaching
-//! into private trust-seeding paths.
+//! Covers the reservation-contract end-to-end between two in-process
+//! `CommsRuntime` instances whose mutual trust is installed through generated
+//! MeerkatMachine authority.
 //!
 //! Scenario:
 //!   1. Peer A sends a `PeerRequest` with `InputStreamMode::ReserveInteraction`.
@@ -25,13 +23,17 @@
 use meerkat_comms::runtime::comms_runtime::CommsRuntime;
 use meerkat_core::PeerInputClass;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName, PeerRoute, SendReceipt};
+use meerkat_core::comms::{
+    CommsCommand, CommsTrustMutation, InputStreamMode, PeerAddress, PeerName, PeerRoute,
+    PeerTransport, SendReceipt, TrustedPeerDescriptor,
+};
 use meerkat_core::{
     ClassifiedInboxInteraction, HandlingMode, InteractionContent, InteractionId, PeerCorrelationId,
     ResponseStatus,
 };
 use meerkat_runtime::handles::{
-    HandleDslAuthority, RuntimeInteractionStreamHandle, RuntimePeerInteractionHandle,
+    HandleDslAuthority, RuntimeInteractionStreamHandle, RuntimePeerCommsHandle,
+    RuntimePeerInteractionHandle,
 };
 use meerkat_runtime::meerkat_machine::dsl as mm_dsl;
 use std::sync::Arc;
@@ -43,7 +45,7 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
     let name_a = format!("cov-a-{suffix}");
     let name_b = format!("cov-b-{suffix}");
 
-    let (a, b) = CommsRuntime::inproc_pair_with_mutual_trust(&name_a, &name_b)
+    let (a, b) = inproc_pair_with_generated_trust(&name_a, &name_b)
         .await
         .expect("inproc pair with mutual trust");
     install_ephemeral_peer_request_response_authority(&a, &format!("authority-a-{suffix}"));
@@ -103,7 +105,10 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
     );
     b.peer_interaction_handle()
         .expect("B should have explicit peer interaction authority")
-        .request_received(PeerCorrelationId::from_uuid(envelope_id))
+        .request_received(
+            PeerCorrelationId::from_uuid(envelope_id),
+            HandlingMode::Queue,
+        )
         .expect("direct comms-drain bypass must seed inbound request state");
 
     let _response_receipt = CoreCommsRuntime::send(
@@ -162,6 +167,87 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
     assert!(second.is_none(), "subscriber should be one-shot");
 }
 
+async fn inproc_pair_with_generated_trust(
+    name_a: &str,
+    name_b: &str,
+) -> Result<(Arc<CommsRuntime>, Arc<CommsRuntime>), String> {
+    let a = Arc::new(CommsRuntime::inproc_only(name_a).map_err(|err| err.to_string())?);
+    let b = Arc::new(CommsRuntime::inproc_only(name_b).map_err(|err| err.to_string())?);
+    let descriptor_a = descriptor_for_runtime(a.as_ref())?;
+    let descriptor_b = descriptor_for_runtime(b.as_ref())?;
+    add_generated_trust(a.as_ref(), &descriptor_a, descriptor_b.clone()).await?;
+    add_generated_trust(b.as_ref(), &descriptor_b, descriptor_a).await?;
+    Ok((a, b))
+}
+
+fn descriptor_for_runtime(runtime: &CommsRuntime) -> Result<TrustedPeerDescriptor, String> {
+    Ok(TrustedPeerDescriptor {
+        peer_id: runtime.public_key().to_peer_id(),
+        name: PeerName::new(runtime.participant_name().to_string())?,
+        address: PeerAddress::new(PeerTransport::Inproc, runtime.participant_name()),
+        pubkey: *runtime.public_key().as_bytes(),
+    })
+}
+
+async fn add_generated_trust(
+    runtime: &CommsRuntime,
+    local: &TrustedPeerDescriptor,
+    peer: TrustedPeerDescriptor,
+) -> Result<(), String> {
+    let authority = generated_trust_add_authority(local, &peer)?;
+    CoreCommsRuntime::apply_trust_mutation(
+        runtime,
+        CommsTrustMutation::AddTrustedPeer { peer, authority },
+    )
+    .await
+    .map(|_| ())
+    .map_err(|err| err.to_string())
+}
+
+fn generated_trust_add_authority(
+    local: &TrustedPeerDescriptor,
+    peer: &TrustedPeerDescriptor,
+) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {
+    let local_endpoint = mm_dsl::PeerEndpoint::from(local);
+    let endpoint = mm_dsl::PeerEndpoint::from(peer);
+    let mut authority = mm_dsl::MeerkatMachineAuthority::new();
+    authority
+        .apply_signal(mm_dsl::MeerkatMachineSignal::Initialize)
+        .map_err(|err| err.to_string())?;
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RegisterSession {
+            session_id: mm_dsl::SessionId::from("integration-generated-trust"),
+        },
+    )
+    .map_err(|err| err.to_string())?;
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::PublishLocalEndpoint {
+            endpoint: local_endpoint,
+        },
+    )
+    .map_err(|err| err.to_string())?;
+    let transition = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
+            endpoint: endpoint.clone(),
+        },
+    )
+    .map_err(|err| err.to_string())?;
+    let mut obligations =
+        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+            &transition,
+            meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                Arc::new(std::sync::Mutex::new(authority)),
+            ),
+        );
+    let obligation = obligations
+        .pop()
+        .ok_or_else(|| "generated trust reconcile obligation missing".to_string())?;
+    meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(&obligation, &endpoint)
+}
+
 fn install_ephemeral_peer_request_response_authority(runtime: &Arc<CommsRuntime>, session: &str) {
     let dsl = Arc::new(HandleDslAuthority::ephemeral());
     dsl.apply_signal(mm_dsl::MeerkatMachineSignal::Initialize, "test::initialize")
@@ -173,7 +259,18 @@ fn install_ephemeral_peer_request_response_authority(runtime: &Arc<CommsRuntime>
         "test::register_session",
     )
     .expect("RegisterSession input");
+    dsl.apply_input(
+        mm_dsl::MeerkatMachineInput::PrepareBindings {
+            agent_runtime_id: mm_dsl::AgentRuntimeId::from(format!("{session}-runtime")),
+            fence_token: mm_dsl::FenceToken(1),
+            generation: mm_dsl::Generation(0),
+            session_id: mm_dsl::SessionId::from(session.to_string()),
+        },
+        "test::prepare_bindings",
+    )
+    .expect("PrepareBindings input");
 
+    runtime.install_peer_comms_handle(Arc::new(RuntimePeerCommsHandle::new(Arc::clone(&dsl))));
     runtime.install_peer_request_response_authority(
         meerkat_comms::PeerRequestResponseAuthority::new(
             Arc::new(RuntimePeerInteractionHandle::new(Arc::clone(&dsl))),

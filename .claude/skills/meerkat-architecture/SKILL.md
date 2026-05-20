@@ -56,6 +56,30 @@ For same-checkout multi-agent work, set distinct `RUST_LANE_ID` values when you
 want stable warm local output roots. Separate Git worktrees are isolated by path
 hash for both Cargo and BuildBuddy output roots.
 
+## Current 0.6.19 Release-Line Deltas
+
+When updating architecture docs or reviewing current code, do not stop at the
+0.6.5 live-adapter picture. The 0.6.19 line also includes:
+
+- `WorkGraphLifecycleMachine` as the sixth canonical machine, with
+  `meerkat-workgraph` owning durable work items, dependencies, claims, evidence,
+  ready derivation, snapshots, and read-only host surfaces.
+- Azure OpenAI auth/backend support, project-local CLI realm defaults, HTML
+  artifact output, typed transcript notices, provider-native search/image
+  improvements, structured skill identity, and model-aware compaction defaults.
+- `gemini-3.5-flash` as the recommended Gemini text model; the older Gemini 3
+  Flash preview row is not the featured/default model.
+- Batch mob wiring (`wire_members_batch` / `MembersWiredBatch`), backpressured
+  dense-mob delivery, autonomous member injector validation, spawn boundary
+  customization, mob task-workflow guidance preloads, peer wake fixes, and safer
+  active-turn retirement/respawn behavior.
+- Runtime-store checkpointing and runtime-committed session projection saves,
+  preserving explicit broken/lost states and keeping MobKit/UnifiedRuntime
+  projections in sync after the machine commit succeeds.
+- Release/docs/SDK hardening: docs validation, version/schema freshness checks,
+  BuildBuddy/Web SDK recovery lanes, Windows asset routing fixes, and current
+  contract/package examples at `0.6.19`.
+
 ## Runtime Dogma (first review lens)
 
 Public doctrine summary: `docs/reference/machine-authority.mdx`.

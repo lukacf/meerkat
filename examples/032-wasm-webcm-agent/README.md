@@ -42,7 +42,7 @@ Browser Tab
 │   ├── Alpha Meerkat (orchestrator) → claude-opus-4-7
 │   ├── Planner → gpt-5.5
 │   ├── Coder → gpt-5.3-codex
-│   └── Reviewer → gemini-3-flash-preview
+│   └── Reviewer → gemini-3.5-flash
 ├── meerkat-web-runtime (Rust WASM)
 │   ├── EphemeralSessionService + AgentFactory
 │   ├── JsToolDispatcher → WebCM tool callbacks

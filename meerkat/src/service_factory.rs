@@ -1686,7 +1686,7 @@ mod tests {
         let (tx3, _rx3) = mpsc::channel(8);
         builder
             .build_agent(
-                &make_session_request_with_connection("gemini-3-flash-preview", "default_gemini"),
+                &make_session_request_with_connection("gemini-3.5-flash", "default_gemini"),
                 tx3,
             )
             .await

@@ -14,7 +14,7 @@ and Gemini responses. Use provider-specific parameters.
 |----------|--------|---------|
 | Anthropic | `claude-opus-4-7`, `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
 | OpenAI | `gpt-5.5` | `OPENAI_API_KEY` |
-| Gemini | `gemini-3-flash-preview`, `gemini-3.1-pro-preview` | `GEMINI_API_KEY` |
+| Gemini | `gemini-3.5-flash`, `gemini-3.1-pro-preview` | `GEMINI_API_KEY` |
 
 ## Run
 ```bash

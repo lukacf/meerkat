@@ -476,7 +476,7 @@ When running tests or demos that involve multiple LLM providers/models, use thes
 | Provider | Model Name |
 |----------|------------|
 | OpenAI | `gpt-5.4` or `gpt-5.4-mini` or `gpt-5.4-pro` or `gpt-5.3-codex` |
-| Gemini | `gemini-3.1-pro-preview` or `gemini-3.1-flash-lite` or `gemini-3.1-flash-lite-preview` or `gemini-3-flash-preview` |
+| Gemini | `gemini-3.1-pro-preview` or `gemini-3.1-flash-lite` or `gemini-3.1-flash-lite-preview` or `gemini-3.5-flash` |
 | Anthropic | `claude-opus-4-7` or `claude-opus-4-6` or `claude-sonnet-4-6` or `claude-sonnet-4-5` |
 
 Do NOT use older model names like `gpt-4o-mini`, `gemini-2.0-flash`, or `claude-3-7-sonnet-20250219`.

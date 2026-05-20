@@ -1086,7 +1086,7 @@ async fn e2e_gemini_structured_output() -> Result<(), Box<dyn std::error::Error>
     };
     let client = GeminiClient::new(api_key);
     let request = LlmRequest::new(
-        "gemini-3-flash-preview",
+        "gemini-3.5-flash",
         vec![Message::User(UserMessage::text(
             "Generate a person named Carol who is 35 years old.".to_string(),
         ))],
@@ -1206,7 +1206,7 @@ async fn e2e_gemini_structured_output_rich_schema_keywords()
     };
     let client = GeminiClient::new(api_key);
     let request = LlmRequest::new(
-        "gemini-3-flash-preview",
+        "gemini-3.5-flash",
         vec![Message::User(UserMessage::text(
             "Return JSON: status='ok', payload={score:0.6, category:'test'}.".to_string(),
         ))],

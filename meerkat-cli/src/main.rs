@@ -18120,7 +18120,7 @@ capabilities = ["definitely_missing_capability"]
     #[test]
     fn test_infer_provider_gemini() {
         assert_eq!(
-            Provider::infer_from_model("gemini-3-flash-preview"),
+            Provider::infer_from_model("gemini-3.5-flash"),
             Some(Provider::Gemini)
         );
         assert_eq!(

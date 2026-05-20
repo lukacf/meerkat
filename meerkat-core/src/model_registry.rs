@@ -190,14 +190,14 @@ impl ModelRegistry {
     ///
     /// ```compile_fail
     /// let registry = meerkat_core::Config::default().model_registry().unwrap();
-    /// let entry = registry.entry("gemini-3-flash-preview").unwrap();
+    /// let entry = registry.entry("gemini-3.5-flash").unwrap();
     /// let _inline_video = entry.profile.inline_video;
     /// ```
     ///
     /// ```
     /// let registry = meerkat_core::Config::default().model_registry().unwrap();
     /// let profile = registry
-    ///     .profile_for_provider(meerkat_core::Provider::Gemini, "gemini-3-flash-preview")
+    ///     .profile_for_provider(meerkat_core::Provider::Gemini, "gemini-3.5-flash")
     ///     .unwrap();
     /// assert!(profile.inline_video);
     /// ```
@@ -578,7 +578,7 @@ mod tests {
         );
         assert!(
             registry
-                .profile_for_provider(Provider::OpenAI, "gemini-3-flash-preview")
+                .profile_for_provider(Provider::OpenAI, "gemini-3.5-flash")
                 .is_none(),
             "provider-aware lookup must not let provider strings select another provider's capabilities"
         );
@@ -591,27 +591,26 @@ mod tests {
             Err(err) => panic!("registry construction failed: {err}"),
         };
 
-        let entry = match registry.entry("gemini-3-flash-preview") {
+        let entry = match registry.entry("gemini-3.5-flash") {
             Some(entry) => entry,
             None => panic!("catalog entry must exist"),
         };
         assert_eq!(entry.provider, Provider::Gemini);
-        assert_eq!(entry.id, "gemini-3-flash-preview");
+        assert_eq!(entry.id, "gemini-3.5-flash");
         let rendered = format!("{entry:?}");
         assert!(
             !rendered.contains("inline_video") && !rendered.contains("supports_temperature"),
             "model-only projection entry must not expose capability fields: {rendered}"
         );
 
-        let profile =
-            match registry.profile_for_provider(Provider::Gemini, "gemini-3-flash-preview") {
-                Some(profile) => profile,
-                None => panic!("typed provider-aware capability lookup should resolve"),
-            };
+        let profile = match registry.profile_for_provider(Provider::Gemini, "gemini-3.5-flash") {
+            Some(profile) => profile,
+            None => panic!("typed provider-aware capability lookup should resolve"),
+        };
         assert!(profile.inline_video);
         assert!(
             registry
-                .profile_for_provider(Provider::OpenAI, "gemini-3-flash-preview")
+                .profile_for_provider(Provider::OpenAI, "gemini-3.5-flash")
                 .is_none(),
             "display/catalog lookup must not let another typed provider read capability truth"
         );
@@ -652,20 +651,20 @@ mod tests {
         };
 
         if let Err(err) =
-            registry.require_inline_video_for_provider(Provider::Gemini, "gemini-3-flash-preview")
+            registry.require_inline_video_for_provider(Provider::Gemini, "gemini-3.5-flash")
         {
             panic!("Gemini catalog owner should authorize inline video: {err}");
         }
 
         let err = match registry
-            .require_inline_video_for_provider(Provider::OpenAI, "gemini-3-flash-preview")
+            .require_inline_video_for_provider(Provider::OpenAI, "gemini-3.5-flash")
         {
             Ok(()) => panic!("same model name under another provider must fail closed"),
             Err(err) => err,
         };
         assert_eq!(err.capability, ModelCapability::InlineVideo);
         assert_eq!(err.provider, Provider::OpenAI);
-        assert_eq!(err.model, "gemini-3-flash-preview");
+        assert_eq!(err.model, "gemini-3.5-flash");
         assert_eq!(
             err.reason,
             UnsupportedModelCapabilityReason::ProviderModelProfileMissing

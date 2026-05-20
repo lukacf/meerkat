@@ -10,11 +10,11 @@ use crate::model_profile::catalog::ModelTier;
 
 /// Capability rows for Gemini catalog models.
 pub const CAPABILITIES: &[ModelCapabilities] = &[
-    // Gemini 3 Flash Preview
+    // Gemini 3.5 Flash
     //
     // Sources:
     //   - Model page:
-    //     https://ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview
+    //     https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash
     //     (input 1,048,576; output 65,536; vision + video inputs; structured output)
     //   - Thinking:
     //     https://ai.google.dev/gemini-api/docs/thinking
@@ -23,9 +23,9 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     https://ai.google.dev/gemini-api/docs/gemini-3
     //     (thinking_budget accepted for backward compatibility)
     ModelCapabilities {
-        id: "gemini-3-flash-preview",
+        id: "gemini-3.5-flash",
         provider: Provider::Gemini,
-        display_name: "Gemini 3 Flash Preview",
+        display_name: "Gemini 3.5 Flash",
         tier: ModelTier::Recommended,
         model_family: "gemini-3",
         context_window: 1_048_576,

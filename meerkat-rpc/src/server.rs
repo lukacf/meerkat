@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use meerkat::surface::{
-    RequestTerminalResolution, SurfaceRequestExecutor, SurfaceRequestSemantics, noop_request_action,
+    RequestAdmissionError, RequestTerminalResolution, SurfaceRequestExecutor,
+    SurfaceRequestSemantics, noop_request_action,
 };
 use meerkat_contracts::rpc_request_lifecycle;
 use tokio::io::{AsyncBufRead, BufReader};
@@ -273,9 +274,16 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                                 continue;
                             }
 
-                            if let Some((request_key, task)) = self.spawn_long_running_request(&request) {
-                                self.request_executor
-                                    .attach_task(&request_key, task);
+                            if let Some(admission) = self.spawn_long_running_request(&request) {
+                                match admission {
+                                    Ok((request_key, task)) => {
+                                        self.request_executor
+                                            .attach_task(&request_key, task);
+                                    }
+                                    Err(response) => {
+                                        self.transport.write_response(&response).await?;
+                                    }
+                                }
                                 continue;
                             }
 
@@ -358,18 +366,21 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     fn spawn_long_running_request(
         &self,
         request: &RpcRequest,
-    ) -> Option<(String, tokio::task::JoinHandle<()>)> {
+    ) -> Option<Result<(String, tokio::task::JoinHandle<()>), RpcResponse>> {
         let semantics = request_semantics(request);
         if !semantics.requires_long_running_executor() {
             return None;
         }
         let id = request.id.clone()?;
         let request_key = request_key(&id);
-        let context = self.request_executor.begin_request_with_semantics(
+        let context = match self.request_executor.try_begin_request_with_semantics(
             request_key.clone(),
             noop_request_action(),
             semantics,
-        );
+        ) {
+            Ok(context) => context,
+            Err(error) => return Some(Err(request_admission_error_response(Some(id), error))),
+        };
         let router = self.router.clone();
         let long_running_tx = self.long_running_tx.clone();
         let request = request.clone();
@@ -388,7 +399,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                     .await;
             }
         });
-        Some((request_key, handle))
+        Some(Ok((request_key, handle)))
     }
 
     async fn write_long_running_response(&mut self, response: LongRunningResponse) -> bool {
@@ -491,6 +502,21 @@ fn request_lifecycle_error_response(
         crate::error::INTERNAL_ERROR,
         format!("request lifecycle rejected publish response: {err}"),
     )
+}
+
+fn request_admission_error_response(id: Option<RpcId>, err: RequestAdmissionError) -> RpcResponse {
+    match err {
+        RequestAdmissionError::AlreadyExists => RpcResponse::error(
+            id,
+            crate::error::DUPLICATE_INPUT,
+            "request already admitted",
+        ),
+        RequestAdmissionError::AuthorityRejected { .. } => RpcResponse::error(
+            id,
+            crate::error::INTERNAL_ERROR,
+            format!("request admission rejected by generated authority: {err}"),
+        ),
+    }
 }
 
 fn request_semantics(request: &RpcRequest) -> SurfaceRequestSemantics {

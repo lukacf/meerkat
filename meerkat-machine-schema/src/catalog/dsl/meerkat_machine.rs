@@ -936,9 +936,9 @@ pub enum SurfaceRequestPhase {
 /// admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SurfaceRequestTerminalPolicy {
-    PublishOnSuccess,
     #[default]
     RespondWithoutPublish,
+    PublishOnSuccess,
 }
 
 /// Typed drain-exit reason. Closed mirror of

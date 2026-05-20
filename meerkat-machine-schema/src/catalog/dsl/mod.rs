@@ -763,7 +763,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "SurfaceRequestTerminalPolicy",
-                &["PublishOnSuccess", "RespondWithoutPublish"],
+                &["RespondWithoutPublish", "PublishOnSuccess"],
             ),
             NamedTypeBinding::string_enum("SurfaceStagedOp", &["None", "Add", "Remove", "Reload"]),
             NamedTypeBinding::type_path_enum_with_structural_variants(

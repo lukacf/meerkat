@@ -467,20 +467,10 @@ impl SurfaceRequestAuthorityShell {
         initial_cancel: RequestAsyncAction,
         semantics: SurfaceRequestSemantics,
     ) -> RequestContext {
-        let key = key.into();
-        match self.try_begin_request_with_semantics(
-            key.clone(),
-            Arc::clone(&initial_cancel),
-            semantics,
-        ) {
-            Ok(context) => context,
-            Err(RequestAdmissionError::AlreadyExists) => {
-                self.replace_mechanics_for_existing(key, initial_cancel)
-            }
-            Err(error @ RequestAdmissionError::AuthorityRejected { .. }) => {
-                panic!("{error}");
-            }
-        }
+        self.try_begin_request_with_semantics(key, initial_cancel, semantics)
+            .unwrap_or_else(|error| {
+                panic!("generated request authority rejected admission: {error}")
+            })
     }
 
     fn try_begin_request(
@@ -793,25 +783,6 @@ impl SurfaceRequestAuthorityShell {
             .collect()
     }
 
-    fn replace_mechanics_for_existing(
-        &self,
-        key: String,
-        initial_cancel: RequestAsyncAction,
-    ) -> RequestContext {
-        let mut inner = lock_or_recover(&self.inner);
-        let entry = inner
-            .entries
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(RequestEntry::new(Arc::clone(&initial_cancel))))
-            .clone();
-        *lock_or_recover(&entry.cancel_action) = initial_cancel;
-        RequestContext {
-            key,
-            entry,
-            authority: self.clone(),
-        }
-    }
-
     fn admit_locked(
         inner: &mut SurfaceRequestAuthorityState,
         key: &str,
@@ -878,8 +849,9 @@ impl SurfaceRequestExecutor {
         }
     }
 
-    /// Register a new in-flight request. Panics on duplicate keys are avoided;
-    /// use [`Self::try_begin_request`] when the caller must detect duplicates.
+    /// Register a new in-flight request. Panics if generated admission rejects;
+    /// surfaces should use [`Self::try_begin_request`] when rejection must be
+    /// reported over the transport.
     pub fn begin_request(
         &self,
         key: impl Into<String>,
@@ -1445,6 +1417,14 @@ mod tests {
             .expect("first registration should succeed");
         let result = executor.try_begin_request("dup-key", noop_request_action());
         assert!(result.is_err(), "duplicate key should be rejected");
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "generated request authority rejected admission")]
+    async fn begin_request_panics_when_generated_admission_rejects_duplicate() {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let _ctx = executor.begin_request("dup-key", noop_request_action());
+        let _duplicate = executor.begin_request("dup-key", noop_request_action());
     }
 
     #[tokio::test]

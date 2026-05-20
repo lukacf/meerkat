@@ -5706,16 +5706,16 @@ impl std::fmt::Display for SurfaceRequestPhase {
 )]
 pub enum SurfaceRequestTerminalPolicy {
     #[default]
-    #[serde(rename = "PublishOnSuccess")]
-    PublishOnSuccess,
     #[serde(rename = "RespondWithoutPublish")]
     RespondWithoutPublish,
+    #[serde(rename = "PublishOnSuccess")]
+    PublishOnSuccess,
 }
 impl SurfaceRequestTerminalPolicy {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::PublishOnSuccess => "PublishOnSuccess",
             Self::RespondWithoutPublish => "RespondWithoutPublish",
+            Self::PublishOnSuccess => "PublishOnSuccess",
         }
     }
 }
@@ -5723,8 +5723,8 @@ impl std::convert::TryFrom<&str> for SurfaceRequestTerminalPolicy {
     type Error = String;
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "PublishOnSuccess" => Ok(Self::PublishOnSuccess),
             "RespondWithoutPublish" => Ok(Self::RespondWithoutPublish),
+            "PublishOnSuccess" => Ok(Self::PublishOnSuccess),
             other => Err(format!(
                 "invalid SurfaceRequestTerminalPolicy value `{other}`"
             )),

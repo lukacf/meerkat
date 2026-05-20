@@ -183,10 +183,6 @@ machine! {
             lifecycle_phase: WorkLifecycleState,
             revision: u64,
             unresolved_blocker_count: u64,
-            topology_item_keys: Set<WorkItemKey>,
-            topology_edge_keys: Set<WorkEdgeKey>,
-            blocks_reachability: Set<WorkDependencyPathKey>,
-            parent_reachability: Set<WorkDependencyPathKey>,
             claim_owner_key: Option<WorkOwnerKey>,
             claimed_at_utc_ms: Option<u64>,
             lease_expires_at_utc_ms: Option<u64>,
@@ -200,10 +196,6 @@ machine! {
         init(Absent) {
             revision = 0,
             unresolved_blocker_count = 0,
-            topology_item_keys = EmptySet,
-            topology_edge_keys = EmptySet,
-            blocks_reachability = EmptySet,
-            parent_reachability = EmptySet,
             claim_owner_key = None,
             claimed_at_utc_ms = None,
             lease_expires_at_utc_ms = None,
@@ -262,6 +254,7 @@ machine! {
             Release { expected_revision: u64 },
             Block { expected_revision: u64 },
             RefreshEligibility { unresolved_blocker_count: u64 },
+            ClassifyReadiness { now_utc_ms: u64 },
             ClassifyBlockerSatisfaction,
             ClassifyTerminality,
             ValidateLink {
@@ -270,6 +263,10 @@ machine! {
                 to_item_key: WorkItemKey,
                 edge_key: WorkEdgeKey,
                 reverse_path_key: WorkDependencyPathKey,
+                topology_item_keys: Set<WorkItemKey>,
+                topology_edge_keys: Set<WorkEdgeKey>,
+                blocks_reachability: Set<WorkDependencyPathKey>,
+                parent_reachability: Set<WorkDependencyPathKey>,
             },
             Close { expected_revision: u64, at_utc_ms: u64, requested_status: Option<Enum<WorkLifecycleState>> },
             CloseCompleted { expected_revision: u64, at_utc_ms: u64 },
@@ -289,6 +286,8 @@ machine! {
             BlockerUnsatisfied,
             LifecycleTerminal,
             LifecycleNonTerminal,
+            WorkReady,
+            WorkNotReady,
             LinkValidated,
             Closed { terminal_state: WorkLifecycleState },
             EvidenceAdded,
@@ -301,12 +300,6 @@ machine! {
 
         invariant live_has_positive_revision {
             self.lifecycle_phase == Phase::Absent || self.revision > 0
-        }
-
-        invariant topology_snapshot_is_stateless {
-            self.topology_item_keys == EmptySet
-                || self.topology_edge_keys == EmptySet
-                || self.lifecycle_phase == Phase::Absent
         }
 
         invariant terminal_has_terminal_time {
@@ -336,6 +329,8 @@ machine! {
         disposition BlockerUnsatisfied => local,
         disposition LifecycleTerminal => local,
         disposition LifecycleNonTerminal => local,
+        disposition WorkReady => local,
+        disposition WorkNotReady => local,
         disposition LinkValidated => local,
         disposition Closed => local,
         disposition EvidenceAdded => local,
@@ -560,6 +555,95 @@ machine! {
             emit Updated
         }
 
+        transition ClassifyReadinessOpenReady {
+            on input ClassifyReadiness { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Open }
+            guard "dependencies_satisfied" { self.unresolved_blocker_count == 0 }
+            guard "due_eligible" { if self.due_at_utc_ms == None { true } else { self.due_at_utc_ms.get("value") <= now_utc_ms } }
+            guard "not_before_eligible" { if self.not_before_utc_ms == None { true } else { self.not_before_utc_ms.get("value") <= now_utc_ms } }
+            guard "snooze_eligible" { if self.snoozed_until_utc_ms == None { true } else { self.snoozed_until_utc_ms.get("value") <= now_utc_ms } }
+            to Open
+            emit WorkReady
+        }
+
+        transition ClassifyReadinessExpiredInProgressReady {
+            on input ClassifyReadiness { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::InProgress }
+            guard "prior_claim_present" { self.claim_owner_key != None }
+            guard "prior_claim_has_lease" { self.lease_expires_at_utc_ms != None }
+            guard "prior_claim_expired" { if self.lease_expires_at_utc_ms == None { false } else { self.lease_expires_at_utc_ms.get("value") <= now_utc_ms } }
+            guard "dependencies_satisfied" { self.unresolved_blocker_count == 0 }
+            guard "due_eligible" { if self.due_at_utc_ms == None { true } else { self.due_at_utc_ms.get("value") <= now_utc_ms } }
+            guard "not_before_eligible" { if self.not_before_utc_ms == None { true } else { self.not_before_utc_ms.get("value") <= now_utc_ms } }
+            guard "snooze_eligible" { if self.snoozed_until_utc_ms == None { true } else { self.snoozed_until_utc_ms.get("value") <= now_utc_ms } }
+            to InProgress
+            emit WorkReady
+        }
+
+        transition ClassifyReadinessAbsentNotReady {
+            on input ClassifyReadiness { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Absent }
+            to Absent
+            emit WorkNotReady
+        }
+
+        transition ClassifyReadinessOpenNotReady {
+            on input ClassifyReadiness { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Open }
+            guard "not_ready" {
+                self.unresolved_blocker_count != 0
+                    || (if self.due_at_utc_ms == None { false } else { now_utc_ms < self.due_at_utc_ms.get("value") })
+                    || (if self.not_before_utc_ms == None { false } else { now_utc_ms < self.not_before_utc_ms.get("value") })
+                    || (if self.snoozed_until_utc_ms == None { false } else { now_utc_ms < self.snoozed_until_utc_ms.get("value") })
+            }
+            to Open
+            emit WorkNotReady
+        }
+
+        transition ClassifyReadinessInProgressNotReady {
+            on input ClassifyReadiness { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::InProgress }
+            guard "not_ready" {
+                self.claim_owner_key == None
+                    || self.lease_expires_at_utc_ms == None
+                    || (if self.lease_expires_at_utc_ms == None { false } else { now_utc_ms < self.lease_expires_at_utc_ms.get("value") })
+                    || self.unresolved_blocker_count != 0
+                    || (if self.due_at_utc_ms == None { false } else { now_utc_ms < self.due_at_utc_ms.get("value") })
+                    || (if self.not_before_utc_ms == None { false } else { now_utc_ms < self.not_before_utc_ms.get("value") })
+                    || (if self.snoozed_until_utc_ms == None { false } else { now_utc_ms < self.snoozed_until_utc_ms.get("value") })
+            }
+            to InProgress
+            emit WorkNotReady
+        }
+
+        transition ClassifyReadinessBlockedNotReady {
+            on input ClassifyReadiness { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Blocked }
+            to Blocked
+            emit WorkNotReady
+        }
+
+        transition ClassifyReadinessCompletedNotReady {
+            on input ClassifyReadiness { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Completed }
+            to Completed
+            emit WorkNotReady
+        }
+
+        transition ClassifyReadinessCancelledNotReady {
+            on input ClassifyReadiness { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Cancelled }
+            to Cancelled
+            emit WorkNotReady
+        }
+
+        transition ClassifyReadinessFailedNotReady {
+            on input ClassifyReadiness { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Failed }
+            to Failed
+            emit WorkNotReady
+        }
+
         transition ClassifyBlockerSatisfiedCompleted {
             on input ClassifyBlockerSatisfaction
             guard { self.lifecycle_phase == Phase::Completed }
@@ -659,17 +743,17 @@ machine! {
         }
 
         transition ValidateLink {
-            on input ValidateLink { kind, from_item_key, to_item_key, edge_key, reverse_path_key }
+            on input ValidateLink { kind, from_item_key, to_item_key, edge_key, reverse_path_key, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability }
             guard "stateless_checker" { self.lifecycle_phase == Phase::Absent }
-            guard "from_endpoint_exists" { self.topology_item_keys.contains(from_item_key) }
-            guard "to_endpoint_exists" { self.topology_item_keys.contains(to_item_key) }
+            guard "from_endpoint_exists" { topology_item_keys.contains(from_item_key) }
+            guard "to_endpoint_exists" { topology_item_keys.contains(to_item_key) }
             guard "not_self_edge" { from_item_key != to_item_key }
-            guard "not_duplicate_edge" { self.topology_edge_keys.contains(edge_key) == false }
+            guard "not_duplicate_edge" { topology_edge_keys.contains(edge_key) == false }
             guard "blocks_acyclic" {
-                kind != WorkEdgeKind::Blocks || self.blocks_reachability.contains(reverse_path_key) == false
+                kind != WorkEdgeKind::Blocks || blocks_reachability.contains(reverse_path_key) == false
             }
             guard "parent_acyclic" {
-                kind != WorkEdgeKind::Parent || self.parent_reachability.contains(reverse_path_key) == false
+                kind != WorkEdgeKind::Parent || parent_reachability.contains(reverse_path_key) == false
             }
             to Absent
             emit LinkValidated
@@ -1133,10 +1217,10 @@ impl From<&WorkGraphLifecycleMachineState> for WorkGraphLifecycleMachineStateWir
             lifecycle_phase: state.lifecycle_phase,
             revision: state.revision,
             unresolved_blocker_count: state.unresolved_blocker_count,
-            topology_item_keys: state.topology_item_keys.clone(),
-            topology_edge_keys: state.topology_edge_keys.clone(),
-            blocks_reachability: state.blocks_reachability.clone(),
-            parent_reachability: state.parent_reachability.clone(),
+            topology_item_keys: Default::default(),
+            topology_edge_keys: Default::default(),
+            blocks_reachability: Default::default(),
+            parent_reachability: Default::default(),
             claim_owner_key: state.claim_owner_key.clone(),
             claimed_at_utc_ms: state.claimed_at_utc_ms,
             lease_expires_at_utc_ms: state.lease_expires_at_utc_ms,
@@ -1155,10 +1239,6 @@ impl From<WorkGraphLifecycleMachineStateWire> for WorkGraphLifecycleMachineState
             lifecycle_phase: wire.lifecycle_phase,
             revision: wire.revision,
             unresolved_blocker_count: wire.unresolved_blocker_count,
-            topology_item_keys: wire.topology_item_keys,
-            topology_edge_keys: wire.topology_edge_keys,
-            blocks_reachability: wire.blocks_reachability,
-            parent_reachability: wire.parent_reachability,
             claim_owner_key: wire.claim_owner_key,
             claimed_at_utc_ms: wire.claimed_at_utc_ms,
             lease_expires_at_utc_ms: wire.lease_expires_at_utc_ms,

@@ -65,6 +65,33 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RefreshEligibilityBlocked`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_create_update_ready_claim`
+- `ClassifyReadinessOpenReady`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_topology_legality`
+- `ClassifyReadinessExpiredInProgressReady`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`
+- `ClassifyReadinessAbsentNotReady`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyReadinessOpenNotReady`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_topology_legality`
+- `ClassifyReadinessInProgressNotReady`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_topology_legality`
+- `ClassifyReadinessBlockedNotReady`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_topology_legality`
+- `ClassifyReadinessCompletedNotReady`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyReadinessCancelledNotReady`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyReadinessFailedNotReady`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
 - `ClassifyBlockerSatisfiedCompleted`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_topology_legality`
@@ -235,6 +262,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LifecycleNonTerminal`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_topology_legality`
+- `WorkReady`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`
+- `WorkNotReady`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`
 - `LinkValidated`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_topology_legality`
@@ -255,9 +288,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `live_has_positive_revision`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
-- `topology_snapshot_is_stateless`
-  - anchors: `workgraph_lifecycle`
-  - scenarios: `workgraph_topology_legality`
 - `terminal_has_terminal_time`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`

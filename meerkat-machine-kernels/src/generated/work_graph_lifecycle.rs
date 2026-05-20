@@ -391,10 +391,6 @@ pub struct State {
     pub phase: Phase,
     pub revision: u64,
     pub unresolved_blocker_count: u64,
-    pub topology_item_keys: std::collections::BTreeSet<WorkItemKey>,
-    pub topology_edge_keys: std::collections::BTreeSet<WorkEdgeKey>,
-    pub blocks_reachability: std::collections::BTreeSet<WorkDependencyPathKey>,
-    pub parent_reachability: std::collections::BTreeSet<WorkDependencyPathKey>,
     pub claim_owner_key: Option<WorkOwnerKey>,
     pub claimed_at_utc_ms: Option<u64>,
     pub lease_expires_at_utc_ms: Option<u64>,
@@ -463,6 +459,10 @@ pub mod inputs {
         pub unresolved_blocker_count: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyReadiness {
+        pub now_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyBlockerSatisfaction {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyTerminality {}
@@ -473,6 +473,10 @@ pub mod inputs {
         pub to_item_key: WorkItemKey,
         pub edge_key: WorkEdgeKey,
         pub reverse_path_key: WorkDependencyPathKey,
+        pub topology_item_keys: std::collections::BTreeSet<WorkItemKey>,
+        pub topology_edge_keys: std::collections::BTreeSet<WorkEdgeKey>,
+        pub blocks_reachability: std::collections::BTreeSet<WorkDependencyPathKey>,
+        pub parent_reachability: std::collections::BTreeSet<WorkDependencyPathKey>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Close {
@@ -515,6 +519,7 @@ pub enum Input {
     Release(inputs::Release),
     Block(inputs::Block),
     RefreshEligibility(inputs::RefreshEligibility),
+    ClassifyReadiness(inputs::ClassifyReadiness),
     ClassifyBlockerSatisfaction(inputs::ClassifyBlockerSatisfaction),
     ClassifyTerminality(inputs::ClassifyTerminality),
     ValidateLink(inputs::ValidateLink),
@@ -536,6 +541,7 @@ impl Input {
             Self::Release(_) => InputKind::Release,
             Self::Block(_) => InputKind::Block,
             Self::RefreshEligibility(_) => InputKind::RefreshEligibility,
+            Self::ClassifyReadiness(_) => InputKind::ClassifyReadiness,
             Self::ClassifyBlockerSatisfaction(_) => InputKind::ClassifyBlockerSatisfaction,
             Self::ClassifyTerminality(_) => InputKind::ClassifyTerminality,
             Self::ValidateLink(_) => InputKind::ValidateLink,
@@ -558,6 +564,7 @@ pub enum InputKind {
     Release,
     Block,
     RefreshEligibility,
+    ClassifyReadiness,
     ClassifyBlockerSatisfaction,
     ClassifyTerminality,
     ValidateLink,
@@ -593,6 +600,10 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LifecycleNonTerminal {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct WorkReady {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct WorkNotReady {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LinkValidated {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Closed {
@@ -617,6 +628,8 @@ pub enum Effect {
     BlockerUnsatisfied(effects::BlockerUnsatisfied),
     LifecycleTerminal(effects::LifecycleTerminal),
     LifecycleNonTerminal(effects::LifecycleNonTerminal),
+    WorkReady(effects::WorkReady),
+    WorkNotReady(effects::WorkNotReady),
     LinkValidated(effects::LinkValidated),
     Closed(effects::Closed),
     EvidenceAdded(effects::EvidenceAdded),
@@ -633,6 +646,8 @@ pub enum EffectKind {
     BlockerUnsatisfied,
     LifecycleTerminal,
     LifecycleNonTerminal,
+    WorkReady,
+    WorkNotReady,
     LinkValidated,
     Closed,
     EvidenceAdded,
@@ -658,6 +673,15 @@ pub enum TransitionId {
     RefreshEligibilityOpen,
     RefreshEligibilityInProgress,
     RefreshEligibilityBlocked,
+    ClassifyReadinessOpenReady,
+    ClassifyReadinessExpiredInProgressReady,
+    ClassifyReadinessAbsentNotReady,
+    ClassifyReadinessOpenNotReady,
+    ClassifyReadinessInProgressNotReady,
+    ClassifyReadinessBlockedNotReady,
+    ClassifyReadinessCompletedNotReady,
+    ClassifyReadinessCancelledNotReady,
+    ClassifyReadinessFailedNotReady,
     ClassifyBlockerSatisfiedCompleted,
     ClassifyBlockerUnsatisfiedAbsent,
     ClassifyBlockerUnsatisfiedOpen,
@@ -779,10 +803,6 @@ pub fn initial_state() -> State {
         phase: Phase::Absent,
         revision: 0,
         unresolved_blocker_count: 0,
-        topology_item_keys: Default::default(),
-        topology_edge_keys: Default::default(),
-        blocks_reachability: Default::default(),
-        parent_reachability: Default::default(),
         claim_owner_key: None,
         claimed_at_utc_ms: None,
         lease_expires_at_utc_ms: None,

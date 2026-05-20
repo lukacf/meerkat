@@ -9,10 +9,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Phase enum: `Absent | Open | InProgress | Blocked | Completed | Cancelled | Failed`
 - `revision`: `u64`
 - `unresolved_blocker_count`: `u64`
-- `topology_item_keys`: `Set<WorkItemKey>`
-- `topology_edge_keys`: `Set<WorkEdgeKey>`
-- `blocks_reachability`: `Set<WorkDependencyPathKey>`
-- `parent_reachability`: `Set<WorkDependencyPathKey>`
 - `claim_owner_key`: `Option<WorkOwnerKey>`
 - `claimed_at_utc_ms`: `Option<u64>`
 - `lease_expires_at_utc_ms`: `Option<u64>`
@@ -31,9 +27,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Release`(expected_revision: u64)
 - `Block`(expected_revision: u64)
 - `RefreshEligibility`(unresolved_blocker_count: u64)
+- `ClassifyReadiness`(now_utc_ms: u64)
 - `ClassifyBlockerSatisfaction`
 - `ClassifyTerminality`
-- `ValidateLink`(kind: WorkEdgeKind, from_item_key: WorkItemKey, to_item_key: WorkItemKey, edge_key: WorkEdgeKey, reverse_path_key: WorkDependencyPathKey)
+- `ValidateLink`(kind: WorkEdgeKind, from_item_key: WorkItemKey, to_item_key: WorkItemKey, edge_key: WorkEdgeKey, reverse_path_key: WorkDependencyPathKey, topology_item_keys: Set<WorkItemKey>, topology_edge_keys: Set<WorkEdgeKey>, blocks_reachability: Set<WorkDependencyPathKey>, parent_reachability: Set<WorkDependencyPathKey>)
 - `Close`(expected_revision: u64, at_utc_ms: u64, requested_status: Option<WorkLifecycleState>)
 - `CloseCompleted`(expected_revision: u64, at_utc_ms: u64)
 - `CloseCancelled`(expected_revision: u64, at_utc_ms: u64)
@@ -53,6 +50,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `BlockerUnsatisfied`
 - `LifecycleTerminal`
 - `LifecycleNonTerminal`
+- `WorkReady`
+- `WorkNotReady`
 - `LinkValidated`
 - `Closed`(terminal_state: WorkLifecycleState)
 - `EvidenceAdded`
@@ -61,7 +60,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Invariants
 - `absent_has_zero_revision`
 - `live_has_positive_revision`
-- `topology_snapshot_is_stateless`
 - `terminal_has_terminal_time`
 - `claim_only_in_progress`
 - `blocked_has_no_claim`
@@ -197,6 +195,77 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `Updated`
 - To: `Blocked`
 
+### `ClassifyReadinessOpenReady`
+- From: `Open`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Guards:
+  - `dependencies_satisfied`
+  - `due_eligible`
+  - `not_before_eligible`
+  - `snooze_eligible`
+- Emits: `WorkReady`
+- To: `Open`
+
+### `ClassifyReadinessExpiredInProgressReady`
+- From: `InProgress`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Guards:
+  - `prior_claim_present`
+  - `prior_claim_has_lease`
+  - `prior_claim_expired`
+  - `dependencies_satisfied`
+  - `due_eligible`
+  - `not_before_eligible`
+  - `snooze_eligible`
+- Emits: `WorkReady`
+- To: `InProgress`
+
+### `ClassifyReadinessAbsentNotReady`
+- From: `Absent`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Emits: `WorkNotReady`
+- To: `Absent`
+
+### `ClassifyReadinessOpenNotReady`
+- From: `Open`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Guards:
+  - `not_ready`
+- Emits: `WorkNotReady`
+- To: `Open`
+
+### `ClassifyReadinessInProgressNotReady`
+- From: `InProgress`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Guards:
+  - `not_ready`
+- Emits: `WorkNotReady`
+- To: `InProgress`
+
+### `ClassifyReadinessBlockedNotReady`
+- From: `Blocked`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Emits: `WorkNotReady`
+- To: `Blocked`
+
+### `ClassifyReadinessCompletedNotReady`
+- From: `Completed`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Emits: `WorkNotReady`
+- To: `Completed`
+
+### `ClassifyReadinessCancelledNotReady`
+- From: `Cancelled`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Emits: `WorkNotReady`
+- To: `Cancelled`
+
+### `ClassifyReadinessFailedNotReady`
+- From: `Failed`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Emits: `WorkNotReady`
+- To: `Failed`
+
 ### `ClassifyBlockerSatisfiedCompleted`
 - From: `Completed`
 - On: `ClassifyBlockerSatisfaction`()
@@ -283,7 +352,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ValidateLink`
 - From: `Absent`
-- On: `ValidateLink`(kind, from_item_key, to_item_key, edge_key, reverse_path_key)
+- On: `ValidateLink`(kind, from_item_key, to_item_key, edge_key, reverse_path_key, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability)
 - Guards:
   - `from_endpoint_exists`
   - `to_endpoint_exists`

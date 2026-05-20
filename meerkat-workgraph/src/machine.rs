@@ -109,6 +109,14 @@ struct WorkGraphTopologyBasis {
     edge_keys: BTreeSet<WorkGraphEdgeIdentity>,
 }
 
+#[derive(Debug, Clone)]
+struct WorkGraphTopologyObservation {
+    item_keys: BTreeSet<wg_dsl::WorkItemKey>,
+    edge_keys: BTreeSet<wg_dsl::WorkEdgeKey>,
+    blocks_reachability: BTreeSet<wg_dsl::WorkDependencyPathKey>,
+    parent_reachability: BTreeSet<wg_dsl::WorkDependencyPathKey>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct WorkGraphEdgeIdentity {
     kind: WorkEdgeKind,
@@ -407,25 +415,12 @@ impl WorkGraphMachine {
 
     pub fn is_ready(item: &WorkItem, now: DateTime<Utc>) -> Result<bool, WorkGraphError> {
         let now_utc_ms = datetime_to_millis(now, "now")?;
-        let owner_key = wg_dsl::WorkOwnerKey {
-            kind: wg_dsl::WorkOwnerKind::Label,
-            id: "__ready_probe__".to_string(),
-        };
-        apply_item_dsl(
+        let applied = apply_item_dsl(
             item,
-            wg_dsl::WorkGraphLifecycleInput::Claim {
-                expected_revision: item.revision,
-                owner_key,
-                now_utc_ms,
-                lease_expires_at_utc_ms: None,
-            },
-            Some(item.revision),
-        )
-        .map(|_| true)
-        .or_else(|error| match error {
-            WorkGraphError::InvalidTimestampMillis { .. } => Err(error),
-            _ => Ok(false),
-        })
+            wg_dsl::WorkGraphLifecycleInput::ClassifyReadiness { now_utc_ms },
+            None,
+        )?;
+        readiness_from_effects(&applied.effects)
     }
 
     pub(crate) fn blocker_satisfies_dependency(item: &WorkItem) -> Result<bool, WorkGraphError> {
@@ -464,17 +459,18 @@ impl WorkGraphMachine {
         existing_items: &[WorkItem],
         existing_edges: &[WorkEdge],
     ) -> Result<WorkGraphEventAuthority, WorkGraphError> {
-        let topology_state = topology_state(existing_items, existing_edges);
-        let effects = apply_link_validation_dsl(
-            topology_state,
-            wg_dsl::WorkGraphLifecycleInput::ValidateLink {
-                kind: dsl_edge_kind(edge.kind),
-                from_item_key: work_item_key(&edge.from_id),
-                to_item_key: work_item_key(&edge.to_id),
-                edge_key: work_edge_key(edge.kind, &edge.from_id, &edge.to_id),
-                reverse_path_key: dependency_path_key(edge.kind, &edge.to_id, &edge.from_id),
-            },
-        )?;
+        let topology = topology_observation(existing_items, existing_edges);
+        let effects = apply_link_validation_dsl(wg_dsl::WorkGraphLifecycleInput::ValidateLink {
+            kind: dsl_edge_kind(edge.kind),
+            from_item_key: work_item_key(&edge.from_id),
+            to_item_key: work_item_key(&edge.to_id),
+            edge_key: work_edge_key(edge.kind, &edge.from_id, &edge.to_id),
+            reverse_path_key: dependency_path_key(edge.kind, &edge.to_id, &edge.from_id),
+            topology_item_keys: topology.item_keys,
+            topology_edge_keys: topology.edge_keys,
+            blocks_reachability: topology.blocks_reachability,
+            parent_reachability: topology.parent_reachability,
+        })?;
         Ok(WorkGraphEventAuthority {
             kind: event_kind_from_effects(&effects)?,
             effects,
@@ -545,11 +541,9 @@ fn apply_new_item_dsl(
 }
 
 fn apply_link_validation_dsl(
-    state: WorkGraphMachineState,
     input: wg_dsl::WorkGraphLifecycleInput,
 ) -> Result<Vec<wg_dsl::WorkGraphLifecycleEffect>, WorkGraphError> {
-    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(state)
-        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
     let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     Ok(transition.into_effects())
@@ -736,22 +730,21 @@ fn work_owner_key(owner: &crate::types::WorkOwner) -> Result<wg_dsl::WorkOwnerKe
     })
 }
 
-fn topology_state(
+fn topology_observation(
     existing_items: &[WorkItem],
     existing_edges: &[WorkEdge],
-) -> WorkGraphMachineState {
-    WorkGraphMachineState {
-        topology_item_keys: existing_items
+) -> WorkGraphTopologyObservation {
+    WorkGraphTopologyObservation {
+        item_keys: existing_items
             .iter()
             .map(|item| work_item_key(&item.id))
             .collect(),
-        topology_edge_keys: existing_edges
+        edge_keys: existing_edges
             .iter()
             .map(|edge| work_edge_key(edge.kind, &edge.from_id, &edge.to_id))
             .collect(),
         blocks_reachability: dependency_reachability(existing_edges, WorkEdgeKind::Blocks),
         parent_reachability: dependency_reachability(existing_edges, WorkEdgeKind::Parent),
-        ..Default::default()
     }
 }
 
@@ -962,6 +955,8 @@ fn event_kind_from_effects(
             | wg_dsl::WorkGraphLifecycleEffect::BlockerUnsatisfied
             | wg_dsl::WorkGraphLifecycleEffect::LifecycleTerminal
             | wg_dsl::WorkGraphLifecycleEffect::LifecycleNonTerminal
+            | wg_dsl::WorkGraphLifecycleEffect::WorkReady
+            | wg_dsl::WorkGraphLifecycleEffect::WorkNotReady
             | wg_dsl::WorkGraphLifecycleEffect::PublicErrorClassified { .. } => None,
             wg_dsl::WorkGraphLifecycleEffect::LinkValidated => Some(WorkGraphEventKind::Linked),
             wg_dsl::WorkGraphLifecycleEffect::Closed { .. } => Some(WorkGraphEventKind::Closed),
@@ -995,6 +990,8 @@ fn effect_label(effect: &wg_dsl::WorkGraphLifecycleEffect) -> &'static str {
         wg_dsl::WorkGraphLifecycleEffect::BlockerUnsatisfied => "BlockerUnsatisfied",
         wg_dsl::WorkGraphLifecycleEffect::LifecycleTerminal => "LifecycleTerminal",
         wg_dsl::WorkGraphLifecycleEffect::LifecycleNonTerminal => "LifecycleNonTerminal",
+        wg_dsl::WorkGraphLifecycleEffect::WorkReady => "WorkReady",
+        wg_dsl::WorkGraphLifecycleEffect::WorkNotReady => "WorkNotReady",
         wg_dsl::WorkGraphLifecycleEffect::LinkValidated => "LinkValidated",
         wg_dsl::WorkGraphLifecycleEffect::Closed { .. } => "Closed",
         wg_dsl::WorkGraphLifecycleEffect::EvidenceAdded => "EvidenceAdded",
@@ -1046,6 +1043,28 @@ fn terminality_from_effects(
     terminal.ok_or_else(|| {
         WorkGraphError::InvalidTransition(
             "generated WorkGraphLifecycle transition produced no terminality effect".to_string(),
+        )
+    })
+}
+
+fn readiness_from_effects(
+    effects: &[wg_dsl::WorkGraphLifecycleEffect],
+) -> Result<bool, WorkGraphError> {
+    let mut ready = None;
+    for effect in effects {
+        match effect {
+            wg_dsl::WorkGraphLifecycleEffect::WorkReady => ready = Some(true),
+            wg_dsl::WorkGraphLifecycleEffect::WorkNotReady => ready = Some(false),
+            other => {
+                return Err(WorkGraphError::InvalidTransition(format!(
+                    "unexpected readiness effect: {other:?}"
+                )));
+            }
+        }
+    }
+    ready.ok_or_else(|| {
+        WorkGraphError::InvalidTransition(
+            "generated WorkGraphLifecycle transition produced no readiness effect".to_string(),
         )
     })
 }

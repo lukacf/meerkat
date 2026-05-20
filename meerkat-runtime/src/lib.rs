@@ -334,12 +334,8 @@ pub fn runtime_stamped_prompt_turn_metadata(
 
 #[allow(clippy::expect_used)]
 fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::RuntimeInputSemantics {
-    let mut authority = meerkat_machine::recover_projected_authority(
-        meerkat_machine::dsl::MeerkatMachineState {
-            lifecycle_phase: meerkat_machine::dsl::MeerkatPhase::Idle,
-            ..meerkat_machine::dsl::MeerkatMachineState::default()
-        },
-        "projected runtime prompt machine state must be recoverable",
+    let mut authority = meerkat_machine::dsl_authority::new_initialized_authority(
+        "generated runtime prompt machine authority must initialize",
     );
     let transition = meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut authority,
@@ -375,6 +371,19 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
             _ => None,
         })
         .expect("generated admission authority must emit prompt runtime semantics")
+}
+
+#[cfg(test)]
+mod runtime_prompt_metadata_tests {
+    #[test]
+    fn runtime_stamped_prompt_turn_metadata_uses_generated_prompt_semantics() {
+        let metadata = super::runtime_stamped_prompt_turn_metadata(None);
+        assert_eq!(
+            metadata.execution_kind,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        );
+        assert!(metadata.peer_response_terminal_apply_intent.is_none());
+    }
 }
 
 #[doc(hidden)]

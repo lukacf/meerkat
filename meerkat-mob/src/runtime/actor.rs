@@ -137,6 +137,24 @@ struct BatchInstalledTrust {
     peer_identity: AgentIdentity,
 }
 
+struct RetireTrustCleanupPlan {
+    machine_wired_peer_identities: BTreeSet<AgentIdentity>,
+    trust_unwire_authority_by_peer: BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
+}
+
+impl RetireTrustCleanupPlan {
+    fn empty() -> Self {
+        Self {
+            machine_wired_peer_identities: BTreeSet::new(),
+            trust_unwire_authority_by_peer: BTreeMap::new(),
+        }
+    }
+
+    fn has_peers(&self) -> bool {
+        !self.machine_wired_peer_identities.is_empty()
+    }
+}
+
 #[derive(Debug, Clone)]
 enum WireTrustAuthority {
     GraphAdded(MemberTrustHandoff),
@@ -2976,6 +2994,7 @@ impl MobActor {
             }
             let snapshot = material.to_snapshot();
             let current_bridge_session_id = snapshot.current_bridge_session_id().cloned();
+            let wired_to = self.machine_wired_peer_identities_for(&entry.agent_identity);
             projected.push(
                 MobMemberListEntry {
                     agent_identity: entry.agent_identity,
@@ -2986,7 +3005,7 @@ impl MobActor {
                     peer_id: entry.peer_id,
                     transport_public_key: entry.transport_public_key,
                     state,
-                    wired_to: entry.wired_to,
+                    wired_to,
                     external_peer_specs: entry.external_peer_specs,
                     labels: entry.labels,
                     status: snapshot.status,
@@ -9760,8 +9779,8 @@ impl MobActor {
         let retire_event_already_present = self
             .retire_event_exists(agent_identity, &entry.member_ref)
             .await?;
-        let trust_unwire_authority_by_peer = self
-            .member_retire_trust_unwire_authorities(agent_identity, &entry)
+        let trust_cleanup_plan = self
+            .member_retire_trust_cleanup_plan(agent_identity, &entry)
             .await?;
 
         let prepared_retire =
@@ -9817,7 +9836,7 @@ impl MobActor {
 
         // Snapshot context and run disposal pipeline.
         let ctx = self
-            .disposal_context_from_entry(agent_identity, &entry, trust_unwire_authority_by_peer)
+            .disposal_context_from_entry(agent_identity, &entry, trust_cleanup_plan)
             .await;
         let mut policy: Box<dyn ErrorPolicy> = if bulk {
             Box::new(BulkBestEffort)
@@ -9844,6 +9863,9 @@ impl MobActor {
             return Err(MobError::Internal(format!(
                 "disposal aborted at ArchiveSession: {error}"
             )));
+        }
+        if Self::disposal_step_succeeded(&report, DisposalStep::NotifyPeers) {
+            self.cleanup_retired_member_machine_wiring(&ctx)?;
         }
 
         self.delete_external_binding_overlay_for_member(&entry.agent_identity, entry.generation)
@@ -10337,13 +10359,37 @@ impl MobActor {
     // Disposal pipeline
     // -----------------------------------------------------------------------
 
-    async fn member_retire_trust_unwire_authorities(
+    fn machine_wired_peer_identities_for(
+        &self,
+        identity: &AgentIdentity,
+    ) -> BTreeSet<AgentIdentity> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        self.dsl_authority
+            .state()
+            .wiring_edges
+            .iter()
+            .filter_map(|edge| {
+                if edge.a == dsl_identity {
+                    Some(AgentIdentity::from(edge.b.0.as_str()))
+                } else if edge.b == dsl_identity {
+                    Some(AgentIdentity::from(edge.a.0.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    async fn member_retire_trust_cleanup_plan(
         &mut self,
         agent_identity: &MeerkatId,
         entry: &RosterEntry,
-    ) -> Result<BTreeMap<AgentIdentity, CommsTrustMutationAuthority>, MobError> {
-        if entry.wired_to.is_empty() {
-            return Ok(BTreeMap::new());
+    ) -> Result<RetireTrustCleanupPlan, MobError> {
+        let retiring_identity = AgentIdentity::from(agent_identity.as_str());
+        let machine_wired_peer_identities =
+            self.machine_wired_peer_identities_for(&retiring_identity);
+        if machine_wired_peer_identities.is_empty() {
+            return Ok(RetireTrustCleanupPlan::empty());
         }
         let retiring_spec = match self
             .resolve_wiring_endpoint(entry, "retire trust authority retiring member")
@@ -10353,8 +10399,7 @@ impl MobActor {
         };
         let retiring_peer_id = Self::trusted_peer_removal_key(&retiring_spec);
         let mut authorities = BTreeMap::new();
-        let retiring_identity = AgentIdentity::from(agent_identity.as_str());
-        for peer_identity in &entry.wired_to {
+        for peer_identity in &machine_wired_peer_identities {
             let peer_present = {
                 let roster = self.roster.read().await;
                 roster.get_by_identity(peer_identity).is_some()
@@ -10372,7 +10417,10 @@ impl MobActor {
                 handoff.unwiring_authority_for(&retiring_identity, &retiring_peer_id)?;
             authorities.insert(peer_identity.clone(), authority);
         }
-        Ok(authorities)
+        Ok(RetireTrustCleanupPlan {
+            machine_wired_peer_identities,
+            trust_unwire_authority_by_peer: authorities,
+        })
     }
 
     /// Snapshot member state for disposal from a roster entry.
@@ -10380,7 +10428,7 @@ impl MobActor {
         &self,
         agent_identity: &MeerkatId,
         entry: &RosterEntry,
-        trust_unwire_authority_by_peer: BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
+        trust_cleanup_plan: RetireTrustCleanupPlan,
     ) -> DisposalContext {
         let retiring_key = self
             .provisioner_comms(&entry.member_ref)
@@ -10390,7 +10438,8 @@ impl MobActor {
             agent_identity: agent_identity.clone(),
             entry: entry.clone(),
             retiring_key,
-            trust_unwire_authority_by_peer,
+            machine_wired_peer_identities: trust_cleanup_plan.machine_wired_peer_identities,
+            trust_unwire_authority_by_peer: trust_cleanup_plan.trust_unwire_authority_by_peer,
         }
     }
 
@@ -10478,6 +10527,36 @@ impl MobActor {
             .map(|(step, error)| format!("disposal completed but {step} failed: {error}"))
     }
 
+    fn disposal_step_succeeded(report: &DisposalReport, step: DisposalStep) -> bool {
+        report.completed.contains(&step)
+            && !matches!(report.aborted_at.as_ref(), Some((aborted, _)) if *aborted == step)
+            && !report.skipped.iter().any(|(skipped, _)| *skipped == step)
+    }
+
+    fn cleanup_retired_member_machine_wiring(
+        &mut self,
+        ctx: &DisposalContext,
+    ) -> Result<(), MobError> {
+        if ctx.machine_wired_peer_identities.is_empty() {
+            return Ok(());
+        }
+        let retiring_identity = mob_dsl::AgentIdentity::from_domain(&ctx.entry.agent_identity);
+        let cleanup_inputs = ctx
+            .machine_wired_peer_identities
+            .iter()
+            .map(|peer_identity| mob_dsl::MobMachineInput::UnwireMembers {
+                edge: mob_dsl::WiringEdge::new(
+                    retiring_identity.clone(),
+                    mob_dsl::AgentIdentity::from_domain(peer_identity),
+                ),
+            })
+            .collect::<Vec<_>>();
+        let prepared =
+            self.prepare_dsl_inputs(&cleanup_inputs, "member_retire_machine_wiring_cleanup")?;
+        self.commit_prepared_dsl_input(prepared);
+        Ok(())
+    }
+
     /// Dispatch a disposal step. Exhaustive match ensures compiler forces new
     /// arms when `DisposalStep` variants are added.
     async fn execute_step(
@@ -10523,9 +10602,9 @@ impl MobActor {
         self.dispose_stop_host_loop(ctx).await
     }
 
-    /// Notify all wired peers that this member is retiring.
+    /// Notify all machine-wired peers that this member is retiring.
     ///
-    /// Iterates the full `wired_to` set internally; skips absent peers.
+    /// Iterates the MobMachine-owned wiring snapshot; skips absent peers.
     /// Returns the first error encountered, if any.
     async fn dispose_notify_peers(&self, ctx: &DisposalContext) -> Result<(), MobError> {
         let Some(retiring_comms) = self.sender_runtime_for_entry(&ctx.entry).await else {
@@ -10537,7 +10616,11 @@ impl MobActor {
         {
             WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
         };
-        let peer_identities = ctx.entry.wired_to.iter().cloned().collect::<Vec<_>>();
+        let peer_identities = ctx
+            .machine_wired_peer_identities
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         let errors = futures::stream::iter(peer_identities)
             .map(|peer_identity| {
                 let retiring_comms = retiring_comms.clone();
@@ -11023,7 +11106,7 @@ impl MobActor {
     async fn destroy_remote_member_for_destroy(
         &mut self,
         entry: RosterEntry,
-        trust_unwire_authority_by_peer: BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
+        trust_cleanup_plan: RetireTrustCleanupPlan,
     ) -> RemoteDestroyOutcome {
         let identity = entry.agent_identity.clone();
         let agent_identity = entry.agent_identity.clone();
@@ -11042,7 +11125,7 @@ impl MobActor {
         };
 
         let ctx = self
-            .disposal_context_from_entry(&agent_identity, &entry, trust_unwire_authority_by_peer)
+            .disposal_context_from_entry(&agent_identity, &entry, trust_cleanup_plan)
             .await;
         let disposal = self.dispose_member_for_destroy(&ctx).await;
 
@@ -11134,10 +11217,7 @@ impl MobActor {
     async fn destroy_remote_members_for_destroy(
         &mut self,
         remote_entries: Vec<RosterEntry>,
-        trust_unwire_authority_by_member: &mut BTreeMap<
-            MeerkatId,
-            BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
-        >,
+        trust_unwire_authority_by_member: &mut BTreeMap<MeerkatId, RetireTrustCleanupPlan>,
         report: &mut super::handle::MobDestroyReport,
     ) {
         if remote_entries.is_empty() {
@@ -11155,12 +11235,12 @@ impl MobActor {
 
         while let Some(entry) = remaining.pop_front() {
             let identity = entry.agent_identity.clone();
-            let trust_unwire_authority_by_peer = trust_unwire_authority_by_member
+            let trust_cleanup_plan = trust_unwire_authority_by_member
                 .remove(&identity)
-                .unwrap_or_default();
+                .unwrap_or_else(RetireTrustCleanupPlan::empty);
             let next = tokio::time::timeout_at(
                 deadline_at,
-                self.destroy_remote_member_for_destroy(entry, trust_unwire_authority_by_peer),
+                self.destroy_remote_member_for_destroy(entry, trust_cleanup_plan),
             )
             .await;
             let outcome = match next {
@@ -11200,10 +11280,7 @@ impl MobActor {
     async fn destroy_remote_members_for_destroy(
         &self,
         remote_entries: Vec<RosterEntry>,
-        _trust_unwire_authority_by_member: &mut BTreeMap<
-            MeerkatId,
-            BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
-        >,
+        _trust_unwire_authority_by_member: &mut BTreeMap<MeerkatId, RetireTrustCleanupPlan>,
         report: &mut super::handle::MobDestroyReport,
     ) {
         for entry in remote_entries {
@@ -11217,15 +11294,11 @@ impl MobActor {
     async fn dispose_local_member_after_destroy_admission(
         &mut self,
         entry: RosterEntry,
-        trust_unwire_authority_by_peer: BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
+        trust_cleanup_plan: RetireTrustCleanupPlan,
         report: &mut super::handle::MobDestroyReport,
     ) -> Result<(), super::handle::MobDestroyError> {
         let ctx = self
-            .disposal_context_from_entry(
-                &entry.agent_identity,
-                &entry,
-                trust_unwire_authority_by_peer,
-            )
+            .disposal_context_from_entry(&entry.agent_identity, &entry, trust_cleanup_plan)
             .await;
         let disposal_report = self.dispose_member_for_destroy(&ctx).await;
         if let Some(error) = Self::destroy_disposal_failure(&disposal_report) {
@@ -11304,17 +11377,15 @@ impl MobActor {
             let roster = self.roster.read().await;
             roster.list_all().cloned().collect::<Vec<_>>()
         };
-        let mut trust_unwire_authority_by_member: BTreeMap<
-            MeerkatId,
-            BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
-        > = BTreeMap::new();
+        let mut trust_cleanup_plan_by_member: BTreeMap<MeerkatId, RetireTrustCleanupPlan> =
+            BTreeMap::new();
         if destroy_input_needed {
             for entry in &entries {
-                let authorities = match self
-                    .member_retire_trust_unwire_authorities(&entry.agent_identity, entry)
+                let plan = match self
+                    .member_retire_trust_cleanup_plan(&entry.agent_identity, entry)
                     .await
                 {
-                    Ok(authorities) => authorities,
+                    Ok(plan) => plan,
                     Err(error) => {
                         report.push_error(format!(
                             "{}: destroy retire trust authority failed: {error}",
@@ -11323,9 +11394,8 @@ impl MobActor {
                         return Err(MobDestroyError::Incomplete { report });
                     }
                 };
-                if !authorities.is_empty() {
-                    trust_unwire_authority_by_member
-                        .insert(entry.agent_identity.clone(), authorities);
+                if plan.has_peers() {
+                    trust_cleanup_plan_by_member.insert(entry.agent_identity.clone(), plan);
                 }
             }
         }
@@ -11407,15 +11477,15 @@ impl MobActor {
             .partition(|entry| Self::runtime_binding_for_entry(entry).is_some());
 
         for entry in local_entries {
-            let authorities = trust_unwire_authority_by_member
+            let plan = trust_cleanup_plan_by_member
                 .remove(&entry.agent_identity)
-                .unwrap_or_default();
-            self.dispose_local_member_after_destroy_admission(entry, authorities, &mut report)
+                .unwrap_or_else(RetireTrustCleanupPlan::empty);
+            self.dispose_local_member_after_destroy_admission(entry, plan, &mut report)
                 .await?;
         }
         self.destroy_remote_members_for_destroy(
             remote_entries,
-            &mut trust_unwire_authority_by_member,
+            &mut trust_cleanup_plan_by_member,
             &mut report,
         )
         .await;
@@ -14405,6 +14475,7 @@ impl MobActor {
                 }
             }),
             retiring_key: spawned_comms.as_ref().and_then(|c| c.public_key()),
+            machine_wired_peer_identities: BTreeSet::new(),
             trust_unwire_authority_by_peer: BTreeMap::new(),
         };
         if let Err(error) = self.dispose_archive_session(&rollback_ctx).await {

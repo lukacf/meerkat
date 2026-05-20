@@ -10680,7 +10680,9 @@ async fn test_respawn_repairs_local_machine_edge_without_roster_projection() {
         crate::machines::mob_machine::AgentIdentity::from(right.as_str()),
     );
     handle
-        .project_machine_input(crate::machines::mob_machine::MobMachineInput::WireMembers { edge })
+        .project_machine_input(crate::machines::mob_machine::MobMachineInput::WireMembers {
+            edge: edge.clone(),
+        })
         .await
         .expect("seed machine-owned edge without roster projection");
     let left_before = handle
@@ -10688,10 +10690,10 @@ async fn test_respawn_repairs_local_machine_edge_without_roster_projection() {
         .await
         .expect("left before respawn");
     assert!(
-        !left_before
+        left_before
             .wired_to
             .contains(&AgentIdentity::from(right.as_str())),
-        "test setup must leave roster projection empty so MobMachine is the only topology source"
+        "public member projection must read machine-owned topology"
     );
 
     handle
@@ -10711,16 +10713,16 @@ async fn test_respawn_repairs_local_machine_edge_without_roster_projection() {
         .await
         .expect("right after respawn");
     assert!(
-        !left_after
+        left_after
             .wired_to
             .contains(&AgentIdentity::from(right.as_str())),
-        "respawn trust repair must not synthesize left roster projection"
+        "respawn trust repair must preserve machine-owned left projection"
     );
     assert!(
-        !right_after
+        right_after
             .wired_to
             .contains(&AgentIdentity::from(left.as_str())),
-        "respawn trust repair must not synthesize right roster projection"
+        "respawn trust repair must preserve machine-owned right projection"
     );
 }
 
@@ -16472,16 +16474,16 @@ async fn test_rewire_local_machine_edge_without_roster_projection_repairs_trust_
         .await
         .expect("right member");
     assert!(
-        !left_entry
+        left_entry
             .wired_to
             .contains(&AgentIdentity::from(right.as_str())),
-        "trust repair must not synthesize left roster projection"
+        "trust repair must expose machine-owned left projection"
     );
     assert!(
-        !right_entry
+        right_entry
             .wired_to
             .contains(&AgentIdentity::from(left.as_str())),
-        "trust repair must not synthesize right roster projection"
+        "trust repair must expose machine-owned right projection"
     );
 
     let events = handle.events().replay_all().await.expect("replay");
@@ -16490,6 +16492,86 @@ async fn test_rewire_local_machine_edge_without_roster_projection_repairs_trust_
             .iter()
             .any(|event| matches!(event.kind, MobEventKind::MembersWired { .. })),
         "trust repair must not append MembersWired without a generated graph-change effect"
+    );
+}
+
+#[tokio::test]
+async fn test_retire_cleans_machine_edge_without_roster_projection() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let lead = MeerkatId::from("retire-machine-lead");
+    let worker = MeerkatId::from("retire-machine-worker");
+    let lead_sid = handle
+        .spawn(ProfileName::from("lead"), lead.clone(), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed lead")
+        .clone();
+    let worker_sid = handle
+        .spawn(ProfileName::from("worker"), worker.clone(), None)
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .expect("session-backed worker")
+        .clone();
+
+    let edge = crate::machines::mob_machine::WiringEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from(lead.as_str()),
+        crate::machines::mob_machine::AgentIdentity::from(worker.as_str()),
+    );
+    handle
+        .project_machine_input(crate::machines::mob_machine::MobMachineInput::WireMembers {
+            edge: edge.clone(),
+        })
+        .await
+        .expect("seed machine-owned edge without roster projection");
+    handle
+        .wire(
+            AgentIdentity::from(lead.as_str()),
+            PeerTarget::Local(AgentIdentity::from(worker.as_str())),
+        )
+        .await
+        .expect("machine-edge rewire should repair trust only");
+
+    let events_before_retire = handle.events().replay_all().await.expect("replay");
+    assert!(
+        !events_before_retire
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MembersWired { .. })),
+        "test setup must not create a roster wiring event"
+    );
+    assert!(
+        service
+            .trusted_peer_names(&lead_sid)
+            .await
+            .contains(&test_comms_name("worker", worker.as_str())),
+        "setup should install worker trust on lead"
+    );
+    assert!(
+        service
+            .trusted_peer_names(&worker_sid)
+            .await
+            .contains(&test_comms_name("lead", lead.as_str())),
+        "setup should install lead trust on worker"
+    );
+
+    handle
+        .retire(AgentIdentity::from(worker.as_str()))
+        .await
+        .expect("retire worker");
+
+    let lead_trust_after_retire = service.trusted_peer_names(&lead_sid).await;
+    assert!(
+        !lead_trust_after_retire.contains(&test_comms_name("worker", worker.as_str())),
+        "retire cleanup must derive peer trust removal from MobMachine wiring, not roster projection"
+    );
+    let dsl = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("dsl snapshot after retire");
+    assert!(
+        !dsl.wiring_edges.contains(&edge),
+        "retire must remove the machine-owned edge"
     );
 }
 

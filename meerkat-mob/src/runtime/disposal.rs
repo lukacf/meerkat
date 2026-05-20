@@ -8,7 +8,7 @@ use crate::error::MobError;
 use crate::ids::MeerkatId;
 use crate::roster::RosterEntry;
 use meerkat_core::comms::CommsTrustMutationAuthority;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
 // DisposalStep
@@ -57,6 +57,7 @@ pub(super) struct DisposalContext {
     pub(crate) agent_identity: MeerkatId,
     pub entry: RosterEntry,
     pub retiring_key: Option<String>,
+    pub machine_wired_peer_identities: BTreeSet<crate::ids::AgentIdentity>,
     pub trust_unwire_authority_by_peer:
         BTreeMap<crate::ids::AgentIdentity, CommsTrustMutationAuthority>,
 }
@@ -214,6 +215,7 @@ mod tests {
                 effective_profile_override: None,
             },
             retiring_key: None,
+            machine_wired_peer_identities: BTreeSet::new(),
             trust_unwire_authority_by_peer: BTreeMap::new(),
         }
     }

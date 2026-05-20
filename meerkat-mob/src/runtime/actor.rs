@@ -8441,8 +8441,6 @@ impl MobActor {
             .wiring_edges
             .iter()
             .any(|existing| existing == &edge);
-        let roster_has_edge = local_entry.wired_to.contains(&peer_entry.agent_identity)
-            || peer_entry.wired_to.contains(&local_entry.agent_identity);
 
         // Resolve endpoints. Failing here leaves the DSL + roster
         // untouched — matches the zero-side-effect expectations.
@@ -8583,7 +8581,7 @@ impl MobActor {
                 .await
                 .iter()
                 .any(|peer| peer.peer_id.to_string() == local_peer_id);
-            if local_has_stale_trust || peer_has_stale_trust || roster_has_edge {
+            if local_has_stale_trust || peer_has_stale_trust {
                 return Err(MobError::WiringError(format!(
                     "unwire for '{local}' <-> '{peer_identity}' requires MobMachine wiring authority"
                 )));
@@ -14789,12 +14787,13 @@ impl MobActor {
         intent: &'static str,
     ) -> Result<(), MobError> {
         let (entry, wired_peers) = {
+            let machine_peer_identities = self
+                .machine_wired_peer_identities_for(&AgentIdentity::from(agent_identity.as_str()));
             let roster = self.roster.read().await;
             let Some(entry) = roster.get(agent_identity).cloned() else {
                 return Ok(());
             };
-            let wired_peers: Vec<MeerkatId> = entry
-                .wired_to
+            let wired_peers: Vec<MeerkatId> = machine_peer_identities
                 .iter()
                 .filter_map(|id| roster.get_by_identity(id).map(|e| e.agent_identity.clone()))
                 .collect();

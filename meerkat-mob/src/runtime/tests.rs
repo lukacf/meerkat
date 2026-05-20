@@ -16485,6 +16485,17 @@ async fn test_rewire_local_machine_edge_without_roster_projection_repairs_trust_
             .contains(&AgentIdentity::from(left.as_str())),
         "trust repair must expose machine-owned right projection"
     );
+    let status = handle
+        .member_status(&AgentIdentity::from(left.as_str()))
+        .await
+        .expect("left member status");
+    let connectivity = status
+        .peer_connectivity
+        .expect("left member should have live peer connectivity");
+    assert_eq!(
+        connectivity.unknown_peer_count, 1,
+        "peer connectivity projection must count machine-owned wiring"
+    );
 
     let events = handle.events().replay_all().await.expect("replay");
     assert!(

@@ -2225,12 +2225,8 @@ impl MobBuilder {
                 );
                 return Ok(());
             }
-            let active_count = roster.len();
-            let wired_edges = roster
-                .list()
-                .map(|entry| entry.wired_to.len())
-                .sum::<usize>()
-                / 2;
+            let active_count = dsl_authority.state().identity_to_runtime.len();
+            let wired_edges = dsl_authority.state().wiring_edges.len();
             let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(
                 &orchestrator_entry.agent_identity,
             );

@@ -1901,7 +1901,9 @@ impl MobHandle {
             .await?;
 
         let reachable_peer_count = 0usize;
-        let unknown_peer_count = entry.wired_to.len();
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let unknown_peer_count =
+            Self::machine_wired_to_for_identity(&entry.agent_identity, &machine_state).len();
         let unreachable_peers = Vec::new();
 
         Some(MobPeerConnectivitySnapshot {

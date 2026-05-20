@@ -337,6 +337,9 @@ pub enum Phase {
 pub struct State {
     pub phase: Phase,
     pub revision: u64,
+    pub item_key: Option<WorkItemKey>,
+    pub external_ref_tokens: Vec<String>,
+    pub evidence_ref_tokens: Vec<String>,
     pub unresolved_blocker_count: u64,
     pub claim_owner_key: Option<WorkOwnerKey>,
     pub claimed_at_utc_ms: Option<u64>,
@@ -358,6 +361,10 @@ pub mod inputs {
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Create {
+        pub item_key: WorkItemKey,
+        pub external_ref_tokens: Vec<String>,
+        pub evidence_ref_tokens: Vec<String>,
+        pub evidence_ref_count: u64,
         pub due_at_utc_ms: Option<u64>,
         pub not_before_utc_ms: Option<u64>,
         pub snoozed_until_utc_ms: Option<u64>,
@@ -366,6 +373,10 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CreateOpen {
+        pub item_key: WorkItemKey,
+        pub external_ref_tokens: Vec<String>,
+        pub evidence_ref_tokens: Vec<String>,
+        pub evidence_ref_count: u64,
         pub due_at_utc_ms: Option<u64>,
         pub not_before_utc_ms: Option<u64>,
         pub snoozed_until_utc_ms: Option<u64>,
@@ -373,6 +384,10 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CreateBlocked {
+        pub item_key: WorkItemKey,
+        pub external_ref_tokens: Vec<String>,
+        pub evidence_ref_tokens: Vec<String>,
+        pub evidence_ref_count: u64,
         pub due_at_utc_ms: Option<u64>,
         pub not_before_utc_ms: Option<u64>,
         pub snoozed_until_utc_ms: Option<u64>,
@@ -381,6 +396,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Update {
         pub expected_revision: u64,
+        pub external_ref_tokens: Vec<String>,
         pub due_at_utc_ms: Option<u64>,
         pub not_before_utc_ms: Option<u64>,
         pub snoozed_until_utc_ms: Option<u64>,
@@ -449,6 +465,8 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AddEvidence {
         pub expected_revision: u64,
+        pub evidence_ref_tokens: Vec<String>,
+        pub evidence_ref_count: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyPublicError {
@@ -749,6 +767,9 @@ pub fn initial_state() -> State {
     State {
         phase: Phase::Absent,
         revision: 0,
+        item_key: None,
+        external_ref_tokens: vec![],
+        evidence_ref_tokens: vec![],
         unresolved_blocker_count: 0,
         claim_owner_key: None,
         claimed_at_utc_ms: None,

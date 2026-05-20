@@ -8,6 +8,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## State
 - Phase enum: `Absent | Open | InProgress | Blocked | Completed | Cancelled | Failed`
 - `revision`: `u64`
+- `item_key`: `Option<WorkItemKey>`
+- `external_ref_tokens`: `Seq<String>`
+- `evidence_ref_tokens`: `Seq<String>`
 - `unresolved_blocker_count`: `u64`
 - `claim_owner_key`: `Option<WorkOwnerKey>`
 - `claimed_at_utc_ms`: `Option<u64>`
@@ -19,10 +22,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `evidence_count`: `u64`
 
 ## Inputs
-- `Create`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64, requested_status: Option<WorkLifecycleState>)
-- `CreateOpen`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
-- `CreateBlocked`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
-- `Update`(expected_revision: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
+- `Create`(item_key: WorkItemKey, external_ref_tokens: Seq<String>, evidence_ref_tokens: Seq<String>, evidence_ref_count: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64, requested_status: Option<WorkLifecycleState>)
+- `CreateOpen`(item_key: WorkItemKey, external_ref_tokens: Seq<String>, evidence_ref_tokens: Seq<String>, evidence_ref_count: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
+- `CreateBlocked`(item_key: WorkItemKey, external_ref_tokens: Seq<String>, evidence_ref_tokens: Seq<String>, evidence_ref_count: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
+- `Update`(expected_revision: u64, external_ref_tokens: Seq<String>, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
 - `Claim`(expected_revision: u64, owner_key: WorkOwnerKey, now_utc_ms: u64, lease_expires_at_utc_ms: Option<u64>)
 - `Release`(expected_revision: u64)
 - `Block`(expected_revision: u64)
@@ -35,7 +38,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CloseCompleted`(expected_revision: u64, at_utc_ms: u64)
 - `CloseCancelled`(expected_revision: u64, at_utc_ms: u64)
 - `CloseFailed`(expected_revision: u64, at_utc_ms: u64)
-- `AddEvidence`(expected_revision: u64)
+- `AddEvidence`(expected_revision: u64, evidence_ref_tokens: Seq<String>, evidence_ref_count: u64)
 - `ClassifyPublicError`(error_kind: WorkGraphErrorKind)
 
 ## Signals
@@ -57,9 +60,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EvidenceAdded`
 - `PublicErrorClassified`(public_class: WorkGraphPublicErrorClass)
 
+## Helpers
+- `workgraph_item_key_present`(item_key: WorkItemKey) -> `Bool`
+
 ## Invariants
 - `absent_has_zero_revision`
 - `live_has_positive_revision`
+- `absent_has_no_item_projection`
+- `live_has_item_key`
 - `terminal_has_terminal_time`
 - `claim_only_in_progress`
 - `blocked_has_no_claim`
@@ -68,35 +76,41 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Transitions
 ### `CreateDefaultOrOpen`
 - From: `Absent`
-- On: `Create`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status)
+- On: `Create`(item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status)
 - Guards:
   - `default_or_open`
+  - `item_key_present`
 - Emits: `Created`
 - To: `Open`
 
 ### `CreateRequestedBlocked`
 - From: `Absent`
-- On: `Create`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status)
+- On: `Create`(item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status)
 - Guards:
   - `requested_blocked`
+  - `item_key_present`
 - Emits: `Created`
 - To: `Blocked`
 
 ### `CreateOpen`
 - From: `Absent`
-- On: `CreateOpen`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `CreateOpen`(item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- Guards:
+  - `item_key_present`
 - Emits: `Created`
 - To: `Open`
 
 ### `CreateBlocked`
 - From: `Absent`
-- On: `CreateBlocked`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `CreateBlocked`(item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- Guards:
+  - `item_key_present`
 - Emits: `Created`
 - To: `Blocked`
 
 ### `UpdateOpen`
 - From: `Open`
-- On: `Update`(expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `Update`(expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
 - Guards:
   - ``
 - Emits: `Updated`
@@ -104,7 +118,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `UpdateInProgress`
 - From: `InProgress`
-- On: `Update`(expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `Update`(expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
 - Guards:
   - ``
 - Emits: `Updated`
@@ -112,7 +126,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `UpdateBlocked`
 - From: `Blocked`
-- On: `Update`(expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `Update`(expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
 - Guards:
   - ``
 - Emits: `Updated`
@@ -518,49 +532,61 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AddEvidenceOpen`
 - From: `Open`
-- On: `AddEvidence`(expected_revision)
+- On: `AddEvidence`(expected_revision, evidence_ref_tokens, evidence_ref_count)
 - Guards:
   - ``
+  - `evidence_refs_preserve_existing`
+  - `evidence_count_advances_one`
 - Emits: `EvidenceAdded`
 - To: `Open`
 
 ### `AddEvidenceInProgress`
 - From: `InProgress`
-- On: `AddEvidence`(expected_revision)
+- On: `AddEvidence`(expected_revision, evidence_ref_tokens, evidence_ref_count)
 - Guards:
   - ``
+  - `evidence_refs_preserve_existing`
+  - `evidence_count_advances_one`
 - Emits: `EvidenceAdded`
 - To: `InProgress`
 
 ### `AddEvidenceBlocked`
 - From: `Blocked`
-- On: `AddEvidence`(expected_revision)
+- On: `AddEvidence`(expected_revision, evidence_ref_tokens, evidence_ref_count)
 - Guards:
   - ``
+  - `evidence_refs_preserve_existing`
+  - `evidence_count_advances_one`
 - Emits: `EvidenceAdded`
 - To: `Blocked`
 
 ### `AddEvidenceCompleted`
 - From: `Completed`
-- On: `AddEvidence`(expected_revision)
+- On: `AddEvidence`(expected_revision, evidence_ref_tokens, evidence_ref_count)
 - Guards:
   - ``
+  - `evidence_refs_preserve_existing`
+  - `evidence_count_advances_one`
 - Emits: `EvidenceAdded`
 - To: `Completed`
 
 ### `AddEvidenceCancelled`
 - From: `Cancelled`
-- On: `AddEvidence`(expected_revision)
+- On: `AddEvidence`(expected_revision, evidence_ref_tokens, evidence_ref_count)
 - Guards:
   - ``
+  - `evidence_refs_preserve_existing`
+  - `evidence_count_advances_one`
 - Emits: `EvidenceAdded`
 - To: `Cancelled`
 
 ### `AddEvidenceFailed`
 - From: `Failed`
-- On: `AddEvidence`(expected_revision)
+- On: `AddEvidence`(expected_revision, evidence_ref_tokens, evidence_ref_count)
 - Guards:
   - ``
+  - `evidence_refs_preserve_existing`
+  - `evidence_count_advances_one`
 - Emits: `EvidenceAdded`
 - To: `Failed`
 

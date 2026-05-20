@@ -15,6 +15,12 @@ use meerkat_machine_dsl::machine;
 )]
 pub struct WorkItemKey(pub String);
 
+impl WorkItemKey {
+    fn len(&self) -> u64 {
+        self.0.len() as u64
+    }
+}
+
 impl<T: Into<String>> From<T> for WorkItemKey {
     fn from(value: T) -> Self {
         Self(value.into())
@@ -178,6 +184,9 @@ machine! {
         state {
             lifecycle_phase: WorkLifecycleState,
             revision: u64,
+            item_key: Option<WorkItemKey>,
+            external_ref_tokens: Seq<String>,
+            evidence_ref_tokens: Seq<String>,
             unresolved_blocker_count: u64,
             claim_owner_key: Option<WorkOwnerKey>,
             claimed_at_utc_ms: Option<u64>,
@@ -191,6 +200,9 @@ machine! {
 
         init(Absent) {
             revision = 0,
+            item_key = None,
+            external_ref_tokens = EmptySeq,
+            evidence_ref_tokens = EmptySeq,
             unresolved_blocker_count = 0,
             claim_owner_key = None,
             claimed_at_utc_ms = None,
@@ -216,6 +228,10 @@ machine! {
 
         input WorkGraphLifecycleInput {
             Create {
+                item_key: WorkItemKey,
+                external_ref_tokens: Seq<String>,
+                evidence_ref_tokens: Seq<String>,
+                evidence_ref_count: u64,
                 due_at_utc_ms: Option<u64>,
                 not_before_utc_ms: Option<u64>,
                 snoozed_until_utc_ms: Option<u64>,
@@ -223,12 +239,20 @@ machine! {
                 requested_status: Option<Enum<WorkLifecycleState>>,
             },
             CreateOpen {
+                item_key: WorkItemKey,
+                external_ref_tokens: Seq<String>,
+                evidence_ref_tokens: Seq<String>,
+                evidence_ref_count: u64,
                 due_at_utc_ms: Option<u64>,
                 not_before_utc_ms: Option<u64>,
                 snoozed_until_utc_ms: Option<u64>,
                 unresolved_blocker_count: u64,
             },
             CreateBlocked {
+                item_key: WorkItemKey,
+                external_ref_tokens: Seq<String>,
+                evidence_ref_tokens: Seq<String>,
+                evidence_ref_count: u64,
                 due_at_utc_ms: Option<u64>,
                 not_before_utc_ms: Option<u64>,
                 snoozed_until_utc_ms: Option<u64>,
@@ -236,6 +260,7 @@ machine! {
             },
             Update {
                 expected_revision: u64,
+                external_ref_tokens: Seq<String>,
                 due_at_utc_ms: Option<u64>,
                 not_before_utc_ms: Option<u64>,
                 snoozed_until_utc_ms: Option<u64>,
@@ -268,7 +293,7 @@ machine! {
             CloseCompleted { expected_revision: u64, at_utc_ms: u64 },
             CloseCancelled { expected_revision: u64, at_utc_ms: u64 },
             CloseFailed { expected_revision: u64, at_utc_ms: u64 },
-            AddEvidence { expected_revision: u64 },
+            AddEvidence { expected_revision: u64, evidence_ref_tokens: Seq<String>, evidence_ref_count: u64 },
             ClassifyPublicError { error_kind: Enum<WorkGraphErrorKind> },
         }
 
@@ -296,6 +321,17 @@ machine! {
 
         invariant live_has_positive_revision {
             self.lifecycle_phase == Phase::Absent || self.revision > 0
+        }
+
+        invariant absent_has_no_item_projection {
+            self.lifecycle_phase != Phase::Absent
+                || (self.item_key == None
+                    && for_all(token in self.external_ref_tokens, false)
+                    && for_all(token in self.evidence_ref_tokens, false))
+        }
+
+        invariant live_has_item_key {
+            self.lifecycle_phase == Phase::Absent || self.item_key != None
         }
 
         invariant terminal_has_terminal_time {
@@ -333,11 +369,16 @@ machine! {
         disposition PublicErrorClassified => local,
 
         transition CreateDefaultOrOpen {
-            on input Create { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status }
+            on input Create { item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status }
             guard "absent" { self.lifecycle_phase == Phase::Absent }
             guard "default_or_open" { requested_status == None || requested_status == Some(WorkLifecycleState::Open) }
+            guard "item_key_present" { workgraph_item_key_present(item_key) }
             update {
                 self.revision = 1;
+                self.item_key = Some(item_key);
+                self.external_ref_tokens = external_ref_tokens;
+                self.evidence_ref_tokens = evidence_ref_tokens;
+                self.evidence_count = evidence_ref_count;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
@@ -348,11 +389,16 @@ machine! {
         }
 
         transition CreateRequestedBlocked {
-            on input Create { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status }
+            on input Create { item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status }
             guard "absent" { self.lifecycle_phase == Phase::Absent }
             guard "requested_blocked" { requested_status == Some(WorkLifecycleState::Blocked) }
+            guard "item_key_present" { workgraph_item_key_present(item_key) }
             update {
                 self.revision = 1;
+                self.item_key = Some(item_key);
+                self.external_ref_tokens = external_ref_tokens;
+                self.evidence_ref_tokens = evidence_ref_tokens;
+                self.evidence_count = evidence_ref_count;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
@@ -363,10 +409,15 @@ machine! {
         }
 
         transition CreateOpen {
-            on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input CreateOpen { item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::Absent }
+            guard "item_key_present" { workgraph_item_key_present(item_key) }
             update {
                 self.revision = 1;
+                self.item_key = Some(item_key);
+                self.external_ref_tokens = external_ref_tokens;
+                self.evidence_ref_tokens = evidence_ref_tokens;
+                self.evidence_count = evidence_ref_count;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
@@ -377,10 +428,15 @@ machine! {
         }
 
         transition CreateBlocked {
-            on input CreateBlocked { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input CreateBlocked { item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::Absent }
+            guard "item_key_present" { workgraph_item_key_present(item_key) }
             update {
                 self.revision = 1;
+                self.item_key = Some(item_key);
+                self.external_ref_tokens = external_ref_tokens;
+                self.evidence_ref_tokens = evidence_ref_tokens;
+                self.evidence_count = evidence_ref_count;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
@@ -391,10 +447,11 @@ machine! {
         }
 
         transition UpdateOpen {
-            on input Update { expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input Update { expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::Open && self.revision == expected_revision }
             update {
                 self.revision += 1;
+                self.external_ref_tokens = external_ref_tokens;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
@@ -405,10 +462,11 @@ machine! {
         }
 
         transition UpdateInProgress {
-            on input Update { expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input Update { expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::InProgress && self.revision == expected_revision }
             update {
                 self.revision += 1;
+                self.external_ref_tokens = external_ref_tokens;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
@@ -419,10 +477,11 @@ machine! {
         }
 
         transition UpdateBlocked {
-            on input Update { expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input Update { expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::Blocked && self.revision == expected_revision }
             update {
                 self.revision += 1;
+                self.external_ref_tokens = external_ref_tokens;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
@@ -1017,69 +1076,91 @@ machine! {
         }
 
         transition AddEvidenceOpen {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_ref_tokens, evidence_ref_count }
             guard { self.lifecycle_phase == Phase::Open && self.revision == expected_revision }
+            guard "evidence_refs_preserve_existing" { for_all(token in self.evidence_ref_tokens, evidence_ref_tokens.count(token) == self.evidence_ref_tokens.count(token)) }
+            guard "evidence_count_advances_one" { evidence_ref_count == self.evidence_count + 1 }
             update {
                 self.revision += 1;
-                self.evidence_count += 1;
+                self.evidence_ref_tokens = evidence_ref_tokens;
+                self.evidence_count = evidence_ref_count;
             }
             to Open
             emit EvidenceAdded
         }
 
         transition AddEvidenceInProgress {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_ref_tokens, evidence_ref_count }
             guard { self.lifecycle_phase == Phase::InProgress && self.revision == expected_revision }
+            guard "evidence_refs_preserve_existing" { for_all(token in self.evidence_ref_tokens, evidence_ref_tokens.count(token) == self.evidence_ref_tokens.count(token)) }
+            guard "evidence_count_advances_one" { evidence_ref_count == self.evidence_count + 1 }
             update {
                 self.revision += 1;
-                self.evidence_count += 1;
+                self.evidence_ref_tokens = evidence_ref_tokens;
+                self.evidence_count = evidence_ref_count;
             }
             to InProgress
             emit EvidenceAdded
         }
 
         transition AddEvidenceBlocked {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_ref_tokens, evidence_ref_count }
             guard { self.lifecycle_phase == Phase::Blocked && self.revision == expected_revision }
+            guard "evidence_refs_preserve_existing" { for_all(token in self.evidence_ref_tokens, evidence_ref_tokens.count(token) == self.evidence_ref_tokens.count(token)) }
+            guard "evidence_count_advances_one" { evidence_ref_count == self.evidence_count + 1 }
             update {
                 self.revision += 1;
-                self.evidence_count += 1;
+                self.evidence_ref_tokens = evidence_ref_tokens;
+                self.evidence_count = evidence_ref_count;
             }
             to Blocked
             emit EvidenceAdded
         }
 
         transition AddEvidenceCompleted {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_ref_tokens, evidence_ref_count }
             guard { self.lifecycle_phase == Phase::Completed && self.revision == expected_revision }
+            guard "evidence_refs_preserve_existing" { for_all(token in self.evidence_ref_tokens, evidence_ref_tokens.count(token) == self.evidence_ref_tokens.count(token)) }
+            guard "evidence_count_advances_one" { evidence_ref_count == self.evidence_count + 1 }
             update {
                 self.revision += 1;
-                self.evidence_count += 1;
+                self.evidence_ref_tokens = evidence_ref_tokens;
+                self.evidence_count = evidence_ref_count;
             }
             to Completed
             emit EvidenceAdded
         }
 
         transition AddEvidenceCancelled {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_ref_tokens, evidence_ref_count }
             guard { self.lifecycle_phase == Phase::Cancelled && self.revision == expected_revision }
+            guard "evidence_refs_preserve_existing" { for_all(token in self.evidence_ref_tokens, evidence_ref_tokens.count(token) == self.evidence_ref_tokens.count(token)) }
+            guard "evidence_count_advances_one" { evidence_ref_count == self.evidence_count + 1 }
             update {
                 self.revision += 1;
-                self.evidence_count += 1;
+                self.evidence_ref_tokens = evidence_ref_tokens;
+                self.evidence_count = evidence_ref_count;
             }
             to Cancelled
             emit EvidenceAdded
         }
 
         transition AddEvidenceFailed {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_ref_tokens, evidence_ref_count }
             guard { self.lifecycle_phase == Phase::Failed && self.revision == expected_revision }
+            guard "evidence_refs_preserve_existing" { for_all(token in self.evidence_ref_tokens, evidence_ref_tokens.count(token) == self.evidence_ref_tokens.count(token)) }
+            guard "evidence_count_advances_one" { evidence_ref_count == self.evidence_count + 1 }
             update {
                 self.revision += 1;
-                self.evidence_count += 1;
+                self.evidence_ref_tokens = evidence_ref_tokens;
+                self.evidence_count = evidence_ref_count;
             }
             to Failed
             emit EvidenceAdded
+        }
+
+        helper workgraph_item_key_present(item_key: WorkItemKey) -> bool {
+            item_key.len() > 0
         }
 
         // --- Public error class ---
@@ -1188,6 +1269,12 @@ impl<'de> serde::Deserialize<'de> for WorkLifecycleState {
 struct WorkGraphLifecycleMachineStateWire {
     lifecycle_phase: WorkLifecycleState,
     revision: u64,
+    #[serde(default)]
+    item_key: Option<WorkItemKey>,
+    #[serde(default)]
+    external_ref_tokens: Vec<String>,
+    #[serde(default)]
+    evidence_ref_tokens: Vec<String>,
     unresolved_blocker_count: u64,
     #[serde(default)]
     topology_item_keys: std::collections::BTreeSet<WorkItemKey>,
@@ -1212,6 +1299,9 @@ impl From<&WorkGraphLifecycleMachineState> for WorkGraphLifecycleMachineStateWir
         Self {
             lifecycle_phase: state.lifecycle_phase,
             revision: state.revision,
+            item_key: state.item_key.clone(),
+            external_ref_tokens: state.external_ref_tokens.clone(),
+            evidence_ref_tokens: state.evidence_ref_tokens.clone(),
             unresolved_blocker_count: state.unresolved_blocker_count,
             topology_item_keys: Default::default(),
             topology_edge_keys: Default::default(),
@@ -1234,6 +1324,9 @@ impl From<WorkGraphLifecycleMachineStateWire> for WorkGraphLifecycleMachineState
         Self {
             lifecycle_phase: wire.lifecycle_phase,
             revision: wire.revision,
+            item_key: wire.item_key,
+            external_ref_tokens: wire.external_ref_tokens,
+            evidence_ref_tokens: wire.evidence_ref_tokens,
             unresolved_blocker_count: wire.unresolved_blocker_count,
             claim_owner_key: wire.claim_owner_key,
             claimed_at_utc_ms: wire.claimed_at_utc_ms,

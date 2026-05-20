@@ -288,6 +288,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `live_has_positive_revision`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
+- `absent_has_no_item_projection`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `live_has_item_key`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
 - `terminal_has_terminal_time`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`

@@ -9,7 +9,7 @@ use crate::types::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
     ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkClaim, WorkEdge, WorkEdgeKind,
     WorkGraphEvent, WorkGraphEventKind, WorkGraphMachineState, WorkItem, WorkItemId, WorkNamespace,
-    WorkStatus,
+    WorkStatus, external_work_ref_tokens, work_evidence_ref_tokens, work_item_key_for_id,
 };
 
 pub type WorkGraphPublicErrorClass = wg_dsl::WorkGraphPublicErrorClass;
@@ -153,7 +153,17 @@ impl WorkGraphMachine {
         now: DateTime<Utc>,
     ) -> Result<WorkGraphItemCommit, WorkGraphError> {
         let title = validate_title(request.title)?;
+        let item_id = WorkItemId::generated();
+        let external_ref_tokens = external_work_ref_tokens(&request.external_refs)
+            .map_err(WorkGraphError::InvalidInput)?;
+        let evidence_ref_tokens = work_evidence_ref_tokens(&request.evidence_refs)
+            .map_err(WorkGraphError::InvalidInput)?;
+        let evidence_ref_count = evidence_ref_count(&request.evidence_refs)?;
         let input = wg_dsl::WorkGraphLifecycleInput::Create {
+            item_key: work_item_key_for_id(&item_id),
+            external_ref_tokens,
+            evidence_ref_tokens,
+            evidence_ref_count,
             due_at_utc_ms: optional_datetime_to_millis(request.due_at, "due_at")?,
             not_before_utc_ms: optional_datetime_to_millis(request.not_before, "not_before")?,
             snoozed_until_utc_ms: optional_datetime_to_millis(
@@ -166,7 +176,7 @@ impl WorkGraphMachine {
         let applied = apply_new_item_dsl(input)?;
         let dsl_state = applied.state.clone();
         let mut item = WorkItem {
-            id: WorkItemId::generated(),
+            id: item_id_from_machine_state(&dsl_state)?,
             realm_id,
             namespace,
             title,
@@ -205,11 +215,19 @@ impl WorkGraphMachine {
         let due_at = request.due_at.or(item.due_at);
         let not_before = request.not_before.or(item.not_before);
         let snoozed_until = request.snoozed_until.or(item.snoozed_until);
+        let external_refs = if request.external_refs.is_empty() {
+            item.external_refs.clone()
+        } else {
+            request.external_refs
+        };
+        let external_ref_tokens =
+            external_work_ref_tokens(&external_refs).map_err(WorkGraphError::InvalidInput)?;
         let previous = item.clone();
         let applied = apply_item_dsl(
             &item,
             wg_dsl::WorkGraphLifecycleInput::Update {
                 expected_revision: request.expected_revision,
+                external_ref_tokens,
                 due_at_utc_ms: optional_datetime_to_millis(due_at, "due_at")?,
                 not_before_utc_ms: optional_datetime_to_millis(not_before, "not_before")?,
                 snoozed_until_utc_ms: optional_datetime_to_millis(snoozed_until, "snoozed_until")?,
@@ -230,11 +248,9 @@ impl WorkGraphMachine {
         if let Some(labels) = request.labels {
             item.labels = normalize_labels(labels)?;
         }
+        item.external_refs = external_refs;
         item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
-        if !request.external_refs.is_empty() {
-            item.external_refs = request.external_refs;
-        }
         item.updated_at = now;
         item_commit_from_effects(item, &applied.effects, now, Some(previous))
     }
@@ -399,14 +415,21 @@ impl WorkGraphMachine {
         now: DateTime<Utc>,
     ) -> Result<WorkGraphItemCommit, WorkGraphError> {
         let previous = item.clone();
+        let mut evidence_refs = item.evidence_refs.clone();
+        evidence_refs.push(request.evidence);
+        let evidence_ref_tokens =
+            work_evidence_ref_tokens(&evidence_refs).map_err(WorkGraphError::InvalidInput)?;
+        let evidence_ref_count = evidence_ref_count(&evidence_refs)?;
         let applied = apply_item_dsl(
             &item,
             wg_dsl::WorkGraphLifecycleInput::AddEvidence {
                 expected_revision: request.expected_revision,
+                evidence_ref_tokens,
+                evidence_ref_count,
             },
             Some(request.expected_revision),
         )?;
-        item.evidence_refs.push(request.evidence);
+        item.evidence_refs = evidence_refs;
         item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
@@ -618,6 +641,7 @@ fn dsl_work_lifecycle_state(status: WorkStatus) -> wg_dsl::WorkLifecycleState {
 }
 
 fn sync_item_from_machine_state(item: &mut WorkItem) -> Result<(), WorkGraphError> {
+    item.id = item_id_from_machine_state(&item.machine_state)?;
     item.status = work_status_from_dsl(item.machine_state.lifecycle_phase)?;
     item.revision = item.machine_state.revision;
     item.due_at = optional_datetime_from_millis(item.machine_state.due_at_utc_ms, "due_at")?;
@@ -628,6 +652,12 @@ fn sync_item_from_machine_state(item: &mut WorkItem) -> Result<(), WorkGraphErro
     item.terminal_at =
         optional_datetime_from_millis(item.machine_state.terminal_at_utc_ms, "terminal_at")?;
     Ok(())
+}
+
+fn evidence_ref_count<T>(refs: &[T]) -> Result<u64, WorkGraphError> {
+    u64::try_from(refs.len()).map_err(|_| {
+        WorkGraphError::InvalidInput("work item evidence_refs length exceeds u64".to_string())
+    })
 }
 
 fn validate_item_machine_projection(item: &WorkItem) -> Result<(), WorkGraphError> {
@@ -642,6 +672,40 @@ fn validate_item_machine_projection(item: &WorkItem) -> Result<(), WorkGraphErro
         return Err(WorkGraphError::Store(format!(
             "work item {} status projection {:?} does not match machine state {:?}",
             item.id, item.status, status
+        )));
+    }
+    if item.machine_state.item_key.as_ref() != Some(&work_item_key_for_id(&item.id)) {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} id projection does not match machine state",
+            item.id
+        )));
+    }
+    if external_work_ref_tokens(&item.external_refs).map_err(WorkGraphError::InvalidInput)?
+        != item.machine_state.external_ref_tokens
+    {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} external_refs projection does not match machine state",
+            item.id
+        )));
+    }
+    if work_evidence_ref_tokens(&item.evidence_refs).map_err(WorkGraphError::InvalidInput)?
+        != item.machine_state.evidence_ref_tokens
+    {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} evidence_refs projection does not match machine state",
+            item.id
+        )));
+    }
+    if u64::try_from(item.evidence_refs.len()).map_err(|_| {
+        WorkGraphError::Store(format!(
+            "work item {} evidence_refs length cannot be represented as u64",
+            item.id
+        ))
+    })? != item.machine_state.evidence_count
+    {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} evidence_count projection does not match machine state",
+            item.id
         )));
     }
     if item.revision != item.machine_state.revision {
@@ -714,6 +778,19 @@ fn validate_item_machine_projection(item: &WorkItem) -> Result<(), WorkGraphErro
         )));
     }
     Ok(())
+}
+
+fn item_id_from_machine_state(state: &WorkGraphMachineState) -> Result<WorkItemId, WorkGraphError> {
+    let item_key = state.item_key.as_ref().ok_or_else(|| {
+        WorkGraphError::Store(
+            "generated WorkGraph lifecycle state did not emit item identity".to_string(),
+        )
+    })?;
+    WorkItemId::new(item_key.0.clone()).map_err(|error| {
+        WorkGraphError::Store(format!(
+            "generated WorkGraph lifecycle emitted invalid item identity: {error}"
+        ))
+    })
 }
 
 fn work_owner_key(owner: &crate::types::WorkOwner) -> Result<wg_dsl::WorkOwnerKey, WorkGraphError> {
@@ -1090,7 +1167,8 @@ fn seconds_to_duration(seconds: u64) -> Duration {
 mod tests {
     use super::*;
     use crate::types::{
-        ClaimWorkItemRequest, CloseWorkItemRequest, UpdateWorkItemRequest, WorkOwner, WorkOwnerKey,
+        ClaimWorkItemRequest, CloseWorkItemRequest, ExternalWorkRef, UpdateWorkItemRequest,
+        WorkEvidenceRef, WorkOwner, WorkOwnerKey,
     };
 
     fn create_request(title: &str) -> CreateWorkItemRequest {
@@ -1176,6 +1254,68 @@ mod tests {
             event.payload["machine_effects"],
             serde_json::json!(["Created"])
         );
+    }
+
+    #[test]
+    fn create_identity_and_provenance_refs_are_generated_machine_owned() {
+        let now = Utc::now();
+        let mut request = create_request("machine-owned refs");
+        request.external_refs = vec![ExternalWorkRef {
+            kind: "linear".to_string(),
+            id: "LUC-524".to_string(),
+            url: Some("https://linear.app/lucrfr/issue/LUC-524".to_string()),
+        }];
+        request.evidence_refs = vec![WorkEvidenceRef {
+            kind: "commit".to_string(),
+            id: "abc123".to_string(),
+            label: Some("initial".to_string()),
+            summary: None,
+        }];
+
+        let (item, _) = WorkGraphMachine::create_item(
+            request,
+            "realm".to_string(),
+            WorkNamespace::default(),
+            now,
+        )
+        .expect("create")
+        .into_insert_parts()
+        .expect("insert parts");
+
+        assert_eq!(
+            item.machine_state.item_key,
+            Some(work_item_key_for_id(&item.id))
+        );
+        assert_eq!(
+            item.machine_state.external_ref_tokens,
+            external_work_ref_tokens(&item.external_refs).expect("external tokens")
+        );
+        assert_eq!(
+            item.machine_state.evidence_ref_tokens,
+            work_evidence_ref_tokens(&item.evidence_refs).expect("evidence tokens")
+        );
+        assert_eq!(item.machine_state.evidence_count, 1);
+
+        let mut tampered_id = item.clone();
+        tampered_id.id = WorkItemId::generated();
+        assert!(matches!(
+            WorkGraphMachine::validate_item_projection(&tampered_id),
+            Err(WorkGraphError::Store(message)) if message.contains("id projection")
+        ));
+
+        let mut tampered_refs = item.clone();
+        tampered_refs.external_refs.clear();
+        assert!(matches!(
+            WorkGraphMachine::validate_item_projection(&tampered_refs),
+            Err(WorkGraphError::Store(message)) if message.contains("external_refs projection")
+        ));
+
+        let mut tampered_evidence = item.clone();
+        tampered_evidence.evidence_refs.clear();
+        assert!(matches!(
+            WorkGraphMachine::validate_item_projection(&tampered_evidence),
+            Err(WorkGraphError::Store(message)) if message.contains("evidence_refs projection")
+        ));
     }
 
     #[test]
@@ -1284,6 +1424,87 @@ mod tests {
         .expect_err("non-terminal close status should fail");
 
         assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+    }
+
+    #[test]
+    fn add_evidence_records_refs_in_generated_machine_state() {
+        let now = Utc::now();
+        let item = create("evidence tokens", now);
+
+        let (item, event, _) = WorkGraphMachine::add_evidence(
+            item,
+            AddEvidenceRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                evidence: WorkEvidenceRef {
+                    kind: "commit".to_string(),
+                    id: "def456".to_string(),
+                    label: None,
+                    summary: Some("generated authority".to_string()),
+                },
+            },
+            now,
+        )
+        .expect("add evidence")
+        .into_update_parts()
+        .expect("update parts");
+
+        assert_eq!(event.kind, WorkGraphEventKind::EvidenceAdded);
+        assert_eq!(
+            event.payload["machine_effects"],
+            serde_json::json!(["EvidenceAdded"])
+        );
+        assert_eq!(
+            item.machine_state.evidence_ref_tokens,
+            work_evidence_ref_tokens(&item.evidence_refs).expect("evidence tokens")
+        );
+        assert_eq!(item.machine_state.evidence_count, 1);
+    }
+
+    #[test]
+    fn update_external_refs_records_refs_in_generated_machine_state() {
+        let now = Utc::now();
+        let item = create("external ref tokens", now);
+
+        let (item, _, _) = WorkGraphMachine::update_item(
+            item,
+            UpdateWorkItemRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                title: None,
+                description: None,
+                priority: None,
+                labels: None,
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: vec![ExternalWorkRef {
+                    kind: "linear".to_string(),
+                    id: "LUC-524".to_string(),
+                    url: None,
+                }],
+            },
+            now,
+        )
+        .expect("update external refs")
+        .into_update_parts()
+        .expect("update parts");
+
+        assert_eq!(
+            item.machine_state.external_ref_tokens,
+            external_work_ref_tokens(&item.external_refs).expect("external tokens")
+        );
+
+        let mut tampered = item.clone();
+        tampered.external_refs.clear();
+        assert!(matches!(
+            WorkGraphMachine::validate_item_projection(&tampered),
+            Err(WorkGraphError::Store(message)) if message.contains("external_refs projection")
+        ));
     }
 
     #[test]

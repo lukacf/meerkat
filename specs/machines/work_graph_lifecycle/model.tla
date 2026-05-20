@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for WorkGraphLifecycleMachine.
 
-CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkGraphErrorKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
+CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, StringValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkGraphErrorKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
 
 SetOfWorkDependencyPathKeyValuesCi == {{}}
 SetOfWorkEdgeKeyValuesCi == {{}}
@@ -21,8 +21,10 @@ None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
 OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
+OptionWorkItemKeyValues == {None} \cup {Some(x) : x \in WorkItemKeyValues}
 OptionWorkLifecycleStateValues == {None} \cup {Some(x) : x \in WorkLifecycleStateValues}
 OptionWorkOwnerKeyValues == {None} \cup {Some(x) : x \in WorkOwnerKeyValues}
+SeqOfStringValues == {<<>>} \cup {<<x>> : x \in StringValues} \cup {<<x, y>> : x \in StringValues, y \in StringValues}
 
 MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
 MapSet(map, key, value) == [x \in DOMAIN map \cup {key} |-> IF x = key THEN value ELSE map[x]]
@@ -37,14 +39,19 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count
+VARIABLES phase, model_step_count, revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count
 
-vars == << phase, model_step_count, revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+vars == << phase, model_step_count, revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+
+workgraph_item_key_present(arg_item_key) == (Len(arg_item_key) > 0)
 
 Init ==
     /\ phase = "Absent"
     /\ model_step_count = 0
     /\ revision = 0
+    /\ item_key = None
+    /\ external_ref_tokens = <<>>
+    /\ evidence_ref_tokens = <<>>
     /\ unresolved_blocker_count = 0
     /\ claim_owner_key = None
     /\ claimed_at_utc_ms = None
@@ -59,93 +66,116 @@ TerminalStutter ==
     /\ phase = "Completed" \/ phase = "Cancelled" \/ phase = "Failed"
     /\ UNCHANGED vars
 
-CreateDefaultOrOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status) ==
+CreateDefaultOrOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status) ==
     /\ phase = "Absent"
     /\ ((requested_status = None) \/ (requested_status = Some("Open")))
+    /\ workgraph_item_key_present(arg_item_key)
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = 1
+    /\ item_key' = Some(arg_item_key)
+    /\ external_ref_tokens' = arg_external_ref_tokens
+    /\ evidence_ref_tokens' = arg_evidence_ref_tokens
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ evidence_count' = evidence_ref_count
+    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms >>
 
 
-CreateRequestedBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status) ==
+CreateRequestedBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status) ==
     /\ phase = "Absent"
     /\ (requested_status = Some("Blocked"))
+    /\ workgraph_item_key_present(arg_item_key)
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = 1
+    /\ item_key' = Some(arg_item_key)
+    /\ external_ref_tokens' = arg_external_ref_tokens
+    /\ evidence_ref_tokens' = arg_evidence_ref_tokens
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ evidence_count' = evidence_ref_count
+    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms >>
 
 
-CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
+CreateOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
     /\ phase = "Absent"
+    /\ workgraph_item_key_present(arg_item_key)
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = 1
+    /\ item_key' = Some(arg_item_key)
+    /\ external_ref_tokens' = arg_external_ref_tokens
+    /\ evidence_ref_tokens' = arg_evidence_ref_tokens
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ evidence_count' = evidence_ref_count
+    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms >>
 
 
-CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
+CreateBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
     /\ phase = "Absent"
+    /\ workgraph_item_key_present(arg_item_key)
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = 1
+    /\ item_key' = Some(arg_item_key)
+    /\ external_ref_tokens' = arg_external_ref_tokens
+    /\ evidence_ref_tokens' = arg_evidence_ref_tokens
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ evidence_count' = evidence_ref_count
+    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms >>
 
 
-UpdateOpen(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
+UpdateOpen(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
     /\ phase = "Open"
     /\ (revision = expected_revision)
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
+    /\ external_ref_tokens' = arg_external_ref_tokens
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, evidence_ref_tokens, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
-UpdateInProgress(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
+UpdateInProgress(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
     /\ phase = "InProgress"
     /\ (revision = expected_revision)
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
+    /\ external_ref_tokens' = arg_external_ref_tokens
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, evidence_ref_tokens, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
-UpdateBlocked(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
+UpdateBlocked(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
     /\ phase = "Blocked"
     /\ (revision = expected_revision)
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
+    /\ external_ref_tokens' = arg_external_ref_tokens
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, evidence_ref_tokens, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClaimOpen(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms) ==
@@ -161,7 +191,7 @@ ClaimOpen(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms)
     /\ claim_owner_key' = Some(owner_key)
     /\ claimed_at_utc_ms' = Some(now_utc_ms)
     /\ lease_expires_at_utc_ms' = arg_lease_expires_at_utc_ms
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClaimExpiredInProgress(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms) ==
@@ -180,7 +210,7 @@ ClaimExpiredInProgress(expected_revision, owner_key, now_utc_ms, arg_lease_expir
     /\ claim_owner_key' = Some(owner_key)
     /\ claimed_at_utc_ms' = Some(now_utc_ms)
     /\ lease_expires_at_utc_ms' = arg_lease_expires_at_utc_ms
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ReleaseInProgress(expected_revision) ==
@@ -192,7 +222,7 @@ ReleaseInProgress(expected_revision) ==
     /\ claim_owner_key' = None
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 BlockOpen(expected_revision) ==
@@ -204,7 +234,7 @@ BlockOpen(expected_revision) ==
     /\ claim_owner_key' = None
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 BlockInProgress(expected_revision) ==
@@ -216,7 +246,7 @@ BlockInProgress(expected_revision) ==
     /\ claim_owner_key' = None
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 BlockBlocked(expected_revision) ==
@@ -228,7 +258,7 @@ BlockBlocked(expected_revision) ==
     /\ claim_owner_key' = None
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 RefreshEligibilityOpen(arg_unresolved_blocker_count) ==
@@ -236,7 +266,7 @@ RefreshEligibilityOpen(arg_unresolved_blocker_count) ==
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
-    /\ UNCHANGED << revision, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 RefreshEligibilityInProgress(arg_unresolved_blocker_count) ==
@@ -244,7 +274,7 @@ RefreshEligibilityInProgress(arg_unresolved_blocker_count) ==
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
-    /\ UNCHANGED << revision, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 RefreshEligibilityBlocked(arg_unresolved_blocker_count) ==
@@ -252,7 +282,7 @@ RefreshEligibilityBlocked(arg_unresolved_blocker_count) ==
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
-    /\ UNCHANGED << revision, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyReadinessOpenReady(now_utc_ms) ==
@@ -263,7 +293,7 @@ ClassifyReadinessOpenReady(now_utc_ms) ==
     /\ (IF (snoozed_until_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN snoozed_until_utc_ms THEN snoozed_until_utc_ms["value"] ELSE None) <= now_utc_ms))
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyReadinessExpiredInProgressReady(now_utc_ms) ==
@@ -277,14 +307,14 @@ ClassifyReadinessExpiredInProgressReady(now_utc_ms) ==
     /\ (IF (snoozed_until_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN snoozed_until_utc_ms THEN snoozed_until_utc_ms["value"] ELSE None) <= now_utc_ms))
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyReadinessAbsentNotReady(now_utc_ms) ==
     /\ phase = "Absent"
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyReadinessOpenNotReady(now_utc_ms) ==
@@ -292,7 +322,7 @@ ClassifyReadinessOpenNotReady(now_utc_ms) ==
     /\ ((unresolved_blocker_count # 0) \/ (IF (due_at_utc_ms = None) THEN FALSE ELSE (now_utc_ms < (IF "value" \in DOMAIN due_at_utc_ms THEN due_at_utc_ms["value"] ELSE None))) \/ (IF (not_before_utc_ms = None) THEN FALSE ELSE (now_utc_ms < (IF "value" \in DOMAIN not_before_utc_ms THEN not_before_utc_ms["value"] ELSE None))) \/ (IF (snoozed_until_utc_ms = None) THEN FALSE ELSE (now_utc_ms < (IF "value" \in DOMAIN snoozed_until_utc_ms THEN snoozed_until_utc_ms["value"] ELSE None))))
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyReadinessInProgressNotReady(now_utc_ms) ==
@@ -300,133 +330,133 @@ ClassifyReadinessInProgressNotReady(now_utc_ms) ==
     /\ ((claim_owner_key = None) \/ (lease_expires_at_utc_ms = None) \/ (IF (lease_expires_at_utc_ms = None) THEN FALSE ELSE (now_utc_ms < (IF "value" \in DOMAIN lease_expires_at_utc_ms THEN lease_expires_at_utc_ms["value"] ELSE None))) \/ (unresolved_blocker_count # 0) \/ (IF (due_at_utc_ms = None) THEN FALSE ELSE (now_utc_ms < (IF "value" \in DOMAIN due_at_utc_ms THEN due_at_utc_ms["value"] ELSE None))) \/ (IF (not_before_utc_ms = None) THEN FALSE ELSE (now_utc_ms < (IF "value" \in DOMAIN not_before_utc_ms THEN not_before_utc_ms["value"] ELSE None))) \/ (IF (snoozed_until_utc_ms = None) THEN FALSE ELSE (now_utc_ms < (IF "value" \in DOMAIN snoozed_until_utc_ms THEN snoozed_until_utc_ms["value"] ELSE None))))
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyReadinessBlockedNotReady(now_utc_ms) ==
     /\ phase = "Blocked"
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyReadinessCompletedNotReady(now_utc_ms) ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyReadinessCancelledNotReady(now_utc_ms) ==
     /\ phase = "Cancelled"
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyReadinessFailedNotReady(now_utc_ms) ==
     /\ phase = "Failed"
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyBlockerSatisfiedCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyBlockerUnsatisfiedAbsent ==
     /\ phase = "Absent"
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyBlockerUnsatisfiedOpen ==
     /\ phase = "Open"
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyBlockerUnsatisfiedInProgress ==
     /\ phase = "InProgress"
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyBlockerUnsatisfiedBlocked ==
     /\ phase = "Blocked"
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyBlockerUnsatisfiedCancelled ==
     /\ phase = "Cancelled"
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyBlockerUnsatisfiedFailed ==
     /\ phase = "Failed"
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyTerminalityAbsent ==
     /\ phase = "Absent"
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyTerminalityOpen ==
     /\ phase = "Open"
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyTerminalityInProgress ==
     /\ phase = "InProgress"
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyTerminalityBlocked ==
     /\ phase = "Blocked"
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyTerminalityCompleted ==
     /\ phase = "Completed"
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyTerminalityCancelled ==
     /\ phase = "Cancelled"
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyTerminalityFailed ==
     /\ phase = "Failed"
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ValidateLink(kind, from_item_key, to_item_key, edge_key, reverse_path_key, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability) ==
@@ -439,7 +469,7 @@ ValidateLink(kind, from_item_key, to_item_key, edge_key, reverse_path_key, topol
     /\ ((kind # "Parent") \/ ((reverse_path_key \in parent_reachability) = FALSE))
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 CloseOpenDefaultOrCompleted(expected_revision, at_utc_ms, requested_status) ==
@@ -453,7 +483,7 @@ CloseOpenDefaultOrCompleted(expected_revision, at_utc_ms, requested_status) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseInProgressDefaultOrCompleted(expected_revision, at_utc_ms, requested_status) ==
@@ -467,7 +497,7 @@ CloseInProgressDefaultOrCompleted(expected_revision, at_utc_ms, requested_status
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseBlockedDefaultOrCompleted(expected_revision, at_utc_ms, requested_status) ==
@@ -481,7 +511,7 @@ CloseBlockedDefaultOrCompleted(expected_revision, at_utc_ms, requested_status) =
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseOpenRequestedCancelled(expected_revision, at_utc_ms, requested_status) ==
@@ -495,7 +525,7 @@ CloseOpenRequestedCancelled(expected_revision, at_utc_ms, requested_status) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseInProgressRequestedCancelled(expected_revision, at_utc_ms, requested_status) ==
@@ -509,7 +539,7 @@ CloseInProgressRequestedCancelled(expected_revision, at_utc_ms, requested_status
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseBlockedRequestedCancelled(expected_revision, at_utc_ms, requested_status) ==
@@ -523,7 +553,7 @@ CloseBlockedRequestedCancelled(expected_revision, at_utc_ms, requested_status) =
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseOpenRequestedFailed(expected_revision, at_utc_ms, requested_status) ==
@@ -537,7 +567,7 @@ CloseOpenRequestedFailed(expected_revision, at_utc_ms, requested_status) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseInProgressRequestedFailed(expected_revision, at_utc_ms, requested_status) ==
@@ -551,7 +581,7 @@ CloseInProgressRequestedFailed(expected_revision, at_utc_ms, requested_status) =
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseBlockedRequestedFailed(expected_revision, at_utc_ms, requested_status) ==
@@ -565,7 +595,7 @@ CloseBlockedRequestedFailed(expected_revision, at_utc_ms, requested_status) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseOpenCompleted(expected_revision, at_utc_ms) ==
@@ -578,7 +608,7 @@ CloseOpenCompleted(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseInProgressCompleted(expected_revision, at_utc_ms) ==
@@ -591,7 +621,7 @@ CloseInProgressCompleted(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseBlockedCompleted(expected_revision, at_utc_ms) ==
@@ -604,7 +634,7 @@ CloseBlockedCompleted(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseOpenCancelled(expected_revision, at_utc_ms) ==
@@ -617,7 +647,7 @@ CloseOpenCancelled(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseInProgressCancelled(expected_revision, at_utc_ms) ==
@@ -630,7 +660,7 @@ CloseInProgressCancelled(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseBlockedCancelled(expected_revision, at_utc_ms) ==
@@ -643,7 +673,7 @@ CloseBlockedCancelled(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseOpenFailed(expected_revision, at_utc_ms) ==
@@ -656,7 +686,7 @@ CloseOpenFailed(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseInProgressFailed(expected_revision, at_utc_ms) ==
@@ -669,7 +699,7 @@ CloseInProgressFailed(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseBlockedFailed(expected_revision, at_utc_ms) ==
@@ -682,67 +712,85 @@ CloseBlockedFailed(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
-AddEvidenceOpen(expected_revision) ==
+AddEvidenceOpen(expected_revision, arg_evidence_ref_tokens, evidence_ref_count) ==
     /\ phase = "Open"
     /\ (revision = expected_revision)
+    /\ (\A token \in SeqElements(evidence_ref_tokens) : (Count(arg_evidence_ref_tokens, token) = Count(evidence_ref_tokens, token)))
+    /\ (evidence_ref_count = (evidence_count + 1))
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
-    /\ evidence_count' = (evidence_count) + 1
-    /\ UNCHANGED << unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
+    /\ evidence_ref_tokens' = arg_evidence_ref_tokens
+    /\ evidence_count' = evidence_ref_count
+    /\ UNCHANGED << item_key, external_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
 
 
-AddEvidenceInProgress(expected_revision) ==
+AddEvidenceInProgress(expected_revision, arg_evidence_ref_tokens, evidence_ref_count) ==
     /\ phase = "InProgress"
     /\ (revision = expected_revision)
+    /\ (\A token \in SeqElements(evidence_ref_tokens) : (Count(arg_evidence_ref_tokens, token) = Count(evidence_ref_tokens, token)))
+    /\ (evidence_ref_count = (evidence_count + 1))
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
-    /\ evidence_count' = (evidence_count) + 1
-    /\ UNCHANGED << unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
+    /\ evidence_ref_tokens' = arg_evidence_ref_tokens
+    /\ evidence_count' = evidence_ref_count
+    /\ UNCHANGED << item_key, external_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
 
 
-AddEvidenceBlocked(expected_revision) ==
+AddEvidenceBlocked(expected_revision, arg_evidence_ref_tokens, evidence_ref_count) ==
     /\ phase = "Blocked"
     /\ (revision = expected_revision)
+    /\ (\A token \in SeqElements(evidence_ref_tokens) : (Count(arg_evidence_ref_tokens, token) = Count(evidence_ref_tokens, token)))
+    /\ (evidence_ref_count = (evidence_count + 1))
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
-    /\ evidence_count' = (evidence_count) + 1
-    /\ UNCHANGED << unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
+    /\ evidence_ref_tokens' = arg_evidence_ref_tokens
+    /\ evidence_count' = evidence_ref_count
+    /\ UNCHANGED << item_key, external_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
 
 
-AddEvidenceCompleted(expected_revision) ==
+AddEvidenceCompleted(expected_revision, arg_evidence_ref_tokens, evidence_ref_count) ==
     /\ phase = "Completed"
     /\ (revision = expected_revision)
+    /\ (\A token \in SeqElements(evidence_ref_tokens) : (Count(arg_evidence_ref_tokens, token) = Count(evidence_ref_tokens, token)))
+    /\ (evidence_ref_count = (evidence_count + 1))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
-    /\ evidence_count' = (evidence_count) + 1
-    /\ UNCHANGED << unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
+    /\ evidence_ref_tokens' = arg_evidence_ref_tokens
+    /\ evidence_count' = evidence_ref_count
+    /\ UNCHANGED << item_key, external_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
 
 
-AddEvidenceCancelled(expected_revision) ==
+AddEvidenceCancelled(expected_revision, arg_evidence_ref_tokens, evidence_ref_count) ==
     /\ phase = "Cancelled"
     /\ (revision = expected_revision)
+    /\ (\A token \in SeqElements(evidence_ref_tokens) : (Count(arg_evidence_ref_tokens, token) = Count(evidence_ref_tokens, token)))
+    /\ (evidence_ref_count = (evidence_count + 1))
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
-    /\ evidence_count' = (evidence_count) + 1
-    /\ UNCHANGED << unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
+    /\ evidence_ref_tokens' = arg_evidence_ref_tokens
+    /\ evidence_count' = evidence_ref_count
+    /\ UNCHANGED << item_key, external_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
 
 
-AddEvidenceFailed(expected_revision) ==
+AddEvidenceFailed(expected_revision, arg_evidence_ref_tokens, evidence_ref_count) ==
     /\ phase = "Failed"
     /\ (revision = expected_revision)
+    /\ (\A token \in SeqElements(evidence_ref_tokens) : (Count(arg_evidence_ref_tokens, token) = Count(evidence_ref_tokens, token)))
+    /\ (evidence_ref_count = (evidence_count + 1))
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
-    /\ evidence_count' = (evidence_count) + 1
-    /\ UNCHANGED << unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
+    /\ evidence_ref_tokens' = arg_evidence_ref_tokens
+    /\ evidence_count' = evidence_ref_count
+    /\ UNCHANGED << item_key, external_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
 
 
 ClassifyPublicErrorNotFound(error_kind) ==
@@ -750,7 +798,7 @@ ClassifyPublicErrorNotFound(error_kind) ==
     /\ (error_kind = "NotFound")
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyPublicErrorStaleRevision(error_kind) ==
@@ -758,7 +806,7 @@ ClassifyPublicErrorStaleRevision(error_kind) ==
     /\ (error_kind = "StaleRevision")
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyPublicErrorConflict(error_kind) ==
@@ -766,7 +814,7 @@ ClassifyPublicErrorConflict(error_kind) ==
     /\ (error_kind = "Conflict")
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyPublicErrorInvalidTransition(error_kind) ==
@@ -774,7 +822,7 @@ ClassifyPublicErrorInvalidTransition(error_kind) ==
     /\ (error_kind = "InvalidTransition")
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyPublicErrorInvalidInput(error_kind) ==
@@ -782,7 +830,7 @@ ClassifyPublicErrorInvalidInput(error_kind) ==
     /\ (error_kind = "InvalidInput")
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyPublicErrorInvalidTimestampMillis(error_kind) ==
@@ -790,7 +838,7 @@ ClassifyPublicErrorInvalidTimestampMillis(error_kind) ==
     /\ (error_kind = "InvalidTimestampMillis")
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyPublicErrorUnsupportedBackend(error_kind) ==
@@ -798,7 +846,7 @@ ClassifyPublicErrorUnsupportedBackend(error_kind) ==
     /\ (error_kind = "UnsupportedBackend")
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClassifyPublicErrorStore(error_kind) ==
@@ -806,17 +854,17 @@ ClassifyPublicErrorStore(error_kind) ==
     /\ (error_kind = "Store")
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 Next ==
-    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CreateDefaultOrOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status)
-    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CreateRequestedBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status)
-    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
-    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
-    \/ \E expected_revision \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : UpdateOpen(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
-    \/ \E expected_revision \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : UpdateInProgress(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
-    \/ \E expected_revision \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : UpdateBlocked(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
+    \/ \E arg_item_key \in WorkItemKeyValues : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CreateDefaultOrOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status)
+    \/ \E arg_item_key \in WorkItemKeyValues : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CreateRequestedBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status)
+    \/ \E arg_item_key \in WorkItemKeyValues : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
+    \/ \E arg_item_key \in WorkItemKeyValues : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
+    \/ \E expected_revision \in 0..2 : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : UpdateOpen(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
+    \/ \E expected_revision \in 0..2 : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : UpdateInProgress(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
+    \/ \E expected_revision \in 0..2 : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : UpdateBlocked(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
     \/ \E expected_revision \in 0..2 : \E owner_key \in WorkOwnerKeyValues : \E now_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in OptionU64Values : ClaimOpen(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms)
     \/ \E expected_revision \in 0..2 : \E owner_key \in WorkOwnerKeyValues : \E now_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in OptionU64Values : ClaimExpiredInProgress(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms)
     \/ \E expected_revision \in 0..2 : ReleaseInProgress(expected_revision)
@@ -868,12 +916,12 @@ Next ==
     \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : CloseOpenFailed(expected_revision, at_utc_ms)
     \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : CloseInProgressFailed(expected_revision, at_utc_ms)
     \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : CloseBlockedFailed(expected_revision, at_utc_ms)
-    \/ \E expected_revision \in 0..2 : AddEvidenceOpen(expected_revision)
-    \/ \E expected_revision \in 0..2 : AddEvidenceInProgress(expected_revision)
-    \/ \E expected_revision \in 0..2 : AddEvidenceBlocked(expected_revision)
-    \/ \E expected_revision \in 0..2 : AddEvidenceCompleted(expected_revision)
-    \/ \E expected_revision \in 0..2 : AddEvidenceCancelled(expected_revision)
-    \/ \E expected_revision \in 0..2 : AddEvidenceFailed(expected_revision)
+    \/ \E expected_revision \in 0..2 : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : AddEvidenceOpen(expected_revision, arg_evidence_ref_tokens, evidence_ref_count)
+    \/ \E expected_revision \in 0..2 : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : AddEvidenceInProgress(expected_revision, arg_evidence_ref_tokens, evidence_ref_count)
+    \/ \E expected_revision \in 0..2 : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : AddEvidenceBlocked(expected_revision, arg_evidence_ref_tokens, evidence_ref_count)
+    \/ \E expected_revision \in 0..2 : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : AddEvidenceCompleted(expected_revision, arg_evidence_ref_tokens, evidence_ref_count)
+    \/ \E expected_revision \in 0..2 : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : AddEvidenceCancelled(expected_revision, arg_evidence_ref_tokens, evidence_ref_count)
+    \/ \E expected_revision \in 0..2 : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : AddEvidenceFailed(expected_revision, arg_evidence_ref_tokens, evidence_ref_count)
     \/ \E error_kind \in WorkGraphErrorKindValues : ClassifyPublicErrorNotFound(error_kind)
     \/ \E error_kind \in WorkGraphErrorKindValues : ClassifyPublicErrorStaleRevision(error_kind)
     \/ \E error_kind \in WorkGraphErrorKindValues : ClassifyPublicErrorConflict(error_kind)
@@ -886,18 +934,22 @@ Next ==
 
 absent_has_zero_revision == ((phase # "Absent") \/ (revision = 0))
 live_has_positive_revision == ((phase = "Absent") \/ (revision > 0))
+absent_has_no_item_projection == ((phase # "Absent") \/ ((item_key = None) /\ (\A token \in SeqElements(external_ref_tokens) : FALSE) /\ (\A token \in SeqElements(evidence_ref_tokens) : FALSE)))
+live_has_item_key == ((phase = "Absent") \/ (item_key # None))
 terminal_has_terminal_time == (((phase # "Completed") /\ (phase # "Cancelled") /\ (phase # "Failed")) \/ (terminal_at_utc_ms # None))
 claim_only_in_progress == ((claim_owner_key = None) \/ (phase = "InProgress"))
 blocked_has_no_claim == ((phase # "Blocked") \/ (claim_owner_key = None))
 terminal_has_no_claim == (((phase # "Completed") /\ (phase # "Cancelled") /\ (phase # "Failed")) \/ (claim_owner_key = None))
 
-CiStateConstraint == /\ model_step_count <= 6
-DeepStateConstraint == /\ model_step_count <= 8
+CiStateConstraint == /\ model_step_count <= 6 /\ Len(external_ref_tokens) <= 1 /\ Len(evidence_ref_tokens) <= 1
+DeepStateConstraint == /\ model_step_count <= 8 /\ Len(external_ref_tokens) <= 2 /\ Len(evidence_ref_tokens) <= 2
 
 Spec == Init /\ [][Next]_vars
 
 THEOREM Spec => []absent_has_zero_revision
 THEOREM Spec => []live_has_positive_revision
+THEOREM Spec => []absent_has_no_item_projection
+THEOREM Spec => []live_has_item_key
 THEOREM Spec => []terminal_has_terminal_time
 THEOREM Spec => []claim_only_in_progress
 THEOREM Spec => []blocked_has_no_claim

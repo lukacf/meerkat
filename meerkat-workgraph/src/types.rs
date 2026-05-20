@@ -44,6 +44,10 @@ impl FromStr for WorkItemId {
     }
 }
 
+pub(crate) fn work_item_key_for_id(id: &WorkItemId) -> wg_dsl::WorkItemKey {
+    wg_dsl::WorkItemKey(id.as_str().to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
@@ -245,6 +249,23 @@ pub struct WorkEvidenceRef {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+}
+
+pub(crate) fn external_work_ref_tokens(refs: &[ExternalWorkRef]) -> Result<Vec<String>, String> {
+    refs.iter()
+        .map(canonical_workgraph_ref_token)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+pub(crate) fn work_evidence_ref_tokens(refs: &[WorkEvidenceRef]) -> Result<Vec<String>, String> {
+    refs.iter()
+        .map(canonical_workgraph_ref_token)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn canonical_workgraph_ref_token<T: Serialize>(value: &T) -> Result<String, String> {
+    serde_json::to_string(value)
+        .map_err(|error| format!("failed to serialize WorkGraph machine provenance token: {error}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -554,6 +575,42 @@ fn validate_work_item_machine_projection(
     machine_state: &WorkGraphMachineState,
 ) -> Result<(), String> {
     validate_workgraph_machine_recovery(machine_state)?;
+    let item_key = machine_state.item_key.as_ref().ok_or_else(|| {
+        format!(
+            "work item {} machine_state is missing generated item identity",
+            wire.id
+        )
+    })?;
+    if item_key != &work_item_key_for_id(&wire.id) {
+        return Err(format!(
+            "work item {} id projection does not match machine_state",
+            wire.id
+        ));
+    }
+    if external_work_ref_tokens(&wire.external_refs)? != machine_state.external_ref_tokens {
+        return Err(format!(
+            "work item {} external_refs projection does not match machine_state",
+            wire.id
+        ));
+    }
+    if work_evidence_ref_tokens(&wire.evidence_refs)? != machine_state.evidence_ref_tokens {
+        return Err(format!(
+            "work item {} evidence_refs projection does not match machine_state",
+            wire.id
+        ));
+    }
+    if u64::try_from(wire.evidence_refs.len()).map_err(|_| {
+        format!(
+            "work item {} evidence_refs length cannot be represented as u64",
+            wire.id
+        )
+    })? != machine_state.evidence_count
+    {
+        return Err(format!(
+            "work item {} evidence_count projection does not match machine_state",
+            wire.id
+        ));
+    }
     if work_lifecycle_state_from_status(wire.status) != machine_state.lifecycle_phase {
         return Err(format!(
             "work item {} status projection does not match machine_state",

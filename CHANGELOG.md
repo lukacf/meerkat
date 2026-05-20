@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.21] - 2026-05-20
+
+Meerkat 0.6.21 is a runtime hotfix release for interrupt-yielding live steer
+injection during active runs.
+
+### Fixed
+
+- **Interrupt-yielding live steer injection** (#736) — adds a machine-owned
+  live boundary path for accepted steer inputs during active runs, projecting
+  them into pending system context so interrupt-yielding peer messages can be
+  consumed at the next inner boundary without cancelling or replaying the
+  active run.
+
 ## [0.6.20] - 2026-05-20
 
 Meerkat 0.6.20 refreshes Gemini model guidance and fixes mob peer delivery

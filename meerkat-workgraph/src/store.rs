@@ -84,6 +84,18 @@ pub trait WorkGraphStore: private::Sealed + Send + Sync {
 
     async fn insert_edge(&self, commit: WorkGraphEdgeCommit) -> Result<WorkEdge, WorkGraphError>;
 
+    async fn insert_edge_with_item_refresh(
+        &self,
+        edge_commit: WorkGraphEdgeCommit,
+        item_refresh: Option<WorkGraphItemCommit>,
+    ) -> Result<WorkEdge, WorkGraphError>;
+
+    async fn update_item_with_dependent_refreshes(
+        &self,
+        item_commit: WorkGraphItemCommit,
+        dependent_refreshes: Vec<WorkGraphItemCommit>,
+    ) -> Result<WorkItem, WorkGraphError>;
+
     async fn list_edges(
         &self,
         realm_id: &str,
@@ -140,6 +152,22 @@ impl WorkGraphStore for DisabledWorkGraphStore {
         Err(unsupported(self.kind()))
     }
 
+    async fn insert_edge_with_item_refresh(
+        &self,
+        _edge_commit: WorkGraphEdgeCommit,
+        _item_refresh: Option<WorkGraphItemCommit>,
+    ) -> Result<WorkEdge, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn update_item_with_dependent_refreshes(
+        &self,
+        _item_commit: WorkGraphItemCommit,
+        _dependent_refreshes: Vec<WorkGraphItemCommit>,
+    ) -> Result<WorkItem, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
     async fn list_edges(
         &self,
         _realm_id: &str,
@@ -173,6 +201,12 @@ struct MemoryWorkGraphState {
     edges: Vec<WorkEdge>,
     events: Vec<WorkGraphEvent>,
     next_event_seq: i64,
+}
+
+struct PreparedMemoryItemUpdate {
+    key: (String, WorkNamespace, WorkItemId),
+    item: WorkItem,
+    event: WorkGraphEvent,
 }
 
 impl MemoryWorkGraphStore {
@@ -212,33 +246,10 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         &self,
         commit: WorkGraphItemCommit,
     ) -> Result<WorkItem, WorkGraphError> {
-        let (item, event, previous) = commit.into_update_parts()?;
-        WorkGraphMachine::validate_item_projection(&previous)?;
-        WorkGraphMachine::validate_item_projection(&item)?;
         let mut guard = self.inner.write().await;
-        let key = item_key(&item.realm_id, &item.namespace, &item.id);
-        let Some(current) = guard.items.get(&key) else {
-            return Err(WorkGraphError::not_found(
-                item.realm_id.clone(),
-                item.namespace.clone(),
-                item.id.clone(),
-            ));
-        };
-        if current.revision != previous.revision {
-            return Err(WorkGraphError::StaleRevision {
-                id: item.id.clone(),
-                expected: previous.revision,
-                actual: current.revision,
-            });
-        }
-        if current != &previous {
-            return Err(WorkGraphError::Conflict(format!(
-                "current work item {} differs from generated commit source",
-                item.id
-            )));
-        }
-        guard.items.insert(key, item.clone());
-        guard.append_event(event);
+        let update = prepare_memory_item_update(&guard, commit)?;
+        let item = update.item.clone();
+        guard.apply_item_update(update);
         Ok(item)
     }
 
@@ -272,7 +283,15 @@ impl WorkGraphStore for MemoryWorkGraphStore {
     }
 
     async fn insert_edge(&self, commit: WorkGraphEdgeCommit) -> Result<WorkEdge, WorkGraphError> {
-        let edge_scope = commit.edge().clone();
+        self.insert_edge_with_item_refresh(commit, None).await
+    }
+
+    async fn insert_edge_with_item_refresh(
+        &self,
+        edge_commit: WorkGraphEdgeCommit,
+        item_refresh: Option<WorkGraphItemCommit>,
+    ) -> Result<WorkEdge, WorkGraphError> {
+        let edge_scope = edge_commit.edge().clone();
         let mut guard = self.inner.write().await;
         let current_items = guard
             .items
@@ -290,8 +309,11 @@ impl WorkGraphStore for MemoryWorkGraphStore {
             })
             .cloned()
             .collect::<Vec<_>>();
-        commit.validate_topology(&current_items, &current_edges)?;
-        let (edge, event) = commit.into_parts();
+        edge_commit.validate_topology(&current_items, &current_edges)?;
+        let item_update = item_refresh
+            .map(|commit| prepare_memory_item_update(&guard, commit))
+            .transpose()?;
+        let (edge, event) = edge_commit.into_parts();
         if guard.edges.iter().any(|existing| {
             existing.realm_id == edge.realm_id
                 && existing.namespace == edge.namespace
@@ -303,7 +325,29 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         }
         guard.edges.push(edge.clone());
         guard.append_event(event);
+        if let Some(update) = item_update {
+            guard.apply_item_update(update);
+        }
         Ok(edge)
+    }
+
+    async fn update_item_with_dependent_refreshes(
+        &self,
+        item_commit: WorkGraphItemCommit,
+        dependent_refreshes: Vec<WorkGraphItemCommit>,
+    ) -> Result<WorkItem, WorkGraphError> {
+        let mut guard = self.inner.write().await;
+        let primary = prepare_memory_item_update(&guard, item_commit)?;
+        let dependent_updates = dependent_refreshes
+            .into_iter()
+            .map(|commit| prepare_memory_item_update(&guard, commit))
+            .collect::<Result<Vec<_>, _>>()?;
+        let item = primary.item.clone();
+        guard.apply_item_update(primary);
+        for update in dependent_updates {
+            guard.apply_item_update(update);
+        }
+        Ok(item)
     }
 
     async fn list_edges(
@@ -340,11 +384,47 @@ impl WorkGraphStore for MemoryWorkGraphStore {
 }
 
 impl MemoryWorkGraphState {
+    fn apply_item_update(&mut self, update: PreparedMemoryItemUpdate) {
+        self.items.insert(update.key, update.item);
+        self.append_event(update.event);
+    }
+
     fn append_event(&mut self, mut event: WorkGraphEvent) {
         self.next_event_seq += 1;
         event.seq = Some(self.next_event_seq);
         self.events.push(event);
     }
+}
+
+fn prepare_memory_item_update(
+    state: &MemoryWorkGraphState,
+    commit: WorkGraphItemCommit,
+) -> Result<PreparedMemoryItemUpdate, WorkGraphError> {
+    let (item, event, previous) = commit.into_update_parts()?;
+    WorkGraphMachine::validate_item_projection(&previous)?;
+    WorkGraphMachine::validate_item_projection(&item)?;
+    let key = item_key(&item.realm_id, &item.namespace, &item.id);
+    let Some(current) = state.items.get(&key) else {
+        return Err(WorkGraphError::not_found(
+            item.realm_id.clone(),
+            item.namespace.clone(),
+            item.id.clone(),
+        ));
+    };
+    if current.revision != previous.revision {
+        return Err(WorkGraphError::StaleRevision {
+            id: item.id.clone(),
+            expected: previous.revision,
+            actual: current.revision,
+        });
+    }
+    if current != &previous {
+        return Err(WorkGraphError::Conflict(format!(
+            "current work item {} differs from generated commit source",
+            item.id
+        )));
+    }
+    Ok(PreparedMemoryItemUpdate { key, item, event })
 }
 
 fn item_key(
@@ -500,51 +580,11 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         &self,
         commit: WorkGraphItemCommit,
     ) -> Result<WorkItem, WorkGraphError> {
-        let (item, event, previous) = commit.into_update_parts()?;
-        WorkGraphMachine::validate_item_projection(&previous)?;
-        WorkGraphMachine::validate_item_projection(&item)?;
         self.with_connection(|conn| {
             let tx = conn
                 .transaction()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-            let current = select_item(&tx, &item.realm_id, &item.namespace, &item.id)?;
-            let Some(current) = current else {
-                return Err(WorkGraphError::not_found(
-                    item.realm_id.clone(),
-                    item.namespace.clone(),
-                    item.id.clone(),
-                ));
-            };
-            if current.revision != previous.revision {
-                return Err(WorkGraphError::StaleRevision {
-                    id: item.id.clone(),
-                    expected: previous.revision,
-                    actual: current.revision,
-                });
-            }
-            if current != previous {
-                return Err(WorkGraphError::Conflict(format!(
-                    "current work item {} differs from generated commit source",
-                    item.id
-                )));
-            }
-            let changed = update_item_tx(&tx, &item, previous.revision)?;
-            if changed == 0 {
-                let actual = current_revision_tx(&tx, &item.realm_id, &item.namespace, &item.id)?;
-                return match actual {
-                    Some(actual) => Err(WorkGraphError::StaleRevision {
-                        id: item.id,
-                        expected: previous.revision,
-                        actual,
-                    }),
-                    None => Err(WorkGraphError::not_found(
-                        item.realm_id,
-                        item.namespace,
-                        item.id,
-                    )),
-                };
-            }
-            insert_event_tx(&tx, &event)?;
+            let item = apply_update_commit_tx(&tx, commit)?;
             tx.commit()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
             Ok(item)
@@ -565,7 +605,15 @@ impl WorkGraphStore for SqliteWorkGraphStore {
     }
 
     async fn insert_edge(&self, commit: WorkGraphEdgeCommit) -> Result<WorkEdge, WorkGraphError> {
-        let edge_scope = commit.edge().clone();
+        self.insert_edge_with_item_refresh(commit, None).await
+    }
+
+    async fn insert_edge_with_item_refresh(
+        &self,
+        edge_commit: WorkGraphEdgeCommit,
+        item_refresh: Option<WorkGraphItemCommit>,
+    ) -> Result<WorkEdge, WorkGraphError> {
+        let edge_scope = edge_commit.edge().clone();
         self.with_connection(|conn| {
             let tx = conn
                 .transaction()
@@ -581,13 +629,35 @@ impl WorkGraphStore for SqliteWorkGraphStore {
             )?;
             let current_edges =
                 list_sqlite_edges(&tx, &edge_scope.realm_id, &edge_scope.namespace)?;
-            commit.validate_topology(&current_items, &current_edges)?;
-            let (edge, event) = commit.into_parts();
+            edge_commit.validate_topology(&current_items, &current_edges)?;
+            let (edge, event) = edge_commit.into_parts();
             insert_edge_tx(&tx, &edge)?;
             insert_event_tx(&tx, &event)?;
+            if let Some(item_refresh) = item_refresh {
+                apply_update_commit_tx(&tx, item_refresh)?;
+            }
             tx.commit()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
             Ok(edge)
+        })
+    }
+
+    async fn update_item_with_dependent_refreshes(
+        &self,
+        item_commit: WorkGraphItemCommit,
+        dependent_refreshes: Vec<WorkGraphItemCommit>,
+    ) -> Result<WorkItem, WorkGraphError> {
+        self.with_connection(|conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            let item = apply_update_commit_tx(&tx, item_commit)?;
+            for dependent_refresh in dependent_refreshes {
+                apply_update_commit_tx(&tx, dependent_refresh)?;
+            }
+            tx.commit()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            Ok(item)
         })
     }
 
@@ -690,6 +760,55 @@ fn update_item_tx(
         ],
     )
     .map_err(|err| WorkGraphError::Store(err.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_update_commit_tx(
+    tx: &Transaction<'_>,
+    commit: WorkGraphItemCommit,
+) -> Result<WorkItem, WorkGraphError> {
+    let (item, event, previous) = commit.into_update_parts()?;
+    WorkGraphMachine::validate_item_projection(&previous)?;
+    WorkGraphMachine::validate_item_projection(&item)?;
+    let current = select_item(tx, &item.realm_id, &item.namespace, &item.id)?;
+    let Some(current) = current else {
+        return Err(WorkGraphError::not_found(
+            item.realm_id.clone(),
+            item.namespace.clone(),
+            item.id.clone(),
+        ));
+    };
+    if current.revision != previous.revision {
+        return Err(WorkGraphError::StaleRevision {
+            id: item.id.clone(),
+            expected: previous.revision,
+            actual: current.revision,
+        });
+    }
+    if current != previous {
+        return Err(WorkGraphError::Conflict(format!(
+            "current work item {} differs from generated commit source",
+            item.id
+        )));
+    }
+    let changed = update_item_tx(tx, &item, previous.revision)?;
+    if changed == 0 {
+        let actual = current_revision_tx(tx, &item.realm_id, &item.namespace, &item.id)?;
+        return match actual {
+            Some(actual) => Err(WorkGraphError::StaleRevision {
+                id: item.id,
+                expected: previous.revision,
+                actual,
+            }),
+            None => Err(WorkGraphError::not_found(
+                item.realm_id,
+                item.namespace,
+                item.id,
+            )),
+        };
+    }
+    insert_event_tx(tx, &event)?;
+    Ok(item)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

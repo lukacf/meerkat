@@ -366,6 +366,8 @@ pub struct MobDefinition {
     #[serde(default)]
     pub limits: Option<LimitsSpec>,
     /// Optional declarative spawn policy for automatic member provisioning.
+    /// Runtime create/resume lowers this static config into MobMachine before
+    /// it can affect unknown-member admission.
     #[serde(default)]
     pub spawn_policy: Option<SpawnPolicyConfig>,
     /// Optional declarative event router configuration.

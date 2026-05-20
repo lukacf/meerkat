@@ -2,7 +2,7 @@ use super::*;
 use crate::definition::{
     BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode, FlowSpec,
     FlowStepSpec, LimitsSpec, MobDefinition, OrchestratorConfig, PolicyMode, RoleWiringRule,
-    SkillSource, StepOutputFormat, TopologyRule, TopologySpec, WiringRules,
+    SkillSource, SpawnPolicyConfig, StepOutputFormat, TopologyRule, TopologySpec, WiringRules,
 };
 use crate::event::MobEvent;
 use crate::profile::{Profile, ProfileBinding, ToolConfig};
@@ -29578,6 +29578,114 @@ impl super::spawn_policy::SpawnPolicy for StaticLeadSpawnPolicy {
     }
 }
 
+fn sample_definition_with_static_spawn_policy(target: &str, profile: &str) -> MobDefinition {
+    let mut definition = sample_definition();
+    definition.spawn_policy = Some(SpawnPolicyConfig::Auto {
+        profile_map: BTreeMap::from([(target.to_string(), ProfileName::from(profile))]),
+    });
+    definition
+}
+
+#[tokio::test]
+async fn test_definition_spawn_policy_lowers_to_machine_authority_on_create() {
+    let target = AgentIdentity::from("definition-policy-create");
+    let (handle, _service) = create_test_mob(sample_definition_with_static_spawn_policy(
+        target.as_str(),
+        "lead",
+    ))
+    .await;
+
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert!(
+        machine_state.spawn_policy_enabled,
+        "definition spawn policy must seed MobMachine policy authority"
+    );
+    assert_eq!(
+        machine_state.spawn_policy_revision, 1,
+        "definition spawn policy must enter through SetSpawnPolicy"
+    );
+
+    handle
+        .submit_work(
+            AgentRuntimeId::initial(target.clone()),
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new(
+                "queued for definition policy spawn".to_string(),
+                WorkOrigin::External,
+            ),
+        )
+        .await
+        .expect("definition policy auto-spawn should admit through machine authority");
+    assert!(
+        handle.get_member(&target).await.is_some(),
+        "definition policy should seed the runtime observation source after authority"
+    );
+}
+
+#[tokio::test]
+async fn test_definition_spawn_policy_lowers_to_machine_authority_on_resume() {
+    let target = AgentIdentity::from("definition-policy-resume");
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+
+    let created = MobBuilder::new(
+        sample_definition_with_static_spawn_policy(target.as_str(), "lead"),
+        storage,
+    )
+    .with_session_service(service.clone())
+    .create()
+    .await
+    .expect("create mob with definition policy");
+    let created_state = created
+        .query_machine_state()
+        .await
+        .expect("query created machine state");
+    assert!(created_state.spawn_policy_enabled);
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("resume mob with definition policy");
+
+    let machine_state = resumed
+        .query_machine_state()
+        .await
+        .expect("query resumed machine state");
+    assert!(
+        machine_state.spawn_policy_enabled,
+        "recovered definition spawn policy must seed MobMachine policy authority"
+    );
+    assert_eq!(
+        machine_state.spawn_policy_revision, 1,
+        "recovered definition policy must enter through SetSpawnPolicy"
+    );
+
+    resumed
+        .submit_work(
+            AgentRuntimeId::initial(target.clone()),
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new(
+                "queued for resumed definition policy spawn".to_string(),
+                WorkOrigin::External,
+            ),
+        )
+        .await
+        .expect("resumed definition policy auto-spawn should use machine authority");
+    assert!(resumed.get_member(&target).await.is_some());
+}
+
 #[derive(Clone)]
 struct PolicyAddressabilityCustomizer {
     override_profile: Profile,
@@ -29600,7 +29708,7 @@ impl SpawnMemberCustomizer for PolicyAddressabilityCustomizer {
 }
 
 #[tokio::test]
-async fn test_policy_auto_spawn_admission_uses_customized_effective_profile() {
+async fn test_policy_auto_spawn_ignores_customized_effective_profile_after_authority() {
     let definition = sample_definition();
     let mut override_profile = definition
         .profiles
@@ -29627,7 +29735,7 @@ async fn test_policy_auto_spawn_admission_uses_customized_effective_profile() {
         .expect("set spawn policy");
 
     let target = AgentIdentity::from("policy-customized-addressable");
-    handle
+    let result = handle
         .submit_work(
             AgentRuntimeId::initial(target.clone()),
             FenceToken::new(0),
@@ -29637,24 +29745,24 @@ async fn test_policy_auto_spawn_admission_uses_customized_effective_profile() {
                 WorkOrigin::External,
             ),
         )
-        .await
-        .expect("policy auto-spawn admission should use customized effective profile");
-
-    let session_id = handle
-        .resolve_bridge_session_id(&target)
-        .await
-        .expect("policy bridge session");
+        .await;
     assert!(
-        service
-            .external_tool_names(&session_id)
-            .await
-            .contains(&"policy_override_tool".to_string()),
-        "policy auto-spawn should build from the customized spec after admission"
+        matches!(result, Err(MobError::NotExternallyAddressable(_))),
+        "policy auto-spawn must not let a customizer mutate post-authority effective profile: {result:?}"
+    );
+    assert!(
+        handle.get_member(&target).await.is_none(),
+        "rejected policy auto-spawn must not create the target member"
+    );
+    assert_eq!(
+        service.recorded_create_requests().await.len(),
+        0,
+        "rejected policy auto-spawn must not provision from customized material"
     );
 }
 
 #[tokio::test]
-async fn test_spawn_member_customizer_covers_policy_auto_spawn_and_respawn_builds() {
+async fn test_spawn_member_customizer_skips_policy_auto_spawn_and_covers_respawn_builds() {
     let customizer = RecordingSpawnCustomizer::new();
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
@@ -29684,22 +29792,22 @@ async fn test_spawn_member_customizer_covers_policy_auto_spawn_and_respawn_build
         .await
         .expect("policy bridge session");
     assert!(
-        service
+        !service
             .external_tool_names(&policy_session_id)
             .await
             .contains(&"customizer_policy_spawn".to_string()),
-        "policy auto-spawn must apply customizer-attached external tools"
+        "policy auto-spawn must not apply customizer-attached external tools after machine resolution"
     );
     let policy_session = service
         .live_session_clone(&policy_session_id)
         .await
         .expect("policy live session");
     assert!(
-        matches!(
+        !matches!(
             policy_session.messages().first(),
             Some(Message::System(system)) if system.content == "custom prompt for policy_spawn"
         ),
-        "policy auto-spawn must apply customizer system prompt replacement"
+        "policy auto-spawn must not apply customizer system prompt replacement"
     );
 
     handle
@@ -29737,10 +29845,8 @@ async fn test_spawn_member_customizer_covers_policy_auto_spawn_and_respawn_build
     assert!(
         calls
             .iter()
-            .any(|ctx| ctx.spawn_source == SpawnSource::PolicySpawn
-                && ctx.spawner_identity.is_none()
-                && ctx.requested_profile.as_str() == "lead"),
-        "policy auto-spawn must be customized with explicit source and no spawner"
+            .all(|ctx| ctx.spawn_source != SpawnSource::PolicySpawn),
+        "policy auto-spawn must not invoke the build customizer after generated resolution"
     );
     assert!(
         calls

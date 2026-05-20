@@ -6257,17 +6257,11 @@ impl MobActor {
         let mut member_spec =
             super::handle::SpawnMemberSpec::new(spawn_spec.profile, requested_identity.clone());
         member_spec.runtime_mode = spawn_spec.runtime_mode;
-        self.customize_spawn_spec(
-            super::handle::SpawnSource::PolicySpawn,
-            None,
-            &mut member_spec,
-        )?;
-        if member_spec.identity != requested_identity {
-            return Err(MobError::Internal(format!(
-                "spawn customizer cannot change policy auto-spawn identity from '{requested_identity}' to '{}'",
-                member_spec.identity
-            )));
-        }
+        // Policy auto-spawn material is the MobMachine-recorded
+        // SpawnPolicyResolutionRecorded effect. Build-boundary customizers are
+        // intentionally skipped here so shell code cannot mutate the
+        // post-authority profile/runtime/capability material before
+        // provisioning.
 
         let super::handle::SpawnMemberSpec {
             role_name: profile_name,

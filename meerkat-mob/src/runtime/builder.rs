@@ -409,6 +409,26 @@ fn finish_seeded_mob_authority_phase(
     }
 }
 
+fn seed_mob_definition_spawn_policy(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    definition: &MobDefinition,
+    context: &'static str,
+) -> Result<(), MobError> {
+    if !super::spawn_policy::definition_config_has_policy_fact(definition.spawn_policy.as_ref()) {
+        return Ok(());
+    }
+
+    apply_seeded_mob_input(
+        authority,
+        crate::machines::mob_machine::MobMachineInput::SetSpawnPolicy {
+            enabled: super::spawn_policy::definition_config_enables_policy(
+                definition.spawn_policy.as_ref(),
+            ),
+        },
+        context,
+    )
+}
+
 fn seeded_mob_public_phase(state: &crate::machines::mob_machine::MobMachineState) -> MobState {
     use crate::machines::mob_machine::MobPhase;
 
@@ -652,6 +672,7 @@ fn seed_mob_authority_sync_from_events(
             _ => {}
         }
     }
+    seed_mob_definition_spawn_policy(authority, definition, "recover_definition_spawn_policy")?;
     Ok(())
 }
 
@@ -2307,6 +2328,11 @@ impl MobBuilder {
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
     ) -> Result<MobHandle, MobError> {
         let mut dsl_authority = Box::new(seed_mob_authority());
+        seed_mob_definition_spawn_policy(
+            &mut dsl_authority,
+            &definition,
+            "create_definition_spawn_policy",
+        )?;
         finish_seeded_mob_authority_phase(&mut dsl_authority, initial_state)?;
         let (machine_state_watch_tx, _machine_state_watch_rx) =
             tokio::sync::watch::channel(dsl_authority.state().clone());
@@ -2433,7 +2459,9 @@ impl MobBuilder {
             events.clone(),
             topology_service,
         );
-        let spawn_policy = Arc::new(super::spawn_policy::SpawnPolicyService::new());
+        let spawn_policy = Arc::new(super::spawn_policy::SpawnPolicyService::with_policy(
+            super::spawn_policy::policy_from_definition_config(definition.spawn_policy.as_ref()),
+        ));
 
         // Wave-c C-6c — flip the composition binding from `Standalone`
         // to `Wired(_)` whenever a runtime adapter is present, wiring

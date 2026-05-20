@@ -617,11 +617,6 @@ impl ScheduleStore for MemoryScheduleStore {
                     let receipt = updated
                         .delivery_receipt_from_authority(None)
                         .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
-                    state
-                        .receipts
-                        .entry(updated.occurrence_id.clone())
-                        .or_default()
-                        .push(receipt.clone());
                     updated = updated
                         .apply(OccurrenceLifecycleInput::RecordReceipt {
                             runtime_outcome: receipt.runtime_outcome.clone(),
@@ -629,6 +624,16 @@ impl ScheduleStore for MemoryScheduleStore {
                         })
                         .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
                         .into_occurrence();
+                    let canonical_receipt = updated.last_receipt.clone().ok_or_else(|| {
+                        ScheduleStoreError::Concurrency(
+                            "generated occurrence authority did not produce a receipt".to_string(),
+                        )
+                    })?;
+                    state
+                        .receipts
+                        .entry(updated.occurrence_id.clone())
+                        .or_default()
+                        .push(canonical_receipt);
                     state
                         .occurrences
                         .insert(updated.occurrence_id.clone(), updated);

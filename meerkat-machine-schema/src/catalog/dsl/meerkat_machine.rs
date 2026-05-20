@@ -1726,6 +1726,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             wait_operation_ids: Set<String>,
             wait_operation_id_tokens: Set<OperationId>,
             next_completion_seq: u64,
+            completion_agent_applied_cursor: u64,
+            completion_runtime_observed_cursor: u64,
+            completion_runtime_injected_cursor: u64,
 
             // --- External tool surface substate ---
             known_surfaces: Set<String>,
@@ -2002,6 +2005,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             wait_operation_ids = EmptySet,
             wait_operation_id_tokens = EmptySet,
             next_completion_seq = 0,
+            completion_agent_applied_cursor = 0,
+            completion_runtime_observed_cursor = 0,
+            completion_runtime_injected_cursor = 0,
             known_surfaces = EmptySet,
             active_surfaces = EmptySet,
             visible_surfaces = EmptySet,
@@ -2388,6 +2394,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 completion_sequence_present: bool,
             },
             RecoverOpsCompletionCursor { next_completion_seq: u64 },
+            RecoverCompletionConsumerCursors {
+                agent_applied_cursor: u64,
+                runtime_observed_cursor: u64,
+                runtime_injected_cursor: u64,
+            },
+            AdvanceAgentCompletionCursor { cursor: u64 },
+            AdvanceRuntimeObservedCompletionCursor { cursor: u64 },
+            AdvanceRuntimeInjectedCompletionCursor { cursor: u64 },
             EvictCompletedOp { operation_id: String },
             CollectCompletedOp { operation_id: String },
             ResolveWaitAllAdmission {
@@ -2764,6 +2778,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             OperationNonTerminal { operation_id: String },
             EvictCompletedRecord { operation_id: String },
             CompletionProduced { seq: u64, operation_id: OperationId, kind: OperationKind },
+            AgentCompletionCursorAdvanced { cursor: u64 },
+            RuntimeObservedCompletionCursorAdvanced { cursor: u64 },
+            RuntimeInjectedCompletionCursorAdvanced { cursor: u64 },
             OpRegistrationAdmissionResolved {
                 operation_id: String,
                 result: Enum<OpRegistrationAdmissionResultKind>,
@@ -2933,6 +2950,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition OperationNonTerminal => local,
         disposition EvictCompletedRecord => local,
         disposition CompletionProduced => local,
+        disposition AgentCompletionCursorAdvanced => local,
+        disposition RuntimeObservedCompletionCursorAdvanced => local,
+        disposition RuntimeInjectedCompletionCursorAdvanced => local,
         disposition OpRegistrationAdmissionResolved => local,
         disposition OpLifecycleTransitionRejected => local,
         disposition WaitAllAdmissionResolved => local,
@@ -10626,6 +10646,83 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
             }
             to Idle
+        }
+
+        // RecoverCompletionConsumerCursors: restore completion-consumer
+        // delivery cursors through generated authority before shell
+        // projections are rehydrated. These cursors decide async completion
+        // replay/suppression, so persisted values must be accepted here before
+        // any epoch-local cache observes them.
+        transition RecoverCompletionConsumerCursors {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecoverCompletionConsumerCursors {
+                agent_applied_cursor,
+                runtime_observed_cursor,
+                runtime_injected_cursor
+            }
+            update {
+                if self.completion_agent_applied_cursor < agent_applied_cursor {
+                    self.completion_agent_applied_cursor = agent_applied_cursor;
+                }
+                if self.completion_runtime_observed_cursor < runtime_observed_cursor {
+                    self.completion_runtime_observed_cursor = runtime_observed_cursor;
+                }
+                if self.completion_runtime_injected_cursor < runtime_injected_cursor {
+                    self.completion_runtime_injected_cursor = runtime_injected_cursor;
+                }
+            }
+            to Idle
+            emit AgentCompletionCursorAdvanced {
+                cursor: self.completion_agent_applied_cursor
+            }
+            emit RuntimeObservedCompletionCursorAdvanced {
+                cursor: self.completion_runtime_observed_cursor
+            }
+            emit RuntimeInjectedCompletionCursorAdvanced {
+                cursor: self.completion_runtime_injected_cursor
+            }
+        }
+
+        transition AdvanceAgentCompletionCursor {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AdvanceAgentCompletionCursor { cursor }
+            update {
+                if self.completion_agent_applied_cursor < cursor {
+                    self.completion_agent_applied_cursor = cursor;
+                }
+            }
+            to Idle
+            emit AgentCompletionCursorAdvanced {
+                cursor: self.completion_agent_applied_cursor
+            }
+        }
+
+        transition AdvanceRuntimeObservedCompletionCursor {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AdvanceRuntimeObservedCompletionCursor { cursor }
+            update {
+                if self.completion_runtime_observed_cursor < cursor {
+                    self.completion_runtime_observed_cursor = cursor;
+                }
+            }
+            to Idle
+            emit RuntimeObservedCompletionCursorAdvanced {
+                cursor: self.completion_runtime_observed_cursor
+            }
+        }
+
+        transition AdvanceRuntimeInjectedCompletionCursor {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AdvanceRuntimeInjectedCompletionCursor { cursor }
+            update {
+                if self.completion_runtime_injected_cursor < cursor {
+                    self.completion_runtime_injected_cursor = cursor;
+                }
+            }
+            to Idle
+            emit RuntimeInjectedCompletionCursorAdvanced {
+                cursor: self.completion_runtime_injected_cursor
+            }
         }
 
         transition EvictCompletedOp {

@@ -17,7 +17,8 @@ use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::lifecycle::{CoreApplyFailureCause, InputId, RunId};
 use meerkat_core::ops::{OperationId, OperationResult};
 use meerkat_core::ops_lifecycle::{
-    OperationKind, OperationProgressUpdate, OperationSpec, OpsLifecycleRegistry,
+    CompletionCursorConsumer, OperationKind, OperationProgressUpdate, OperationSpec,
+    OpsLifecycleRegistry,
 };
 use meerkat_machine_kernels::generated::meerkat as modeled_meerkat_kernel;
 use meerkat_machine_kernels::test_oracle::{
@@ -7033,15 +7034,36 @@ async fn meerkat_machine_spine_snapshot_tracks_epoch_cursor_state() {
                 .cursor_state,
         )
     };
-    cursor_state
-        .agent_applied_cursor
-        .store(7, Ordering::Release);
-    cursor_state
-        .runtime_observed_seq
-        .store(11, Ordering::Release);
-    cursor_state
-        .runtime_last_injected_seq
-        .store(13, Ordering::Release);
+    {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions
+            .get(&session_id)
+            .expect("registered session should exist");
+        entry
+            .ops_lifecycle
+            .advance_completion_cursor(
+                CompletionCursorConsumer::AgentApplied,
+                7,
+                Some(&cursor_state),
+            )
+            .expect("agent cursor should advance through generated authority");
+        entry
+            .ops_lifecycle
+            .advance_completion_cursor(
+                CompletionCursorConsumer::RuntimeObserved,
+                11,
+                Some(&cursor_state),
+            )
+            .expect("observed cursor should advance through generated authority");
+        entry
+            .ops_lifecycle
+            .advance_completion_cursor(
+                CompletionCursorConsumer::RuntimeInjected,
+                13,
+                Some(&cursor_state),
+            )
+            .expect("injected cursor should advance through generated authority");
+    }
 
     let snapshot = adapter
         .meerkat_machine_spine_snapshot(&session_id)

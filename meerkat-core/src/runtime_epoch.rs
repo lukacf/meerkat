@@ -19,6 +19,7 @@ use crate::handles::{
     McpServerLifecycleHandle, ModelRoutingHandle, PeerCommsHandle, PeerInteractionHandle,
     SessionAdmissionHandle, SessionClaimHandle, SessionContextHandle, TurnStateHandle,
 };
+use crate::ops_lifecycle::CompletionCursorConsumer;
 use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::tool_scope::ToolVisibilityOwner;
 use crate::types::SessionId;
@@ -56,21 +57,18 @@ impl std::fmt::Display for RuntimeEpochId {
     }
 }
 
-/// Shared consumer cursor state for the epoch.
+/// Projection of generated completion-consumer cursor state for the epoch.
 ///
-/// Written by the agent boundary and runtime loop; read by the persistence
-/// channel for snapshotting. Atomics provide lock-free monotonic updates.
-///
-/// Cursor values may be stale relative to the agent's true position when
-/// read for persistence — this is safe (stale cursors produce duplicate
-/// notices on recovery, never lost notices).
+/// The generated ops-lifecycle authority owns cursor truth. This struct is a
+/// lock-free cache updated only after that authority emits cursor-advanced
+/// feedback, then read by consumers that need a local starting watermark.
 pub struct EpochCursorState {
-    /// Agent's `applied_cursor` — advanced at the CallingLlm boundary.
-    pub agent_applied_cursor: AtomicU64,
-    /// Runtime loop's `observed_seq` — advanced after feed reads.
-    pub runtime_observed_seq: AtomicU64,
-    /// Runtime loop's `last_injected_seq` — advanced after continuation injection.
-    pub runtime_last_injected_seq: AtomicU64,
+    /// Agent's `applied_cursor` — projected after generated authority accepts it.
+    agent_applied_cursor: AtomicU64,
+    /// Runtime loop's `observed_seq` — projected after generated authority accepts it.
+    runtime_observed_seq: AtomicU64,
+    /// Runtime loop's `last_injected_seq` — projected after generated authority accepts it.
+    runtime_last_injected_seq: AtomicU64,
 }
 
 impl EpochCursorState {
@@ -83,7 +81,7 @@ impl EpochCursorState {
         }
     }
 
-    /// Create from recovered persisted values.
+    /// Create a projection from generated-recovered cursor values.
     pub fn from_recovered(
         agent_applied_cursor: CompletionSeq,
         runtime_observed_seq: CompletionSeq,
@@ -96,12 +94,24 @@ impl EpochCursorState {
         }
     }
 
-    /// Snapshot current cursor values for persistence.
-    pub fn snapshot(&self) -> EpochCursorSnapshot {
-        EpochCursorSnapshot {
-            agent_applied_cursor: self.agent_applied_cursor.load(Ordering::Acquire),
-            runtime_observed_seq: self.runtime_observed_seq.load(Ordering::Acquire),
-            runtime_last_injected_seq: self.runtime_last_injected_seq.load(Ordering::Acquire),
+    /// Project a cursor value accepted by generated machine authority.
+    #[doc(hidden)]
+    pub fn project_authorized_completion_cursor(
+        &self,
+        consumer: CompletionCursorConsumer,
+        cursor: CompletionSeq,
+    ) {
+        match consumer {
+            CompletionCursorConsumer::AgentApplied => {
+                self.agent_applied_cursor.store(cursor, Ordering::Release);
+            }
+            CompletionCursorConsumer::RuntimeObserved => {
+                self.runtime_observed_seq.store(cursor, Ordering::Release);
+            }
+            CompletionCursorConsumer::RuntimeInjected => {
+                self.runtime_last_injected_seq
+                    .store(cursor, Ordering::Release);
+            }
         }
     }
 }

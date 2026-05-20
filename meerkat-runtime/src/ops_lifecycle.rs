@@ -28,9 +28,9 @@ use meerkat_core::completion_feed::{
 use crate::tokio;
 use meerkat_core::lifecycle::{RunId, WaitRequestId};
 use meerkat_core::ops_lifecycle::{
-    DEFAULT_MAX_COMPLETED, OperationCompletionWatch, OperationId, OperationKind,
-    OperationLifecycleSnapshot, OperationPeerHandle, OperationProgressUpdate, OperationResult,
-    OperationSpec, OperationStatus, OperationTerminalOutcome, OpsLifecycleError,
+    CompletionCursorConsumer, DEFAULT_MAX_COMPLETED, OperationCompletionWatch, OperationId,
+    OperationKind, OperationLifecycleSnapshot, OperationPeerHandle, OperationProgressUpdate,
+    OperationResult, OperationSpec, OperationStatus, OperationTerminalOutcome, OpsLifecycleError,
     OpsLifecycleRegistry, WaitAllResult, WaitAllSatisfied,
 };
 use meerkat_core::time_compat::{Instant, SystemTime, UNIX_EPOCH};
@@ -612,6 +612,24 @@ impl ShellState {
     fn completion_sequence(&self, id: &OperationId) -> Option<CompletionSeq> {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
         self.dsl.0.state().op_completion_seq.get(&id_key).copied()
+    }
+
+    fn completion_cursor(&self, consumer: CompletionCursorConsumer) -> CompletionSeq {
+        let state = self.dsl.0.state();
+        match consumer {
+            CompletionCursorConsumer::AgentApplied => state.completion_agent_applied_cursor,
+            CompletionCursorConsumer::RuntimeObserved => state.completion_runtime_observed_cursor,
+            CompletionCursorConsumer::RuntimeInjected => state.completion_runtime_injected_cursor,
+        }
+    }
+
+    fn completion_cursor_snapshot(&self) -> meerkat_core::EpochCursorSnapshot {
+        meerkat_core::EpochCursorSnapshot {
+            agent_applied_cursor: self.completion_cursor(CompletionCursorConsumer::AgentApplied),
+            runtime_observed_seq: self.completion_cursor(CompletionCursorConsumer::RuntimeObserved),
+            runtime_last_injected_seq: self
+                .completion_cursor(CompletionCursorConsumer::RuntimeInjected),
+        }
     }
 
     /// Build a snapshot from DSL state + shell record.
@@ -1214,7 +1232,7 @@ impl ShellState {
     fn capture_snapshot(
         &self,
         epoch_id: meerkat_core::RuntimeEpochId,
-        cursor_state: &meerkat_core::EpochCursorState,
+        _cursor_state: &meerkat_core::EpochCursorState,
     ) -> PersistedOpsSnapshot {
         let operation_specs: HashMap<OperationId, OperationSpec> = self
             .records
@@ -1278,7 +1296,7 @@ impl ShellState {
             authority_state,
             operation_specs,
             completion_entries,
-            cursors: cursor_state.snapshot(),
+            cursors: self.completion_cursor_snapshot(),
         }
     }
 
@@ -1407,6 +1425,7 @@ impl RuntimeOpsLifecycleRegistry {
             authority_state,
             operation_specs,
             completion_entries,
+            cursors,
             ..
         } = snapshot;
         let mut shell = ShellState::new(
@@ -1484,6 +1503,14 @@ impl RuntimeOpsLifecycleRegistry {
                 next_completion_seq: authority_state.next_completion_seq,
             },
             "RecoverOpsCompletionCursor",
+        )?;
+        shell.dsl_apply(
+            mm_dsl::MeerkatMachineInput::RecoverCompletionConsumerCursors {
+                agent_applied_cursor: cursors.agent_applied_cursor,
+                runtime_observed_cursor: cursors.runtime_observed_seq,
+                runtime_injected_cursor: cursors.runtime_last_injected_seq,
+            },
+            "RecoverCompletionConsumerCursors",
         )?;
 
         // Rebuild completed_order from generated completion-sequence truth,
@@ -1566,8 +1593,7 @@ impl RuntimeOpsLifecycleRegistry {
     /// Capture a serializable snapshot of the current state for persistence.
     ///
     /// Includes authority state, operation specs, completion entries, and
-    /// cursor values. Cursor values may be stale relative to the agent's
-    /// true position (monotonic staleness, not atomicity).
+    /// generated completion-consumer cursor values.
     pub fn capture_persistence_snapshot(
         &self,
         epoch_id: meerkat_core::RuntimeEpochId,
@@ -1578,6 +1604,15 @@ impl RuntimeOpsLifecycleRegistry {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.capture_snapshot(epoch_id, cursor_state)
+    }
+
+    /// Snapshot generated completion-consumer cursor state.
+    pub fn completion_cursor_snapshot(&self) -> meerkat_core::EpochCursorSnapshot {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.completion_cursor_snapshot()
     }
 
     /// Return a read handle to the completion feed.
@@ -2285,6 +2320,62 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
     fn completion_feed(&self) -> Option<Arc<dyn CompletionFeed>> {
         Some(self.completion_feed_handle())
+    }
+
+    fn completion_cursor(&self, consumer: CompletionCursorConsumer) -> Option<CompletionSeq> {
+        let state = self.read_state().ok()?;
+        Some(state.completion_cursor(consumer))
+    }
+
+    fn advance_completion_cursor(
+        &self,
+        consumer: CompletionCursorConsumer,
+        cursor: CompletionSeq,
+        projection: Option<&meerkat_core::EpochCursorState>,
+    ) -> Result<CompletionSeq, OpsLifecycleError> {
+        let mut state = self.write_state()?;
+        let input = match consumer {
+            CompletionCursorConsumer::AgentApplied => {
+                mm_dsl::MeerkatMachineInput::AdvanceAgentCompletionCursor { cursor }
+            }
+            CompletionCursorConsumer::RuntimeObserved => {
+                mm_dsl::MeerkatMachineInput::AdvanceRuntimeObservedCompletionCursor { cursor }
+            }
+            CompletionCursorConsumer::RuntimeInjected => {
+                mm_dsl::MeerkatMachineInput::AdvanceRuntimeInjectedCompletionCursor { cursor }
+            }
+        };
+        let effects = state.dsl_apply_with_effects(input, "AdvanceCompletionCursor")?;
+        let advanced = effects
+            .iter()
+            .find_map(|effect| match (consumer, effect) {
+                (
+                    CompletionCursorConsumer::AgentApplied,
+                    mm_dsl::MeerkatMachineEffect::AgentCompletionCursorAdvanced { cursor },
+                ) => Some(*cursor),
+                (
+                    CompletionCursorConsumer::RuntimeObserved,
+                    mm_dsl::MeerkatMachineEffect::RuntimeObservedCompletionCursorAdvanced {
+                        cursor,
+                    },
+                ) => Some(*cursor),
+                (
+                    CompletionCursorConsumer::RuntimeInjected,
+                    mm_dsl::MeerkatMachineEffect::RuntimeInjectedCompletionCursorAdvanced {
+                        cursor,
+                    },
+                ) => Some(*cursor),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                OpsLifecycleError::Internal(format!(
+                    "generated completion cursor transition emitted no feedback for {consumer:?}"
+                ))
+            })?;
+        if let Some(projection) = projection {
+            projection.project_authorized_completion_cursor(consumer, advanced);
+        }
+        Ok(advanced)
     }
 
     fn wait_all(

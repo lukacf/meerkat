@@ -634,7 +634,6 @@ impl MeerkatMachine {
             control_snapshot,
             completions_handle,
             ops_lifecycle,
-            cursor_state,
             completions_present,
             ops_registry_present,
             attachment_live,
@@ -684,7 +683,6 @@ impl MeerkatMachine {
                 snapshot,
                 Arc::clone(&entry.completions),
                 Arc::clone(&entry.ops_lifecycle),
-                Arc::clone(&entry.cursor_state),
                 true,
                 true,
                 entry.attachment_is_live(),
@@ -766,7 +764,7 @@ impl MeerkatMachine {
             attachment_live,
             epoch_id,
             cursor_state: {
-                let cursor_state = cursor_state.snapshot();
+                let cursor_state = ops_lifecycle.completion_cursor_snapshot();
                 MeerkatCursorSnapshot {
                     agent_applied_cursor: cursor_state.agent_applied_cursor,
                     runtime_observed_seq: cursor_state.runtime_observed_seq,

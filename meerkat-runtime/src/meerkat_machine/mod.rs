@@ -1664,11 +1664,6 @@ impl MeerkatMachine {
             match store.load_ops_lifecycle(runtime_id).await {
                 Ok(Some(snapshot)) => {
                     let recovered_epoch = snapshot.epoch_id.clone();
-                    let recovered_cursors = meerkat_core::EpochCursorState::from_recovered(
-                        snapshot.cursors.agent_applied_cursor,
-                        snapshot.cursors.runtime_observed_seq,
-                        snapshot.cursors.runtime_last_injected_seq,
-                    );
                     let recovered_ops_count = snapshot.completion_entries.len();
                     let registry =
                         match crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::from_recovered(
@@ -1687,6 +1682,12 @@ impl MeerkatMachine {
                                 )));
                             }
                         };
+                    let recovered_cursor_snapshot = registry.completion_cursor_snapshot();
+                    let recovered_cursors = meerkat_core::EpochCursorState::from_recovered(
+                        recovered_cursor_snapshot.agent_applied_cursor,
+                        recovered_cursor_snapshot.runtime_observed_seq,
+                        recovered_cursor_snapshot.runtime_last_injected_seq,
+                    );
                     tracing::info!(
                         %session_id,
                         %runtime_id,

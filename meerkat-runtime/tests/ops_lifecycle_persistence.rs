@@ -9,7 +9,7 @@ use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError}
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::{CoreExecutor, RunId};
 use meerkat_core::ops_lifecycle::{
-    OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry,
+    CompletionCursorConsumer, OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry,
 };
 use meerkat_core::runtime_epoch::{EpochCursorState, RuntimeEpochId};
 use meerkat_core::types::SessionId;
@@ -74,7 +74,28 @@ fn persisted_ops_snapshot_serde_round_trip() {
 #[test]
 fn persisted_ops_snapshot_preserves_cursor_values() {
     let registry = RuntimeOpsLifecycleRegistry::new();
-    let cursor_state = Arc::new(EpochCursorState::from_recovered(5, 3, 2));
+    let cursor_state = Arc::new(EpochCursorState::new());
+    registry
+        .advance_completion_cursor(
+            CompletionCursorConsumer::AgentApplied,
+            5,
+            Some(&cursor_state),
+        )
+        .unwrap();
+    registry
+        .advance_completion_cursor(
+            CompletionCursorConsumer::RuntimeObserved,
+            3,
+            Some(&cursor_state),
+        )
+        .unwrap();
+    registry
+        .advance_completion_cursor(
+            CompletionCursorConsumer::RuntimeInjected,
+            2,
+            Some(&cursor_state),
+        )
+        .unwrap();
 
     let snapshot = registry.capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state);
 

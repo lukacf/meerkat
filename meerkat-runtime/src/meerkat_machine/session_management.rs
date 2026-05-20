@@ -639,6 +639,7 @@ impl MeerkatMachine {
                 effect_rx,
                 Some(completions.clone()),
                 Some(completion_feed),
+                Some(Arc::clone(&ops_lifecycle) as Arc<dyn meerkat_core::OpsLifecycleRegistry>),
                 entry_cursor_state,
                 Arc::downgrade(self),
                 session_id.clone(),

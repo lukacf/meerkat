@@ -1424,10 +1424,28 @@ where
                                 },
                             ));
                         }
-                        self.applied_cursor = batch.watermark;
-                        if let Some(ref cs) = self.epoch_cursor_state {
-                            cs.agent_applied_cursor
-                                .store(batch.watermark, std::sync::atomic::Ordering::Release);
+                        let mut cursor_advanced = self.ops_lifecycle.is_none();
+                        if let Some(registry) = self.ops_lifecycle.as_deref() {
+                            match registry.advance_completion_cursor(
+                                crate::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
+                                batch.watermark,
+                                self.epoch_cursor_state.as_deref(),
+                            ) {
+                                Ok(cursor) => {
+                                    self.applied_cursor = cursor;
+                                    cursor_advanced = true;
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        error = %err,
+                                        cursor = batch.watermark,
+                                        "generated completion cursor authority rejected agent-applied cursor advance"
+                                    );
+                                }
+                            }
+                        }
+                        if cursor_advanced {
+                            self.applied_cursor = batch.watermark.max(self.applied_cursor);
                         }
                     }
 

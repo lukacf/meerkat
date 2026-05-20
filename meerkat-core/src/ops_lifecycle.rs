@@ -10,6 +10,7 @@ use tokio::sync::oneshot;
 use crate::comms::TrustedPeerDescriptor;
 use crate::lifecycle::{RunId, WaitRequestId};
 pub use crate::ops::{OperationId, OperationResult};
+use crate::runtime_epoch::EpochCursorState;
 use crate::types::SessionId;
 
 /// Default maximum number of completed operations to retain before eviction.
@@ -260,6 +261,17 @@ pub struct WaitAllSatisfied {
     pub operation_ids: Vec<OperationId>,
 }
 
+/// Completion-feed consumer cursor owned by generated machine authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompletionCursorConsumer {
+    /// Cursor advanced after the agent boundary has applied background notices.
+    AgentApplied,
+    /// Cursor advanced after the runtime loop has observed feed entries.
+    RuntimeObserved,
+    /// Cursor advanced after the runtime loop has injected detached continuation.
+    RuntimeInjected,
+}
+
 /// Shared async-operation lifecycle registry.
 pub trait OpsLifecycleRegistry: Send + Sync {
     fn register_operation(&self, spec: OperationSpec) -> Result<(), OpsLifecycleError>;
@@ -318,6 +330,32 @@ pub trait OpsLifecycleRegistry: Send + Sync {
         &self,
     ) -> Option<std::sync::Arc<dyn crate::completion_feed::CompletionFeed>> {
         None
+    }
+
+    /// Read the generated completion-consumer cursor for this registry.
+    ///
+    /// Implementations without generated cursor authority return `None`.
+    fn completion_cursor(
+        &self,
+        _consumer: CompletionCursorConsumer,
+    ) -> Option<crate::completion_feed::CompletionSeq> {
+        None
+    }
+
+    /// Advance a completion-consumer cursor through generated authority.
+    ///
+    /// Runtime-backed registries update `projection` only after the generated
+    /// transition emits the matching cursor-advanced effect. The projection is
+    /// an epoch-local cache, never the source of cursor truth.
+    fn advance_completion_cursor(
+        &self,
+        _consumer: CompletionCursorConsumer,
+        _cursor: crate::completion_feed::CompletionSeq,
+        _projection: Option<&EpochCursorState>,
+    ) -> Result<crate::completion_feed::CompletionSeq, OpsLifecycleError> {
+        Err(OpsLifecycleError::Unsupported(
+            "advance_completion_cursor".into(),
+        ))
     }
 
     /// Register an authority-owned barrier wait and await its completion.

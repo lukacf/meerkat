@@ -6385,6 +6385,9 @@ pub struct State {
     pub wait_operation_ids: std::collections::BTreeSet<String>,
     pub wait_operation_id_tokens: std::collections::BTreeSet<OperationId>,
     pub next_completion_seq: u64,
+    pub completion_agent_applied_cursor: u64,
+    pub completion_runtime_observed_cursor: u64,
+    pub completion_runtime_injected_cursor: u64,
     pub known_surfaces: std::collections::BTreeSet<String>,
     pub active_surfaces: std::collections::BTreeSet<String>,
     pub visible_surfaces: std::collections::BTreeSet<String>,
@@ -7091,6 +7094,24 @@ pub mod inputs {
         pub next_completion_seq: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverCompletionConsumerCursors {
+        pub agent_applied_cursor: u64,
+        pub runtime_observed_cursor: u64,
+        pub runtime_injected_cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdvanceAgentCompletionCursor {
+        pub cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdvanceRuntimeObservedCompletionCursor {
+        pub cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdvanceRuntimeInjectedCompletionCursor {
+        pub cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EvictCompletedOp {
         pub operation_id: String,
     }
@@ -7508,6 +7529,10 @@ pub enum Input {
     ClassifyOperationTerminality(inputs::ClassifyOperationTerminality),
     ClassifyRecoveredOperationRecord(inputs::ClassifyRecoveredOperationRecord),
     RecoverOpsCompletionCursor(inputs::RecoverOpsCompletionCursor),
+    RecoverCompletionConsumerCursors(inputs::RecoverCompletionConsumerCursors),
+    AdvanceAgentCompletionCursor(inputs::AdvanceAgentCompletionCursor),
+    AdvanceRuntimeObservedCompletionCursor(inputs::AdvanceRuntimeObservedCompletionCursor),
+    AdvanceRuntimeInjectedCompletionCursor(inputs::AdvanceRuntimeInjectedCompletionCursor),
     EvictCompletedOp(inputs::EvictCompletedOp),
     CollectCompletedOp(inputs::CollectCompletedOp),
     ResolveWaitAllAdmission(inputs::ResolveWaitAllAdmission),
@@ -7715,6 +7740,16 @@ impl Input {
                 InputKind::ClassifyRecoveredOperationRecord
             }
             Self::RecoverOpsCompletionCursor(_) => InputKind::RecoverOpsCompletionCursor,
+            Self::RecoverCompletionConsumerCursors(_) => {
+                InputKind::RecoverCompletionConsumerCursors
+            }
+            Self::AdvanceAgentCompletionCursor(_) => InputKind::AdvanceAgentCompletionCursor,
+            Self::AdvanceRuntimeObservedCompletionCursor(_) => {
+                InputKind::AdvanceRuntimeObservedCompletionCursor
+            }
+            Self::AdvanceRuntimeInjectedCompletionCursor(_) => {
+                InputKind::AdvanceRuntimeInjectedCompletionCursor
+            }
             Self::EvictCompletedOp(_) => InputKind::EvictCompletedOp,
             Self::CollectCompletedOp(_) => InputKind::CollectCompletedOp,
             Self::ResolveWaitAllAdmission(_) => InputKind::ResolveWaitAllAdmission,
@@ -7911,6 +7946,10 @@ pub enum InputKind {
     ClassifyOperationTerminality,
     ClassifyRecoveredOperationRecord,
     RecoverOpsCompletionCursor,
+    RecoverCompletionConsumerCursors,
+    AdvanceAgentCompletionCursor,
+    AdvanceRuntimeObservedCompletionCursor,
+    AdvanceRuntimeInjectedCompletionCursor,
     EvictCompletedOp,
     CollectCompletedOp,
     ResolveWaitAllAdmission,
@@ -8303,6 +8342,18 @@ pub mod effects {
         pub kind: OperationKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AgentCompletionCursorAdvanced {
+        pub cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeObservedCompletionCursorAdvanced {
+        pub cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeInjectedCompletionCursorAdvanced {
+        pub cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct OpRegistrationAdmissionResolved {
         pub operation_id: String,
         pub result: OpRegistrationAdmissionResultKind,
@@ -8515,6 +8566,9 @@ pub enum Effect {
     OperationNonTerminal(effects::OperationNonTerminal),
     EvictCompletedRecord(effects::EvictCompletedRecord),
     CompletionProduced(effects::CompletionProduced),
+    AgentCompletionCursorAdvanced(effects::AgentCompletionCursorAdvanced),
+    RuntimeObservedCompletionCursorAdvanced(effects::RuntimeObservedCompletionCursorAdvanced),
+    RuntimeInjectedCompletionCursorAdvanced(effects::RuntimeInjectedCompletionCursorAdvanced),
     OpRegistrationAdmissionResolved(effects::OpRegistrationAdmissionResolved),
     OpLifecycleTransitionRejected(effects::OpLifecycleTransitionRejected),
     WaitAllAdmissionResolved(effects::WaitAllAdmissionResolved),
@@ -8605,6 +8659,9 @@ pub enum EffectKind {
     OperationNonTerminal,
     EvictCompletedRecord,
     CompletionProduced,
+    AgentCompletionCursorAdvanced,
+    RuntimeObservedCompletionCursorAdvanced,
+    RuntimeInjectedCompletionCursorAdvanced,
     OpRegistrationAdmissionResolved,
     OpLifecycleTransitionRejected,
     WaitAllAdmissionResolved,
@@ -9376,6 +9433,26 @@ pub enum TransitionId {
     RecoverOpsCompletionCursorRunning,
     RecoverOpsCompletionCursorRetired,
     RecoverOpsCompletionCursorStopped,
+    RecoverCompletionConsumerCursorsIdle,
+    RecoverCompletionConsumerCursorsAttached,
+    RecoverCompletionConsumerCursorsRunning,
+    RecoverCompletionConsumerCursorsRetired,
+    RecoverCompletionConsumerCursorsStopped,
+    AdvanceAgentCompletionCursorIdle,
+    AdvanceAgentCompletionCursorAttached,
+    AdvanceAgentCompletionCursorRunning,
+    AdvanceAgentCompletionCursorRetired,
+    AdvanceAgentCompletionCursorStopped,
+    AdvanceRuntimeObservedCompletionCursorIdle,
+    AdvanceRuntimeObservedCompletionCursorAttached,
+    AdvanceRuntimeObservedCompletionCursorRunning,
+    AdvanceRuntimeObservedCompletionCursorRetired,
+    AdvanceRuntimeObservedCompletionCursorStopped,
+    AdvanceRuntimeInjectedCompletionCursorIdle,
+    AdvanceRuntimeInjectedCompletionCursorAttached,
+    AdvanceRuntimeInjectedCompletionCursorRunning,
+    AdvanceRuntimeInjectedCompletionCursorRetired,
+    AdvanceRuntimeInjectedCompletionCursorStopped,
     EvictCompletedOpIdle,
     EvictCompletedOpAttached,
     EvictCompletedOpRunning,
@@ -9795,6 +9872,9 @@ pub fn initial_state() -> State {
         wait_operation_ids: Default::default(),
         wait_operation_id_tokens: Default::default(),
         next_completion_seq: 0,
+        completion_agent_applied_cursor: 0,
+        completion_runtime_observed_cursor: 0,
+        completion_runtime_injected_cursor: 0,
         known_surfaces: Default::default(),
         active_surfaces: Default::default(),
         visible_surfaces: Default::default(),

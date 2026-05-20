@@ -506,19 +506,21 @@ impl AgentBuilder {
                 .unwrap_or_else(crate::event_tap::new_event_tap),
             system_context_state,
             default_event_tx: self.default_event_tx,
-            ops_lifecycle: self.ops_lifecycle,
-            // Seed from epoch cursor state if available (runtime-backed surfaces),
-            // otherwise fall back to the feed watermark to avoid replaying retained
-            // completions from prior agent lifetimes (stop/resume, live reattach).
-            // Same pattern as runtime_loop.rs line 276. Computed before move.
+            // Seed from generated cursor authority if available
+            // (runtime-backed surfaces), otherwise fall back to the feed
+            // watermark to avoid replaying retained completions from prior
+            // agent lifetimes (stop/resume, live reattach). Computed before
+            // moving the registry/feed into the agent.
             applied_cursor: self
-                .epoch_cursor_state
+                .ops_lifecycle
                 .as_ref()
-                .map(|cs| {
-                    cs.agent_applied_cursor
-                        .load(std::sync::atomic::Ordering::Acquire)
+                .and_then(|registry| {
+                    registry.completion_cursor(
+                        crate::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
+                    )
                 })
                 .unwrap_or_else(|| self.completion_feed.as_ref().map_or(0, |f| f.watermark())),
+            ops_lifecycle: self.ops_lifecycle,
             completion_feed: self.completion_feed,
             epoch_cursor_state: self.epoch_cursor_state,
             completion_enrichment: self.completion_enrichment,

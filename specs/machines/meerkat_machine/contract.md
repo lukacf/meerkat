@@ -108,6 +108,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `wait_operation_ids`: `Set<String>`
 - `wait_operation_id_tokens`: `Set<OperationId>`
 - `next_completion_seq`: `u64`
+- `completion_agent_applied_cursor`: `u64`
+- `completion_runtime_observed_cursor`: `u64`
+- `completion_runtime_injected_cursor`: `u64`
 - `known_surfaces`: `Set<String>`
 - `active_surfaces`: `Set<String>`
 - `visible_surfaces`: `Set<String>`
@@ -293,6 +296,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyOperationTerminality`(operation_id: String, status: OperationStatus)
 - `ClassifyRecoveredOperationRecord`(operation_id: String, status: OperationStatus, terminal_outcome_present: Bool, terminal_payload_present: Bool, completion_sequence_present: Bool)
 - `RecoverOpsCompletionCursor`(next_completion_seq: u64)
+- `RecoverCompletionConsumerCursors`(agent_applied_cursor: u64, runtime_observed_cursor: u64, runtime_injected_cursor: u64)
+- `AdvanceAgentCompletionCursor`(cursor: u64)
+- `AdvanceRuntimeObservedCompletionCursor`(cursor: u64)
+- `AdvanceRuntimeInjectedCompletionCursor`(cursor: u64)
 - `EvictCompletedOp`(operation_id: String)
 - `CollectCompletedOp`(operation_id: String)
 - `ResolveWaitAllAdmission`(wait_request_id: WaitRequestId, operation_id_sequence: Seq<String>, operation_ids: Set<String>, operation_id_tokens: Set<OperationId>, operation_token_by_id: Map<String, OperationId>, operation_id_by_token: Map<OperationId, String>, duplicate_operation_id: Option<String>, not_found_operation_id: Option<String>)
@@ -433,6 +440,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `OperationNonTerminal`(operation_id: String)
 - `EvictCompletedRecord`(operation_id: String)
 - `CompletionProduced`(seq: u64, operation_id: OperationId, kind: OperationKind)
+- `AgentCompletionCursorAdvanced`(cursor: u64)
+- `RuntimeObservedCompletionCursorAdvanced`(cursor: u64)
+- `RuntimeInjectedCompletionCursorAdvanced`(cursor: u64)
 - `OpRegistrationAdmissionResolved`(operation_id: String, result: OpRegistrationAdmissionResultKind, reject_reason: Option<OpRegistrationRejectReasonKind>, max_concurrent_limit: Option<u64>, active_op_count: u64)
 - `OpLifecycleTransitionRejected`(operation_id: String, action: OpLifecycleActionKind, reason: OpLifecycleRejectReasonKind, status: Option<OperationStatus>)
 - `WaitAllAdmissionResolved`(wait_request_id: WaitRequestId, result: WaitAllAdmissionResultKind, reject_reason: Option<WaitAllRejectReasonKind>, rejected_operation_id: Option<String>)
@@ -6909,6 +6919,126 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverOpsCompletionCursor`(next_completion_seq)
 - To: `Stopped`
 
+### `RecoverCompletionConsumerCursorsIdle`
+- From: `Idle`
+- On: `RecoverCompletionConsumerCursors`(agent_applied_cursor, runtime_observed_cursor, runtime_injected_cursor)
+- Emits: `AgentCompletionCursorAdvanced`, `RuntimeObservedCompletionCursorAdvanced`, `RuntimeInjectedCompletionCursorAdvanced`
+- To: `Idle`
+
+### `RecoverCompletionConsumerCursorsAttached`
+- From: `Attached`
+- On: `RecoverCompletionConsumerCursors`(agent_applied_cursor, runtime_observed_cursor, runtime_injected_cursor)
+- Emits: `AgentCompletionCursorAdvanced`, `RuntimeObservedCompletionCursorAdvanced`, `RuntimeInjectedCompletionCursorAdvanced`
+- To: `Attached`
+
+### `RecoverCompletionConsumerCursorsRunning`
+- From: `Running`
+- On: `RecoverCompletionConsumerCursors`(agent_applied_cursor, runtime_observed_cursor, runtime_injected_cursor)
+- Emits: `AgentCompletionCursorAdvanced`, `RuntimeObservedCompletionCursorAdvanced`, `RuntimeInjectedCompletionCursorAdvanced`
+- To: `Running`
+
+### `RecoverCompletionConsumerCursorsRetired`
+- From: `Retired`
+- On: `RecoverCompletionConsumerCursors`(agent_applied_cursor, runtime_observed_cursor, runtime_injected_cursor)
+- Emits: `AgentCompletionCursorAdvanced`, `RuntimeObservedCompletionCursorAdvanced`, `RuntimeInjectedCompletionCursorAdvanced`
+- To: `Retired`
+
+### `RecoverCompletionConsumerCursorsStopped`
+- From: `Stopped`
+- On: `RecoverCompletionConsumerCursors`(agent_applied_cursor, runtime_observed_cursor, runtime_injected_cursor)
+- Emits: `AgentCompletionCursorAdvanced`, `RuntimeObservedCompletionCursorAdvanced`, `RuntimeInjectedCompletionCursorAdvanced`
+- To: `Stopped`
+
+### `AdvanceAgentCompletionCursorIdle`
+- From: `Idle`
+- On: `AdvanceAgentCompletionCursor`(cursor)
+- Emits: `AgentCompletionCursorAdvanced`
+- To: `Idle`
+
+### `AdvanceAgentCompletionCursorAttached`
+- From: `Attached`
+- On: `AdvanceAgentCompletionCursor`(cursor)
+- Emits: `AgentCompletionCursorAdvanced`
+- To: `Attached`
+
+### `AdvanceAgentCompletionCursorRunning`
+- From: `Running`
+- On: `AdvanceAgentCompletionCursor`(cursor)
+- Emits: `AgentCompletionCursorAdvanced`
+- To: `Running`
+
+### `AdvanceAgentCompletionCursorRetired`
+- From: `Retired`
+- On: `AdvanceAgentCompletionCursor`(cursor)
+- Emits: `AgentCompletionCursorAdvanced`
+- To: `Retired`
+
+### `AdvanceAgentCompletionCursorStopped`
+- From: `Stopped`
+- On: `AdvanceAgentCompletionCursor`(cursor)
+- Emits: `AgentCompletionCursorAdvanced`
+- To: `Stopped`
+
+### `AdvanceRuntimeObservedCompletionCursorIdle`
+- From: `Idle`
+- On: `AdvanceRuntimeObservedCompletionCursor`(cursor)
+- Emits: `RuntimeObservedCompletionCursorAdvanced`
+- To: `Idle`
+
+### `AdvanceRuntimeObservedCompletionCursorAttached`
+- From: `Attached`
+- On: `AdvanceRuntimeObservedCompletionCursor`(cursor)
+- Emits: `RuntimeObservedCompletionCursorAdvanced`
+- To: `Attached`
+
+### `AdvanceRuntimeObservedCompletionCursorRunning`
+- From: `Running`
+- On: `AdvanceRuntimeObservedCompletionCursor`(cursor)
+- Emits: `RuntimeObservedCompletionCursorAdvanced`
+- To: `Running`
+
+### `AdvanceRuntimeObservedCompletionCursorRetired`
+- From: `Retired`
+- On: `AdvanceRuntimeObservedCompletionCursor`(cursor)
+- Emits: `RuntimeObservedCompletionCursorAdvanced`
+- To: `Retired`
+
+### `AdvanceRuntimeObservedCompletionCursorStopped`
+- From: `Stopped`
+- On: `AdvanceRuntimeObservedCompletionCursor`(cursor)
+- Emits: `RuntimeObservedCompletionCursorAdvanced`
+- To: `Stopped`
+
+### `AdvanceRuntimeInjectedCompletionCursorIdle`
+- From: `Idle`
+- On: `AdvanceRuntimeInjectedCompletionCursor`(cursor)
+- Emits: `RuntimeInjectedCompletionCursorAdvanced`
+- To: `Idle`
+
+### `AdvanceRuntimeInjectedCompletionCursorAttached`
+- From: `Attached`
+- On: `AdvanceRuntimeInjectedCompletionCursor`(cursor)
+- Emits: `RuntimeInjectedCompletionCursorAdvanced`
+- To: `Attached`
+
+### `AdvanceRuntimeInjectedCompletionCursorRunning`
+- From: `Running`
+- On: `AdvanceRuntimeInjectedCompletionCursor`(cursor)
+- Emits: `RuntimeInjectedCompletionCursorAdvanced`
+- To: `Running`
+
+### `AdvanceRuntimeInjectedCompletionCursorRetired`
+- From: `Retired`
+- On: `AdvanceRuntimeInjectedCompletionCursor`(cursor)
+- Emits: `RuntimeInjectedCompletionCursorAdvanced`
+- To: `Retired`
+
+### `AdvanceRuntimeInjectedCompletionCursorStopped`
+- From: `Stopped`
+- On: `AdvanceRuntimeInjectedCompletionCursor`(cursor)
+- Emits: `RuntimeInjectedCompletionCursorAdvanced`
+- To: `Stopped`
+
 ### `EvictCompletedOpIdle`
 - From: `Idle`
 - On: `EvictCompletedOp`(operation_id)
@@ -9040,7 +9170,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify input terminality, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, peer ready operation, peer request, peer response, peer ingress, peer endpoint projection, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
+- `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify input terminality, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, peer ready operation, peer request, peer response, peer ingress, peer endpoint projection, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, completion consumer cursors, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, recover/advance completion consumer cursors, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure
 - `meerkat/src/meerkat_machine.rs` — MeerkatMachine snapshot/diagnostic facade
 
 ### Scenarios
@@ -9050,7 +9180,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `turn_interrupt_and_shutdown` — running work records interrupt and shutdown intent without escaping the Meerkat authority boundary
 - `session_registration_and_binding` — initialize, recover initializing, register, unregister, reconfigure session identity, prepare bindings, ensure executor, attach session ingress, detach ingress, drain exit, and runtime bound/retired/destroyed notices
 - `input_admission_and_queueing` — ingest and publish event, accept input with or without completion, classify input terminality, classify external envelope or plain event, classify peer message, peer request, peer response, and peer ingress, prepare run work, primitive applied conversation or immediate, enter extraction, extraction validation passed, recoverable or fatal failure, budget exhausted, steer accepted, increment attempt count, consume on accept, enqueue classified entry, resolve admission, submit admitted ingress effect, post admission signal, and input or ingress notices
-- `ops_completion_and_waiters` — abort, wait, abort all, peer ready operation, request cancellation at boundary, completion produced/resolved, wait all satisfied, collect completed result, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, evict completed op, collect completed op, submit op event, resolve op lifecycle transition rejected feedback, notify op watcher, reject surface call, retain discard or evict completed terminal records
+- `ops_completion_and_waiters` — abort, wait, abort all, peer ready operation, request cancellation at boundary, completion produced/resolved, wait all satisfied, collect completed result, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, recover/advance completion consumer cursors, evict completed op, collect completed op, submit op event, resolve op lifecycle transition rejected feedback, notify op watcher, reject surface call, retain discard or evict completed terminal records
 - `realtime_connection_projection` — project realtime intent, begin replace detach binding, require reattach, publish signal, reconnect progress, MCP server connect/connected/failed/disconnected/reload, advance session context, interaction stream reserved/attached/completed/expired/closed early, freshness, policy, and binding rotation
 - `product_turn_streaming` — product turn in flight, committed, output started, interrupted, terminal, realtime projection advance/refreshed/reset, client input submitted, mid turn activity, and turn terminated classification
 - `recycle_and_compaction` — recycle from idle or retired, initiate recycle, check compaction, and re-enter ready runtime ownership without preserving stale completed records

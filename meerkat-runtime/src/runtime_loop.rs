@@ -533,6 +533,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     mut effect_rx: tokio::sync::mpsc::Receiver<crate::effect::RuntimeEffect>,
     completions: Option<crate::meerkat_machine::SharedCompletionRegistry>,
     completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
+    ops_lifecycle: Option<std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
     epoch_cursor_state: Option<std::sync::Arc<meerkat_core::EpochCursorState>>,
     machine_weak: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
     session_id: meerkat_core::types::SessionId,
@@ -547,34 +548,32 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     let authority_binding = RuntimeLoopAuthorityBinding::new(machine_weak, session_id);
     tokio::spawn(async move {
         // Feed-based idle wake state (local to this loop).
-        // Seed from epoch cursor state when available (runtime-backed surfaces).
-        // Even an all-zero cursor must win over the feed watermark so a fresh
-        // runtime loop cannot silently skip background completions that land
-        // before the task reaches its first select iteration. Only callers that
-        // do not provide cursor state fall back to the feed watermark to avoid
-        // replaying historical completions.
-        let initial_watermark = epoch_cursor_state
+        // Seed from generated cursor authority when available. Even an
+        // all-zero runtime-owned cursor must win over the feed watermark so a
+        // fresh runtime loop cannot silently skip background completions that
+        // land before the task reaches its first select iteration.
+        let initial_watermark = ops_lifecycle
             .as_ref()
-            .map(|cs| {
-                let obs = cs
-                    .runtime_observed_seq
-                    .load(std::sync::atomic::Ordering::Acquire);
-                let inj = cs
-                    .runtime_last_injected_seq
-                    .load(std::sync::atomic::Ordering::Acquire);
-                obs.max(inj)
+            .and_then(|registry| {
+                let obs = registry.completion_cursor(
+                    meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
+                )?;
+                let inj = registry.completion_cursor(
+                    meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeInjected,
+                )?;
+                Some(obs.max(inj))
             })
             .unwrap_or_else(|| completion_feed.as_ref().map(|f| f.watermark()).unwrap_or(0));
         let mut observed_seq: meerkat_core::completion_feed::CompletionSeq = initial_watermark;
-        let mut last_injected_seq: meerkat_core::completion_feed::CompletionSeq =
-            epoch_cursor_state
-                .as_ref()
-                .map(|cs| {
-                    cs.runtime_last_injected_seq
-                        .load(std::sync::atomic::Ordering::Acquire)
-                })
-                .filter(|&v| v > 0)
-                .unwrap_or(initial_watermark);
+        let mut last_injected_seq: meerkat_core::completion_feed::CompletionSeq = ops_lifecycle
+            .as_ref()
+            .and_then(|registry| {
+                registry.completion_cursor(
+                    meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeInjected,
+                )
+            })
+            .filter(|&v| v > 0)
+            .unwrap_or(initial_watermark);
 
         loop {
             // Build a future for the idle wake. Backed by the completion feed
@@ -648,6 +647,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 &mut observed_seq,
                                 &mut last_injected_seq,
                                 epoch_cursor_state.as_deref(),
+                                ops_lifecycle.as_deref(),
                                 &authority_binding,
                             )
                             .await
@@ -683,6 +683,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                         &mut observed_seq,
                         &mut last_injected_seq,
                         epoch_cursor_state.as_deref(),
+                        ops_lifecycle.as_deref(),
                         &authority_binding,
                     )
                     .await
@@ -720,12 +721,43 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 /// Called after queue processing completes (session has returned to idle).
 /// Distinguishes ordinary no-op from stale-authority shutdown so cursor
 /// projection cannot advance after the runtime loop loses current ownership.
+fn advance_runtime_completion_cursor(
+    ops_lifecycle: Option<&dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+    consumer: meerkat_core::ops_lifecycle::CompletionCursorConsumer,
+    cursor: meerkat_core::completion_feed::CompletionSeq,
+    epoch_cursor_state: Option<&meerkat_core::EpochCursorState>,
+) -> Result<meerkat_core::completion_feed::CompletionSeq, FeedWakeOutcome> {
+    let Some(registry) = ops_lifecycle else {
+        if epoch_cursor_state.is_some() {
+            tracing::warn!(
+                ?consumer,
+                cursor,
+                "runtime loop refused completion cursor projection without generated ops authority"
+            );
+            return Err(FeedWakeOutcome::StaleAuthority);
+        }
+        return Ok(cursor);
+    };
+    registry
+        .advance_completion_cursor(consumer, cursor, epoch_cursor_state)
+        .map_err(|err| {
+            tracing::warn!(
+                ?consumer,
+                cursor,
+                error = %err,
+                "generated ops authority rejected runtime completion cursor advance"
+            );
+            FeedWakeOutcome::StaleAuthority
+        })
+}
+
 async fn maybe_inject_feed_wake(
     driver: &crate::meerkat_machine::SharedDriver,
     feed: Option<&dyn meerkat_core::completion_feed::CompletionFeed>,
     observed_seq: &mut meerkat_core::completion_feed::CompletionSeq,
     last_injected_seq: &mut meerkat_core::completion_feed::CompletionSeq,
     epoch_cursor_state: Option<&meerkat_core::EpochCursorState>,
+    ops_lifecycle: Option<&dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
     authority_binding: &RuntimeLoopAuthorityBinding,
 ) -> FeedWakeOutcome {
     let Some(feed) = feed else {
@@ -748,11 +780,16 @@ async fn maybe_inject_feed_wake(
     if !has_new_bg_completion {
         // No new BG completions — advance to prevent hot-spin
         // on non-BG entries (MobMemberChild, etc.).
-        *observed_seq = batch.watermark;
-        if let Some(cs) = epoch_cursor_state {
-            cs.runtime_observed_seq
-                .store(batch.watermark, std::sync::atomic::Ordering::Release);
-        }
+        let advanced = match advance_runtime_completion_cursor(
+            ops_lifecycle,
+            meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
+            batch.watermark,
+            epoch_cursor_state,
+        ) {
+            Ok(cursor) => cursor,
+            Err(outcome) => return outcome,
+        };
+        *observed_seq = advanced;
         return FeedWakeOutcome::Noop;
     }
 
@@ -770,18 +807,28 @@ async fn maybe_inject_feed_wake(
     );
     let mut d = driver.lock().await;
     if d.as_driver_mut().accept_input(input).await.is_ok() {
-        *last_injected_seq = batch.watermark;
-        if let Some(cs) = epoch_cursor_state {
-            cs.runtime_last_injected_seq
-                .store(batch.watermark, std::sync::atomic::Ordering::Release);
-        }
+        let advanced = match advance_runtime_completion_cursor(
+            ops_lifecycle,
+            meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeInjected,
+            batch.watermark,
+            epoch_cursor_state,
+        ) {
+            Ok(cursor) => cursor,
+            Err(outcome) => return outcome,
+        };
+        *last_injected_seq = advanced;
     }
     // Advance cursor after injection attempt (quiescent path).
-    *observed_seq = batch.watermark;
-    if let Some(cs) = epoch_cursor_state {
-        cs.runtime_observed_seq
-            .store(batch.watermark, std::sync::atomic::Ordering::Release);
-    }
+    let advanced = match advance_runtime_completion_cursor(
+        ops_lifecycle,
+        meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
+        batch.watermark,
+        epoch_cursor_state,
+    ) {
+        Ok(cursor) => cursor,
+        Err(outcome) => return outcome,
+    };
+    *observed_seq = advanced;
     FeedWakeOutcome::Injected
 }
 
@@ -1382,6 +1429,7 @@ mod tests {
             Box::new(executor),
             wake_rx,
             effect_rx,
+            None,
             None,
             None,
             None,
@@ -2731,6 +2779,7 @@ mod tests {
             &mut observed_seq,
             &mut last_injected_seq,
             None,
+            Some(&registry),
             &RuntimeLoopAuthorityBinding::detached_for_test(),
         )
         .await;
@@ -2772,6 +2821,7 @@ mod tests {
             &mut observed_seq,
             &mut last_injected_seq,
             None,
+            None,
             &RuntimeLoopAuthorityBinding::detached_for_test(),
         )
         .await;
@@ -2805,6 +2855,7 @@ mod tests {
             &mut observed_seq,
             &mut last_injected_seq,
             None,
+            Some(&registry),
             &RuntimeLoopAuthorityBinding::detached_for_test(),
         )
         .await;
@@ -2846,6 +2897,7 @@ mod tests {
             &mut observed_seq,
             &mut last_injected_seq,
             None,
+            Some(&registry),
             &stale_binding,
         )
         .await;

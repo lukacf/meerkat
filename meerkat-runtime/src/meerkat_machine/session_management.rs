@@ -333,9 +333,7 @@ impl MeerkatMachine {
         session_id: SessionId,
         executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
     ) {
-        let mut repaired_dead_attachment = false;
         enum ExistingExecutorClaim {
-            Missing,
             AlreadyClaimed,
             Rejected(String),
             Claimed {
@@ -343,42 +341,177 @@ impl MeerkatMachine {
                 completions: SharedCompletionRegistry,
                 ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
                 staged: StagedSessionDslInput,
+                repaired_dead_attachment: bool,
+                _gate_guard: crate::tokio::sync::OwnedMutexGuard<()>,
             },
         }
 
-        let existing = {
-            let mut sessions = self.sessions.write().await;
-            match sessions.get_mut(&session_id) {
-                Some(entry) => {
-                    repaired_dead_attachment = entry.clear_dead_attachment();
-                    if repaired_dead_attachment
-                        && let Err(reason) = entry.stage_generated_executor_exit_observation()
-                    {
-                        ExistingExecutorClaim::Rejected(reason)
-                    } else if entry.generated_executor_registration_active() {
-                        ExistingExecutorClaim::AlreadyClaimed
-                    } else if entry.has_live_attachment() {
-                        match entry.stage_generated_executor_registration_claim(&session_id) {
-                            Ok(_) => ExistingExecutorClaim::AlreadyClaimed,
-                            Err(reason) => ExistingExecutorClaim::Rejected(reason),
-                        }
-                    } else {
-                        match entry.stage_generated_executor_registration_claim(&session_id) {
-                            Ok(staged) => ExistingExecutorClaim::Claimed {
-                                driver: entry.driver.clone(),
-                                completions: entry.completions.clone(),
-                                ops_lifecycle: entry.ops_lifecycle.clone(),
-                                staged,
-                            },
-                            Err(reason) => ExistingExecutorClaim::Rejected(reason),
-                        }
+        let existing = loop {
+            if let Some(gate) = self.session_mutation_gate(&session_id).await {
+                let gate_guard = gate.lock_owned().await;
+                let mut sessions = self.sessions.write().await;
+                let Some(entry) = sessions.get_mut(&session_id) else {
+                    continue;
+                };
+                let repaired_dead_attachment = entry.clear_dead_attachment();
+                if repaired_dead_attachment
+                    && let Err(reason) = entry.stage_generated_executor_exit_observation()
+                {
+                    break ExistingExecutorClaim::Rejected(reason);
+                }
+                if entry.generated_executor_registration_active() {
+                    break ExistingExecutorClaim::AlreadyClaimed;
+                }
+                if entry.has_live_attachment() {
+                    match entry.stage_generated_executor_registration_claim(&session_id) {
+                        Ok(_) => break ExistingExecutorClaim::AlreadyClaimed,
+                        Err(reason) => break ExistingExecutorClaim::Rejected(reason),
                     }
                 }
-                None => ExistingExecutorClaim::Missing,
+                match entry.stage_generated_executor_registration_claim(&session_id) {
+                    Ok(staged) => {
+                        break ExistingExecutorClaim::Claimed {
+                            driver: entry.driver.clone(),
+                            completions: entry.completions.clone(),
+                            ops_lifecycle: entry.ops_lifecycle.clone(),
+                            staged,
+                            repaired_dead_attachment,
+                            _gate_guard: gate_guard,
+                        };
+                    }
+                    Err(reason) => break ExistingExecutorClaim::Rejected(reason),
+                }
+            }
+
+            let runtime_id = Self::logical_runtime_id(&session_id);
+            let durable_runtime_state = match self
+                .durable_runtime_state_for_registration(&runtime_id)
+                .await
+            {
+                Ok(state) => state,
+                Err(err) => {
+                    tracing::error!(
+                        %session_id,
+                        error = %err,
+                        "failed to load durable runtime state during executor registration"
+                    );
+                    return;
+                }
+            };
+            let initial_runtime_state = durable_runtime_state.unwrap_or(RuntimeState::Idle);
+            let dsl_authority =
+                match super::dsl_authority::recover_authority_from_runtime_observation(
+                    &session_id,
+                    initial_runtime_state,
+                    None,
+                    None,
+                    None,
+                    std::collections::BTreeSet::new(),
+                    None,
+                ) {
+                    Ok(authority) => Arc::new(std::sync::Mutex::new(authority)),
+                    Err(err) => {
+                        tracing::error!(
+                            %session_id,
+                            error = %super::dsl_authority::map_error(err, "session recovery DSL recovery"),
+                            "failed to recover generated runtime authority during executor registration"
+                        );
+                        return;
+                    }
+                };
+            let mut recovered_entry = self.make_driver(
+                runtime_id.clone(),
+                Arc::clone(&dsl_authority),
+                initial_runtime_state,
+            );
+            if let Err(err) = recovered_entry.as_driver_mut().recover().await {
+                tracing::error!(
+                    %session_id,
+                    error = %err,
+                    "failed to recover runtime driver during registration"
+                );
+                return;
+            }
+            // Recover ops state OUTSIDE the sessions lock to avoid blocking
+            // other adapter operations behind potentially slow disk I/O.
+            let (recovered_ops, recovered_epoch, recovered_cursors) = match self
+                .recover_or_create_ops_state(&session_id, &runtime_id)
+                .await
+            {
+                Ok(recovered) => recovered,
+                Err(err) => {
+                    tracing::error!(
+                        %session_id,
+                        error = %err,
+                        "failed to recover ops lifecycle during executor registration"
+                    );
+                    return;
+                }
+            };
+
+            let mutation_gate = Arc::new(Mutex::new(()));
+            let gate_guard = Arc::clone(&mutation_gate).lock_owned().await;
+            let mut sessions = self.sessions.write().await;
+            if sessions.contains_key(&session_id) {
+                continue;
+            }
+
+            let control_projection = recovered_entry.control_projection_handle();
+            let driver = Arc::new(Mutex::new(recovered_entry));
+            let completions = Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
+            let tool_visibility_owner = Arc::new(MachineToolVisibilityOwner::new());
+            // Bind the DSL authority before the entry is inserted — any
+            // subsequent staging trait call must see the bound authority.
+            tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
+            sessions.insert(
+                session_id.clone(),
+                RuntimeSessionEntry {
+                    runtime_id,
+                    mutation_gate,
+                    control_projection,
+                    driver: driver.clone(),
+                    ops_lifecycle: recovered_ops.clone(),
+                    epoch_id: recovered_epoch,
+                    cursor_state: recovered_cursors,
+                    completions: completions.clone(),
+                    tool_visibility_owner,
+                    current_llm_identity: None,
+                    current_capability_surface: None,
+                    capability_surface_status: SessionLlmCapabilitySurfaceStatus::Unresolved,
+                    attachment_slot: RuntimeLoopAttachmentSlot::Empty,
+                    provisional_interrupt_handle: None,
+                    dsl_authority,
+                    drain_slot: CommsDrainSlot::new(),
+                },
+            );
+            let entry = sessions
+                .get_mut(&session_id)
+                .expect("inserted runtime session entry must be present");
+            match entry.stage_generated_executor_registration_claim(&session_id) {
+                Ok(staged) => {
+                    break ExistingExecutorClaim::Claimed {
+                        driver,
+                        completions,
+                        ops_lifecycle: recovered_ops,
+                        staged,
+                        repaired_dead_attachment: false,
+                        _gate_guard: gate_guard,
+                    };
+                }
+                Err(reason) => {
+                    break ExistingExecutorClaim::Rejected(reason);
+                }
             }
         };
 
-        let (driver, completions, ops_lifecycle, staged_registration) = match existing {
+        let (
+            driver,
+            completions,
+            ops_lifecycle,
+            staged_registration,
+            repaired_dead_attachment,
+            _gate_guard,
+        ) = match existing {
             ExistingExecutorClaim::AlreadyClaimed => {
                 return;
             }
@@ -395,168 +528,16 @@ impl MeerkatMachine {
                 completions,
                 ops_lifecycle,
                 staged,
-            } => (driver, completions, ops_lifecycle, staged),
-            ExistingExecutorClaim::Missing => {
-                let runtime_id = Self::logical_runtime_id(&session_id);
-                let durable_runtime_state = match self
-                    .durable_runtime_state_for_registration(&runtime_id)
-                    .await
-                {
-                    Ok(state) => state,
-                    Err(err) => {
-                        tracing::error!(
-                            %session_id,
-                            error = %err,
-                            "failed to load durable runtime state during executor registration"
-                        );
-                        return;
-                    }
-                };
-                let initial_runtime_state = durable_runtime_state.unwrap_or(RuntimeState::Idle);
-                let dsl_authority =
-                    match super::dsl_authority::recover_authority_from_runtime_observation(
-                        &session_id,
-                        initial_runtime_state,
-                        None,
-                        None,
-                        None,
-                        std::collections::BTreeSet::new(),
-                        None,
-                    ) {
-                        Ok(authority) => Arc::new(std::sync::Mutex::new(authority)),
-                        Err(err) => {
-                            tracing::error!(
-                                %session_id,
-                                error = %super::dsl_authority::map_error(err, "session recovery DSL recovery"),
-                                "failed to recover generated runtime authority during executor registration"
-                            );
-                            return;
-                        }
-                    };
-                let mut recovered_entry = self.make_driver(
-                    runtime_id.clone(),
-                    Arc::clone(&dsl_authority),
-                    initial_runtime_state,
-                );
-                if let Err(err) = recovered_entry.as_driver_mut().recover().await {
-                    tracing::error!(
-                        %session_id,
-                        error = %err,
-                        "failed to recover runtime driver during registration"
-                    );
-                    return;
-                }
-                // Recover ops state OUTSIDE the sessions lock to avoid blocking
-                // other adapter operations behind potentially slow disk I/O.
-                let (recovered_ops, recovered_epoch, recovered_cursors) = match self
-                    .recover_or_create_ops_state(&session_id, &runtime_id)
-                    .await
-                {
-                    Ok(recovered) => recovered,
-                    Err(err) => {
-                        tracing::error!(
-                            %session_id,
-                            error = %err,
-                            "failed to recover ops lifecycle during executor registration"
-                        );
-                        return;
-                    }
-                };
-
-                // Double-check under the lock — another task may have inserted
-                // the entry while we were rebuilding runtime state.
-                let mut sessions = self.sessions.write().await;
-                if let Some(entry) = sessions.get_mut(&session_id) {
-                    repaired_dead_attachment = entry.clear_dead_attachment();
-                    if repaired_dead_attachment
-                        && let Err(reason) = entry.stage_generated_executor_exit_observation()
-                    {
-                        tracing::warn!(
-                            %session_id,
-                            error = %reason,
-                            "generated MeerkatMachine rejected executor-exit observation"
-                        );
-                        return;
-                    }
-                    if entry.generated_executor_registration_active() {
-                        return;
-                    }
-                    if entry.has_live_attachment() {
-                        match entry.stage_generated_executor_registration_claim(&session_id) {
-                            Ok(_) => return,
-                            Err(reason) => {
-                                tracing::warn!(
-                                    %session_id,
-                                    error = %reason,
-                                    "generated MeerkatMachine rejected executor registration"
-                                );
-                                return;
-                            }
-                        }
-                    }
-                    match entry.stage_generated_executor_registration_claim(&session_id) {
-                        Ok(staged) => (
-                            entry.driver.clone(),
-                            entry.completions.clone(),
-                            entry.ops_lifecycle.clone(),
-                            staged,
-                        ),
-                        Err(reason) => {
-                            tracing::warn!(
-                                %session_id,
-                                error = %reason,
-                                "generated MeerkatMachine rejected executor registration"
-                            );
-                            return;
-                        }
-                    }
-                } else {
-                    let control_projection = recovered_entry.control_projection_handle();
-                    let driver = Arc::new(Mutex::new(recovered_entry));
-                    let completions =
-                        Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
-                    let tool_visibility_owner = Arc::new(MachineToolVisibilityOwner::new());
-                    // Bind the DSL authority before the entry is inserted — any
-                    // subsequent staging trait call must see the bound authority.
-                    tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
-                    sessions.insert(
-                        session_id.clone(),
-                        RuntimeSessionEntry {
-                            runtime_id,
-                            mutation_gate: Arc::new(Mutex::new(())),
-                            control_projection,
-                            driver: driver.clone(),
-                            ops_lifecycle: recovered_ops.clone(),
-                            epoch_id: recovered_epoch,
-                            cursor_state: recovered_cursors,
-                            completions: completions.clone(),
-                            tool_visibility_owner,
-                            current_llm_identity: None,
-                            current_capability_surface: None,
-                            capability_surface_status:
-                                SessionLlmCapabilitySurfaceStatus::Unresolved,
-                            attachment_slot: RuntimeLoopAttachmentSlot::Empty,
-                            provisional_interrupt_handle: None,
-                            dsl_authority,
-                            drain_slot: CommsDrainSlot::new(),
-                        },
-                    );
-                    let entry = sessions
-                        .get_mut(&session_id)
-                        .expect("inserted runtime session entry must be present");
-                    match entry.stage_generated_executor_registration_claim(&session_id) {
-                        Ok(staged) => (driver, completions, recovered_ops, staged),
-                        Err(reason) => {
-                            tracing::warn!(
-                                %session_id,
-                                error = %reason,
-                                "generated MeerkatMachine rejected executor registration"
-                            );
-                            return;
-                        }
-                    }
-                }
-            }
+                repaired_dead_attachment,
+                _gate_guard,
+            } => (
+                driver,
+                completions,
+                ops_lifecycle,
+                staged,
+                repaired_dead_attachment,
+                _gate_guard,
+            ),
         };
 
         let should_wake = {

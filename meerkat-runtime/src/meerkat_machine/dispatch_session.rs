@@ -788,9 +788,10 @@ impl MeerkatMachine {
                 ) {
                     return Err(RuntimeDriverError::Destroyed);
                 }
-                // `inner` creates the session entry (if new), stages the DSL
-                // EnsureSessionWithExecutor transition BEFORE mutating the
-                // driver, attaches the executor, and spawns the runtime loop.
+                // `inner` creates the session entry (if new), holds the
+                // per-session mutation gate across the generated registration
+                // claim and shell publication, attaches the executor, and
+                // spawns the runtime loop.
                 self.ensure_session_with_executor_inner(session_id, executor)
                     .await;
                 Ok(MeerkatMachineCommandResult::Unit)

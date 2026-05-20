@@ -701,7 +701,7 @@ enum CommittedEffectDispatchFailure {
     RestorePreviousDslState,
 }
 
-/// Per-session state: driver + registration phase.
+/// Per-session state: driver + generated authority binding + shell handles.
 struct RuntimeSessionEntry {
     /// Canonical runtime control-plane identity for this registered session.
     runtime_id: LogicalRuntimeId,
@@ -741,9 +741,11 @@ struct RuntimeSessionEntry {
     current_capability_surface: Option<SessionLlmCapabilitySurface>,
     /// Whether the machine has a resolved capability surface for the current identity.
     capability_surface_status: SessionLlmCapabilitySurfaceStatus,
-    /// Registration phase — explicit type-level distinction between
-    /// "registered but inert" and "executor attached."
-    phase: RegistrationPhase,
+    /// Runtime-loop channel publication slot.
+    ///
+    /// This is mechanical shell state only. The generated `MeerkatMachine`
+    /// `registration_phase` is the semantic executor registration authority.
+    attachment_slot: RuntimeLoopAttachmentSlot,
     /// Temporary live interrupt capability for prepared, session-owned turns
     /// that run before the runtime loop attachment is published.
     provisional_interrupt_handle:
@@ -782,22 +784,10 @@ struct RuntimeLoopAttachment {
     _loop_handle: tokio::task::JoinHandle<()>,
 }
 
-/// Explicit registration phase — the type-level distinction between
-/// "registered but inert," "attachment in progress," and "executor attached."
-///
-/// Replaces the implicit `Option<RuntimeLoopAttachment>` discriminant
-/// (Dogma §8: Option must not hide ownership uncertainty).
-enum RegistrationPhase {
-    /// Registered via `prepare_bindings()`. No executor — inputs queue
-    /// but are not processed until an executor attaches.
-    Queuing,
-    /// `ensure_session_with_executor()` is in progress — another task is
-    /// wiring the runtime loop. Concurrent callers must treat this as
-    /// "attachment pending" and not race a second loop spawn.
-    Attaching,
-    /// Executor attached with live channels. Inputs are processed
-    /// by the RuntimeLoop.
-    Active(RuntimeLoopAttachment),
+/// Mechanical runtime-loop channel slot.
+enum RuntimeLoopAttachmentSlot {
+    Empty,
+    Attached(RuntimeLoopAttachment),
 }
 
 impl RuntimeSessionEntry {
@@ -812,25 +802,57 @@ impl RuntimeSessionEntry {
     }
 
     fn attachment_is_live(&self) -> bool {
-        match &self.phase {
-            RegistrationPhase::Active(attachment) => {
+        match &self.attachment_slot {
+            RuntimeLoopAttachmentSlot::Attached(attachment) => {
                 !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed()
             }
-            RegistrationPhase::Queuing | RegistrationPhase::Attaching => false,
+            RuntimeLoopAttachmentSlot::Empty => false,
         }
     }
 
-    /// Returns `true` if an executor is attached with live channels, OR if
-    /// attachment is in progress (another task is wiring the loop).
-    /// Used by external-facing queries (`session_has_executor`) to prevent
-    /// concurrent callers from racing a second loop spawn.
-    fn has_attachment_or_attaching(&self) -> bool {
-        matches!(self.phase, RegistrationPhase::Attaching) || self.attachment_is_live()
+    fn generated_executor_registration_active(&self) -> bool {
+        let authority = self
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(
+            authority.state().registration_phase,
+            dsl::RegistrationPhase::Active
+        )
+    }
+
+    fn stage_generated_executor_registration_claim(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<StagedSessionDslInput, String> {
+        let staged = MeerkatMachine::stage_dsl_transition_on_authority(
+            &self.dsl_authority,
+            dsl::MeerkatMachineInput::EnsureSessionWithExecutor {
+                session_id: dsl::SessionId::from_domain(session_id),
+            },
+            "EnsureSessionWithExecutor",
+        )?;
+        if self.generated_executor_registration_active() {
+            Ok(staged)
+        } else {
+            let mut authority = self
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            authority.restore_snapshot(staged.previous_snapshot.clone());
+            Err("generated MeerkatMachine did not grant active executor registration".into())
+        }
+    }
+
+    fn stage_generated_executor_exit_observation(&self) -> Result<StagedSessionDslInput, String> {
+        MeerkatMachine::stage_runtime_internal_dsl_transition_on_authority(
+            &self.dsl_authority,
+            crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput::RuntimeExecutorExited,
+        )
     }
 
     /// Returns `true` only if the executor is fully attached with live channels.
-    /// Used by internal publish logic within `ensure_session_with_executor`
-    /// where the caller itself may have set `Attaching`.
+    /// Used by internal publish logic within `ensure_session_with_executor`.
     fn has_live_attachment(&self) -> bool {
         self.attachment_is_live()
     }
@@ -844,7 +866,7 @@ impl RuntimeSessionEntry {
         loop_handle: tokio::task::JoinHandle<()>,
     ) {
         self.provisional_interrupt_handle = None;
-        self.phase = RegistrationPhase::Active(RuntimeLoopAttachment {
+        self.attachment_slot = RuntimeLoopAttachmentSlot::Attached(RuntimeLoopAttachment {
             wake_tx,
             effect_tx,
             boundary_handle,
@@ -854,18 +876,18 @@ impl RuntimeSessionEntry {
     }
 
     fn clear_dead_attachment(&mut self) -> bool {
-        if matches!(self.phase, RegistrationPhase::Active(_)) && !self.attachment_is_live() {
-            // Don't regress to Queuing if another task is mid-attach;
-            // Active with dead channels goes back to Queuing for retry.
-            self.phase = RegistrationPhase::Queuing;
+        if matches!(self.attachment_slot, RuntimeLoopAttachmentSlot::Attached(_))
+            && !self.attachment_is_live()
+        {
+            self.attachment_slot = RuntimeLoopAttachmentSlot::Empty;
             return true;
         }
         false
     }
 
     fn wake_sender(&self) -> Option<mpsc::Sender<()>> {
-        match &self.phase {
-            RegistrationPhase::Active(attachment)
+        match &self.attachment_slot {
+            RuntimeLoopAttachmentSlot::Attached(attachment)
                 if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
                 Some(attachment.wake_tx.clone())
@@ -875,8 +897,8 @@ impl RuntimeSessionEntry {
     }
 
     fn effect_sender(&self) -> Option<mpsc::Sender<crate::effect::RuntimeEffect>> {
-        match &self.phase {
-            RegistrationPhase::Active(attachment)
+        match &self.attachment_slot {
+            RuntimeLoopAttachmentSlot::Attached(attachment)
                 if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
                 Some(attachment.effect_tx.clone())
@@ -888,8 +910,8 @@ impl RuntimeSessionEntry {
     fn boundary_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
-        match &self.phase {
-            RegistrationPhase::Active(attachment)
+        match &self.attachment_slot {
+            RuntimeLoopAttachmentSlot::Attached(attachment)
                 if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
                 attachment.boundary_handle.clone()
@@ -901,8 +923,8 @@ impl RuntimeSessionEntry {
     fn interrupt_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>> {
-        match &self.phase {
-            RegistrationPhase::Active(attachment)
+        match &self.attachment_slot {
+            RuntimeLoopAttachmentSlot::Attached(attachment)
                 if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
                 attachment.interrupt_handle.clone()
@@ -1072,7 +1094,14 @@ impl MeerkatMachine {
     async fn clear_dead_runtime_attachment(&self, session_id: &SessionId) {
         let mut sessions = self.sessions.write().await;
         if let Some(entry) = sessions.get_mut(session_id) {
-            entry.clear_dead_attachment();
+            let cleared = entry.clear_dead_attachment();
+            if cleared && let Err(error) = entry.stage_generated_executor_exit_observation() {
+                tracing::warn!(
+                    %session_id,
+                    error = %error,
+                    "generated MeerkatMachine rejected executor-exit observation while clearing dead attachment"
+                );
+            }
         }
     }
 

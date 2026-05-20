@@ -4440,6 +4440,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
                 self.silent_intent_overrides = EmptySet;
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
@@ -4451,6 +4452,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
                 self.silent_intent_overrides = EmptySet;
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
@@ -4460,6 +4462,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Idle }
             update {
                 self.silent_intent_overrides = EmptySet;
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
@@ -4471,6 +4474,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
                 self.silent_intent_overrides = EmptySet;
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
@@ -4478,7 +4482,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition RuntimeExecutorExitedFromStopped {
             on input RuntimeExecutorExited
             guard { self.lifecycle_phase == Phase::Stopped }
-            update {}
+            update {
+                self.registration_phase = RegistrationPhase::Queuing;
+            }
             to Stopped
         }
 

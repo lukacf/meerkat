@@ -139,10 +139,7 @@ impl MeerkatMachine {
 
         // No live effect sender was available for this stop path. Scrub any
         // dead attachment capabilities that may still be published.
-        let mut sessions = self.sessions.write().await;
-        if let Some(entry) = sessions.get_mut(session_id) {
-            entry.clear_dead_attachment();
-        }
+        self.clear_dead_runtime_attachment(session_id).await;
         Ok(())
     }
 

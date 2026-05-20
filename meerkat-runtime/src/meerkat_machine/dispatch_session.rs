@@ -422,7 +422,7 @@ impl MeerkatMachine {
                 Ok(MeerkatMachineCommandResult::Bool(
                     sessions
                         .get(&session_id)
-                        .map(RuntimeSessionEntry::has_attachment_or_attaching)
+                        .map(RuntimeSessionEntry::generated_executor_registration_active)
                         .unwrap_or(false),
                 ))
             }

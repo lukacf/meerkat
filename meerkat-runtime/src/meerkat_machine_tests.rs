@@ -15565,6 +15565,88 @@ async fn reconfigure_session_llm_identity_rejects_idle_session() {
 }
 
 #[tokio::test]
+async fn session_has_executor_follows_generated_registration_phase() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+    assert!(
+        !adapter.session_has_executor(&session_id).await,
+        "registered idle sessions start without generated executor registration"
+    );
+
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await;
+    assert!(
+        adapter.session_has_executor(&session_id).await,
+        "EnsureSessionWithExecutor must publish generated active registration"
+    );
+    assert_eq!(
+        adapter
+            .session_dsl_state(&session_id)
+            .await
+            .expect("session DSL state should exist")
+            .registration_phase,
+        mm_dsl::RegistrationPhase::Active
+    );
+
+    adapter
+        .stop_runtime_executor(&session_id, "test stop")
+        .await
+        .expect("stop should terminalize executor");
+    assert!(
+        !adapter.session_has_executor(&session_id).await,
+        "RuntimeExecutorExited must clear generated executor registration"
+    );
+    assert_eq!(
+        adapter
+            .session_dsl_state(&session_id)
+            .await
+            .expect("session DSL state should exist")
+            .registration_phase,
+        mm_dsl::RegistrationPhase::Queuing
+    );
+}
+
+#[tokio::test]
 async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_attached_session() {
     struct NoopExecutor;
 

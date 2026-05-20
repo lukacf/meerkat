@@ -465,6 +465,20 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum("LiveRefreshPublicStatus", &["Queued"]),
+            NamedTypeBinding::string_enum(
+                "LiveChannelPublicStatus",
+                &["Idle", "Opening", "Ready", "Degraded", "Closing", "Closed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveChannelDegradationReason",
+                &[
+                    "Unknown",
+                    "RateLimited",
+                    "ProviderThrottled",
+                    "NetworkUnstable",
+                    "Other",
+                ],
+            ),
             NamedTypeBinding::string("McpServerId"),
             NamedTypeBinding::string_enum(
                 "McpServerState",
@@ -963,6 +977,7 @@ runtime_internal_inputs!(
         ProgressReportedOp,
         QueueAccepted,
         RecordBoundarySeq,
+        RecordLiveChannelStatus,
         RecordLiveRefreshQueued,
         RecoverAdmittedInput,
         PrioritizeInput,

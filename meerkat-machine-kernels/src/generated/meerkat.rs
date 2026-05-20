@@ -2181,6 +2181,136 @@ impl std::fmt::Display for InteractionStreamState {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveChannelDegradationReason {
+    #[default]
+    #[serde(rename = "Unknown")]
+    Unknown,
+    #[serde(rename = "RateLimited")]
+    RateLimited,
+    #[serde(rename = "ProviderThrottled")]
+    ProviderThrottled,
+    #[serde(rename = "NetworkUnstable")]
+    NetworkUnstable,
+    #[serde(rename = "Other")]
+    Other,
+}
+impl LiveChannelDegradationReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::RateLimited => "RateLimited",
+            Self::ProviderThrottled => "ProviderThrottled",
+            Self::NetworkUnstable => "NetworkUnstable",
+            Self::Other => "Other",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveChannelDegradationReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unknown" => Ok(Self::Unknown),
+            "RateLimited" => Ok(Self::RateLimited),
+            "ProviderThrottled" => Ok(Self::ProviderThrottled),
+            "NetworkUnstable" => Ok(Self::NetworkUnstable),
+            "Other" => Ok(Self::Other),
+            other => Err(format!(
+                "invalid LiveChannelDegradationReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveChannelDegradationReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveChannelDegradationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveChannelPublicStatus {
+    #[default]
+    #[serde(rename = "Idle")]
+    Idle,
+    #[serde(rename = "Opening")]
+    Opening,
+    #[serde(rename = "Ready")]
+    Ready,
+    #[serde(rename = "Degraded")]
+    Degraded,
+    #[serde(rename = "Closing")]
+    Closing,
+    #[serde(rename = "Closed")]
+    Closed,
+}
+impl LiveChannelPublicStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Opening => "Opening",
+            Self::Ready => "Ready",
+            Self::Degraded => "Degraded",
+            Self::Closing => "Closing",
+            Self::Closed => "Closed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveChannelPublicStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Idle" => Ok(Self::Idle),
+            "Opening" => Ok(Self::Opening),
+            "Ready" => Ok(Self::Ready),
+            "Degraded" => Ok(Self::Degraded),
+            "Closing" => Ok(Self::Closing),
+            "Closed" => Ok(Self::Closed),
+            other => Err(format!("invalid LiveChannelPublicStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveChannelPublicStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveChannelPublicStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveRefreshPublicStatus {
     #[default]
     #[serde(rename = "Queued")]
@@ -6550,6 +6680,10 @@ pub struct State {
     pub live_refresh_result_sequence: u64,
     pub live_refresh_queue_acceptance_sequence_by_channel: std::collections::BTreeMap<String, u64>,
     pub live_refresh_status_by_channel: std::collections::BTreeMap<String, LiveRefreshPublicStatus>,
+    pub live_channel_status_result_sequence: u64,
+    pub live_channel_status_observation_sequence_by_channel:
+        std::collections::BTreeMap<String, u64>,
+    pub live_channel_status_by_channel: std::collections::BTreeMap<String, LiveChannelPublicStatus>,
     pub known_surfaces: std::collections::BTreeSet<String>,
     pub active_surfaces: std::collections::BTreeSet<String>,
     pub visible_surfaces: std::collections::BTreeSet<String>,
@@ -7340,6 +7474,14 @@ pub mod inputs {
         pub queue_acceptance_sequence: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveChannelStatus {
+        pub channel_id: String,
+        pub status: LiveChannelPublicStatus,
+        pub status_observation_sequence: u64,
+        pub degradation_reason: Option<LiveChannelDegradationReason>,
+        pub degradation_detail: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnDrain {
         pub mode: DrainMode,
     }
@@ -7739,6 +7881,7 @@ pub enum Input {
     PublishOrCancelSurfaceRequest(inputs::PublishOrCancelSurfaceRequest),
     FinishSurfaceRequestUnpublished(inputs::FinishSurfaceRequestUnpublished),
     RecordLiveRefreshQueued(inputs::RecordLiveRefreshQueued),
+    RecordLiveChannelStatus(inputs::RecordLiveChannelStatus),
     SpawnDrain(inputs::SpawnDrain),
     StopDrain(inputs::StopDrain),
     StageVisibilityFilter(inputs::StageVisibilityFilter),
@@ -7963,6 +8106,7 @@ impl Input {
             Self::PublishOrCancelSurfaceRequest(_) => InputKind::PublishOrCancelSurfaceRequest,
             Self::FinishSurfaceRequestUnpublished(_) => InputKind::FinishSurfaceRequestUnpublished,
             Self::RecordLiveRefreshQueued(_) => InputKind::RecordLiveRefreshQueued,
+            Self::RecordLiveChannelStatus(_) => InputKind::RecordLiveChannelStatus,
             Self::SpawnDrain(_) => InputKind::SpawnDrain,
             Self::StopDrain(_) => InputKind::StopDrain,
             Self::StageVisibilityFilter(_) => InputKind::StageVisibilityFilter,
@@ -8170,6 +8314,7 @@ pub enum InputKind {
     PublishOrCancelSurfaceRequest,
     FinishSurfaceRequestUnpublished,
     RecordLiveRefreshQueued,
+    RecordLiveChannelStatus,
     SpawnDrain,
     StopDrain,
     StageVisibilityFilter,
@@ -8662,6 +8807,15 @@ pub mod effects {
         pub queue_acceptance_sequence: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveChannelStatusResolved {
+        pub channel_id: String,
+        pub status: LiveChannelPublicStatus,
+        pub sequence: u64,
+        pub status_observation_sequence: u64,
+        pub degradation_reason: Option<LiveChannelDegradationReason>,
+        pub degradation_detail: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnqueueClassifiedEntry {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerIngressClassified {
@@ -8870,6 +9024,7 @@ pub enum Effect {
     SurfaceRequestCompleted(effects::SurfaceRequestCompleted),
     SurfaceRequestSupersededByCancel(effects::SurfaceRequestSupersededByCancel),
     LiveRefreshResultResolved(effects::LiveRefreshResultResolved),
+    LiveChannelStatusResolved(effects::LiveChannelStatusResolved),
     EnqueueClassifiedEntry(effects::EnqueueClassifiedEntry),
     PeerIngressClassified(effects::PeerIngressClassified),
     PeerResponseReplyClassified(effects::PeerResponseReplyClassified),
@@ -8978,6 +9133,7 @@ pub enum EffectKind {
     SurfaceRequestCompleted,
     SurfaceRequestSupersededByCancel,
     LiveRefreshResultResolved,
+    LiveChannelStatusResolved,
     EnqueueClassifiedEntry,
     PeerIngressClassified,
     PeerResponseReplyClassified,
@@ -9801,6 +9957,11 @@ pub enum TransitionId {
     RecordLiveRefreshQueuedRunning,
     RecordLiveRefreshQueuedRetired,
     RecordLiveRefreshQueuedStopped,
+    RecordLiveChannelStatusIdle,
+    RecordLiveChannelStatusAttached,
+    RecordLiveChannelStatusRunning,
+    RecordLiveChannelStatusRetired,
+    RecordLiveChannelStatusStopped,
     ResolveWaitAllAdmissionDuplicateRejectedIdle,
     ResolveWaitAllAdmissionDuplicateRejectedAttached,
     ResolveWaitAllAdmissionDuplicateRejectedRunning,
@@ -10218,6 +10379,9 @@ pub fn initial_state() -> State {
         live_refresh_result_sequence: 0,
         live_refresh_queue_acceptance_sequence_by_channel: Default::default(),
         live_refresh_status_by_channel: Default::default(),
+        live_channel_status_result_sequence: 0,
+        live_channel_status_observation_sequence_by_channel: Default::default(),
+        live_channel_status_by_channel: Default::default(),
         known_surfaces: Default::default(),
         active_surfaces: Default::default(),
         visible_surfaces: Default::default(),

@@ -2408,6 +2408,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordLiveRefreshQueuedStopped`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`, `live_topology_and_supervision`
+- `RecordLiveChannelStatusIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `recycle_and_compaction`
+- `RecordLiveChannelStatusAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+- `RecordLiveChannelStatusRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`
+- `RecordLiveChannelStatusRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `recycle_and_compaction`
+- `RecordLiveChannelStatusStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`, `live_topology_and_supervision`
 - `ResolveWaitAllAdmissionDuplicateRejectedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -3358,6 +3373,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveRefreshResultResolved`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
+- `LiveChannelStatusResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`, `live_topology_and_supervision`
 - `EnqueueClassifiedEntry`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`

@@ -1661,6 +1661,31 @@ pub enum LiveRefreshPublicStatus {
     Queued,
 }
 
+/// Typed public status class for `live/status` after the live host has
+/// observed the adapter transport state. RPC/SDK surfaces may only project
+/// these values from generated `LiveChannelStatusResolved` effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelPublicStatus {
+    #[default]
+    Idle,
+    Opening,
+    Ready,
+    Degraded,
+    Closing,
+    Closed,
+}
+
+/// Typed public degradation reason for `live/status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelDegradationReason {
+    #[default]
+    Unknown,
+    RateLimited,
+    ProviderThrottled,
+    NetworkUnstable,
+    Other,
+}
+
 /// Typed mirror of the public runtime lifecycle projection. The shell passes
 /// only the observed variant; generated transitions own the semantic facts
 /// derived from it.

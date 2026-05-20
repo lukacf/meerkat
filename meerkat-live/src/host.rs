@@ -46,8 +46,7 @@ use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::ToolError;
 use meerkat_core::live_adapter::{
     LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterErrorCode,
-    LiveAdapterObservation, LiveAdapterStatus, LiveInputChunk, LiveRefreshQueueAcceptance,
-    LiveToolResult,
+    LiveAdapterObservation, LiveAdapterStatus, LiveInputChunk, LiveToolResult,
 };
 use meerkat_core::types::{SessionId, StopReason, ToolCall, ToolResult, Usage};
 use serde_json::value::RawValue;
@@ -85,6 +84,89 @@ impl LiveChannelId {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Typed evidence that a live refresh command was accepted onto the adapter
+/// command queue.
+///
+/// This is host-minted observation evidence, not the public refresh result.
+/// External crates can read it and submit it to MeerkatMachine, but cannot
+/// forge it because the constructor is private to `meerkat-live`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveRefreshQueueAcceptance {
+    channel_id: String,
+    acceptance_sequence: u64,
+}
+
+impl LiveRefreshQueueAcceptance {
+    #[must_use]
+    pub fn channel_id(&self) -> &str {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn acceptance_sequence(&self) -> u64 {
+        self.acceptance_sequence
+    }
+
+    fn from_host_queue_acceptance(
+        channel_id: impl Into<String>,
+        acceptance_sequence: u64,
+    ) -> Option<Self> {
+        let channel_id = channel_id.into();
+        if channel_id.is_empty() || acceptance_sequence == 0 {
+            return None;
+        }
+        Some(Self {
+            channel_id,
+            acceptance_sequence,
+        })
+    }
+}
+
+/// Host-minted observation of the adapter transport status.
+///
+/// The host owns transport mechanics and observed adapter health; generated
+/// MeerkatMachine authority owns the public `live/status` result projected to
+/// SDK/RPC callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveChannelStatusObservation {
+    channel_id: String,
+    status: LiveAdapterStatus,
+    observation_sequence: u64,
+}
+
+impl LiveChannelStatusObservation {
+    #[must_use]
+    pub fn channel_id(&self) -> &str {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn status(&self) -> &LiveAdapterStatus {
+        &self.status
+    }
+
+    #[must_use]
+    pub fn observation_sequence(&self) -> u64 {
+        self.observation_sequence
+    }
+
+    fn from_host_status_observation(
+        channel_id: impl Into<String>,
+        status: LiveAdapterStatus,
+        observation_sequence: u64,
+    ) -> Option<Self> {
+        let channel_id = channel_id.into();
+        if channel_id.is_empty() || observation_sequence == 0 {
+            return None;
+        }
+        Some(Self {
+            channel_id,
+            status,
+            observation_sequence,
+        })
     }
 }
 
@@ -547,9 +629,11 @@ const CLOSED_CHANNEL_TTL: std::time::Duration = std::time::Duration::from_secs(6
 /// Per-channel state tracked by the host.
 struct ChannelState {
     session_id: SessionId,
-    /// Source-of-truth status. Driven by adapter observations after attach,
-    /// not by the host asserting `Ready` at attach time (F32, F33).
+    /// Adapter-observed transport status cache. This is input evidence for
+    /// generated MeerkatMachine public-status authority; it is not the
+    /// public `live/status` source of truth.
     status: LiveAdapterStatus,
+    status_observation_sequence: u64,
     snapshot_version: u64,
     refresh_acceptance_sequence: u64,
     adapter: Option<Arc<dyn LiveAdapter>>,
@@ -913,6 +997,7 @@ impl LiveAdapterHost {
             ChannelState {
                 session_id: session_id.clone(),
                 status: LiveAdapterStatus::Opening,
+                status_observation_sequence: 0,
                 snapshot_version: 0,
                 refresh_acceptance_sequence: 0,
                 adapter: None,
@@ -1043,9 +1128,9 @@ impl LiveAdapterHost {
 
     /// Send an input chunk to the adapter on a channel.
     ///
-    /// F31: rejects when the host-tracked status does not `accepts_commands()`
-    /// (i.e. channel is not in `Ready`). Returns `ChannelNotReady` so callers
-    /// can map to a typed wire error.
+    /// F31: adapter-mechanical guard using the observed transport status.
+    /// Public result/status authority still lives in MeerkatMachine; this
+    /// check prevents writes to a transport that is not ready to accept bytes.
     pub async fn send_input(
         &self,
         channel_id: &LiveChannelId,
@@ -1110,8 +1195,8 @@ impl LiveAdapterHost {
     /// Read the next adapter observation without applying it to canonical state.
     ///
     /// F34: when the adapter pump errors with a transport/closed/provider
-    /// error, the host marks the channel terminal so subsequent
-    /// `channel_status` reads do not return a stale `Ready`.
+    /// error, the host updates its observed transport-status cache so
+    /// subsequent status observations do not report a stale `Ready`.
     pub async fn next_observation_raw(
         &self,
         channel_id: &LiveChannelId,
@@ -1682,6 +1767,12 @@ impl LiveAdapterHost {
         Ok(())
     }
 
+    /// Return the host's raw adapter-status cache.
+    ///
+    /// Internal tests and adapter mechanics may inspect this cache directly,
+    /// but public surfaces must use [`Self::channel_status_observation`] and
+    /// submit the observation to generated MeerkatMachine authority before
+    /// projecting a result to callers.
     pub async fn channel_status(
         &self,
         channel_id: &LiveChannelId,
@@ -1693,6 +1784,25 @@ impl LiveAdapterHost {
             .get(channel_id)
             .map(|ch| ch.status.clone())
             .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+    }
+
+    pub async fn channel_status_observation(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<LiveChannelStatusObservation, LiveAdapterHostError> {
+        let mut inner = self.inner.lock().await;
+        Self::reap_retired_locked(&mut inner);
+        let channel = inner
+            .channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        channel.status_observation_sequence = channel.status_observation_sequence.saturating_add(1);
+        LiveChannelStatusObservation::from_host_status_observation(
+            channel_id.as_str().to_owned(),
+            channel.status.clone(),
+            channel.status_observation_sequence,
+        )
+        .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
     }
 
     pub async fn channel_session(
@@ -1764,6 +1874,9 @@ impl LiveAdapterHost {
         }
     }
 
+    /// Update the host's adapter-observed status cache from a typed adapter
+    /// observation. Public status projection still requires generated
+    /// MeerkatMachine authority over a [`LiveChannelStatusObservation`].
     pub async fn apply_status_update(
         &self,
         channel_id: &LiveChannelId,
@@ -1991,6 +2104,20 @@ mod tests {
         let ch = host.open_channel(test_session_id()).await.unwrap();
         let status = host.channel_status(&ch).await.unwrap();
         assert_eq!(status, LiveAdapterStatus::Opening);
+    }
+
+    #[tokio::test]
+    async fn channel_status_observation_advances_per_channel() {
+        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
+        let ch = host.open_channel(test_session_id()).await.unwrap();
+
+        let first = host.channel_status_observation(&ch).await.unwrap();
+        let second = host.channel_status_observation(&ch).await.unwrap();
+
+        assert_eq!(first.channel_id(), ch.as_str());
+        assert_eq!(first.status(), &LiveAdapterStatus::Opening);
+        assert_eq!(first.observation_sequence(), 1);
+        assert_eq!(second.observation_sequence(), 2);
     }
 
     #[tokio::test]

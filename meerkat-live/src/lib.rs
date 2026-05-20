@@ -14,9 +14,9 @@ pub mod webrtc;
 
 pub use host::{
     DEFAULT_LIVE_TOOL_TIMEOUT, LiveAdapterHost, LiveAdapterHostError, LiveChannelId,
-    LiveProjectionError, LiveProjectionSink, LiveToolDispatchError, LiveToolDispatcher,
-    LiveTranscriptIdentity, NoOpProjectionSink, ObservationOutcome, ObservationRouting,
-    ToolDispatchSkipReason,
+    LiveChannelStatusObservation, LiveProjectionError, LiveProjectionSink,
+    LiveRefreshQueueAcceptance, LiveToolDispatchError, LiveToolDispatcher, LiveTranscriptIdentity,
+    NoOpProjectionSink, ObservationOutcome, ObservationRouting, ToolDispatchSkipReason,
 };
 pub use transport::{LIVE_WS_PATH, LiveWsState, live_ws_router, serve_live_ws_listener};
 #[cfg(feature = "webrtc")]

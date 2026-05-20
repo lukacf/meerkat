@@ -14,6 +14,7 @@ categories.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true, features = ["__meerkat-generated-authority-bridge"] }
+meerkat-live = { workspace = true, optional = true }
 meerkat-machine-dsl = { workspace = true }
 meerkat-machine-schema = { workspace = true }
 meerkat-contracts = { workspace = true }
@@ -38,6 +39,7 @@ tokio_with_wasm = { workspace = true }
 
 [features]
 default = []
+live = ["dep:meerkat-live"]
 sqlite-store = ["dep:rusqlite", "dep:meerkat-store", "meerkat-store/sqlite"]
 
 [dev-dependencies]

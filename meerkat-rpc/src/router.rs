@@ -1603,7 +1603,13 @@ impl MethodRouter {
                 }
             }
             "live/status" if self.live_enabled() => {
-                handlers::live::handle_live_status(id, params, &self.live_adapter_host).await
+                handlers::live::handle_live_status(
+                    id,
+                    params,
+                    &self.live_adapter_host,
+                    &self.runtime,
+                )
+                .await
             }
             "live/close" if self.live_enabled() => {
                 handlers::live::handle_live_close(id, params, &self.live_adapter_host).await

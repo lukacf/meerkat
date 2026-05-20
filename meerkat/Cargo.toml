@@ -122,7 +122,7 @@ skills = [
 ]
 # Live-channel orchestration (LiveAdapterHost wiring + realtime open/refresh
 # helpers shared by RPC, Rust SDK, REST, etc.). Pulls in `meerkat-live`.
-live = ["dep:meerkat-live"]
+live = ["dep:meerkat-live", "meerkat-runtime/live"]
 
 [package.metadata.cargo-machete]
 ignored = ["which"]  # dev-dependency used in e2e tests

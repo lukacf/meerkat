@@ -15140,6 +15140,89 @@ fn live_refresh_queued_result_is_machine_owned() {
 }
 
 #[test]
+fn live_channel_status_result_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    let transition = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveChannelStatus {
+            channel_id: "live-channel-1".to_string(),
+            status: mm_dsl::LiveChannelPublicStatus::Degraded,
+            status_observation_sequence: 11,
+            degradation_reason: Some(mm_dsl::LiveChannelDegradationReason::NetworkUnstable),
+            degradation_detail: None,
+        },
+    )
+    .expect("machine authority should accept live-status observation");
+
+    assert_eq!(
+        authority.state().live_channel_status_result_sequence,
+        1,
+        "machine authority should assign the public status result sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_channel_status_observation_sequence_by_channel
+            .get("live-channel-1"),
+        Some(&11),
+        "machine state should retain the host status-observation sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_channel_status_by_channel
+            .get("live-channel-1"),
+        Some(&mm_dsl::LiveChannelPublicStatus::Degraded),
+        "machine state should retain the public status class by channel"
+    );
+    assert!(
+        transition.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::LiveChannelStatusResolved {
+                channel_id,
+                status: mm_dsl::LiveChannelPublicStatus::Degraded,
+                sequence: 1,
+                status_observation_sequence: 11,
+                degradation_reason: Some(mm_dsl::LiveChannelDegradationReason::NetworkUnstable),
+                degradation_detail: None,
+            } if channel_id == "live-channel-1"
+        )),
+        "machine authority must emit the typed public status effect"
+    );
+
+    let stale = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveChannelStatus {
+            channel_id: "live-channel-1".to_string(),
+            status: mm_dsl::LiveChannelPublicStatus::Ready,
+            status_observation_sequence: 11,
+            degradation_reason: None,
+            degradation_detail: None,
+        },
+    );
+    assert!(
+        stale.is_err(),
+        "machine authority must reject reused host status-observation evidence"
+    );
+
+    let incoherent = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveChannelStatus {
+            channel_id: "live-channel-1".to_string(),
+            status: mm_dsl::LiveChannelPublicStatus::Ready,
+            status_observation_sequence: 12,
+            degradation_reason: Some(mm_dsl::LiveChannelDegradationReason::Other),
+            degradation_detail: Some("detail belongs only to degraded status".to_string()),
+        },
+    );
+    assert!(
+        incoherent.is_err(),
+        "machine authority must reject degradation facts on non-degraded public status"
+    );
+}
+
+#[test]
 fn request_deferred_tools_rejects_empty_dsl_authority_witness() {
     let mut authority = registered_dsl_authority_for_visibility_tests();
     let witnesses = [(

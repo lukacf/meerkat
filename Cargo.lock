@@ -3485,6 +3485,7 @@ dependencies = [
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-live",
  "meerkat-machine-derive",
  "meerkat-machine-dsl",
  "meerkat-machine-kernels",

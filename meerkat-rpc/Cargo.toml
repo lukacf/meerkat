@@ -38,7 +38,7 @@ reqwest = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-mob = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
-meerkat-runtime = { workspace = true, features = ["sqlite-store"] }
+meerkat-runtime = { workspace = true, features = ["sqlite-store", "live"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

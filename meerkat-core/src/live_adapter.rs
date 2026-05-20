@@ -641,51 +641,6 @@ pub struct LiveProjectionSnapshot {
     pub runtime_system_context: Vec<PendingSystemContextAppend>,
 }
 
-/// Typed evidence that a live refresh command was accepted onto the adapter
-/// command queue.
-///
-/// This is an observation receipt, not the public refresh result. Surfaces
-/// hand it to MeerkatMachine so generated authority can decide the public
-/// `live/refresh` result class and compatibility mirrors.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveRefreshQueueAcceptance {
-    channel_id: String,
-    acceptance_sequence: u64,
-}
-
-impl LiveRefreshQueueAcceptance {
-    #[must_use]
-    pub fn channel_id(&self) -> &str {
-        &self.channel_id
-    }
-
-    #[must_use]
-    pub fn acceptance_sequence(&self) -> u64 {
-        self.acceptance_sequence
-    }
-
-    /// Minted by `meerkat-live` only after adapter queue acceptance.
-    ///
-    /// Public because the core protocol type is shared across crates; the
-    /// production minting path is `LiveAdapterHost::enqueue_refresh`, and the
-    /// host rejects generic `send_command(Refresh)` dispatch.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn from_host_queue_acceptance(
-        channel_id: impl Into<String>,
-        acceptance_sequence: u64,
-    ) -> Option<Self> {
-        let channel_id = channel_id.into();
-        if channel_id.is_empty() || acceptance_sequence == 0 {
-            return None;
-        }
-        Some(Self {
-            channel_id,
-            acceptance_sequence,
-        })
-    }
-}
-
 /// Audio format configuration for the live session.
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

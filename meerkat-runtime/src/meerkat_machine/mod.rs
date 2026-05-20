@@ -1271,11 +1271,27 @@ pub struct MachineSessionControlAuthority {
 /// handoff. RPC/SDK surfaces project this value to their wire result instead
 /// of classifying the public status from host queue mechanics.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "live")]
 pub struct LiveRefreshResultAuthority {
     pub status: dsl::LiveRefreshPublicStatus,
     pub refresh_enqueued: bool,
     pub sequence: u64,
     pub queue_acceptance_sequence: u64,
+}
+
+/// Generated authority output for the public `live/status` result.
+///
+/// Constructed only from a `MeerkatMachineEffect::LiveChannelStatusResolved`
+/// emitted after the live host supplies typed adapter-status observation
+/// evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "live")]
+pub struct LiveChannelStatusAuthority {
+    pub status: dsl::LiveChannelPublicStatus,
+    pub sequence: u64,
+    pub status_observation_sequence: u64,
+    pub degradation_reason: Option<dsl::LiveChannelDegradationReason>,
+    pub degradation_detail: Option<String>,
 }
 
 /// Session-scoped execution kernel for the Meerkat runtime.

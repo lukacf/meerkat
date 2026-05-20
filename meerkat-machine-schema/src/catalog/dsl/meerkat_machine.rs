@@ -778,6 +778,31 @@ pub enum LiveRefreshPublicStatus {
     Queued,
 }
 
+/// Typed public status class for `live/status` after the live host has
+/// observed the adapter transport state. RPC/SDK surfaces may only project
+/// these values from generated `LiveChannelStatusResolved` effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelPublicStatus {
+    #[default]
+    Idle,
+    Opening,
+    Ready,
+    Degraded,
+    Closing,
+    Closed,
+}
+
+/// Typed public degradation reason for `live/status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelDegradationReason {
+    #[default]
+    Unknown,
+    RateLimited,
+    ProviderThrottled,
+    NetworkUnstable,
+    Other,
+}
+
 /// Typed mirror of the public runtime lifecycle projection. The shell passes
 /// only the observed variant; generated transitions own the semantic facts
 /// derived from it (terminality, input admission, queue admission, and ingress
@@ -1779,6 +1804,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_refresh_result_sequence: u64,
             live_refresh_queue_acceptance_sequence_by_channel: Map<String, u64>,
             live_refresh_status_by_channel: Map<String, Enum<LiveRefreshPublicStatus>>,
+            live_channel_status_result_sequence: u64,
+            live_channel_status_observation_sequence_by_channel: Map<String, u64>,
+            live_channel_status_by_channel: Map<String, Enum<LiveChannelPublicStatus>>,
 
             // --- External tool surface substate ---
             known_surfaces: Set<String>,
@@ -2065,6 +2093,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_refresh_result_sequence = 0,
             live_refresh_queue_acceptance_sequence_by_channel = EmptyMap,
             live_refresh_status_by_channel = EmptyMap,
+            live_channel_status_result_sequence = 0,
+            live_channel_status_observation_sequence_by_channel = EmptyMap,
+            live_channel_status_by_channel = EmptyMap,
             // External tool surface substate
             known_surfaces = EmptySet,
             active_surfaces = EmptySet,
@@ -2495,6 +2526,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             PublishOrCancelSurfaceRequest { request_key: String },
             FinishSurfaceRequestUnpublished { request_key: String },
             RecordLiveRefreshQueued { channel_id: String, queue_acceptance_sequence: u64 },
+            RecordLiveChannelStatus {
+                channel_id: String,
+                status: Enum<LiveChannelPublicStatus>,
+                status_observation_sequence: u64,
+                degradation_reason: Option<Enum<LiveChannelDegradationReason>>,
+                degradation_detail: Option<String>,
+            },
             // Comms drain inputs
             SpawnDrain { mode: DrainMode },
             StopDrain,
@@ -2897,6 +2935,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 sequence: u64,
                 queue_acceptance_sequence: u64,
             },
+            LiveChannelStatusResolved {
+                channel_id: String,
+                status: Enum<LiveChannelPublicStatus>,
+                sequence: u64,
+                status_observation_sequence: u64,
+                degradation_reason: Option<Enum<LiveChannelDegradationReason>>,
+                degradation_detail: Option<String>,
+            },
             EnqueueClassifiedEntry,
             PeerIngressClassified {
                 class: Enum<PeerIngressInputClass>,
@@ -3068,6 +3114,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition SurfaceRequestCompleted => local,
         disposition SurfaceRequestSupersededByCancel => local,
         disposition LiveRefreshResultResolved => local,
+        disposition LiveChannelStatusResolved => local,
         disposition EnqueueClassifiedEntry => local,
         disposition PeerIngressClassified => local,
         disposition PeerResponseReplyClassified => local,
@@ -11180,6 +11227,51 @@ macro_rules! meerkat_catalog_machine_dsl {
                 refresh_enqueued: true,
                 sequence: self.live_refresh_result_sequence,
                 queue_acceptance_sequence: queue_acceptance_sequence
+            }
+        }
+
+        // RecordLiveChannelStatus: generated public-result authority for
+        // `live/status` once the live host has supplied typed transport-status
+        // observation evidence. The shell observes adapter health but cannot
+        // construct the public status discriminator or degradation reason
+        // without this generated effect.
+        transition RecordLiveChannelStatus {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveChannelStatus {
+                channel_id,
+                status,
+                status_observation_sequence,
+                degradation_reason,
+                degradation_detail
+            }
+            guard "channel_id_present" { channel_id != "" }
+            guard "status_observation_sequence_present" { status_observation_sequence > 0 }
+            guard "status_observation_sequence_advances" {
+                !self.live_channel_status_observation_sequence_by_channel.contains_key(channel_id)
+                || status_observation_sequence > self.live_channel_status_observation_sequence_by_channel.get_copied(channel_id).get("value")
+            }
+            guard "degradation_fields_match_status" {
+                (status == LiveChannelPublicStatus::Degraded && degradation_reason != None)
+                || (status != LiveChannelPublicStatus::Degraded
+                    && degradation_reason == None
+                    && degradation_detail == None)
+            }
+            update {
+                self.live_channel_status_result_sequence += 1;
+                self.live_channel_status_observation_sequence_by_channel.insert(
+                    channel_id,
+                    status_observation_sequence
+                );
+                self.live_channel_status_by_channel.insert(channel_id, status);
+            }
+            to Idle
+            emit LiveChannelStatusResolved {
+                channel_id: channel_id,
+                status: status,
+                sequence: self.live_channel_status_result_sequence,
+                status_observation_sequence: status_observation_sequence,
+                degradation_reason: degradation_reason,
+                degradation_detail: degradation_detail
             }
         }
 

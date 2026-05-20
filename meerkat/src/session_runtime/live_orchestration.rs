@@ -949,14 +949,31 @@ mod orchestrator {
                         continue;
                     }
                 }
-                if let Err(err) = host.enqueue_refresh(&channel_id, snapshot).await {
-                    tracing::warn!(
-                        target: "meerkat::session_runtime::live_orchestration",
-                        ?channel_id,
-                        ?session_id,
-                        ?err,
-                        "failed to enqueue Refresh command to live channel"
-                    );
+                match host.enqueue_refresh(&channel_id, snapshot).await {
+                    Ok(acceptance) => {
+                        if let Err(err) = self
+                            .runtime_adapter
+                            .resolve_live_refresh_queued_result(&session_id, &acceptance)
+                            .await
+                        {
+                            tracing::warn!(
+                                target: "meerkat::session_runtime::live_orchestration",
+                                ?channel_id,
+                                ?session_id,
+                                ?err,
+                                "live refresh queue acceptance was rejected by generated authority"
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "meerkat::session_runtime::live_orchestration",
+                            ?channel_id,
+                            ?session_id,
+                            ?err,
+                            "failed to enqueue Refresh command to live channel"
+                        );
+                    }
                 }
             }
         }

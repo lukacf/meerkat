@@ -14,7 +14,7 @@ use meerkat_contracts::{
     LiveChannelParams, LiveCommitInputParams, LiveInputChunkWire, LiveOpenParams, LiveOpenResult,
     LiveOpenTransport, LiveRefreshResult, LiveSendInputParams, LiveStatusResult,
     LiveTruncateParams, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, RealtimeTurningMode,
-    WireLiveAdapterStatus,
+    WireLiveAdapterStatus, WireLiveDegradationReason,
 };
 use meerkat_core::live_adapter::{
     LiveAdapterCommand, LiveChannelCapabilities, LiveContinuityMode, LiveInputChunk,
@@ -43,6 +43,64 @@ fn live_refresh_result_from_machine_authority(
             "LiveRefreshResultResolved emitted unsupported status {other:?} with refresh_enqueued={}",
             authority.refresh_enqueued
         )),
+    }
+}
+
+fn live_status_result_from_machine_authority(
+    channel_id: String,
+    authority: &meerkat_runtime::meerkat_machine::LiveChannelStatusAuthority,
+) -> Result<LiveStatusResult, String> {
+    Ok(LiveStatusResult {
+        channel_id,
+        status: wire_live_status_from_machine_authority(authority)?,
+    })
+}
+
+fn wire_live_status_from_machine_authority(
+    authority: &meerkat_runtime::meerkat_machine::LiveChannelStatusAuthority,
+) -> Result<WireLiveAdapterStatus, String> {
+    use meerkat_runtime::meerkat_machine::dsl::LiveChannelPublicStatus;
+
+    match authority.status {
+        LiveChannelPublicStatus::Idle => Ok(WireLiveAdapterStatus::Idle),
+        LiveChannelPublicStatus::Opening => Ok(WireLiveAdapterStatus::Opening),
+        LiveChannelPublicStatus::Ready => Ok(WireLiveAdapterStatus::Ready),
+        LiveChannelPublicStatus::Closing => Ok(WireLiveAdapterStatus::Closing),
+        LiveChannelPublicStatus::Closed => Ok(WireLiveAdapterStatus::Closed),
+        LiveChannelPublicStatus::Degraded => {
+            let reason = authority.degradation_reason.ok_or_else(|| {
+                "LiveChannelStatusResolved emitted degraded status without reason".to_string()
+            })?;
+            Ok(WireLiveAdapterStatus::Degraded {
+                reason: wire_live_degradation_reason_from_machine_authority(
+                    reason,
+                    authority.degradation_detail.as_deref(),
+                ),
+            })
+        }
+    }
+}
+
+fn wire_live_degradation_reason_from_machine_authority(
+    reason: meerkat_runtime::meerkat_machine::dsl::LiveChannelDegradationReason,
+    detail: Option<&str>,
+) -> WireLiveDegradationReason {
+    use meerkat_runtime::meerkat_machine::dsl::LiveChannelDegradationReason;
+
+    match reason {
+        LiveChannelDegradationReason::RateLimited => WireLiveDegradationReason::RateLimited,
+        LiveChannelDegradationReason::ProviderThrottled => {
+            WireLiveDegradationReason::ProviderThrottled
+        }
+        LiveChannelDegradationReason::NetworkUnstable => WireLiveDegradationReason::NetworkUnstable,
+        LiveChannelDegradationReason::Other => WireLiveDegradationReason::Other {
+            detail: detail.unwrap_or_default().to_string(),
+        },
+        LiveChannelDegradationReason::Unknown => WireLiveDegradationReason::Unknown {
+            debug: detail
+                .unwrap_or("unknown live channel degradation")
+                .to_string(),
+        },
     }
 }
 
@@ -557,6 +615,7 @@ pub async fn handle_live_status(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
     host: &LiveAdapterHost,
+    runtime: &Arc<SessionRuntime>,
 ) -> RpcResponse {
     let parsed: LiveChannelParams = match super::parse_params(params) {
         Ok(p) => p,
@@ -564,17 +623,39 @@ pub async fn handle_live_status(
     };
     let channel_id = LiveChannelId::new(&parsed.channel_id);
 
-    match host.channel_status(&channel_id).await {
-        Ok(status) => {
-            // R6-3 (P2): convert core → typed wire mirror so SDK codegen
-            // emits a discriminated union for `status` instead of an
-            // opaque `Value`/`Any`.
-            let result = LiveStatusResult {
-                channel_id: parsed.channel_id,
-                status: WireLiveAdapterStatus::from(status),
+    let session_id = match host.channel_session(&channel_id).await {
+        Ok(id) => id,
+        Err(LiveAdapterHostError::ChannelNotFound(_)) => {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("channel {} not found", parsed.channel_id),
+            );
+        }
+        Err(err) => return RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+    };
+
+    match host.channel_status_observation(&channel_id).await {
+        Ok(observation) => {
+            let authority = match runtime
+                .runtime_adapter()
+                .resolve_live_channel_status_result(&session_id, &observation)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live status authority rejected result: {error}"),
+                    );
+                }
             };
-            // N75: see `handle_live_open` — same INTERNAL_ERROR fallback for
-            // a serialization failure that should never happen in practice.
+            let result =
+                match live_status_result_from_machine_authority(parsed.channel_id, &authority) {
+                    Ok(result) => result,
+                    Err(error) => return RpcResponse::error(id, error::INTERNAL_ERROR, error),
+                };
             match serde_json::to_value(result) {
                 Ok(value) => RpcResponse::success(id, value),
                 Err(err) => RpcResponse::error(
@@ -1255,6 +1336,33 @@ mod tests {
         let core_only =
             serde_json::to_value(LiveAdapterStatus::Ready).expect("core serialize should succeed");
         assert_eq!(j["status"], core_only);
+    }
+
+    #[test]
+    fn live_status_success_reply_is_machine_owned() {
+        let authority = meerkat_runtime::meerkat_machine::LiveChannelStatusAuthority {
+            status: meerkat_runtime::meerkat_machine::dsl::LiveChannelPublicStatus::Degraded,
+            sequence: 1,
+            status_observation_sequence: 3,
+            degradation_reason: Some(
+                meerkat_runtime::meerkat_machine::dsl::LiveChannelDegradationReason::Other,
+            ),
+            degradation_detail: Some("provider reported degraded mode".to_string()),
+        };
+
+        let reply = serde_json::to_value(
+            live_status_result_from_machine_authority("live_1".to_string(), &authority)
+                .expect("generated status authority should project to wire"),
+        )
+        .expect("LiveStatusResult must round-trip through serde");
+
+        assert_eq!(reply["channel_id"], "live_1");
+        assert_eq!(reply["status"]["status"], "degraded");
+        assert_eq!(reply["status"]["reason"]["kind"], "other");
+        assert_eq!(
+            reply["status"]["reason"]["detail"],
+            "provider reported degraded mode"
+        );
     }
 
     #[test]

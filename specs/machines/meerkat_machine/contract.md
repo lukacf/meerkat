@@ -116,6 +116,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_refresh_result_sequence`: `u64`
 - `live_refresh_queue_acceptance_sequence_by_channel`: `Map<String, u64>`
 - `live_refresh_status_by_channel`: `Map<String, LiveRefreshPublicStatus>`
+- `live_channel_status_result_sequence`: `u64`
+- `live_channel_status_observation_sequence_by_channel`: `Map<String, u64>`
+- `live_channel_status_by_channel`: `Map<String, LiveChannelPublicStatus>`
 - `known_surfaces`: `Set<String>`
 - `active_surfaces`: `Set<String>`
 - `visible_surfaces`: `Set<String>`
@@ -318,6 +321,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PublishOrCancelSurfaceRequest`(request_key: String)
 - `FinishSurfaceRequestUnpublished`(request_key: String)
 - `RecordLiveRefreshQueued`(channel_id: String, queue_acceptance_sequence: u64)
+- `RecordLiveChannelStatus`(channel_id: String, status: LiveChannelPublicStatus, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
 - `SpawnDrain`(mode: DrainMode)
 - `StopDrain`
 - `StageVisibilityFilter`(filter: ToolFilter)
@@ -475,6 +479,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SurfaceRequestCompleted`(request_key: String)
 - `SurfaceRequestSupersededByCancel`(request_key: String)
 - `LiveRefreshResultResolved`(channel_id: String, status: LiveRefreshPublicStatus, refresh_enqueued: Bool, sequence: u64, queue_acceptance_sequence: u64)
+- `LiveChannelStatusResolved`(channel_id: String, status: LiveChannelPublicStatus, sequence: u64, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
 - `EnqueueClassifiedEntry`
 - `PeerIngressClassified`(class: PeerIngressInputClass, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
 - `PeerResponseReplyClassified`(response_terminality: PeerIngressResponseTerminality)
@@ -7385,6 +7390,61 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `queue_acceptance_sequence_present`
   - `queue_acceptance_sequence_advances`
 - Emits: `LiveRefreshResultResolved`
+- To: `Stopped`
+
+### `RecordLiveChannelStatusIdle`
+- From: `Idle`
+- On: `RecordLiveChannelStatus`(channel_id, status, status_observation_sequence, degradation_reason, degradation_detail)
+- Guards:
+  - `channel_id_present`
+  - `status_observation_sequence_present`
+  - `status_observation_sequence_advances`
+  - `degradation_fields_match_status`
+- Emits: `LiveChannelStatusResolved`
+- To: `Idle`
+
+### `RecordLiveChannelStatusAttached`
+- From: `Attached`
+- On: `RecordLiveChannelStatus`(channel_id, status, status_observation_sequence, degradation_reason, degradation_detail)
+- Guards:
+  - `channel_id_present`
+  - `status_observation_sequence_present`
+  - `status_observation_sequence_advances`
+  - `degradation_fields_match_status`
+- Emits: `LiveChannelStatusResolved`
+- To: `Attached`
+
+### `RecordLiveChannelStatusRunning`
+- From: `Running`
+- On: `RecordLiveChannelStatus`(channel_id, status, status_observation_sequence, degradation_reason, degradation_detail)
+- Guards:
+  - `channel_id_present`
+  - `status_observation_sequence_present`
+  - `status_observation_sequence_advances`
+  - `degradation_fields_match_status`
+- Emits: `LiveChannelStatusResolved`
+- To: `Running`
+
+### `RecordLiveChannelStatusRetired`
+- From: `Retired`
+- On: `RecordLiveChannelStatus`(channel_id, status, status_observation_sequence, degradation_reason, degradation_detail)
+- Guards:
+  - `channel_id_present`
+  - `status_observation_sequence_present`
+  - `status_observation_sequence_advances`
+  - `degradation_fields_match_status`
+- Emits: `LiveChannelStatusResolved`
+- To: `Retired`
+
+### `RecordLiveChannelStatusStopped`
+- From: `Stopped`
+- On: `RecordLiveChannelStatus`(channel_id, status, status_observation_sequence, degradation_reason, degradation_detail)
+- Guards:
+  - `channel_id_present`
+  - `status_observation_sequence_present`
+  - `status_observation_sequence_advances`
+  - `degradation_fields_match_status`
+- Emits: `LiveChannelStatusResolved`
 - To: `Stopped`
 
 ### `ResolveWaitAllAdmissionDuplicateRejectedIdle`

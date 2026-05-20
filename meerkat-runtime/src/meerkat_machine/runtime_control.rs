@@ -1,10 +1,63 @@
 use super::*;
 
+#[cfg(feature = "live")]
+fn dsl_live_channel_status_from_observation(
+    status: &meerkat_core::live_adapter::LiveAdapterStatus,
+) -> (
+    crate::meerkat_machine::dsl::LiveChannelPublicStatus,
+    Option<crate::meerkat_machine::dsl::LiveChannelDegradationReason>,
+    Option<String>,
+) {
+    use crate::meerkat_machine::dsl::{
+        LiveChannelDegradationReason as DslReason, LiveChannelPublicStatus as DslStatus,
+    };
+    use meerkat_core::live_adapter::LiveAdapterStatus;
+
+    match status {
+        LiveAdapterStatus::Idle => (DslStatus::Idle, None, None),
+        LiveAdapterStatus::Opening => (DslStatus::Opening, None, None),
+        LiveAdapterStatus::Ready => (DslStatus::Ready, None, None),
+        LiveAdapterStatus::Closing => (DslStatus::Closing, None, None),
+        LiveAdapterStatus::Closed => (DslStatus::Closed, None, None),
+        LiveAdapterStatus::Degraded { reason } => {
+            let (reason, detail) = dsl_live_channel_degradation_reason(reason);
+            (DslStatus::Degraded, Some(reason), detail)
+        }
+        other => (
+            DslStatus::Degraded,
+            Some(DslReason::Unknown),
+            Some(format!("{other:?}")),
+        ),
+    }
+}
+
+#[cfg(feature = "live")]
+fn dsl_live_channel_degradation_reason(
+    reason: &meerkat_core::live_adapter::LiveDegradationReason,
+) -> (
+    crate::meerkat_machine::dsl::LiveChannelDegradationReason,
+    Option<String>,
+) {
+    use crate::meerkat_machine::dsl::LiveChannelDegradationReason as DslReason;
+    use meerkat_core::live_adapter::LiveDegradationReason;
+
+    match reason {
+        LiveDegradationReason::RateLimited => (DslReason::RateLimited, None),
+        LiveDegradationReason::ProviderThrottled => (DslReason::ProviderThrottled, None),
+        LiveDegradationReason::NetworkUnstable => (DslReason::NetworkUnstable, None),
+        LiveDegradationReason::Other { detail } => {
+            (DslReason::Other, Some(detail.clone().into_owned()))
+        }
+        other => (DslReason::Unknown, Some(format!("{other:?}"))),
+    }
+}
+
 impl MeerkatMachine {
+    #[cfg(feature = "live")]
     pub async fn resolve_live_refresh_queued_result(
         &self,
         session_id: &SessionId,
-        acceptance: &meerkat_core::live_adapter::LiveRefreshQueueAcceptance,
+        acceptance: &meerkat_live::LiveRefreshQueueAcceptance,
     ) -> Result<LiveRefreshResultAuthority, RuntimeDriverError> {
         let channel_id = acceptance.channel_id().to_string();
         let (_, effects) = self
@@ -40,6 +93,61 @@ impl MeerkatMachine {
             .ok_or_else(|| {
                 RuntimeDriverError::Internal(format!(
                     "RecordLiveRefreshQueued for channel '{channel_id}' emitted no LiveRefreshResultResolved effect"
+                ))
+            })
+    }
+
+    #[cfg(feature = "live")]
+    pub async fn resolve_live_channel_status_result(
+        &self,
+        session_id: &SessionId,
+        observation: &meerkat_live::LiveChannelStatusObservation,
+    ) -> Result<LiveChannelStatusAuthority, RuntimeDriverError> {
+        let channel_id = observation.channel_id().to_string();
+        let (status, degradation_reason, degradation_detail) =
+            dsl_live_channel_status_from_observation(observation.status());
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveChannelStatus {
+                    channel_id: channel_id.clone(),
+                    status,
+                    status_observation_sequence: observation.observation_sequence(),
+                    degradation_reason,
+                    degradation_detail: degradation_detail.clone(),
+                },
+                "RecordLiveChannelStatus",
+            )
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+
+        effects
+            .as_slice()
+            .iter()
+            .find_map(|effect| match effect {
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveChannelStatusResolved {
+                    channel_id: effect_channel_id,
+                    status,
+                    sequence,
+                    status_observation_sequence,
+                    degradation_reason,
+                    degradation_detail,
+                } if *effect_channel_id == channel_id
+                    && *status_observation_sequence == observation.observation_sequence() =>
+                {
+                    Some(LiveChannelStatusAuthority {
+                        status: *status,
+                        sequence: *sequence,
+                        status_observation_sequence: *status_observation_sequence,
+                        degradation_reason: *degradation_reason,
+                        degradation_detail: degradation_detail.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "RecordLiveChannelStatus for channel '{channel_id}' emitted no LiveChannelStatusResolved effect"
                 ))
             })
     }

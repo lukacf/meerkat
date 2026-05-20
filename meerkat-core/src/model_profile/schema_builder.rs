@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn gemini_3_schema_exposes_thinking_level() {
-        let caps = capabilities_for(crate::Provider::Gemini, "gemini-3-flash-preview")
+        let caps = capabilities_for(crate::Provider::Gemini, "gemini-3.5-flash")
             .expect("gemini 3 flash row");
         let schema = build_params_schema(caps);
         let keys = property_keys(&schema);

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.20] - 2026-05-20
+
+Meerkat 0.6.20 refreshes Gemini model guidance and fixes mob peer delivery
+lifecycle behavior under backpressure.
+
+### Changed
+
+- **Gemini model and post-0.6.5 guidance refresh** (#734) — updates the
+  featured Gemini text model to `gemini-3.5-flash` across the catalog, default
+  provider model, tests, examples, public docs, and Meerkat skill guidance.
+
+### Fixed
+
+- **Classified inbox wake and peer delivery lifecycle** (#735) — fixes
+  classified inbox capacity wake registration, wakes senders on close, and
+  moves mob peer-message delivery out of the actor command loop so
+  backpressured recipients do not wedge unrelated mob handle calls.
+
 ## [0.6.19] - 2026-05-19
 
 Meerkat 0.6.19 is a runtime/session projection hotfix release for

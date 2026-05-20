@@ -118,6 +118,7 @@ Defaults:
 
 - `--tools safe`
 - default model is OpenAI `gpt-5.5` unless realm config/auth binding selects another model
+- current recommended Gemini model is `gemini-3.5-flash`
 - CLI realm state is project-local by default: `<context-root>/.rkat/realms/<ws-...>/`
 - stream on in a TTY, off in pipes/scripts
 - piped stdin is blob context unless `--stdin lines`

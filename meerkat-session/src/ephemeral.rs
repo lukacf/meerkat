@@ -5024,7 +5024,7 @@ mod inline_video_admission_tests {
     fn provider_gemini_capability_false_rejects_inline_video() {
         let result = validate_prompt_video_input_against_capability(
             &inline_video_prompt(),
-            &identity(Provider::Gemini, "gemini-3-flash-preview"),
+            &identity(Provider::Gemini, "gemini-3.5-flash"),
             false,
         );
 

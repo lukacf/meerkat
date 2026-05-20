@@ -137,6 +137,25 @@ Use WorkGraph for durable pending work, dependencies, claims, and evidence. Use
 Schedule for time and recurrence; use memory for retrieved knowledge; use comms
 for live messages.
 
+## Current 0.6.19 Surface Snapshot
+
+For platform integration answers, assume the current public line is `0.6.19`,
+not the old live-adapter/docs-refresh snapshot:
+
+- Default hosted text recommendations are OpenAI `gpt-5.5`, Anthropic
+  `claude-opus-4-7`, and Gemini `gemini-3.5-flash`.
+- WorkGraph is available through agent `workgraph_*` tools plus read-only host
+  surfaces (`workgraph/list`, `ready`, `snapshot`, `events`, REST and SDK
+  equivalents).
+- CLI runs default to project-local realms unless `--realm`, `--isolated`,
+  `--context-root`, or `--state-root` says otherwise.
+- `rkat run --output html` / `--html` writes standalone HTML artifacts.
+- Image generation uses `generate_image` with OpenAI `gpt-image-2` and Gemini
+  `gemini-3.1-flash-image-preview` as provider defaults.
+- Mob host surfaces include batch wiring, helper/fork/respawn/cancel/wait
+  operations, profile CRUD when a profile store is present, and safer
+  runtime-committed session checkpoint projections for SDK consumers.
+
 ## Mob behavior (current contract)
 
 - CLI `run`/`run --resume` compose `mob_*` tools through `meerkat-mob-mcp` dispatcher integration when mob tools are enabled, for example with `--tools full` or config `tools.mob_enabled=true`.
@@ -470,13 +489,13 @@ The `meerkat` facade crate defaults to providers only (Anthropic, OpenAI, Gemini
 
 ```toml
 # Default: three providers, no storage/comms/tools
-meerkat = "0.6.6"
+meerkat = "0.6.19"
 
 # Single provider, minimal
-meerkat = { version = "0.6.6", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.6.19", default-features = false, features = ["anthropic"] }
 
 # Add persistence + memory + comms + live channels
-meerkat = { version = "0.6.6", features = [
+meerkat = { version = "0.6.19", features = [
     "jsonl-store", "session-store", "session-compaction",
     "memory-store-session", "comms", "mcp", "skills",
     "openai-realtime", "live"

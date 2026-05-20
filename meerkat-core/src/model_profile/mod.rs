@@ -176,14 +176,14 @@ mod tests {
     #[test]
     fn wrong_typed_provider_for_known_model_returns_none() {
         assert!(profile_for(Provider::Anthropic, "gpt-5.4").is_none());
-        assert!(profile_for(Provider::OpenAI, "gemini-3-flash-preview").is_none());
+        assert!(profile_for(Provider::OpenAI, "gemini-3.5-flash").is_none());
     }
 
     #[test]
     fn unknown_provider_model_pairs_fail_closed_without_defaults() {
         assert!(profile_for(Provider::Other, "gpt-5.4").is_none());
         assert!(profile_for(Provider::Other, "uncatalogued-gpt-compatible").is_none());
-        assert!(inline_video_support_for(Provider::Other, "gemini-3-flash-preview").is_none());
+        assert!(inline_video_support_for(Provider::Other, "gemini-3.5-flash").is_none());
     }
 
     #[test]
@@ -191,7 +191,7 @@ mod tests {
         let display_provider = Provider::parse_strict("Gemini").unwrap_or(Provider::Other);
         assert_eq!(display_provider, Provider::Other);
         assert_eq!(
-            inline_video_support_for(display_provider, "gemini-3-flash-preview"),
+            inline_video_support_for(display_provider, "gemini-3.5-flash"),
             None
         );
     }
@@ -233,8 +233,8 @@ mod tests {
 
     #[test]
     fn gemini_profile_vision_and_image_tool_results_true() {
-        let profile = profile_for(Provider::Gemini, "gemini-3-flash-preview")
-            .expect("gemini-3-flash-preview must have a profile");
+        let profile = profile_for(Provider::Gemini, "gemini-3.5-flash")
+            .expect("gemini-3.5-flash must have a profile");
         assert!(profile.vision, "Gemini models must support vision");
         assert!(
             profile.image_tool_results,
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn inline_video_support_for_reads_capability_truth() {
         assert_eq!(
-            inline_video_support_for(Provider::Gemini, "gemini-3-flash-preview"),
+            inline_video_support_for(Provider::Gemini, "gemini-3.5-flash"),
             Some(true)
         );
         assert_eq!(
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn gemini_supports_web_search() {
-        let profile = profile_for(Provider::Gemini, "gemini-3-flash-preview").unwrap();
+        let profile = profile_for(Provider::Gemini, "gemini-3.5-flash").unwrap();
         assert!(profile.supports_web_search);
     }
 }

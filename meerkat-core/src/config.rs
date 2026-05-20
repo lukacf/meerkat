@@ -2683,7 +2683,7 @@ api_style = "chat_completions"
             Some(Provider::OpenAI)
         );
         assert_eq!(
-            Provider::infer_from_model("gemini-3-flash-preview"),
+            Provider::infer_from_model("gemini-3.5-flash"),
             Some(Provider::Gemini)
         );
         assert_eq!(Provider::infer_from_model("gpt-unknown-preview"), None);

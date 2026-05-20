@@ -49,7 +49,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.19",
+        "CARGO_PKG_VERSION": "0.6.20",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -103,7 +103,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.19",
+        "CARGO_PKG_VERSION": "0.6.20",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -173,7 +173,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.19",
+        "CARGO_PKG_VERSION": "0.6.20",
         "CARGO_BIN_NAME": "dispatcher_rule_synthetic_injection",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -244,7 +244,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.19",
+        "CARGO_PKG_VERSION": "0.6.20",
         "CARGO_BIN_NAME": "flow_frame_recovery_tests",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -313,7 +313,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.19",
+        "CARGO_PKG_VERSION": "0.6.20",
         "CARGO_BIN_NAME": "member_session_bindings",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -382,7 +382,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.19",
+        "CARGO_PKG_VERSION": "0.6.20",
         "CARGO_BIN_NAME": "mob_orchestrator_kernel",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -451,7 +451,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.19",
+        "CARGO_PKG_VERSION": "0.6.20",
         "CARGO_BIN_NAME": "shadow_state_absent",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -520,7 +520,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.19",
+        "CARGO_PKG_VERSION": "0.6.20",
         "CARGO_BIN_NAME": "smoke_mob_flow_runtime",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -589,7 +589,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.19",
+        "CARGO_PKG_VERSION": "0.6.20",
         "CARGO_BIN_NAME": "smoke_mob_generated_image_comms",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -658,7 +658,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.19",
+        "CARGO_PKG_VERSION": "0.6.20",
         "CARGO_BIN_NAME": "smoke_mob_pictionary",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -727,7 +727,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.19",
+        "CARGO_PKG_VERSION": "0.6.20",
         "CARGO_BIN_NAME": "smoke_mob_resume",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",

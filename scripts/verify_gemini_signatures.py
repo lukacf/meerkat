@@ -30,7 +30,7 @@ if not API_KEY:
     sys.exit(1)
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-MODEL = "gemini-3-flash-preview"
+MODEL = "gemini-3.5-flash"
 
 
 def make_request(

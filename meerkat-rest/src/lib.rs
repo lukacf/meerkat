@@ -8567,7 +8567,7 @@ mod tests {
             Arc::new(MemoryConfigStore::new(Config::default()));
         let config_runtime =
             meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
-        let identity = validation_identity(Provider::Anthropic, "gemini-3-flash-preview");
+        let identity = validation_identity(Provider::Anthropic, "gemini-3.5-flash");
 
         let err = validate_prompt_video_input(&config_runtime, &inline_video_prompt(), &identity)
             .await
@@ -8585,7 +8585,7 @@ mod tests {
             meerkat_core::UnsupportedModelCapabilityReason::ProviderModelProfileMissing
         );
         assert_eq!(evidence.provider, Provider::Anthropic);
-        assert_eq!(evidence.model, "gemini-3-flash-preview");
+        assert_eq!(evidence.model, "gemini-3.5-flash");
     }
 
     #[tokio::test]
@@ -8619,7 +8619,7 @@ mod tests {
             Arc::new(MemoryConfigStore::new(Config::default()));
         let config_runtime =
             meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
-        let identity = validation_identity(Provider::Other, "gemini-3-flash-preview");
+        let identity = validation_identity(Provider::Other, "gemini-3.5-flash");
 
         let err = validate_prompt_video_input(&config_runtime, &inline_video_prompt(), &identity)
             .await
@@ -8635,7 +8635,7 @@ mod tests {
             meerkat_core::UnsupportedModelCapabilityReason::ProviderModelProfileMissing
         );
         assert_eq!(evidence.provider, Provider::Other);
-        assert_eq!(evidence.model, "gemini-3-flash-preview");
+        assert_eq!(evidence.model, "gemini-3.5-flash");
     }
 
     #[tokio::test]

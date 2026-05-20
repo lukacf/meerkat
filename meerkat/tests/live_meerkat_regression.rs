@@ -751,7 +751,7 @@ mod scenario_23_structured_output {
         // --- Gemini ---
         #[cfg(feature = "gemini")]
         if let Some(_api_key) = gemini_api_key() {
-            let gemini_model = "gemini-3-flash-preview".to_string();
+            let gemini_model = "gemini-3.5-flash".to_string();
             eprintln!("[scenario 23] Testing structured output with Gemini ({gemini_model})");
             let temp_dir = TempDir::new().unwrap();
             let factory = AgentFactory::new(temp_dir.path().join("sessions"));

@@ -15,7 +15,7 @@ if not API_KEY:
     raise ValueError("GEMINI_API_KEY not set")
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-MODEL = "gemini-3-flash-preview"  # Gemini 3 model that supports thinking with thoughtSignature
+MODEL = "gemini-3.5-flash"  # Gemini 3 model that supports thinking with thoughtSignature
 
 def make_request(contents, tools=None, thinking_config=None):
     """Make a request to Gemini API."""

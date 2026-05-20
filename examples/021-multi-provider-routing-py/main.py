@@ -56,7 +56,7 @@ async def main():
         if os.environ.get("OPENAI_API_KEY"):
             models.append("gpt-5.5")
         if os.environ.get("GEMINI_API_KEY"):
-            models.append("gemini-3-flash-preview")
+            models.append("gemini-3.5-flash")
 
         if not models:
             print("Set at least one API key: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY")
@@ -110,13 +110,13 @@ async def main():
 Model selection strategies:
 
 1. COST OPTIMIZATION
-   - Simple tasks → claude-sonnet-4-6 or gemini-3-flash-preview
+   - Simple tasks → claude-sonnet-4-6 or gemini-3.5-flash
    - Complex tasks → claude-opus-4-7 or gpt-5.5
 
 2. CAPABILITY-BASED
    - Code generation → claude-sonnet-4-6 (strong at code)
    - Reasoning → claude-opus-4-7 with thinking, or gpt-5.5 high effort
-   - Speed → gemini-3-flash-preview
+   - Speed → gemini-3.5-flash
 
 3. FALLBACK CHAIN
    - Try primary provider
@@ -126,7 +126,7 @@ Model selection strategies:
 4. PER-AGENT ROUTING (in mobs)
    - Orchestrator: claude-opus-4-7 (complex planning)
    - Workers: claude-sonnet-4-6 (execution)
-   - Validators: gemini-3-flash-preview (fast checks)
+   - Validators: gemini-3.5-flash (fast checks)
 """)
 
     finally:

@@ -183,7 +183,7 @@ fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>>
     }
     assert_eq!(infer("claude-opus-4-6"), Provider::Anthropic);
     assert_eq!(infer("gpt-5.4"), Provider::OpenAI);
-    assert_eq!(infer("gemini-3-flash-preview"), Provider::Gemini);
+    assert_eq!(infer("gemini-3.5-flash"), Provider::Gemini);
     assert_eq!(infer("unknown"), Provider::Other);
 
     // Phase 6.6 removed the legacy env-precedence credential helpers

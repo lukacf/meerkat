@@ -2411,7 +2411,7 @@ mod tests {
     fn test_build_request_body_with_thinking_level() -> Result<(), Box<dyn std::error::Error>> {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gemini-3-flash-preview",
+            "gemini-3.5-flash",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_gemini_tag_merge(|t| t.thinking_level = Some(GeminiThinkingLevel::Low));
@@ -2497,7 +2497,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gemini-3-flash-preview",
+            "gemini-3.5-flash",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_params(ProviderTag::OpenAi(OpenAiProviderTag {

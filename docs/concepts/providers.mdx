@@ -58,13 +58,13 @@ This page is the concept layer for provider abstraction. Use [Auth](/guides/auth
 
     | Model | Context | Best for |
     |-------|---------|----------|
-    | `gemini-3.1-pro-preview` | 1M | Default Gemini recommendation, advanced reasoning |
-    | `gemini-3-flash-preview` | 1M | Fast general-purpose tasks |
+    | `gemini-3.5-flash` | 1M | Default Gemini recommendation, stable fast reasoning |
+    | `gemini-3.1-pro-preview` | 1M | Advanced preview reasoning |
     | `gemini-3.1-flash-lite-preview` | 1M | Lightweight fast-path tasks |
 
     ```toml config.toml (active realm)
     [agent]
-    model = "gemini-3.1-pro-preview"
+    model = "gemini-3.5-flash"
     max_tokens_per_turn = 8192
     ```
   </Tab>
@@ -119,7 +119,7 @@ The `generate_image` builtin uses provider-specific image profiles behind a sing
 | OpenAI | `gpt-image-2` | Uses the hosted Responses image tool by default. Other OpenAI-owned `gpt-image*` or `dall-e*` targets use the Images API path. |
 | Gemini | `gemini-3.1-flash-image-preview` | Also accepts provider alias `google`. Gemini image targets run through an internal scoped image-model turn. |
 
-Request `provider_params` are provider-specific and do not replace Meerkat's universal image fields. Use top-level `size`, `quality`, `format`, and `intent`; the OpenAI adapter lowers `format` to provider-side `output_format`. For the current `gpt-image-2` default, public callers should only need `background`, `output_compression`, `moderation`, hosted-tool-only `action`, hosted-tool-only `reasoning_effort`, and hosted-tool-only `web_search`; use `background: "auto"` or `"opaque"` (not `"transparent"`), use `output_compression` only with `format: "jpeg"` or `"webp"`, usually omit `action`, and omit `input_fidelity` because Meerkat 0.6.6 rejects unknown OpenAI image provider params. Gemini accepts `aspect_ratio` and `image_size`. See [Image generation](/guides/image-generation) for the exact request shape and troubleshooting.
+Request `provider_params` are provider-specific and do not replace Meerkat's universal image fields. Use top-level `size`, `quality`, `format`, and `intent`; the OpenAI adapter lowers `format` to provider-side `output_format`. For the current `gpt-image-2` default, public callers should only need `background`, `output_compression`, `moderation`, hosted-tool-only `action`, hosted-tool-only `reasoning_effort`, and hosted-tool-only `web_search`; use `background: "auto"` or `"opaque"` (not `"transparent"`), use `output_compression` only with `format: "jpeg"` or `"webp"`, usually omit `action`, and omit `input_fidelity` because Meerkat 0.6.19 rejects unknown OpenAI image provider params. Gemini accepts `aspect_ratio` and `image_size`. See [Image generation](/guides/image-generation) for the exact request shape and troubleshooting.
 
 ## SDK feature flags
 
@@ -135,11 +135,11 @@ When using Meerkat as a Rust library, enable only the providers you need:
 <CodeGroup>
 
 ```toml Anthropic only (smallest binary)
-meerkat = { version = "0.6.6", features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "0.6.19", features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
-meerkat = { version = "0.6.6", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "0.6.19", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>
@@ -180,7 +180,7 @@ or for a single CLI run with `rkat run --no-web-search "..."`.
     | `top_k` | Top-k sampling parameter (integer) |
 
     ```bash
-    rkat run --model gemini-3-flash-preview --param thinking_budget=5000 "Analyze this data"
+    rkat run --model gemini-3.5-flash --param thinking_budget=5000 "Analyze this data"
     ```
   </Tab>
 </Tabs>

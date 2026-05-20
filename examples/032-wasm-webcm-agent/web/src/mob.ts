@@ -71,7 +71,7 @@ export function resolveModels(keys: ApiKeys): ModelAssignments {
     : "gemini-3.1-pro-preview";
 
   // Reviewer: prefer Gemini (schema issues fixed in PR #93)
-  const reviewer = hasGemini ? "gemini-3-flash-preview"
+  const reviewer = hasGemini ? "gemini-3.5-flash"
     : hasAnthropic ? "claude-sonnet-4-6"
     : "gpt-5.5";
 

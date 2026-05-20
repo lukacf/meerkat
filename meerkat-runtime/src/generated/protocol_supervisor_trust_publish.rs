@@ -71,7 +71,11 @@ impl SupervisorTrustFreshnessAuthority {
     fn validate_pending_publish(
         &self,
         expected_peer_id: &str,
+        expected_name: &str,
+        expected_address: &str,
+        expected_signing_public_key: Option<&str>,
         expected_epoch: u64,
+        expected_local_endpoint: &Option<PeerEndpoint>,
     ) -> Result<(), String> {
         let Some(authority) = &self.authority else {
             return Err("generated supervisor trust freshness authority is absent".to_string());
@@ -81,7 +85,14 @@ impl SupervisorTrustFreshnessAuthority {
         })?;
         let state = guard.state();
         if state.supervisor_publish_pending_peer_id.as_deref() == Some(expected_peer_id)
+            && state.supervisor_publish_pending_name.as_deref() == Some(expected_name)
+            && state.supervisor_publish_pending_address.as_deref() == Some(expected_address)
+            && state
+                .supervisor_publish_pending_signing_public_key
+                .as_deref()
+                == expected_signing_public_key
             && state.supervisor_publish_pending_epoch == Some(expected_epoch)
+            && state.local_endpoint.as_ref() == expected_local_endpoint.as_ref()
         {
             Ok(())
         } else {
@@ -95,6 +106,7 @@ impl SupervisorTrustFreshnessAuthority {
         &self,
         expected_peer_id: &str,
         expected_epoch: u64,
+        expected_local_endpoint: &Option<PeerEndpoint>,
     ) -> Result<(), String> {
         let Some(authority) = &self.authority else {
             return Err("generated supervisor trust freshness authority is absent".to_string());
@@ -105,6 +117,7 @@ impl SupervisorTrustFreshnessAuthority {
         let state = guard.state();
         if state.supervisor_revoke_pending_peer_id.as_deref() == Some(expected_peer_id)
             && state.supervisor_revoke_pending_epoch == Some(expected_epoch)
+            && state.local_endpoint.as_ref() == expected_local_endpoint.as_ref()
         {
             Ok(())
         } else {
@@ -191,7 +204,14 @@ impl SupervisorTrustPublishObligation {
             ));
         }
         self.supervisor_trust_freshness_authority
-            .validate_pending_publish(self.peer_id.as_str(), self.epoch)?;
+            .validate_pending_publish(
+                self.peer_id.as_str(),
+                self.name.as_str(),
+                self.address.as_str(),
+                self.signing_public_key.as_deref(),
+                self.epoch,
+                &self.local_endpoint,
+            )?;
         if self.peer_id != peer_id {
             return Err(format!(
                 "MeerkatMachine supervisor trust obligation peer_id {:?} does not match requested peer {peer_id:?}",

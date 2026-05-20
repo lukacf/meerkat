@@ -788,10 +788,18 @@ fn emit_supervisor_trust_freshness_authority(out: &mut String) -> Result<()> {
     )?;
     writeln!(out, "    }}")?;
     writeln!(out)?;
+    writeln!(out, "    fn validate_pending_publish(")?;
+    writeln!(out, "        &self,")?;
+    writeln!(out, "        expected_peer_id: &str,")?;
+    writeln!(out, "        expected_name: &str,")?;
+    writeln!(out, "        expected_address: &str,")?;
+    writeln!(out, "        expected_signing_public_key: Option<&str>,")?;
+    writeln!(out, "        expected_epoch: u64,")?;
     writeln!(
         out,
-        "    fn validate_pending_publish(&self, expected_peer_id: &str, expected_epoch: u64) -> Result<(), String> {{"
+        "        expected_local_endpoint: &Option<PeerEndpoint>,"
     )?;
+    writeln!(out, "    ) -> Result<(), String> {{")?;
     writeln!(out, "        let Some(authority) = &self.authority else {{")?;
     writeln!(
         out,
@@ -805,8 +813,29 @@ fn emit_supervisor_trust_freshness_authority(out: &mut String) -> Result<()> {
     writeln!(out, "        let state = guard.state();")?;
     writeln!(
         out,
-        "        if state.supervisor_publish_pending_peer_id.as_deref() == Some(expected_peer_id) && state.supervisor_publish_pending_epoch == Some(expected_epoch) {{"
+        "        if state.supervisor_publish_pending_peer_id.as_deref() == Some(expected_peer_id)"
     )?;
+    writeln!(
+        out,
+        "            && state.supervisor_publish_pending_name.as_deref() == Some(expected_name)"
+    )?;
+    writeln!(
+        out,
+        "            && state.supervisor_publish_pending_address.as_deref() == Some(expected_address)"
+    )?;
+    writeln!(
+        out,
+        "            && state.supervisor_publish_pending_signing_public_key.as_deref() == expected_signing_public_key"
+    )?;
+    writeln!(
+        out,
+        "            && state.supervisor_publish_pending_epoch == Some(expected_epoch)"
+    )?;
+    writeln!(
+        out,
+        "            && state.local_endpoint.as_ref() == expected_local_endpoint.as_ref()"
+    )?;
+    writeln!(out, "        {{")?;
     writeln!(out, "            Ok(())")?;
     writeln!(out, "        }} else {{")?;
     writeln!(
@@ -818,7 +847,7 @@ fn emit_supervisor_trust_freshness_authority(out: &mut String) -> Result<()> {
     writeln!(out)?;
     writeln!(
         out,
-        "    fn validate_pending_revoke(&self, expected_peer_id: &str, expected_epoch: u64) -> Result<(), String> {{"
+        "    fn validate_pending_revoke(&self, expected_peer_id: &str, expected_epoch: u64, expected_local_endpoint: &Option<PeerEndpoint>) -> Result<(), String> {{"
     )?;
     writeln!(out, "        let Some(authority) = &self.authority else {{")?;
     writeln!(
@@ -833,7 +862,7 @@ fn emit_supervisor_trust_freshness_authority(out: &mut String) -> Result<()> {
     writeln!(out, "        let state = guard.state();")?;
     writeln!(
         out,
-        "        if state.supervisor_revoke_pending_peer_id.as_deref() == Some(expected_peer_id) && state.supervisor_revoke_pending_epoch == Some(expected_epoch) {{"
+        "        if state.supervisor_revoke_pending_peer_id.as_deref() == Some(expected_peer_id) && state.supervisor_revoke_pending_epoch == Some(expected_epoch) && state.local_endpoint.as_ref() == expected_local_endpoint.as_ref() {{"
     )?;
     writeln!(out, "            Ok(())")?;
     writeln!(out, "        }} else {{")?;
@@ -890,15 +919,24 @@ fn emit_comms_trust_authority_source_impl(
         )?;
     }
     if is_supervisor_trust_protocol(protocol.name.as_str()) {
-        let freshness_method = if protocol.name.as_str() == "supervisor_trust_publish" {
-            "validate_pending_publish"
+        if protocol.name.as_str() == "supervisor_trust_publish" {
+            writeln!(
+                out,
+                "        self.supervisor_trust_freshness_authority.validate_pending_publish("
+            )?;
+            writeln!(out, "            self.peer_id.as_str(),")?;
+            writeln!(out, "            self.name.as_str(),")?;
+            writeln!(out, "            self.address.as_str(),")?;
+            writeln!(out, "            self.signing_public_key.as_deref(),")?;
+            writeln!(out, "            self.epoch,")?;
+            writeln!(out, "            &self.local_endpoint,")?;
+            writeln!(out, "        )?;")?;
         } else {
-            "validate_pending_revoke"
-        };
-        writeln!(
-            out,
-            "        self.supervisor_trust_freshness_authority.{freshness_method}(self.peer_id.as_str(), self.epoch)?;"
-        )?;
+            writeln!(
+                out,
+                "        self.supervisor_trust_freshness_authority.validate_pending_revoke(self.peer_id.as_str(), self.epoch, &self.local_endpoint)?;"
+            )?;
+        }
     }
     if is_mob_topology_trust_protocol(protocol.name.as_str()) {
         let allow_next_epoch = if protocol.effect_variant.as_str() == "MemberTrustUnwiringRequested"

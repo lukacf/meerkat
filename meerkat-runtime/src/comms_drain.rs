@@ -5851,6 +5851,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generated_supervisor_publish_authority_rejects_stale_descriptor_same_peer_epoch() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        let runtime = bootstrap_runtime(PEER_ID_RECEIVER, "inproc://receiver", Some("token"));
+        adapter
+            .stage_local_endpoint_for_comms_runtime(&session_id, &runtime)
+            .await
+            .expect("stage local endpoint");
+        let supervisor_peer_id = test_pubkey(0xaa).to_peer_id().as_str();
+
+        let transition = adapter
+            .stage_supervisor_bind(
+                &session_id,
+                "super-a".to_string(),
+                supervisor_peer_id.clone(),
+                "inproc://super-old".to_string(),
+                test_supervisor_signing_public_key(0xaa),
+                7,
+            )
+            .await
+            .expect("initial bind");
+        let freshness = adapter
+            .supervisor_trust_publish_freshness_authority(&session_id)
+            .await
+            .expect("publish freshness");
+        let stale_obligation =
+            crate::protocol_supervisor_trust_publish::extract_obligations_with_freshness(
+                &transition,
+                freshness,
+            )
+            .into_iter()
+            .next()
+            .expect("generated publish obligation");
+
+        adapter
+            .stage_supervisor_authorize(
+                &session_id,
+                "super-a-renamed".to_string(),
+                supervisor_peer_id,
+                "inproc://super-new".to_string(),
+                test_supervisor_signing_public_key(0xbb),
+                7,
+            )
+            .await
+            .expect("same-peer same-epoch descriptor rotation");
+
+        let stale_authority = crate::protocol_supervisor_trust_publish::publish_authority_for_peer(
+            &stale_obligation,
+            stale_obligation.peer_id(),
+        );
+        assert!(
+            matches!(stale_authority, Err(ref error) if error.contains("stale generated supervisor trust publish obligation")),
+            "stale descriptor must not mint generated supervisor publish authority, got: {stale_authority:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn dsl_supervisor_trust_revoke_ack_stale_epoch_is_rejected() {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();

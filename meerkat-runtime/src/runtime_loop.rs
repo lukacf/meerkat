@@ -563,7 +563,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                 )?;
                 Some(obs.max(inj))
             })
-            .unwrap_or_else(|| completion_feed.as_ref().map(|f| f.watermark()).unwrap_or(0));
+            .unwrap_or(0);
         let mut observed_seq: meerkat_core::completion_feed::CompletionSeq = initial_watermark;
         let mut last_injected_seq: meerkat_core::completion_feed::CompletionSeq = ops_lifecycle
             .as_ref()
@@ -577,10 +577,11 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 
         loop {
             // Build a future for the idle wake. Backed by the completion feed
-            // when present; otherwise pends forever (no background ops can
-            // complete without a feed-producing ops registry).
+            // only when generated ops cursor authority is present; otherwise
+            // pends forever because the feed watermark is not delivery
+            // authority.
             let idle_wake = async {
-                if let Some(ref feed) = completion_feed {
+                if let (Some(feed), Some(_)) = (completion_feed.as_ref(), ops_lifecycle.as_ref()) {
                     feed.wait_for_advance(observed_seq).await;
                 } else {
                     std::future::pending::<()>().await;
@@ -728,15 +729,13 @@ fn advance_runtime_completion_cursor(
     epoch_cursor_state: Option<&meerkat_core::EpochCursorState>,
 ) -> Result<meerkat_core::completion_feed::CompletionSeq, FeedWakeOutcome> {
     let Some(registry) = ops_lifecycle else {
-        if epoch_cursor_state.is_some() {
-            tracing::warn!(
-                ?consumer,
-                cursor,
-                "runtime loop refused completion cursor projection without generated ops authority"
-            );
-            return Err(FeedWakeOutcome::StaleAuthority);
-        }
-        return Ok(cursor);
+        tracing::warn!(
+            ?consumer,
+            cursor,
+            has_epoch_projection = epoch_cursor_state.is_some(),
+            "runtime loop refused completion cursor advance without generated ops authority"
+        );
+        return Err(FeedWakeOutcome::StaleAuthority);
     };
     registry
         .advance_completion_cursor(consumer, cursor, epoch_cursor_state)
@@ -763,6 +762,12 @@ async fn maybe_inject_feed_wake(
     let Some(feed) = feed else {
         return FeedWakeOutcome::Noop;
     };
+    let Some(registry) = ops_lifecycle else {
+        tracing::warn!(
+            "runtime loop refused completion feed wake without generated ops cursor authority"
+        );
+        return FeedWakeOutcome::StaleAuthority;
+    };
     let batch = feed.list_since(*observed_seq);
 
     let has_new_bg_completion = batch.entries.iter().any(|e| {
@@ -781,7 +786,7 @@ async fn maybe_inject_feed_wake(
         // No new BG completions — advance to prevent hot-spin
         // on non-BG entries (MobMemberChild, etc.).
         let advanced = match advance_runtime_completion_cursor(
-            ops_lifecycle,
+            Some(registry),
             meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
             batch.watermark,
             epoch_cursor_state,
@@ -808,7 +813,7 @@ async fn maybe_inject_feed_wake(
     let mut d = driver.lock().await;
     if d.as_driver_mut().accept_input(input).await.is_ok() {
         let advanced = match advance_runtime_completion_cursor(
-            ops_lifecycle,
+            Some(registry),
             meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeInjected,
             batch.watermark,
             epoch_cursor_state,
@@ -820,7 +825,7 @@ async fn maybe_inject_feed_wake(
     }
     // Advance cursor after injection attempt (quiescent path).
     let advanced = match advance_runtime_completion_cursor(
-        ops_lifecycle,
+        Some(registry),
         meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
         batch.watermark,
         epoch_cursor_state,
@@ -2838,6 +2843,49 @@ mod tests {
         assert!(
             guard.as_driver().active_input_ids().is_empty(),
             "no feed must not enqueue anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn maybe_inject_feed_wake_with_feed_without_ops_authority_fails_closed() {
+        let driver = make_shared_ephemeral_driver("feed-without-ops-authority");
+        let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+
+        let spec = background_spec("feed-without-ops-authority");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+        registry
+            .complete_operation(&op_id, op_result(&op_id, "done"))
+            .unwrap();
+
+        let feed = registry.completion_feed_handle();
+        let mut observed_seq = 0;
+        let mut last_injected_seq = 0;
+
+        let injected = maybe_inject_feed_wake(
+            &driver,
+            Some(feed.as_ref()),
+            &mut observed_seq,
+            &mut last_injected_seq,
+            None,
+            None,
+            &RuntimeLoopAuthorityBinding::detached_for_test(),
+        )
+        .await;
+
+        assert_eq!(
+            injected,
+            FeedWakeOutcome::StaleAuthority,
+            "feed-backed wake must fail closed without generated cursor authority"
+        );
+        assert_eq!(observed_seq, 0);
+        assert_eq!(last_injected_seq, 0);
+
+        let guard = driver.lock().await;
+        assert!(
+            guard.as_driver().active_input_ids().is_empty(),
+            "missing cursor authority must not enqueue a detached continuation"
         );
     }
 

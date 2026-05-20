@@ -506,11 +506,9 @@ impl AgentBuilder {
                 .unwrap_or_else(crate::event_tap::new_event_tap),
             system_context_state,
             default_event_tx: self.default_event_tx,
-            // Seed from generated cursor authority if available
-            // (runtime-backed surfaces), otherwise fall back to the feed
-            // watermark to avoid replaying retained completions from prior
-            // agent lifetimes (stop/resume, live reattach). Computed before
-            // moving the registry/feed into the agent.
+            // Seed only from generated cursor authority. A completion feed
+            // without ops-lifecycle authority is read-only storage, not cursor
+            // truth for async completion delivery.
             applied_cursor: self
                 .ops_lifecycle
                 .as_ref()
@@ -519,7 +517,7 @@ impl AgentBuilder {
                         crate::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
                     )
                 })
-                .unwrap_or_else(|| self.completion_feed.as_ref().map_or(0, |f| f.watermark())),
+                .unwrap_or(0),
             ops_lifecycle: self.ops_lifecycle,
             completion_feed: self.completion_feed,
             epoch_cursor_state: self.epoch_cursor_state,
@@ -1873,11 +1871,10 @@ mod tests {
         );
     }
 
-    /// Regression: agent builder must seed applied_cursor from the feed's
-    /// current watermark, not from 0. Starting from 0 replays every retained
-    /// completion as new after stop/resume or live reattachment.
+    /// Regression: agent builder must not treat the feed watermark as cursor
+    /// authority when generated ops-lifecycle authority is absent.
     #[tokio::test]
-    async fn test_builder_seeds_applied_cursor_from_feed_watermark() {
+    async fn test_builder_does_not_seed_applied_cursor_from_feed_without_ops_authority() {
         use crate::completion_feed::tests::MockCompletionFeed;
 
         let client = Arc::new(MockClient);
@@ -1893,8 +1890,8 @@ mod tests {
             .await;
 
         assert_eq!(
-            agent.applied_cursor, 42,
-            "applied_cursor must seed from feed watermark, not 0"
+            agent.applied_cursor, 0,
+            "feed watermark must not seed cursor truth without generated ops authority"
         );
     }
 

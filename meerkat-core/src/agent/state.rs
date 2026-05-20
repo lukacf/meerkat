@@ -1377,7 +1377,9 @@ where
                         !is_synthetic_notice(message, SystemNoticeKind::BackgroundJob)
                     });
                     // Feed path: ops-lifecycle-tracked completions from the runtime.
-                    if let Some(ref feed) = self.completion_feed {
+                    if let (Some(feed), Some(registry)) =
+                        (self.completion_feed.as_ref(), self.ops_lifecycle.as_deref())
+                    {
                         let batch = feed.list_since(self.applied_cursor);
                         for entry in batch.entries.iter().filter(|e| {
                             e.kind == crate::ops_lifecycle::OperationKind::BackgroundToolOp
@@ -1424,29 +1426,26 @@ where
                                 },
                             ));
                         }
-                        let mut cursor_advanced = self.ops_lifecycle.is_none();
-                        if let Some(registry) = self.ops_lifecycle.as_deref() {
-                            match registry.advance_completion_cursor(
-                                crate::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
-                                batch.watermark,
-                                self.epoch_cursor_state.as_deref(),
-                            ) {
-                                Ok(cursor) => {
-                                    self.applied_cursor = cursor;
-                                    cursor_advanced = true;
-                                }
-                                Err(err) => {
-                                    tracing::warn!(
-                                        error = %err,
-                                        cursor = batch.watermark,
-                                        "generated completion cursor authority rejected agent-applied cursor advance"
-                                    );
-                                }
+                        match registry.advance_completion_cursor(
+                            crate::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
+                            batch.watermark,
+                            self.epoch_cursor_state.as_deref(),
+                        ) {
+                            Ok(cursor) => {
+                                self.applied_cursor = cursor;
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    cursor = batch.watermark,
+                                    "generated completion cursor authority rejected agent-applied cursor advance"
+                                );
                             }
                         }
-                        if cursor_advanced {
-                            self.applied_cursor = batch.watermark.max(self.applied_cursor);
-                        }
+                    } else if self.completion_feed.is_some() {
+                        tracing::debug!(
+                            "completion feed present without generated ops cursor authority; skipping feed delivery"
+                        );
                     }
 
                     // Legacy path: completions from custom/override dispatchers that

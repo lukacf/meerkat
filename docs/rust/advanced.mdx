@@ -128,7 +128,7 @@ Pass provider-specific options via `AgentBuildConfig`:
   </Tab>
   <Tab title="Gemini">
     ```rust
-    let mut build_config = AgentBuildConfig::new("gemini-3-flash-preview".into());
+    let mut build_config = AgentBuildConfig::new("gemini-3.5-flash".into());
     build_config.provider_params = Some(json!({"thinking_budget": 8000, "top_k": 40}));
     ```
   </Tab>

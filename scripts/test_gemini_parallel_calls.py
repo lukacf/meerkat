@@ -15,7 +15,7 @@ if not API_KEY:
     raise ValueError("GEMINI_API_KEY not set")
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-MODEL = "gemini-3-flash-preview"
+MODEL = "gemini-3.5-flash"
 
 def make_request(contents, tools=None, thinking_config=None):
     """Make a request to Gemini API."""

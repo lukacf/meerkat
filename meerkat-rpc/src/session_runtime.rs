@@ -7907,7 +7907,7 @@ mod tests {
     fn apply_precheck_gates_b19_fires_before_b18() {
         let result = apply_precheck_gates(
             meerkat_core::Provider::Gemini,
-            "gemini-3-flash-preview",
+            "gemini-3.5-flash",
             // Synthesized: matches the catalog reality (Gemini chat models
             // are realtime: false). Without the explicit ordering check,
             // a refactor could plausibly choose to reject on provider
@@ -7916,7 +7916,7 @@ mod tests {
         );
         match result {
             Err(LiveOpenPrecheckError::ModelNotRealtime { model, provider }) => {
-                assert_eq!(model, "gemini-3-flash-preview");
+                assert_eq!(model, "gemini-3.5-flash");
                 assert_eq!(provider, "gemini");
             }
             other => panic!(
@@ -11371,7 +11371,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let gemini_video_model_on_openai = SessionLlmIdentity {
-            model: "gemini-3-flash-preview".to_string(),
+            model: "gemini-3.5-flash".to_string(),
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
@@ -11401,7 +11401,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let identity = SessionLlmIdentity {
-            model: "gemini-3-flash-preview".to_string(),
+            model: "gemini-3.5-flash".to_string(),
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
@@ -11429,7 +11429,7 @@ mod tests {
         );
         assert_eq!(
             data["unsupported_capability"]["model"],
-            serde_json::json!("gemini-3-flash-preview")
+            serde_json::json!("gemini-3.5-flash")
         );
     }
 

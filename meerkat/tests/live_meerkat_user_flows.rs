@@ -312,7 +312,7 @@ fn openai_model() -> String {
 /// Get the Gemini model to use in tests (configurable via GEMINI_MODEL env var)
 #[allow(dead_code)]
 fn gemini_model() -> String {
-    std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-3-flash-preview".to_string())
+    std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-3.5-flash".to_string())
 }
 
 fn get_test_server_path() -> Option<std::path::PathBuf> {

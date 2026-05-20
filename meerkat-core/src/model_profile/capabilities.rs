@@ -169,7 +169,7 @@ pub enum ThinkingSupport {
 /// ```compile_fail
 /// let _ = meerkat_core::model_profile::capabilities::capabilities_for(
 ///     "gemini",
-///     "gemini-3-flash-preview",
+///     "gemini-3.5-flash",
 /// );
 /// ```
 pub fn capabilities_for(provider: Provider, model_id: &str) -> Option<&'static ModelCapabilities> {
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn typed_provider_mismatch_fails_closed() {
         assert!(capabilities_for(Provider::Anthropic, "gpt-5.4").is_none());
-        assert!(capabilities_for(Provider::OpenAI, "gemini-3-flash-preview").is_none());
+        assert!(capabilities_for(Provider::OpenAI, "gemini-3.5-flash").is_none());
         assert!(capabilities_for(Provider::Other, "gpt-5.4").is_none());
     }
 
@@ -276,7 +276,7 @@ mod tests {
         let display_provider = Provider::parse_strict("Gemini").unwrap_or(Provider::Other);
         assert_eq!(display_provider, Provider::Other);
         assert!(
-            capabilities_for(display_provider, "gemini-3-flash-preview").is_none(),
+            capabilities_for(display_provider, "gemini-3.5-flash").is_none(),
             "display provider strings must fail closed at the typed capability boundary"
         );
     }

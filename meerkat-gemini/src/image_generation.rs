@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn catalog_rejects_non_image_gemini_models() {
-        assert!(image_generation_model(Provider::Gemini, "gemini-3-flash-preview").is_none());
+        assert!(image_generation_model(Provider::Gemini, "gemini-3.5-flash").is_none());
     }
 
     #[test]

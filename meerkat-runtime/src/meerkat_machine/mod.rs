@@ -956,6 +956,23 @@ impl MeerkatMachine {
             .map(|entry| Arc::clone(&entry.mutation_gate))
     }
 
+    async fn lock_current_session_mutation_gate(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<crate::tokio::sync::OwnedMutexGuard<()>> {
+        loop {
+            let gate = self.session_mutation_gate(session_id).await?;
+            let gate_guard = Arc::clone(&gate).lock_owned().await;
+            let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id) else {
+                return None;
+            };
+            if Arc::ptr_eq(&entry.mutation_gate, &gate) {
+                return Some(gate_guard);
+            }
+        }
+    }
+
     async fn session_dsl_authority(
         &self,
         session_id: &SessionId,
@@ -1150,11 +1167,18 @@ impl MeerkatMachine {
         snapshot: dsl::MeerkatMachineAuthoritySnapshot,
     ) {
         if let Ok(authority) = self.session_dsl_authority(session_id).await {
-            let mut authority = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authority.restore_snapshot(snapshot);
+            Self::restore_dsl_authority_snapshot(&authority, snapshot);
         }
+    }
+
+    fn restore_dsl_authority_snapshot(
+        authority: &Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
+        snapshot: dsl::MeerkatMachineAuthoritySnapshot,
+    ) {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        authority.restore_snapshot(snapshot);
     }
 }
 

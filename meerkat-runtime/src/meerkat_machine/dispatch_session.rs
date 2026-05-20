@@ -289,12 +289,12 @@ impl MeerkatMachine {
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::UnregisterSession { session_id } => {
-                // Guard: session must exist before it can be unregistered.
-                if !self.sessions.read().await.contains_key(&session_id) {
+                let Some(_gate_guard) = self.lock_current_session_mutation_gate(&session_id).await
+                else {
                     return Err(RuntimeDriverError::NotReady {
                         state: RuntimeState::Destroyed,
                     });
-                }
+                };
                 let _ = self
                     .stage_session_dsl_input(
                         &session_id,
@@ -307,7 +307,7 @@ impl MeerkatMachine {
                     )
                     .await
                     .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-                self.unregister_session_inner(&session_id).await;
+                self.unregister_session_inner_locked(&session_id).await;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::SetSilentIntents {

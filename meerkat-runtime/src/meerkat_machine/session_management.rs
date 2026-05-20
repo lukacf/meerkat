@@ -195,19 +195,21 @@ impl MeerkatMachine {
         session_id: &SessionId,
         epoch_id: &meerkat_core::RuntimeEpochId,
     ) {
+        let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
+            return;
+        };
         let entry = {
             let mut sessions = self.sessions.write().await;
-            let should_unregister = sessions
-                .get(session_id)
-                .is_some_and(|entry| &entry.epoch_id == epoch_id);
-            if should_unregister {
-                if let Some(entry) = sessions.get_mut(session_id) {
-                    abort_slot(&mut entry.drain_slot);
-                }
-                sessions.remove(session_id)
-            } else {
-                None
+            let Some(entry) = sessions.get(session_id) else {
+                return;
+            };
+            if &entry.epoch_id != epoch_id {
+                return;
             }
+            if let Some(entry) = sessions.get_mut(session_id) {
+                abort_slot(&mut entry.drain_slot);
+            }
+            sessions.remove(session_id)
         };
 
         if let Some(entry) = entry {
@@ -337,9 +339,11 @@ impl MeerkatMachine {
             AlreadyClaimed,
             Rejected(String),
             Claimed {
+                gate: Arc<Mutex<()>>,
                 driver: SharedDriver,
                 completions: SharedCompletionRegistry,
                 ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+                dsl_authority: Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
                 staged: StagedSessionDslInput,
                 repaired_dead_attachment: bool,
                 _gate_guard: crate::tokio::sync::OwnedMutexGuard<()>,
@@ -348,11 +352,14 @@ impl MeerkatMachine {
 
         let existing = loop {
             if let Some(gate) = self.session_mutation_gate(&session_id).await {
-                let gate_guard = gate.lock_owned().await;
+                let gate_guard = Arc::clone(&gate).lock_owned().await;
                 let mut sessions = self.sessions.write().await;
                 let Some(entry) = sessions.get_mut(&session_id) else {
                     continue;
                 };
+                if !Arc::ptr_eq(&entry.mutation_gate, &gate) {
+                    continue;
+                }
                 let repaired_dead_attachment = entry.clear_dead_attachment();
                 if repaired_dead_attachment
                     && let Err(reason) = entry.stage_generated_executor_exit_observation()
@@ -371,9 +378,11 @@ impl MeerkatMachine {
                 match entry.stage_generated_executor_registration_claim(&session_id) {
                     Ok(staged) => {
                         break ExistingExecutorClaim::Claimed {
+                            gate,
                             driver: entry.driver.clone(),
                             completions: entry.completions.clone(),
                             ops_lifecycle: entry.ops_lifecycle.clone(),
+                            dsl_authority: Arc::clone(&entry.dsl_authority),
                             staged,
                             repaired_dead_attachment,
                             _gate_guard: gate_guard,
@@ -467,7 +476,7 @@ impl MeerkatMachine {
                 session_id.clone(),
                 RuntimeSessionEntry {
                     runtime_id,
-                    mutation_gate,
+                    mutation_gate: Arc::clone(&mutation_gate),
                     control_projection,
                     driver: driver.clone(),
                     ops_lifecycle: recovered_ops.clone(),
@@ -480,7 +489,7 @@ impl MeerkatMachine {
                     capability_surface_status: SessionLlmCapabilitySurfaceStatus::Unresolved,
                     attachment_slot: RuntimeLoopAttachmentSlot::Empty,
                     provisional_interrupt_handle: None,
-                    dsl_authority,
+                    dsl_authority: Arc::clone(&dsl_authority),
                     drain_slot: CommsDrainSlot::new(),
                 },
             );
@@ -490,9 +499,11 @@ impl MeerkatMachine {
             match entry.stage_generated_executor_registration_claim(&session_id) {
                 Ok(staged) => {
                     break ExistingExecutorClaim::Claimed {
+                        gate: mutation_gate,
                         driver,
                         completions,
                         ops_lifecycle: recovered_ops,
+                        dsl_authority,
                         staged,
                         repaired_dead_attachment: false,
                         _gate_guard: gate_guard,
@@ -508,8 +519,10 @@ impl MeerkatMachine {
             driver,
             completions,
             ops_lifecycle,
+            dsl_authority,
             staged_registration,
             repaired_dead_attachment,
+            registration_gate,
             _gate_guard,
         ) = match existing {
             ExistingExecutorClaim::AlreadyClaimed => {
@@ -524,9 +537,11 @@ impl MeerkatMachine {
                 return;
             }
             ExistingExecutorClaim::Claimed {
+                gate,
                 driver,
                 completions,
                 ops_lifecycle,
+                dsl_authority,
                 staged,
                 repaired_dead_attachment,
                 _gate_guard,
@@ -534,8 +549,10 @@ impl MeerkatMachine {
                 driver,
                 completions,
                 ops_lifecycle,
+                dsl_authority,
                 staged,
                 repaired_dead_attachment,
+                gate,
                 _gate_guard,
             ),
         };
@@ -563,11 +580,10 @@ impl MeerkatMachine {
                         error = %error,
                         "failed to attach runtime driver before publishing loop attachment"
                     );
-                    self.restore_session_dsl_state(
-                        &session_id,
+                    Self::restore_dsl_authority_snapshot(
+                        &dsl_authority,
                         staged_registration.previous_snapshot,
-                    )
-                    .await;
+                    );
                     return;
                 }
             }
@@ -636,7 +652,9 @@ impl MeerkatMachine {
                     entry.clear_dead_attachment();
                     if entry.has_live_attachment() {
                         (false, false)
-                    } else if !Arc::ptr_eq(&entry.driver, &driver)
+                    } else if !Arc::ptr_eq(&entry.mutation_gate, &registration_gate)
+                        || !Arc::ptr_eq(&entry.dsl_authority, &dsl_authority)
+                        || !Arc::ptr_eq(&entry.driver, &driver)
                         || !Arc::ptr_eq(&entry.completions, &completions)
                     {
                         tracing::warn!(
@@ -676,8 +694,10 @@ impl MeerkatMachine {
             if detach_after_abort {
                 let mut driver_guard = driver.lock().await;
                 machine_unregister_session_projection(&mut driver_guard);
-                self.restore_session_dsl_state(&session_id, staged_registration.previous_snapshot)
-                    .await;
+                Self::restore_dsl_authority_snapshot(
+                    &dsl_authority,
+                    staged_registration.previous_snapshot,
+                );
             }
             return;
         }
@@ -712,6 +732,13 @@ impl MeerkatMachine {
     }
 
     pub(super) async fn unregister_session_inner(&self, session_id: &SessionId) {
+        let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
+            return;
+        };
+        self.unregister_session_inner_locked(session_id).await;
+    }
+
+    pub(super) async fn unregister_session_inner_locked(&self, session_id: &SessionId) {
         let entry = {
             let mut sessions = self.sessions.write().await;
             // Abort the drain slot inline before removing the entry — the

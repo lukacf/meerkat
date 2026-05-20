@@ -587,6 +587,7 @@ impl MeerkatMachine {
                         None
                     };
                     if should_unregister {
+                        drop(_gate_guard);
                         self.unregister_session_inner(&session_id).await;
                     }
                     let message = match rollback_err {
@@ -626,6 +627,7 @@ impl MeerkatMachine {
                     let should_unregister = run_err.should_unregister_session();
                     let run_err = run_err.into_driver_error();
                     if should_unregister {
+                        drop(_gate_guard);
                         self.unregister_session_inner(&session_id).await;
                     }
                     return Err(RuntimeDriverError::Internal(format!(

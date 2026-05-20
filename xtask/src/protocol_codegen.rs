@@ -432,62 +432,54 @@ fn emit_auth_lease_transition_authority_helper(
         "            return Err(\"generated auth lease lifecycle publication was already consumed\".into());"
     )?;
     writeln!(out, "        }}")?;
-    writeln!(out, "        struct GeneratedAuthLeaseTransitionParts {{")?;
     writeln!(
         out,
-        "            lease_key: meerkat_core::handles::LeaseKey,"
+        "        #[allow(improper_ctypes_definitions, unsafe_code)]"
     )?;
-    writeln!(out, "            expires_at: u64,")?;
-    writeln!(out, "            generation: u64,")?;
+    writeln!(out, "        unsafe extern \"Rust\" {{")?;
     writeln!(
         out,
-        "            credential_published_at_millis: Option<u64>,"
+        "            #[link_name = concat!(\"__meerkat_core_runtime_generated_auth_lease_transition_build_v1_\", env!(\"MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX\"))]"
+    )?;
+    writeln!(
+        out,
+        "            fn core_runtime_generated_auth_lease_transition_build("
+    )?;
+    writeln!(
+        out,
+        "                token: &'static (dyn std::any::Any + Send + Sync),"
+    )?;
+    writeln!(
+        out,
+        "                lease_key: meerkat_core::handles::LeaseKey,"
+    )?;
+    writeln!(out, "                expires_at: u64,")?;
+    writeln!(out, "                generation: u64,")?;
+    writeln!(
+        out,
+        "                credential_published_at_millis: Option<u64>,"
+    )?;
+    writeln!(
+        out,
+        "            ) -> Result<meerkat_core::handles::AuthLeaseTransition, String>;"
     )?;
     writeln!(out, "        }}")?;
-    writeln!(
-        out,
-        "        // This unsafe impl is generated inside the one-use AuthMachine lifecycle"
-    )?;
-    writeln!(
-        out,
-        "        // publication handoff after the typed obligation has been consumed."
-    )?;
     writeln!(out, "        #[allow(unsafe_code)]")?;
+    writeln!(out, "        unsafe {{")?;
     writeln!(
         out,
-        "        unsafe impl meerkat_core::handles::GeneratedAuthLeaseTransitionParts for GeneratedAuthLeaseTransitionParts {{"
+        "            core_runtime_generated_auth_lease_transition_build("
     )?;
     writeln!(
         out,
-        "            fn lease_key(&self) -> &meerkat_core::handles::LeaseKey {{ &self.lease_key }}"
+        "                crate::generated_authority_bridge::generated_authority_bridge_token(),"
     )?;
-    writeln!(
-        out,
-        "            fn expires_at(&self) -> u64 {{ self.expires_at }}"
-    )?;
-    writeln!(
-        out,
-        "            fn generation(&self) -> u64 {{ self.generation }}"
-    )?;
-    writeln!(
-        out,
-        "            fn credential_published_at_millis(&self) -> Option<u64> {{ self.credential_published_at_millis }}"
-    )?;
+    writeln!(out, "                lease_key,")?;
+    writeln!(out, "                expires_at,")?;
+    writeln!(out, "                self.credential_generation,")?;
+    writeln!(out, "                self.credential_published_at_millis,")?;
+    writeln!(out, "            )")?;
     writeln!(out, "        }}")?;
-    writeln!(
-        out,
-        "        Ok(unsafe {{ meerkat_core::handles::AuthLeaseTransition::from_generated_auth_lease_publication("
-    )?;
-    writeln!(out, "            GeneratedAuthLeaseTransitionParts {{")?;
-    writeln!(out, "            lease_key,")?;
-    writeln!(out, "            expires_at,")?;
-    writeln!(out, "            generation: self.credential_generation,")?;
-    writeln!(
-        out,
-        "            credential_published_at_millis: self.credential_published_at_millis,"
-    )?;
-    writeln!(out, "            }}")?;
-    writeln!(out, "        ) }})")?;
     writeln!(out, "    }}")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
@@ -689,7 +681,7 @@ fn emit_comms_trust_authority_source_impl(
         "            return Err(format!(\"generated comms trust authority source already minted {{operation:?}} for peer {{peer_id:?}}\"));"
     )?;
     writeln!(out, "        }}")?;
-    emit_comms_trust_parts_type(out)?;
+    emit_comms_trust_bridge(out, protocol)?;
     emit_comms_trust_grant_return(out, protocol)?;
     writeln!(out, "    }}")?;
     writeln!(out, "}}")?;
@@ -698,68 +690,51 @@ fn emit_comms_trust_authority_source_impl(
     Ok(())
 }
 
-fn emit_comms_trust_parts_type(out: &mut String) -> Result<()> {
-    writeln!(out, "        struct GeneratedCommsTrustAuthorityParts {{")?;
+fn emit_comms_trust_bridge(out: &mut String, protocol: &EffectHandoffProtocol) -> Result<()> {
+    let bridge_owner = if protocol.name.as_str().starts_with("mob_") {
+        "mob"
+    } else {
+        "runtime"
+    };
     writeln!(
         out,
-        "            source_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,"
+        "        #[allow(improper_ctypes_definitions, unsafe_code)]"
     )?;
-    writeln!(out, "            source_epoch: u64,")?;
+    writeln!(out, "        unsafe extern \"Rust\" {{")?;
     writeln!(
         out,
-        "            trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,"
-    )?;
-    writeln!(
-        out,
-        "            operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation,"
-    )?;
-    writeln!(out, "            peer_id: String,")?;
-    writeln!(out, "            trust_store_peer_id: Option<String>,")?;
-    writeln!(
-        out,
-        "            peer_descriptor: Option<meerkat_core::comms::TrustedPeerDescriptor>,"
-    )?;
-    writeln!(out, "        }}")?;
-    writeln!(
-        out,
-        "        // This unsafe impl is generated inside the one-use machine/composition"
+        "            #[link_name = concat!(\"__meerkat_core_{bridge_owner}_generated_comms_trust_authority_build_v1_\", env!(\"MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX\"))]"
     )?;
     writeln!(
         out,
-        "        // trust handoff after typed obligation validation and claim consumption."
-    )?;
-    writeln!(out, "        #[allow(unsafe_code)]")?;
-    writeln!(
-        out,
-        "        unsafe impl meerkat_core::comms::GeneratedCommsTrustAuthorityParts for GeneratedCommsTrustAuthorityParts {{"
+        "            fn core_generated_comms_trust_authority_build("
     )?;
     writeln!(
         out,
-        "            fn source_kind(&self) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {{ self.source_kind }}"
+        "                token: &'static (dyn std::any::Any + Send + Sync),"
     )?;
     writeln!(
         out,
-        "            fn source_epoch(&self) -> u64 {{ self.source_epoch }}"
+        "                source_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,"
+    )?;
+    writeln!(out, "                source_epoch: u64,")?;
+    writeln!(
+        out,
+        "                trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,"
     )?;
     writeln!(
         out,
-        "            fn trust_row_owner_kind(&self) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {{ self.trust_row_owner_kind }}"
+        "                operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation,"
+    )?;
+    writeln!(out, "                peer_id: String,")?;
+    writeln!(out, "                trust_store_peer_id: Option<String>,")?;
+    writeln!(
+        out,
+        "                peer_descriptor: Option<meerkat_core::comms::TrustedPeerDescriptor>,"
     )?;
     writeln!(
         out,
-        "            fn operation(&self) -> meerkat_core::comms::GeneratedCommsTrustAuthorityOperation {{ self.operation }}"
-    )?;
-    writeln!(
-        out,
-        "            fn peer_id(&self) -> &str {{ self.peer_id.as_str() }}"
-    )?;
-    writeln!(
-        out,
-        "            fn trust_store_peer_id(&self) -> Option<&str> {{ self.trust_store_peer_id.as_deref() }}"
-    )?;
-    writeln!(
-        out,
-        "            fn peer_descriptor(&self) -> Option<&meerkat_core::comms::TrustedPeerDescriptor> {{ self.peer_descriptor.as_ref() }}"
+        "            ) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String>;"
     )?;
     writeln!(out, "        }}")?;
     Ok(())
@@ -813,10 +788,15 @@ fn emit_comms_trust_grant_return(out: &mut String, protocol: &EffectHandoffProto
                     out,
                     "                let generated_peer_id = peer_descriptor.peer_id.to_string();"
                 )?;
-                writeln!(
+                emit_comms_trust_bridge_call(
                     out,
-                    "                unsafe {{ meerkat_core::comms::CommsTrustMutationAuthority::from_generated_authority_parts(GeneratedCommsTrustAuthorityParts {{ source_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{source_kind}, source_epoch: {}, trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{row_owner_kind}, operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::{operation_variant}, peer_id: generated_peer_id, trust_store_peer_id: Some(trust_store_peer_id), peer_descriptor: Some(peer_descriptor) }}) }}",
-                    comms_trust_epoch_expr(protocol)?,
+                    source_kind,
+                    row_owner_kind,
+                    operation_variant,
+                    &comms_trust_epoch_expr(protocol)?,
+                    "generated_peer_id",
+                    "Some(trust_store_peer_id)",
+                    "Some(peer_descriptor)",
                 )?;
                 writeln!(out, "            }}")?;
             }
@@ -833,10 +813,15 @@ fn emit_comms_trust_grant_return(out: &mut String, protocol: &EffectHandoffProto
                     out,
                     "                let trust_store_peer_id = {target_peer_expr}.to_string();"
                 )?;
-                writeln!(
+                emit_comms_trust_bridge_call(
                     out,
-                    "                unsafe {{ meerkat_core::comms::CommsTrustMutationAuthority::from_generated_authority_parts(GeneratedCommsTrustAuthorityParts {{ source_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{source_kind}, source_epoch: {}, trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{row_owner_kind}, operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::{operation_variant}, peer_id: peer_id.to_string(), trust_store_peer_id: Some(trust_store_peer_id), peer_descriptor: None }}) }}",
-                    comms_trust_epoch_expr(protocol)?,
+                    source_kind,
+                    row_owner_kind,
+                    operation_variant,
+                    &comms_trust_epoch_expr(protocol)?,
+                    "peer_id.to_string()",
+                    "Some(trust_store_peer_id)",
+                    "None",
                 )?;
                 writeln!(out, "            }}")?;
             }
@@ -847,6 +832,47 @@ fn emit_comms_trust_grant_return(out: &mut String, protocol: &EffectHandoffProto
         "            _ => unreachable!(\"operation checked above\"),"
     )?;
     writeln!(out, "        }}")?;
+    Ok(())
+}
+
+fn emit_comms_trust_bridge_call(
+    out: &mut String,
+    source_kind: &str,
+    row_owner_kind: &str,
+    operation_variant: &str,
+    source_epoch_expr: &str,
+    peer_id_expr: &str,
+    trust_store_peer_id_expr: &str,
+    peer_descriptor_expr: &str,
+) -> Result<()> {
+    writeln!(out, "                #[allow(unsafe_code)]")?;
+    writeln!(out, "                unsafe {{")?;
+    writeln!(
+        out,
+        "                    core_generated_comms_trust_authority_build("
+    )?;
+    writeln!(
+        out,
+        "                        crate::generated_authority_bridge::generated_authority_bridge_token(),"
+    )?;
+    writeln!(
+        out,
+        "                        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{source_kind},"
+    )?;
+    writeln!(out, "                        {source_epoch_expr},")?;
+    writeln!(
+        out,
+        "                        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{row_owner_kind},"
+    )?;
+    writeln!(
+        out,
+        "                        meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::{operation_variant},"
+    )?;
+    writeln!(out, "                        {peer_id_expr},")?;
+    writeln!(out, "                        {trust_store_peer_id_expr},")?;
+    writeln!(out, "                        {peer_descriptor_expr},")?;
+    writeln!(out, "                    )")?;
+    writeln!(out, "                }}")?;
     Ok(())
 }
 

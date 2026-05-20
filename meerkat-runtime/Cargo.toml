@@ -13,7 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-meerkat-core = { workspace = true }
+meerkat-core = { workspace = true, features = ["__meerkat-generated-authority-bridge"] }
 meerkat-machine-dsl = { workspace = true }
 meerkat-machine-schema = { workspace = true }
 meerkat-contracts = { workspace = true }

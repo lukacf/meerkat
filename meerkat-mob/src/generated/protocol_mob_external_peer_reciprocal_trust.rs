@@ -138,44 +138,19 @@ impl MobExternalPeerReciprocalTrustObligation {
                 "generated comms trust authority source already minted {operation:?} for peer {peer_id:?}"
             ));
         }
-        struct GeneratedCommsTrustAuthorityParts {
-            source_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,
-            source_epoch: u64,
-            trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,
-            operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation,
-            peer_id: String,
-            trust_store_peer_id: Option<String>,
-            peer_descriptor: Option<meerkat_core::comms::TrustedPeerDescriptor>,
-        }
-        // This unsafe impl is generated inside the one-use machine/composition
-        // trust handoff after typed obligation validation and claim consumption.
-        #[allow(unsafe_code)]
-        unsafe impl meerkat_core::comms::GeneratedCommsTrustAuthorityParts
-            for GeneratedCommsTrustAuthorityParts
-        {
-            fn source_kind(&self) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
-                self.source_kind
-            }
-            fn source_epoch(&self) -> u64 {
-                self.source_epoch
-            }
-            fn trust_row_owner_kind(
-                &self,
-            ) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
-                self.trust_row_owner_kind
-            }
-            fn operation(&self) -> meerkat_core::comms::GeneratedCommsTrustAuthorityOperation {
-                self.operation
-            }
-            fn peer_id(&self) -> &str {
-                self.peer_id.as_str()
-            }
-            fn trust_store_peer_id(&self) -> Option<&str> {
-                self.trust_store_peer_id.as_deref()
-            }
-            fn peer_descriptor(&self) -> Option<&meerkat_core::comms::TrustedPeerDescriptor> {
-                self.peer_descriptor.as_ref()
-            }
+        #[allow(improper_ctypes_definitions, unsafe_code)]
+        unsafe extern "Rust" {
+            #[link_name = concat!("__meerkat_core_mob_generated_comms_trust_authority_build_v1_", env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX"))]
+            fn core_generated_comms_trust_authority_build(
+                token: &'static (dyn std::any::Any + Send + Sync),
+                source_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,
+                source_epoch: u64,
+                trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,
+                operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation,
+                peer_id: String,
+                trust_store_peer_id: Option<String>,
+                peer_descriptor: Option<meerkat_core::comms::TrustedPeerDescriptor>,
+            ) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String>;
         }
         match operation {
             Operation::PublicAdd => {
@@ -188,8 +163,18 @@ impl MobExternalPeerReciprocalTrustObligation {
                 }
                 let trust_store_peer_id = self.edge.endpoint.peer_id.0.as_str().to_string();
                 let generated_peer_id = peer_descriptor.peer_id.to_string();
+                #[allow(unsafe_code)]
                 unsafe {
-                    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_authority_parts(GeneratedCommsTrustAuthorityParts { source_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust, source_epoch: self.epoch, trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring, operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicAdd, peer_id: generated_peer_id, trust_store_peer_id: Some(trust_store_peer_id), peer_descriptor: Some(peer_descriptor) })
+                    core_generated_comms_trust_authority_build(
+                        crate::generated_authority_bridge::generated_authority_bridge_token(),
+                        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust,
+                        self.epoch,
+                        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+                        meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicAdd,
+                        generated_peer_id,
+                        Some(trust_store_peer_id),
+                        Some(peer_descriptor),
+                    )
                 }
             }
             _ => unreachable!("operation checked above"),

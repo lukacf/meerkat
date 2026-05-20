@@ -187,7 +187,7 @@ strip = "symbols"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(meerkat_internal_agent_factory_build)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(meerkat_internal_agent_factory_build)", "cfg(meerkat_internal_generated_authority_bridge)"] }
 
 [workspace.lints.clippy]
 # ── Lint groups (pedantic is the main "paranoid" level) ──────────────

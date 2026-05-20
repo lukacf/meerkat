@@ -1153,23 +1153,7 @@ impl AuthLeaseTransition {
         }
     }
 
-    /// Package an auth lease transition from generated AuthMachine publication
-    /// parts. The raw field constructor stays private to this module; protocol
-    /// codegen emits the handoff-parts implementation inside the one-use
-    /// generated obligation method.
-    #[doc(hidden)]
-    #[allow(unsafe_code)]
-    pub unsafe fn from_generated_auth_lease_publication(
-        parts: impl GeneratedAuthLeaseTransitionParts,
-    ) -> Self {
-        Self::from_generated_auth_lease_publication_parts(
-            parts.lease_key().clone(),
-            parts.expires_at(),
-            parts.generation(),
-            parts.credential_published_at_millis(),
-        )
-    }
-
+    #[cfg_attr(not(meerkat_internal_generated_authority_bridge), allow(dead_code))]
     fn from_generated_auth_lease_publication_parts(
         lease_key: LeaseKey,
         expires_at: u64,
@@ -1185,19 +1169,54 @@ impl AuthLeaseTransition {
     }
 }
 
-/// Field handoff for generated AuthMachine lifecycle publication packaging.
-///
-/// Implementations must be emitted by generated AuthMachine/composition
-/// protocol code after consuming the typed lifecycle-publication obligation.
-/// Handwritten implementations fabricate auth lease result facts and violate
-/// Dogma Invariant 1.
+#[cfg(meerkat_internal_generated_authority_bridge)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
 #[doc(hidden)]
-#[allow(unsafe_code)]
-pub unsafe trait GeneratedAuthLeaseTransitionParts {
-    fn lease_key(&self) -> &LeaseKey;
-    fn expires_at(&self) -> u64;
-    fn generation(&self) -> u64;
-    fn credential_published_at_millis(&self) -> Option<u64>;
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_core_runtime_generated_auth_lease_transition_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    lease_key: LeaseKey,
+    expires_at: u64,
+    generation: u64,
+    credential_published_at_millis: Option<u64>,
+) -> Result<AuthLeaseTransition, String> {
+    validate_runtime_generated_authority_bridge_token(token)?;
+    Ok(
+        AuthLeaseTransition::from_generated_auth_lease_publication_parts(
+            lease_key,
+            expires_at,
+            generation,
+            credential_published_at_millis,
+        ),
+    )
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
+fn validate_runtime_generated_authority_bridge_token(
+    token: &(dyn std::any::Any + Send + Sync),
+) -> Result<(), String> {
+    #[allow(unsafe_code)]
+    let valid = unsafe { runtime_generated_authority_bridge_token_is_valid(token) };
+    if valid {
+        Ok(())
+    } else {
+        Err("generated auth lease transition requires the canonical runtime bridge token".into())
+    }
 }
 
 /// Window (in seconds) before `expires_at` at which a `valid` lease is

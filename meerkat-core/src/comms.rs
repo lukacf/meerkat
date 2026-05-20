@@ -391,27 +391,7 @@ pub enum GeneratedCommsTrustAuthorityOperation {
 }
 
 impl CommsTrustMutationAuthority {
-    /// Package a trust mutation authority from generated obligation parts.
-    ///
-    /// The raw field constructor stays private to this module; protocol
-    /// codegen emits the `GeneratedCommsTrustAuthorityParts` implementation
-    /// inside the one-use obligation method after typed validation.
-    #[doc(hidden)]
-    #[allow(unsafe_code)]
-    pub unsafe fn from_generated_authority_parts(
-        parts: impl GeneratedCommsTrustAuthorityParts,
-    ) -> Result<Self, String> {
-        Self::from_generated_parts(
-            parts.source_kind(),
-            parts.source_epoch(),
-            parts.trust_row_owner_kind(),
-            parts.operation(),
-            parts.peer_id().to_string(),
-            parts.trust_store_peer_id().map(ToString::to_string),
-            parts.peer_descriptor().cloned(),
-        )
-    }
-
+    #[cfg_attr(not(meerkat_internal_generated_authority_bridge), allow(dead_code))]
     fn from_generated_parts(
         source_kind: GeneratedCommsTrustAuthoritySourceKind,
         source_epoch: u64,
@@ -627,22 +607,164 @@ impl CommsTrustMutationAuthority {
     }
 }
 
-/// Field handoff for generated comms trust authority packaging.
-///
-/// Implementations must be emitted by generated machine/composition protocol
-/// code after that protocol has validated the typed obligation and consumed its
-/// one-use claim. Handwritten implementations fabricate authority and violate
-/// Dogma Invariant 1.
+#[cfg(meerkat_internal_generated_authority_bridge)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
 #[doc(hidden)]
-#[allow(unsafe_code)]
-pub unsafe trait GeneratedCommsTrustAuthorityParts {
-    fn source_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind;
-    fn source_epoch(&self) -> u64;
-    fn trust_row_owner_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind;
-    fn operation(&self) -> GeneratedCommsTrustAuthorityOperation;
-    fn peer_id(&self) -> &str;
-    fn trust_store_peer_id(&self) -> Option<&str>;
-    fn peer_descriptor(&self) -> Option<&TrustedPeerDescriptor>;
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_core_runtime_generated_comms_trust_authority_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn runtime_generated_comms_trust_authority_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    source_epoch: u64,
+    trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
+    operation: GeneratedCommsTrustAuthorityOperation,
+    peer_id: String,
+    trust_store_peer_id: Option<String>,
+    peer_descriptor: Option<TrustedPeerDescriptor>,
+) -> Result<CommsTrustMutationAuthority, String> {
+    validate_runtime_generated_authority_bridge_token(token)?;
+    validate_meerkat_machine_trust_source(source_kind, trust_row_owner_kind)?;
+    CommsTrustMutationAuthority::from_generated_parts(
+        source_kind,
+        source_epoch,
+        trust_row_owner_kind,
+        operation,
+        peer_id,
+        trust_store_peer_id,
+        peer_descriptor,
+    )
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_core_mob_generated_comms_trust_authority_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn mob_generated_comms_trust_authority_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    source_epoch: u64,
+    trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
+    operation: GeneratedCommsTrustAuthorityOperation,
+    peer_id: String,
+    trust_store_peer_id: Option<String>,
+    peer_descriptor: Option<TrustedPeerDescriptor>,
+) -> Result<CommsTrustMutationAuthority, String> {
+    validate_mob_generated_authority_bridge_token(token)?;
+    validate_mob_machine_trust_source(source_kind, trust_row_owner_kind)?;
+    CommsTrustMutationAuthority::from_generated_parts(
+        source_kind,
+        source_epoch,
+        trust_row_owner_kind,
+        operation,
+        peer_id,
+        trust_store_peer_id,
+        peer_descriptor,
+    )
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
+fn validate_runtime_generated_authority_bridge_token(
+    token: &(dyn std::any::Any + Send + Sync),
+) -> Result<(), String> {
+    #[allow(unsafe_code)]
+    let valid = unsafe { runtime_generated_authority_bridge_token_is_valid(token) };
+    if valid {
+        Ok(())
+    } else {
+        Err("generated comms trust authority requires the canonical runtime bridge token".into())
+    }
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
+fn validate_mob_generated_authority_bridge_token(
+    token: &(dyn std::any::Any + Send + Sync),
+) -> Result<(), String> {
+    #[allow(unsafe_code)]
+    let valid = unsafe { mob_generated_authority_bridge_token_is_valid(token) };
+    if valid {
+        Ok(())
+    } else {
+        Err("generated comms trust authority requires the canonical MobMachine bridge token".into())
+    }
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
+fn validate_meerkat_machine_trust_source(
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
+) -> Result<(), String> {
+    if is_meerkat_machine_trust_source(source_kind)
+        && is_meerkat_machine_trust_source(trust_row_owner_kind)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "runtime generated comms trust authority cannot package source {source_kind:?} with row owner {trust_row_owner_kind:?}"
+        ))
+    }
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
+fn validate_mob_machine_trust_source(
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
+) -> Result<(), String> {
+    if is_mob_machine_trust_source(source_kind) && is_mob_machine_trust_source(trust_row_owner_kind)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "mob generated comms trust authority cannot package source {source_kind:?} with row owner {trust_row_owner_kind:?}"
+        ))
+    }
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
+fn is_meerkat_machine_trust_source(kind: GeneratedCommsTrustAuthoritySourceKind) -> bool {
+    matches!(
+        kind,
+        GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection
+            | GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish
+            | GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke
+    )
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
+fn is_mob_machine_trust_source(kind: GeneratedCommsTrustAuthoritySourceKind) -> bool {
+    matches!(
+        kind,
+        GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring
+            | GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustUnwiring
+            | GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring
+            | GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustUnwiring
+            | GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustRepair
+            | GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust
+    )
 }
 
 /// Trust-store projection mutation requested by generated authority.

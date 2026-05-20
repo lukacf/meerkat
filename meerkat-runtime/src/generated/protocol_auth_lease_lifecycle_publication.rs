@@ -40,41 +40,27 @@ impl AuthLeaseLifecyclePublicationObligation {
         {
             return Err("generated auth lease lifecycle publication was already consumed".into());
         }
-        struct GeneratedAuthLeaseTransitionParts {
-            lease_key: meerkat_core::handles::LeaseKey,
-            expires_at: u64,
-            generation: u64,
-            credential_published_at_millis: Option<u64>,
+        #[allow(improper_ctypes_definitions, unsafe_code)]
+        unsafe extern "Rust" {
+            #[link_name = concat!("__meerkat_core_runtime_generated_auth_lease_transition_build_v1_", env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX"))]
+            fn core_runtime_generated_auth_lease_transition_build(
+                token: &'static (dyn std::any::Any + Send + Sync),
+                lease_key: meerkat_core::handles::LeaseKey,
+                expires_at: u64,
+                generation: u64,
+                credential_published_at_millis: Option<u64>,
+            ) -> Result<meerkat_core::handles::AuthLeaseTransition, String>;
         }
-        // This unsafe impl is generated inside the one-use AuthMachine lifecycle
-        // publication handoff after the typed obligation has been consumed.
         #[allow(unsafe_code)]
-        unsafe impl meerkat_core::handles::GeneratedAuthLeaseTransitionParts
-            for GeneratedAuthLeaseTransitionParts
-        {
-            fn lease_key(&self) -> &meerkat_core::handles::LeaseKey {
-                &self.lease_key
-            }
-            fn expires_at(&self) -> u64 {
-                self.expires_at
-            }
-            fn generation(&self) -> u64 {
-                self.generation
-            }
-            fn credential_published_at_millis(&self) -> Option<u64> {
-                self.credential_published_at_millis
-            }
-        }
-        Ok(unsafe {
-            meerkat_core::handles::AuthLeaseTransition::from_generated_auth_lease_publication(
-                GeneratedAuthLeaseTransitionParts {
-                    lease_key,
-                    expires_at,
-                    generation: self.credential_generation,
-                    credential_published_at_millis: self.credential_published_at_millis,
-                },
+        unsafe {
+            core_runtime_generated_auth_lease_transition_build(
+                crate::generated_authority_bridge::generated_authority_bridge_token(),
+                lease_key,
+                expires_at,
+                self.credential_generation,
+                self.credential_published_at_millis,
             )
-        })
+        }
     }
 }
 

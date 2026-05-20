@@ -270,21 +270,57 @@ fn comms_trust_authority_minting_is_generated_only() {
         ),
     ];
     let mut violations = Vec::new();
+    let mut raw_constructor_violations = Vec::new();
+    let mut generated_parts_impl_violations = Vec::new();
     for path in files {
+        let relative = path
+            .strip_prefix(&root)
+            .unwrap_or_else(|_| panic!("strip repo root from {}", path.display()))
+            .display()
+            .to_string();
         let source =
             std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {}", path.display()));
         if patterns.iter().any(|pattern| source.contains(pattern)) {
-            violations.push(
-                path.strip_prefix(&root)
-                    .unwrap_or_else(|_| panic!("strip repo root from {}", path.display()))
-                    .display()
-                    .to_string(),
-            );
+            violations.push(relative.clone());
+        }
+        if source.contains(concat!(
+            "CommsTrustMutationAuthority::",
+            "from_generated_parts"
+        )) && relative != "meerkat-core/src/comms.rs"
+        {
+            raw_constructor_violations.push(relative.clone());
+        }
+        if source.contains(concat!(
+            "AuthLeaseTransition::",
+            "from_generated_auth_lease_publication_parts"
+        )) && relative != "meerkat-core/src/handles.rs"
+        {
+            raw_constructor_violations.push(relative.clone());
+        }
+        let generated_protocol_file = relative.contains("/src/generated/protocol_")
+            || relative == "xtask/src/protocol_codegen.rs";
+        if (source.contains(concat!(
+            "impl meerkat_core::comms::",
+            "GeneratedCommsTrustAuthorityParts"
+        )) || source.contains(concat!(
+            "impl meerkat_core::handles::",
+            "GeneratedAuthLeaseTransitionParts"
+        ))) && !generated_protocol_file
+        {
+            generated_parts_impl_violations.push(relative);
         }
     }
 
     assert!(
         violations.is_empty(),
         "generated authority must not reintroduce public source traits, grants, requests, legacy public constructors, or raw public generated-module mint helpers; found {violations:?}",
+    );
+    assert!(
+        raw_constructor_violations.is_empty(),
+        "raw generated authority field constructors must stay private to core; found direct external calls in {raw_constructor_violations:?}",
+    );
+    assert!(
+        generated_parts_impl_violations.is_empty(),
+        "generated authority parts impls must be emitted only by protocol codegen into src/generated/protocol_* helpers; found {generated_parts_impl_violations:?}",
     );
 }

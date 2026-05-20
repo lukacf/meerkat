@@ -391,8 +391,27 @@ pub enum GeneratedCommsTrustAuthorityOperation {
 }
 
 impl CommsTrustMutationAuthority {
+    /// Package a trust mutation authority from generated obligation parts.
+    ///
+    /// The raw field constructor stays private to this module; protocol
+    /// codegen emits the `GeneratedCommsTrustAuthorityParts` implementation
+    /// inside the one-use obligation method after typed validation.
     #[doc(hidden)]
-    pub fn from_generated_parts(
+    pub fn from_generated_authority_parts(
+        parts: impl GeneratedCommsTrustAuthorityParts,
+    ) -> Result<Self, String> {
+        Self::from_generated_parts(
+            parts.source_kind(),
+            parts.source_epoch(),
+            parts.trust_row_owner_kind(),
+            parts.operation(),
+            parts.peer_id().to_string(),
+            parts.trust_store_peer_id().map(ToString::to_string),
+            parts.peer_descriptor().cloned(),
+        )
+    }
+
+    fn from_generated_parts(
         source_kind: GeneratedCommsTrustAuthoritySourceKind,
         source_epoch: u64,
         trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
@@ -605,6 +624,23 @@ impl CommsTrustMutationAuthority {
     pub fn trust_row_owner_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind {
         self.trust_row_owner_kind
     }
+}
+
+/// Field handoff for generated comms trust authority packaging.
+///
+/// Implementations must be emitted by generated machine/composition protocol
+/// code after that protocol has validated the typed obligation and consumed its
+/// one-use claim. Handwritten implementations fabricate authority and violate
+/// Dogma Invariant 1.
+#[doc(hidden)]
+pub trait GeneratedCommsTrustAuthorityParts {
+    fn source_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind;
+    fn source_epoch(&self) -> u64;
+    fn trust_row_owner_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind;
+    fn operation(&self) -> GeneratedCommsTrustAuthorityOperation;
+    fn peer_id(&self) -> &str;
+    fn trust_store_peer_id(&self) -> Option<&str>;
+    fn peer_descriptor(&self) -> Option<&TrustedPeerDescriptor>;
 }
 
 /// Trust-store projection mutation requested by generated authority.

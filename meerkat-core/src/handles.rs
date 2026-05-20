@@ -1153,8 +1153,23 @@ impl AuthLeaseTransition {
         }
     }
 
+    /// Package an auth lease transition from generated AuthMachine publication
+    /// parts. The raw field constructor stays private to this module; protocol
+    /// codegen emits the handoff-parts implementation inside the one-use
+    /// generated obligation method.
     #[doc(hidden)]
-    pub fn from_generated_auth_lease_publication_parts(
+    pub fn from_generated_auth_lease_publication(
+        parts: impl GeneratedAuthLeaseTransitionParts,
+    ) -> Self {
+        Self::from_generated_auth_lease_publication_parts(
+            parts.lease_key().clone(),
+            parts.expires_at(),
+            parts.generation(),
+            parts.credential_published_at_millis(),
+        )
+    }
+
+    fn from_generated_auth_lease_publication_parts(
         lease_key: LeaseKey,
         expires_at: u64,
         generation: u64,
@@ -1167,6 +1182,20 @@ impl AuthLeaseTransition {
             credential_published_at_millis,
         }
     }
+}
+
+/// Field handoff for generated AuthMachine lifecycle publication packaging.
+///
+/// Implementations must be emitted by generated AuthMachine/composition
+/// protocol code after consuming the typed lifecycle-publication obligation.
+/// Handwritten implementations fabricate auth lease result facts and violate
+/// Dogma Invariant 1.
+#[doc(hidden)]
+pub trait GeneratedAuthLeaseTransitionParts {
+    fn lease_key(&self) -> &LeaseKey;
+    fn expires_at(&self) -> u64;
+    fn generation(&self) -> u64;
+    fn credential_published_at_millis(&self) -> Option<u64>;
 }
 
 /// Window (in seconds) before `expires_at` at which a `valid` lease is

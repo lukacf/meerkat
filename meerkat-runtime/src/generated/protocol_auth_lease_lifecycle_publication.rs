@@ -39,12 +39,38 @@ impl AuthLeaseLifecyclePublicationObligation {
         {
             return Err("generated auth lease lifecycle publication was already consumed".into());
         }
+        struct GeneratedAuthLeaseTransitionParts {
+            lease_key: meerkat_core::handles::LeaseKey,
+            expires_at: u64,
+            generation: u64,
+            credential_published_at_millis: Option<u64>,
+        }
+        // This impl is generated inside the one-use AuthMachine lifecycle
+        // publication handoff after the typed obligation has been consumed.
+        impl meerkat_core::handles::GeneratedAuthLeaseTransitionParts
+            for GeneratedAuthLeaseTransitionParts
+        {
+            fn lease_key(&self) -> &meerkat_core::handles::LeaseKey {
+                &self.lease_key
+            }
+            fn expires_at(&self) -> u64 {
+                self.expires_at
+            }
+            fn generation(&self) -> u64 {
+                self.generation
+            }
+            fn credential_published_at_millis(&self) -> Option<u64> {
+                self.credential_published_at_millis
+            }
+        }
         Ok(
-            meerkat_core::handles::AuthLeaseTransition::from_generated_auth_lease_publication_parts(
-                lease_key,
-                expires_at,
-                self.credential_generation,
-                self.credential_published_at_millis,
+            meerkat_core::handles::AuthLeaseTransition::from_generated_auth_lease_publication(
+                GeneratedAuthLeaseTransitionParts {
+                    lease_key,
+                    expires_at,
+                    generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                },
             ),
         )
     }

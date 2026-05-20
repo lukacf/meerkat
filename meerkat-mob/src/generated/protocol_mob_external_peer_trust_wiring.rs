@@ -131,6 +131,42 @@ impl MobExternalPeerTrustWiringObligation {
                 "generated comms trust authority source already minted {operation:?} for peer {peer_id:?}"
             ));
         }
+        struct GeneratedCommsTrustAuthorityParts {
+            source_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,
+            source_epoch: u64,
+            trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind,
+            operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation,
+            peer_id: String,
+            trust_store_peer_id: Option<String>,
+            peer_descriptor: Option<meerkat_core::comms::TrustedPeerDescriptor>,
+        }
+        // This impl is generated inside the one-use machine/composition
+        // trust handoff after typed obligation validation and claim consumption.
+        impl meerkat_core::comms::GeneratedCommsTrustAuthorityParts for GeneratedCommsTrustAuthorityParts {
+            fn source_kind(&self) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
+                self.source_kind
+            }
+            fn source_epoch(&self) -> u64 {
+                self.source_epoch
+            }
+            fn trust_row_owner_kind(
+                &self,
+            ) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
+                self.trust_row_owner_kind
+            }
+            fn operation(&self) -> meerkat_core::comms::GeneratedCommsTrustAuthorityOperation {
+                self.operation
+            }
+            fn peer_id(&self) -> &str {
+                self.peer_id.as_str()
+            }
+            fn trust_store_peer_id(&self) -> Option<&str> {
+                self.trust_store_peer_id.as_deref()
+            }
+            fn peer_descriptor(&self) -> Option<&meerkat_core::comms::TrustedPeerDescriptor> {
+                self.peer_descriptor.as_ref()
+            }
+        }
         match operation {
             Operation::PublicAdd => {
                 let peer_descriptor = peer_descriptor.ok_or_else(|| format!("generated comms trust add for peer {peer_id:?} requires a trusted peer descriptor"))?;
@@ -142,7 +178,7 @@ impl MobExternalPeerTrustWiringObligation {
                 }
                 let trust_store_peer_id = self.local_peer_id.0.as_str().to_string();
                 let generated_peer_id = peer_descriptor.peer_id.to_string();
-                meerkat_core::comms::CommsTrustMutationAuthority::from_generated_parts(meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring, meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicAdd, generated_peer_id, Some(trust_store_peer_id), Some(peer_descriptor))
+                meerkat_core::comms::CommsTrustMutationAuthority::from_generated_authority_parts(GeneratedCommsTrustAuthorityParts { source_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring, source_epoch: self.epoch, trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring, operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicAdd, peer_id: generated_peer_id, trust_store_peer_id: Some(trust_store_peer_id), peer_descriptor: Some(peer_descriptor) })
             }
             _ => unreachable!("operation checked above"),
         }

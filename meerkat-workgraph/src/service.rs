@@ -11,7 +11,7 @@ use crate::types::{
     WorkItemFilter, WorkItemId, WorkNamespace,
 };
 
-const BEST_EFFORT_REFRESH_ATTEMPTS: usize = 3;
+const REQUIRED_REFRESH_ATTEMPTS: usize = 3;
 
 #[derive(Clone)]
 pub struct WorkGraphService {
@@ -78,6 +78,8 @@ impl WorkGraphService {
     pub async fn ready(&self, filter: ReadyWorkFilter) -> Result<Vec<WorkItem>, WorkGraphError> {
         let now = self.store.get_store_time_utc().await?;
         let (realm_id, namespace) = self.scope(filter.realm_id.clone(), filter.namespace.clone());
+        self.refresh_all_item_eligibility(&realm_id, &namespace, now)
+            .await?;
         let all_items = self
             .store
             .list_items(WorkItemFilter {
@@ -242,8 +244,8 @@ impl WorkGraphService {
             .await?;
         let commit = WorkGraphMachine::close_item(item, request, now)?;
         let closed = self.store.update_item_cas(commit).await?;
-        self.best_effort_refresh_dependents_after_blocker_change(&closed, now)
-            .await;
+        self.refresh_dependents_after_blocker_change(&closed, now)
+            .await?;
         Ok(closed)
     }
 
@@ -274,13 +276,13 @@ impl WorkGraphService {
         let commit = WorkGraphMachine::link_edge(edge, &existing_items, &existing_edges, now)?;
         let inserted = self.store.insert_edge(commit).await?;
         if inserted.kind == WorkEdgeKind::Blocks {
-            self.best_effort_refresh_item_eligibility(
+            self.refresh_item_eligibility_with_retries(
                 &inserted.realm_id,
                 &inserted.namespace,
                 &inserted.to_id,
                 now,
             )
-            .await;
+            .await?;
         }
         Ok(inserted)
     }
@@ -392,6 +394,8 @@ impl WorkGraphService {
     ) -> Result<Vec<WorkItemId>, WorkGraphError> {
         let mut ready_ids = Vec::new();
         for namespace in namespaces {
+            self.refresh_all_item_eligibility(realm_id, namespace, now)
+                .await?;
             let all_items = self
                 .store
                 .list_items(WorkItemFilter {
@@ -426,46 +430,68 @@ impl WorkGraphService {
             .iter()
             .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.from_id == blocker.id)
         {
-            self.refresh_item_eligibility(&blocker.realm_id, &blocker.namespace, &edge.to_id, now)
-                .await?;
+            self.refresh_item_eligibility_with_retries(
+                &blocker.realm_id,
+                &blocker.namespace,
+                &edge.to_id,
+                now,
+            )
+            .await?;
         }
         Ok(())
     }
 
-    async fn best_effort_refresh_dependents_after_blocker_change(
-        &self,
-        blocker: &WorkItem,
-        now: chrono::DateTime<chrono::Utc>,
-    ) {
-        for _ in 0..BEST_EFFORT_REFRESH_ATTEMPTS {
-            match self
-                .refresh_dependents_after_blocker_change(blocker, now)
-                .await
-            {
-                Ok(()) => return,
-                Err(WorkGraphError::StaleRevision { .. }) => continue,
-                Err(_) => return,
-            }
-        }
-    }
-
-    async fn best_effort_refresh_item_eligibility(
+    async fn refresh_item_eligibility_with_retries(
         &self,
         realm_id: &str,
         namespace: &WorkNamespace,
         id: &WorkItemId,
         now: chrono::DateTime<chrono::Utc>,
-    ) {
-        for _ in 0..BEST_EFFORT_REFRESH_ATTEMPTS {
+    ) -> Result<(), WorkGraphError> {
+        let mut last_stale = None;
+        for _ in 0..REQUIRED_REFRESH_ATTEMPTS {
             match self
                 .refresh_item_eligibility(realm_id, namespace, id, now)
                 .await
             {
-                Ok(()) => return,
-                Err(WorkGraphError::StaleRevision { .. }) => continue,
-                Err(_) => return,
+                Ok(()) => return Ok(()),
+                Err(error @ WorkGraphError::StaleRevision { .. }) => {
+                    last_stale = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(error),
             }
         }
+        Err(last_stale.unwrap_or_else(|| {
+            WorkGraphError::Conflict(
+                "generated WorkGraph eligibility refresh did not converge".to_string(),
+            )
+        }))
+    }
+
+    async fn refresh_all_item_eligibility(
+        &self,
+        realm_id: &str,
+        namespace: &WorkNamespace,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), WorkGraphError> {
+        let item_ids = self
+            .store
+            .list_items(WorkItemFilter {
+                realm_id: Some(realm_id.to_string()),
+                namespace: Some(namespace.clone()),
+                include_terminal: false,
+                ..WorkItemFilter::default()
+            })
+            .await?
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        for id in item_ids {
+            self.refresh_item_eligibility_with_retries(realm_id, namespace, &id, now)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn refresh_item_eligibility(
@@ -594,7 +620,11 @@ mod tests {
         }
 
         fn fail_next_refresh_update(&self) {
-            self.fail_updated_events.fetch_add(1, Ordering::SeqCst);
+            self.fail_refresh_updates(1);
+        }
+
+        fn fail_refresh_updates(&self, count: usize) {
+            self.fail_updated_events.fetch_add(count, Ordering::SeqCst);
         }
     }
 
@@ -759,6 +789,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn link_fails_when_generated_eligibility_refresh_cannot_commit() {
+        let store = Arc::new(RefreshConflictStore::new());
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let blocker = service
+            .create(create_req("blocker"))
+            .await
+            .expect("blocker");
+        let blocked = service
+            .create(create_req("blocked"))
+            .await
+            .expect("blocked");
+
+        store.fail_refresh_updates(super::REQUIRED_REFRESH_ATTEMPTS);
+        let error = service
+            .link(LinkWorkItemsRequest {
+                realm_id: None,
+                namespace: None,
+                kind: WorkEdgeKind::Blocks,
+                from_id: blocker.id.clone(),
+                to_id: blocked.id.clone(),
+            })
+            .await
+            .expect_err("link success must wait for generated eligibility refresh");
+
+        assert!(matches!(error, crate::WorkGraphError::StaleRevision { .. }));
+        let ready = service.ready(Default::default()).await.expect("ready");
+        assert!(ready.iter().any(|item| item.id == blocker.id));
+        assert!(!ready.iter().any(|item| item.id == blocked.id));
+    }
+
+    #[tokio::test]
+    async fn ready_fails_when_generated_eligibility_refresh_cannot_commit() {
+        let store = Arc::new(RefreshConflictStore::new());
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let blocker = service
+            .create(create_req("blocker"))
+            .await
+            .expect("blocker");
+        let blocked = service
+            .create(create_req("blocked"))
+            .await
+            .expect("blocked");
+        let now = store.get_store_time_utc().await.expect("time");
+        let edge = WorkEdge {
+            realm_id: "realm".to_string(),
+            namespace: WorkNamespace::default(),
+            kind: WorkEdgeKind::Blocks,
+            from_id: blocker.id.clone(),
+            to_id: blocked.id.clone(),
+            created_at: now,
+        };
+        let commit =
+            WorkGraphMachine::link_edge(edge, &[blocker.clone(), blocked.clone()], &[], now)
+                .expect("generated edge commit");
+        store
+            .insert_edge(commit)
+            .await
+            .expect("generated edge insert");
+
+        store.fail_refresh_updates(super::REQUIRED_REFRESH_ATTEMPTS);
+        let error = service
+            .ready(Default::default())
+            .await
+            .expect_err("ready must fail closed without generated eligibility refresh");
+
+        assert!(matches!(error, crate::WorkGraphError::StaleRevision { .. }));
+    }
+
+    #[tokio::test]
     async fn close_reports_success_when_dependent_refresh_conflicts() {
         let store = Arc::new(RefreshConflictStore::new());
         let service =
@@ -800,6 +901,52 @@ mod tests {
             .get(None, None, closed.id)
             .await
             .expect("closed item should be stored");
+        assert_eq!(fetched.status, crate::WorkStatus::Completed);
+        let ready = service.ready(Default::default()).await.expect("ready");
+        assert!(ready.iter().any(|item| item.id == blocked.id));
+    }
+
+    #[tokio::test]
+    async fn close_fails_when_generated_dependent_refresh_cannot_commit() {
+        let store = Arc::new(RefreshConflictStore::new());
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let blocker = service
+            .create(create_req("blocker"))
+            .await
+            .expect("blocker");
+        let blocked = service
+            .create(create_req("blocked"))
+            .await
+            .expect("blocked");
+        service
+            .link(LinkWorkItemsRequest {
+                realm_id: None,
+                namespace: None,
+                kind: WorkEdgeKind::Blocks,
+                from_id: blocker.id.clone(),
+                to_id: blocked.id.clone(),
+            })
+            .await
+            .expect("link");
+
+        store.fail_refresh_updates(super::REQUIRED_REFRESH_ATTEMPTS);
+        let error = service
+            .close(crate::CloseWorkItemRequest {
+                id: blocker.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: blocker.revision,
+                status: Some(crate::WorkStatus::Completed),
+            })
+            .await
+            .expect_err("close success must wait for generated dependent refresh");
+
+        assert!(matches!(error, crate::WorkGraphError::StaleRevision { .. }));
+        let fetched = service
+            .get(None, None, blocker.id)
+            .await
+            .expect("closed item should still be stored");
         assert_eq!(fetched.status, crate::WorkStatus::Completed);
         let ready = service.ready(Default::default()).await.expect("ready");
         assert!(ready.iter().any(|item| item.id == blocked.id));

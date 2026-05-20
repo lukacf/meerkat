@@ -1158,7 +1158,8 @@ impl AuthLeaseTransition {
     /// codegen emits the handoff-parts implementation inside the one-use
     /// generated obligation method.
     #[doc(hidden)]
-    pub fn from_generated_auth_lease_publication(
+    #[allow(unsafe_code)]
+    pub unsafe fn from_generated_auth_lease_publication(
         parts: impl GeneratedAuthLeaseTransitionParts,
     ) -> Self {
         Self::from_generated_auth_lease_publication_parts(
@@ -1191,7 +1192,8 @@ impl AuthLeaseTransition {
 /// Handwritten implementations fabricate auth lease result facts and violate
 /// Dogma Invariant 1.
 #[doc(hidden)]
-pub trait GeneratedAuthLeaseTransitionParts {
+#[allow(unsafe_code)]
+pub unsafe trait GeneratedAuthLeaseTransitionParts {
     fn lease_key(&self) -> &LeaseKey;
     fn expires_at(&self) -> u64;
     fn generation(&self) -> u64;

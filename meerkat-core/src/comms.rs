@@ -397,7 +397,8 @@ impl CommsTrustMutationAuthority {
     /// codegen emits the `GeneratedCommsTrustAuthorityParts` implementation
     /// inside the one-use obligation method after typed validation.
     #[doc(hidden)]
-    pub fn from_generated_authority_parts(
+    #[allow(unsafe_code)]
+    pub unsafe fn from_generated_authority_parts(
         parts: impl GeneratedCommsTrustAuthorityParts,
     ) -> Result<Self, String> {
         Self::from_generated_parts(
@@ -633,7 +634,8 @@ impl CommsTrustMutationAuthority {
 /// one-use claim. Handwritten implementations fabricate authority and violate
 /// Dogma Invariant 1.
 #[doc(hidden)]
-pub trait GeneratedCommsTrustAuthorityParts {
+#[allow(unsafe_code)]
+pub unsafe trait GeneratedCommsTrustAuthorityParts {
     fn source_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind;
     fn source_epoch(&self) -> u64;
     fn trust_row_owner_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind;

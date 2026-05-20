@@ -29,6 +29,7 @@ impl SupervisorTrustRevokeObligation {
 }
 
 impl SupervisorTrustRevokeObligation {
+    #[allow(unsafe_code)]
     fn authorize_comms_trust_authority(
         &self,
         operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation,
@@ -65,9 +66,12 @@ impl SupervisorTrustRevokeObligation {
             trust_store_peer_id: Option<String>,
             peer_descriptor: Option<meerkat_core::comms::TrustedPeerDescriptor>,
         }
-        // This impl is generated inside the one-use machine/composition
+        // This unsafe impl is generated inside the one-use machine/composition
         // trust handoff after typed obligation validation and claim consumption.
-        impl meerkat_core::comms::GeneratedCommsTrustAuthorityParts for GeneratedCommsTrustAuthorityParts {
+        #[allow(unsafe_code)]
+        unsafe impl meerkat_core::comms::GeneratedCommsTrustAuthorityParts
+            for GeneratedCommsTrustAuthorityParts
+        {
             fn source_kind(&self) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
                 self.source_kind
             }
@@ -100,7 +104,9 @@ impl SupervisorTrustRevokeObligation {
                     ));
                 }
                 let trust_store_peer_id = self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str().to_string();
-                meerkat_core::comms::CommsTrustMutationAuthority::from_generated_authority_parts(GeneratedCommsTrustAuthorityParts { source_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke, source_epoch: self.epoch, trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish, operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PrivateRemove, peer_id: peer_id.to_string(), trust_store_peer_id: Some(trust_store_peer_id), peer_descriptor: None })
+                unsafe {
+                    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_authority_parts(GeneratedCommsTrustAuthorityParts { source_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke, source_epoch: self.epoch, trust_row_owner_kind: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish, operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PrivateRemove, peer_id: peer_id.to_string(), trust_store_peer_id: Some(trust_store_peer_id), peer_descriptor: None })
+                }
             }
             _ => unreachable!("operation checked above"),
         }

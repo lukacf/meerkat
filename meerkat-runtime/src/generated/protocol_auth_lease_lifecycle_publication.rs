@@ -28,6 +28,7 @@ impl AuthLeaseLifecyclePublicationObligation {
 }
 
 impl AuthLeaseLifecyclePublicationObligation {
+    #[allow(unsafe_code)]
     pub(crate) fn into_auth_lease_transition(
         &self,
         lease_key: meerkat_core::handles::LeaseKey,
@@ -45,9 +46,10 @@ impl AuthLeaseLifecyclePublicationObligation {
             generation: u64,
             credential_published_at_millis: Option<u64>,
         }
-        // This impl is generated inside the one-use AuthMachine lifecycle
+        // This unsafe impl is generated inside the one-use AuthMachine lifecycle
         // publication handoff after the typed obligation has been consumed.
-        impl meerkat_core::handles::GeneratedAuthLeaseTransitionParts
+        #[allow(unsafe_code)]
+        unsafe impl meerkat_core::handles::GeneratedAuthLeaseTransitionParts
             for GeneratedAuthLeaseTransitionParts
         {
             fn lease_key(&self) -> &meerkat_core::handles::LeaseKey {
@@ -63,7 +65,7 @@ impl AuthLeaseLifecyclePublicationObligation {
                 self.credential_published_at_millis
             }
         }
-        Ok(
+        Ok(unsafe {
             meerkat_core::handles::AuthLeaseTransition::from_generated_auth_lease_publication(
                 GeneratedAuthLeaseTransitionParts {
                     lease_key,
@@ -71,8 +73,8 @@ impl AuthLeaseLifecyclePublicationObligation {
                     generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 },
-            ),
-        )
+            )
+        })
     }
 }
 

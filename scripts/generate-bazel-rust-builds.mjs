@@ -40,6 +40,12 @@ const packageLabel = (pkg) => `//${relative(root, packageDir(pkg))}:${crateName(
 const crateName = (name) => name.replaceAll("-", "_");
 const q = (value) => JSON.stringify(value);
 const cargoPackageVersionEnv = (pkg) => `        "CARGO_PKG_VERSION": ${q(pkg.version)},`;
+const generatedAuthorityBridgeSymbolSuffix = "bazel_private_generated_authority_bridge";
+const generatedAuthorityBridgePackageKeys = new Set([
+  "meerkat-core",
+  "meerkat-runtime",
+  "meerkat-mob",
+]);
 
 function defaultFeatures(pkg) {
   return pkg.features?.default ?? [];
@@ -247,6 +253,19 @@ function listExpr(values, indent = 8) {
   if (values.length === 0) return "[]";
   const pad = " ".repeat(indent);
   return `[\n${values.map((v) => `${pad}${q(v)},`).join("\n")}\n${" ".repeat(indent - 4)}]`;
+}
+
+function generatedAuthorityBridgeRustcEnv(key) {
+  if (!generatedAuthorityBridgePackageKeys.has(key)) return [];
+  return [
+    `        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": ${q(generatedAuthorityBridgeSymbolSuffix)},`,
+  ];
+}
+
+function generatedAuthorityBridgeRustcFlags(key) {
+  return key === "meerkat-core"
+    ? ["--cfg=meerkat_internal_generated_authority_bridge"]
+    : [];
 }
 
 function rustTargetVisibility(key) {
@@ -1041,6 +1060,11 @@ for (const pkg of localPackages.values()) {
       `    visibility = ${rustTargetVisibility(key)},`,
       `    deps = ${depsExpr},`,
     ];
+    const bridgeRustcFlags = generatedAuthorityBridgeRustcFlags(key);
+    if (bridgeRustcFlags.length) {
+      const editionIndex = attrs.indexOf(`    edition = "2024",`);
+      attrs.splice(editionIndex + 1, 0, `    rustc_flags = ${listExpr(bridgeRustcFlags)},`);
+    }
     if (rule === "rust_binary" || rule === "rust_test") {
       const packageRunfilesDir = relative(root, dir) || ".";
       const cargoManifestDir = isTest && packageRunfilesDir !== "."
@@ -1050,6 +1074,7 @@ for (const pkg of localPackages.values()) {
         cargoPackageVersionEnv(pkg),
         `        "CARGO_BIN_NAME": ${q(target.name)},`,
         `        "CARGO_MANIFEST_DIR": ${q(cargoManifestDir)},`,
+        ...generatedAuthorityBridgeRustcEnv(key),
       ];
       if (rule === "rust_test" && key === "meerkat-rpc") {
         rustcEnv.push(`        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",`);
@@ -1064,6 +1089,7 @@ for (const pkg of localPackages.values()) {
       const rustcEnv = [
         cargoPackageVersionEnv(pkg),
         `        "CARGO_MANIFEST_DIR": ${q(cargoManifestDir)},`,
+        ...generatedAuthorityBridgeRustcEnv(key),
       ];
       if (key === "meerkat") {
         rustcEnv.push(
@@ -1200,15 +1226,30 @@ for (const pkg of localPackages.values()) {
         return line;
       });
       if (key === "meerkat-core") {
-        const editionIndex = internalAttrs.indexOf(`    edition = "2024",`);
-        internalAttrs.splice(
-          editionIndex + 1,
-          0,
-          `    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],`,
-        );
+        const rustcFlags = [
+          "--cfg=meerkat_internal_agent_factory_build",
+          ...generatedAuthorityBridgeRustcFlags(key),
+        ];
+        const rustcFlagsIndex = internalAttrs.findIndex((line) => line.startsWith("    rustc_flags = "));
+        if (rustcFlagsIndex >= 0) {
+          internalAttrs[rustcFlagsIndex] = `    rustc_flags = ${listExpr(rustcFlags)},`;
+        } else {
+          const editionIndex = internalAttrs.indexOf(`    edition = "2024",`);
+          internalAttrs.splice(
+            editionIndex + 1,
+            0,
+            `    rustc_flags = ${listExpr(rustcFlags)},`,
+          );
+        }
         const rustcEnvIndex = internalAttrs.findIndex((line) => line.startsWith("    rustc_env = {"));
         if (rustcEnvIndex >= 0) {
-          internalAttrs[rustcEnvIndex] = `    rustc_env = {\n${cargoPackageVersionEnv(pkg)}\n        "CARGO_MANIFEST_DIR": "./meerkat-core",\n        "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": ${q(agentFactoryBridgeSymbolSuffix)},\n    },`;
+          const rustcEnv = [
+            cargoPackageVersionEnv(pkg),
+            `        "CARGO_MANIFEST_DIR": "./meerkat-core",`,
+            ...generatedAuthorityBridgeRustcEnv(key),
+            `        "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": ${q(agentFactoryBridgeSymbolSuffix)},`,
+          ];
+          internalAttrs[rustcEnvIndex] = `    rustc_env = {\n${rustcEnv.join("\n")}\n    },`;
         }
       }
       if (key === "meerkat-machine-schema" || key === "meerkat-runtime") {
@@ -1272,6 +1313,7 @@ for (const pkg of localPackages.values()) {
       const unitRustcEnv = [
         cargoPackageVersionEnv(pkg),
         `        "CARGO_MANIFEST_DIR": ${q(cargoManifestDir)},`,
+        ...generatedAuthorityBridgeRustcEnv(key),
       ];
       if (key === "meerkat") {
         unitRustcEnv.push(
@@ -1296,6 +1338,15 @@ for (const pkg of localPackages.values()) {
         `    proc_macro_deps = ${unitProcExpr},`,
         `    deps = ${unitDepsExpr},`,
       ];
+      const unitBridgeRustcFlags = generatedAuthorityBridgeRustcFlags(key);
+      if (unitBridgeRustcFlags.length) {
+        const editionIndex = unitAttrs.indexOf(`    edition = "2024",`);
+        unitAttrs.splice(
+          editionIndex + 1,
+          0,
+          `    rustc_flags = ${listExpr(unitBridgeRustcFlags)},`,
+        );
+      }
       rules.push(`rust_test(\n${unitAttrs.join("\n")}\n)`);
       fastTestLabels.push(`//${relative(root, dir)}:${unitName}`);
       packageFastTests.push(`:${unitName}`);

@@ -963,6 +963,7 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
+        "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat",
         "//meerkat:meerkat_client_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
@@ -1052,6 +1053,7 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
+        "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat",
         "//meerkat:meerkat_client_agent_factory_build",
         "//meerkat:meerkat_comms_agent_factory_build",

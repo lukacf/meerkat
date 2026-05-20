@@ -36,6 +36,7 @@ rust_library(
     crate_features = [
         "integration-real-tests",
         "runtime-adapter",
+        "test-support",
     ],
     edition = "2024",
     compile_data = [
@@ -50,6 +51,7 @@ rust_library(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.6.15",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -88,6 +90,7 @@ rust_test(
     crate_features = [
         "integration-real-tests",
         "runtime-adapter",
+        "test-support",
     ],
     edition = "2024",
     compile_data = [
@@ -102,6 +105,7 @@ rust_test(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.6.15",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "fast",
@@ -154,6 +158,7 @@ rust_test(
     crate_features = [
         "integration-real-tests",
         "runtime-adapter",
+        "test-support",
     ],
     edition = "2024",
     compile_data = [
@@ -171,6 +176,7 @@ rust_test(
         "CARGO_PKG_VERSION": "0.6.15",
         "CARGO_BIN_NAME": "dispatcher_rule_synthetic_injection",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "fast",
@@ -223,6 +229,7 @@ rust_test(
     crate_features = [
         "integration-real-tests",
         "runtime-adapter",
+        "test-support",
     ],
     edition = "2024",
     compile_data = [
@@ -240,6 +247,7 @@ rust_test(
         "CARGO_PKG_VERSION": "0.6.15",
         "CARGO_BIN_NAME": "flow_frame_recovery_tests",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "fast",
@@ -290,6 +298,7 @@ rust_test(
     crate_features = [
         "integration-real-tests",
         "runtime-adapter",
+        "test-support",
     ],
     edition = "2024",
     compile_data = [
@@ -307,6 +316,7 @@ rust_test(
         "CARGO_PKG_VERSION": "0.6.15",
         "CARGO_BIN_NAME": "member_session_bindings",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "fast",
@@ -357,6 +367,7 @@ rust_test(
     crate_features = [
         "integration-real-tests",
         "runtime-adapter",
+        "test-support",
     ],
     edition = "2024",
     compile_data = [
@@ -374,6 +385,7 @@ rust_test(
         "CARGO_PKG_VERSION": "0.6.15",
         "CARGO_BIN_NAME": "mob_orchestrator_kernel",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "fast",
@@ -424,6 +436,7 @@ rust_test(
     crate_features = [
         "integration-real-tests",
         "runtime-adapter",
+        "test-support",
     ],
     edition = "2024",
     compile_data = [
@@ -441,6 +454,7 @@ rust_test(
         "CARGO_PKG_VERSION": "0.6.15",
         "CARGO_BIN_NAME": "shadow_state_absent",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "fast",
@@ -491,6 +505,7 @@ rust_test(
     crate_features = [
         "integration-real-tests",
         "runtime-adapter",
+        "test-support",
     ],
     edition = "2024",
     compile_data = [
@@ -508,6 +523,7 @@ rust_test(
         "CARGO_PKG_VERSION": "0.6.15",
         "CARGO_BIN_NAME": "smoke_mob_flow_runtime",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "integration",
@@ -558,6 +574,7 @@ rust_test(
     crate_features = [
         "integration-real-tests",
         "runtime-adapter",
+        "test-support",
     ],
     edition = "2024",
     compile_data = [
@@ -575,6 +592,7 @@ rust_test(
         "CARGO_PKG_VERSION": "0.6.15",
         "CARGO_BIN_NAME": "smoke_mob_generated_image_comms",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "integration",
@@ -625,6 +643,7 @@ rust_test(
     crate_features = [
         "integration-real-tests",
         "runtime-adapter",
+        "test-support",
     ],
     edition = "2024",
     compile_data = [
@@ -642,6 +661,7 @@ rust_test(
         "CARGO_PKG_VERSION": "0.6.15",
         "CARGO_BIN_NAME": "smoke_mob_pictionary",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "integration",
@@ -692,6 +712,7 @@ rust_test(
     crate_features = [
         "integration-real-tests",
         "runtime-adapter",
+        "test-support",
     ],
     edition = "2024",
     compile_data = [
@@ -709,6 +730,7 @@ rust_test(
         "CARGO_PKG_VERSION": "0.6.15",
         "CARGO_BIN_NAME": "smoke_mob_resume",
         "CARGO_MANIFEST_DIR": "./meerkat-mob",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "integration",

@@ -138,6 +138,7 @@ rust_test(
         "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-core:meerkat_core",
         "//meerkat-llm-core:meerkat_llm_core",
+        "//meerkat-runtime:meerkat_runtime",
     ] + all_crate_deps(
         package_name = "meerkat-anthropic",
         normal = True,
@@ -190,6 +191,7 @@ rust_test(
         "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-core:meerkat_core",
         "//meerkat-llm-core:meerkat_llm_core",
+        "//meerkat-runtime:meerkat_runtime",
     ] + all_crate_deps(
         package_name = "meerkat-anthropic",
         normal = True,

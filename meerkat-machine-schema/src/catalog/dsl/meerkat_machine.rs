@@ -4978,7 +4978,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit IngressAccepted
             emit PostAdmissionSignal { signal: PostAdmissionSignalKind::InterruptYielding }
-            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: "peer admission requested cooperative boundary cancel" }
         }
         // Running + immediate (immediate=true, interrupt_yielding=false)
         transition AcceptWithCompletionRunningImmediate {
@@ -4991,7 +4990,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit IngressAccepted
             emit PostAdmissionSignal { signal: PostAdmissionSignalKind::RequestImmediateProcessing }
-            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: "peer admission requested cooperative boundary cancel" }
         }
 
         // 26. AcceptWithoutWake: Idle/Attached/Running self-loops
@@ -6123,11 +6121,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 policy_wake_mode: if without_wake || silent_intent_match {
                     AdmissionPolicyWakeMode::None
                 } else {
-                    if runtime_running {
-                        AdmissionPolicyWakeMode::InterruptYielding
-                    } else {
-                        AdmissionPolicyWakeMode::WakeIfIdle
-                    }
+                    AdmissionPolicyWakeMode::WakeIfIdle
                 },
                 policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
                 policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
@@ -6144,12 +6138,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 runtime_peer_response_terminal_apply_intent: None,
                 record_transcript: true,
                 request_immediate_processing: false,
-                interrupt_yielding: without_wake == false
-                    && silent_intent_match == false
-                    && runtime_running == true,
+                interrupt_yielding: false,
                 wake_if_idle: without_wake == false
                     && silent_intent_match == false
-                    && runtime_running == false
             }
         }
 

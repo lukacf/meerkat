@@ -3205,6 +3205,8 @@ pub enum TransitionId {
     ResetMember,
     RespawnMember,
     RecoverMemberRestoreFailureRunning,
+    RecoverMemberRestoreFailureStopped,
+    RecoverMemberRestoreFailureCompleted,
     AdmitDestroyCleanup,
     AdmitDestroyStorageFinalizing,
     MarkCompleted,

@@ -759,6 +759,7 @@ struct CreateSessionRecord {
     initial_turn: meerkat_core::service::InitialTurnPolicy,
     comms_name: Option<String>,
     peer_meta_labels: BTreeMap<String, String>,
+    runtime_build_mode_session_owned: bool,
 }
 
 /// A mock session service that creates sessions with mock comms runtimes.
@@ -1417,6 +1418,12 @@ impl SessionService for MockSessionService {
                     .as_ref()
                     .and_then(|build| build.comms_name.clone()),
                 peer_meta_labels,
+                runtime_build_mode_session_owned: req.build.as_ref().is_some_and(|build| {
+                    matches!(
+                        build.runtime_build_mode,
+                        meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(_)
+                    )
+                }),
             });
 
         // Record the prompt for test inspection
@@ -10009,6 +10016,7 @@ async fn profile_tools_mcp_allowlist_scopes_default_external_tools() {
         handle.clone(),
         Some(host_mcp_dispatcher),
         None,
+        None,
     )
     .expect("compose dispatcher")
     .expect("dispatcher should mount when default_external_tools is provided");
@@ -10084,6 +10092,7 @@ async fn profile_tools_mcp_empty_passes_all_default_external_tools() {
         handle.clone(),
         Some(host_mcp_dispatcher),
         None,
+        None,
     )
     .expect("compose dispatcher")
     .expect("dispatcher should mount when default_external_tools is provided");
@@ -10122,6 +10131,7 @@ async fn profile_tools_mob_true_grants_operator_dispatcher_without_persisted_aut
         profile,
         &BTreeMap::new(),
         handle.clone(),
+        None,
         None,
         None,
     )
@@ -10171,6 +10181,7 @@ async fn profile_tools_mob_false_keeps_operator_dispatcher_off() {
         handle.clone(),
         None,
         None,
+        None,
     )
     .expect("compose dispatcher");
 
@@ -10209,6 +10220,7 @@ async fn test_visible_mob_operator_reads_still_require_exact_scope() {
         profile,
         &BTreeMap::new(),
         handle.clone(),
+        None,
         None,
         Some(
             meerkat_core::service::MobToolAuthorityContext::new(
@@ -10258,6 +10270,7 @@ async fn test_visible_mob_operator_tools_deny_before_arg_validation_when_scope_m
         &BTreeMap::new(),
         handle.clone(),
         None,
+        None,
         Some(
             meerkat_core::service::MobToolAuthorityContext::new(
                 meerkat_core::service::OpaquePrincipalToken::new("out-of-scope"),
@@ -10296,6 +10309,7 @@ async fn test_visible_mob_operator_tools_emit_identity_native_member_payloads() 
         profile,
         &BTreeMap::new(),
         handle.clone(),
+        None,
         None,
         Some(
             meerkat_core::service::MobToolAuthorityContext::new(
@@ -12759,6 +12773,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 shell_env: None,
                 mob_tool_authority_context: None,
                 inherited_tool_filter: None,
+                system_prompt_override: None,
             },
             expected_session_id: &wrong_session_id,
             resumed_session: resumed,
@@ -26106,6 +26121,21 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     .await
     .expect("default peer response should succeed");
 
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        service
+            .applied_runtime_context_appends(&sid_requester)
+            .await
+            .len(),
+        requester_context_baseline,
+        "default response to a steer request should wait for the requester boundary, not cancel the active run"
+    );
+
+    service
+        .interrupt(&sid_requester)
+        .await
+        .expect("boundary release should let requester drain steered response");
+
     let requester_delivery = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let appends = service
@@ -26136,7 +26166,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
             .await
             .expect("requester snapshot should exist");
         panic!(
-            "default response to a steer request should interrupt and reach requester; appends={appends:?} snapshot={snapshot:?}"
+            "default response to a steer request should drain after requester boundary; appends={appends:?} snapshot={snapshot:?}"
         );
     }
 
@@ -27309,6 +27339,172 @@ async fn test_member_status_round_trips_through_machine_command_surface() {
         Some(receipt.bridge_session_id().expect("session-backed")),
         "machine-routed member_status should preserve the active session binding"
     );
+}
+
+#[tokio::test]
+async fn test_member_status_marks_current_missing_bridge_session_broken() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+
+    service
+        .archive(&bridge_session_id)
+        .await
+        .expect("test should remove the live bridge session");
+
+    let snapshot = handle
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member status should still return a diagnostic snapshot");
+    assert_eq!(snapshot.status, crate::runtime::MobMemberStatus::Broken);
+    assert!(snapshot.is_final);
+    assert_eq!(snapshot.current_session_id, Some(bridge_session_id.clone()));
+    assert!(snapshot.peer_connectivity.is_none());
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("missing bridge session")),
+        "broken member should surface the missing-session reason: {snapshot:?}"
+    );
+
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state");
+    let machine_identity =
+        crate::machines::mob_machine::AgentIdentity::from_domain(&AgentIdentity::from("w-1"));
+    assert_eq!(
+        machine_state.member_lifecycle_for_identity(&machine_identity),
+        crate::machines::mob_machine::MobMemberLifecycleMaterial {
+            status: crate::machines::mob_machine::MobMemberLifecycleStatus::Broken,
+            terminal_class: crate::machines::mob_machine::MobMemberTerminalClass::TerminalFailure,
+            error: Some(format!(
+                "missing bridge session snapshot for '{bridge_session_id}'"
+            )),
+        },
+        "missing bridge-session classification must be owned by MobMachine state"
+    );
+}
+
+#[tokio::test]
+async fn test_missing_bridge_session_stops_member_from_looking_runnable_after_status_probe() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+
+    service
+        .archive(&bridge_session_id)
+        .await
+        .expect("test should remove the live bridge session");
+
+    let _ = handle
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("status probe should record the missing session");
+
+    let listed = handle.list_members().await;
+    let entry = listed
+        .iter()
+        .find(|entry| entry.agent_identity == "w-1")
+        .expect("member remains visible for diagnostics");
+    assert_eq!(entry.status, crate::runtime::MobMemberStatus::Broken);
+    assert!(entry.is_final);
+    assert_eq!(entry.current_session_id, Some(bridge_session_id.clone()));
+
+    let error = handle
+        .internal_turn(
+            AgentIdentity::from("w-1"),
+            ContentInput::from("should fail fast".to_string()),
+        )
+        .await
+        .expect_err("broken member must reject queued work");
+    match error {
+        MobError::MemberRestoreFailed {
+            member_id,
+            session_id,
+            reason,
+        } => {
+            assert_eq!(member_id, MeerkatId::from("w-1"));
+            assert_eq!(session_id, Some(bridge_session_id));
+            assert!(
+                reason.contains("missing bridge session"),
+                "unexpected restore failure reason: {reason}"
+            );
+        }
+        other => panic!("expected MemberRestoreFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_submit_work_marks_missing_bridge_session_broken_without_prior_status_probe() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+    let active = handle
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("initial member status");
+    let (runtime_id, fence_token) = active.runtime_identity_fields();
+    let runtime_id = runtime_id.clone();
+
+    service
+        .archive(&bridge_session_id)
+        .await
+        .expect("test should remove the live bridge session");
+
+    let error = handle
+        .submit_work(
+            runtime_id,
+            fence_token,
+            WorkRef::new(),
+            WorkSpec::new(
+                ContentInput::from("dispatch should fail fast".to_string()),
+                WorkOrigin::Internal,
+            ),
+        )
+        .await
+        .expect_err("submit_work should diagnose the missing bridge session");
+    match error {
+        MobError::MemberRestoreFailed {
+            member_id,
+            session_id,
+            reason,
+        } => {
+            assert_eq!(member_id, MeerkatId::from("w-1"));
+            assert_eq!(session_id, Some(bridge_session_id.clone()));
+            assert!(
+                reason.contains("missing bridge session"),
+                "unexpected restore failure reason: {reason}"
+            );
+        }
+        other => panic!("expected MemberRestoreFailed, got {other:?}"),
+    }
+
+    let after = handle
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("post-failure member status");
+    assert_eq!(after.status, crate::runtime::MobMemberStatus::Broken);
+    assert_eq!(after.current_session_id, Some(bridge_session_id));
 }
 
 #[tokio::test]
@@ -28756,6 +28952,115 @@ async fn test_external_tools_provider_called_per_spawn() {
 }
 
 #[tokio::test]
+async fn test_per_spawn_external_tools_compose_with_profile_and_default_tools() {
+    let provider: crate::ExternalToolsProvider = Arc::new(|| {
+        Some(
+            Arc::new(MultiToolDispatcher::new(&["default_only", "shared_tool"]))
+                as Arc<dyn AgentToolDispatcher>,
+        )
+    });
+
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(|binding| binding.as_inline_mut())
+        .expect("worker profile")
+        .tools
+        .rust_bundles = vec!["profile-bundle".to_string()];
+
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .register_tool_bundle(
+            "profile-bundle",
+            Arc::new(MultiToolDispatcher::new(&["profile_only", "shared_tool"])),
+        )
+        .with_default_external_tools_provider(Some(provider))
+        .create()
+        .await
+        .expect("create mob");
+
+    let mut spec = SpawnMemberSpec::new("worker", "w-per-spawn");
+    spec.external_tools = Some(Arc::new(MultiToolDispatcher::new(&[
+        "spawn_only",
+        "shared_tool",
+    ])));
+    let spawned = handle.spawn_spec(spec).await.expect("spawn");
+    let session_id = handle
+        .resolve_bridge_session_id(&spawned.agent_identity)
+        .await
+        .expect("bridge session id");
+
+    let tool_names = service.external_tool_names(&session_id).await;
+    assert!(tool_names.contains(&"profile_only".to_string()));
+    assert!(tool_names.contains(&"spawn_only".to_string()));
+    assert!(tool_names.contains(&"default_only".to_string()));
+
+    let shared_count = tool_names
+        .iter()
+        .filter(|name| name.as_str() == "shared_tool")
+        .count();
+    assert_eq!(
+        shared_count, 1,
+        "profile > per-spawn > default collision order must expose one deterministic shared_tool"
+    );
+}
+
+#[tokio::test]
+async fn test_per_spawn_external_tools_are_not_restored_from_storage() {
+    let definition = sample_definition();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition.clone(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let mut spec = SpawnMemberSpec::new("worker", "w-live-dispatcher");
+    spec.external_tools = Some(Arc::new(MultiToolDispatcher::new(&["live_only"])));
+    let spawned = handle.spawn_spec(spec).await.expect("spawn");
+    let old_session_id = handle
+        .resolve_bridge_session_id(&spawned.agent_identity)
+        .await
+        .expect("old bridge session");
+    assert!(
+        service
+            .external_tool_names(&old_session_id)
+            .await
+            .contains(&"live_only".to_string()),
+        "live per-spawn dispatcher should be installed on the original create"
+    );
+
+    handle.stop().await.expect("stop");
+    service
+        .archive(&old_session_id)
+        .await
+        .expect("archive session");
+
+    let _resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume");
+
+    let flags = service.recorded_external_tools_flags().await;
+    assert_eq!(
+        flags.last().copied(),
+        Some(false),
+        "per-spawn trait-object dispatchers must be supplied again by the upper layer on restore"
+    );
+}
+
+#[tokio::test]
 async fn test_external_tools_name_collision_profile_wins() {
     // Provider returns a dispatcher with tool "spawn_member". When
     // profile.tools.mob = true, the canonical resolver mounts the mob-owned
@@ -28809,6 +29114,548 @@ async fn test_external_tools_name_collision_profile_wins() {
         .dispatch_external_tool_outcome(&session_id, "spawn_member", raw_args)
         .await
         .expect("mob-owned spawn_member should win and use generated definition-profile scope");
+}
+
+#[tokio::test]
+async fn test_default_helper_spawns_remain_ephemeral() {
+    let definition = sample_definition();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+
+    handle
+        .spawn_helper(
+            AgentIdentity::from("helper-ephemeral"),
+            "short helper task",
+            HelperOptions {
+                role_name: Some(ProfileName::from("worker")),
+                runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                ..HelperOptions::default()
+            },
+        )
+        .await
+        .expect("helper spawn");
+
+    let events = handle.events().replay_all().await.expect("events");
+    let helper_spawn = events
+        .iter()
+        .filter_map(|event| event.kind.member_spawned())
+        .find(|spawn| spawn.agent_identity.as_str() == "helper-ephemeral")
+        .expect("helper spawn event");
+    assert_eq!(
+        helper_spawn.continuity_intent,
+        SpawnContinuityIntent::Ephemeral,
+        "helpers must not become durable unless a customizer explicitly promotes them"
+    );
+}
+
+#[derive(Clone)]
+struct RecordingSpawnCustomizer {
+    calls: Arc<Mutex<Vec<SpawnCustomizationContext>>>,
+}
+
+impl RecordingSpawnCustomizer {
+    fn new() -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn calls(&self) -> Vec<SpawnCustomizationContext> {
+        self.calls.lock().expect("customizer calls").clone()
+    }
+}
+
+impl SpawnMemberCustomizer for RecordingSpawnCustomizer {
+    fn customize_spawn(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        self.calls
+            .lock()
+            .expect("customizer calls")
+            .push(ctx.clone());
+        spec.labels.get_or_insert_with(BTreeMap::new).insert(
+            "customized".to_string(),
+            ctx.spawn_source.as_str().to_string(),
+        );
+        let tool_name = format!("customizer_{}", ctx.spawn_source.as_str());
+        spec.external_tools = Some(Arc::new(MultiToolDispatcher::new(&[tool_name.as_str()])));
+        spec.system_prompt_override = Some(SpawnSystemPromptOverride::Replace(format!(
+            "custom prompt for {}",
+            ctx.spawn_source.as_str()
+        )));
+        if ctx.spawn_source == SpawnSource::HelperSpawn {
+            spec.continuity_intent = SpawnContinuityIntent::DurableIdentity {
+                continuity_key: format!("helper/{}", spec.identity),
+            };
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct ResumeAddressabilityCustomizer {
+    calls: Arc<Mutex<Vec<SpawnCustomizationContext>>>,
+    override_profile: Profile,
+}
+
+impl ResumeAddressabilityCustomizer {
+    fn new(override_profile: Profile) -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            override_profile,
+        }
+    }
+
+    fn calls(&self) -> Vec<SpawnCustomizationContext> {
+        self.calls.lock().expect("resume customizer calls").clone()
+    }
+}
+
+impl SpawnMemberCustomizer for ResumeAddressabilityCustomizer {
+    fn customize_spawn(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        self.calls
+            .lock()
+            .expect("resume customizer calls")
+            .push(ctx.clone());
+        if ctx.spawn_source == SpawnSource::Resume {
+            spec.override_profile = Some(self.override_profile.clone());
+            spec.external_tools = Some(Arc::new(MultiToolDispatcher::new(&["customizer_resume"])));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_spawn_member_customizer_fires_with_source_and_spawner_provenance() {
+    let customizer = RecordingSpawnCustomizer::new();
+    let definition = sample_definition_with_mob_tools();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(Arc::new(customizer.clone()))
+        .create()
+        .await
+        .expect("create mob");
+
+    let lead_ref = handle
+        .spawn_spec(SpawnMemberSpec::new("lead", "lead-1"))
+        .await
+        .expect("spawn root");
+    let lead_session_id = handle
+        .resolve_bridge_session_id(&lead_ref.agent_identity)
+        .await
+        .expect("lead bridge session");
+
+    let worker_spec = SpawnMemberSpec::new("worker", "worker-agent-tool");
+    handle
+        .spawn_spec_receipt_with_owner_context(
+            worker_spec,
+            super::handle::CanonicalOpsOwnerContext {
+                owner_bridge_session_id: lead_session_id.clone(),
+                ops_registry: Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new()),
+            },
+        )
+        .await
+        .expect("agent spawn_member");
+
+    let mut batch = handle
+        .spawn_many(vec![
+            SpawnMemberSpec::new("worker", "batch-a"),
+            SpawnMemberSpec::new("worker", "batch-b"),
+        ])
+        .await;
+    assert!(batch.drain(..).all(|result| result.is_ok()));
+
+    handle
+        .spawn_helper(
+            AgentIdentity::from("helper-promoted"),
+            "do helper work",
+            HelperOptions {
+                role_name: Some(ProfileName::from("worker")),
+                runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                ..HelperOptions::default()
+            },
+        )
+        .await
+        .expect("helper spawn");
+    handle
+        .fork_helper(
+            &AgentIdentity::from("lead-1"),
+            AgentIdentity::from("fork-helper"),
+            "do forked helper work",
+            crate::launch::ForkContext::LastMessages { count: 1 },
+            HelperOptions {
+                role_name: Some(ProfileName::from("worker")),
+                runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                ..HelperOptions::default()
+            },
+        )
+        .await
+        .expect("fork helper spawn");
+
+    let calls = customizer.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|ctx| ctx.spawn_source == SpawnSource::Consumer
+                && ctx.spawner_identity.is_none()
+                && ctx.requested_profile.as_str() == "lead"),
+        "root spawn must be customized as Consumer without spawner provenance"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|ctx| ctx.spawn_source == SpawnSource::AgentSpawnMember
+                && ctx.spawner_identity.as_ref() == Some(&AgentIdentity::from("lead-1"))
+                && ctx
+                    .spawner_runtime_id
+                    .as_ref()
+                    .is_some_and(|id| id.identity.as_str() == "lead-1")),
+        "agent spawn_member must carry typed spawning-agent identity/runtime provenance"
+    );
+    assert!(
+        calls
+            .iter()
+            .filter(|ctx| ctx.spawn_source == SpawnSource::BatchItem)
+            .count()
+            >= 2,
+        "spawn_many items must be customized as BatchItem"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|ctx| ctx.spawn_source == SpawnSource::HelperSpawn),
+        "spawn_helper must be customized as HelperSpawn"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|ctx| ctx.spawn_source == SpawnSource::Fork),
+        "fork launch-mode spawns must be customized as Fork"
+    );
+
+    let root_labels = handle
+        .get_member(&AgentIdentity::from("lead-1"))
+        .await
+        .expect("lead roster entry")
+        .labels;
+    assert_eq!(
+        root_labels.get("customized").map(String::as_str),
+        Some("consumer"),
+        "customizer mutations must land in the created member"
+    );
+    assert!(
+        service
+            .external_tool_names(&lead_session_id)
+            .await
+            .contains(&"customizer_consumer".to_string()),
+        "customizer-attached external tools must reach the created session"
+    );
+    let lead_session = service
+        .live_session_clone(&lead_session_id)
+        .await
+        .expect("lead live session");
+    assert!(
+        matches!(
+            lead_session.messages().first(),
+            Some(Message::System(system)) if system.content == "custom prompt for consumer"
+        ),
+        "customizer system_prompt_override must reach the created session"
+    );
+
+    let events = handle.events().replay_all().await.expect("events");
+    let helper_spawn = events
+        .iter()
+        .filter_map(|event| event.kind.member_spawned())
+        .find(|spawn| spawn.agent_identity.as_str() == "helper-promoted")
+        .expect("helper spawn event");
+    assert_eq!(
+        helper_spawn.continuity_intent,
+        SpawnContinuityIntent::DurableIdentity {
+            continuity_key: "helper/helper-promoted".to_string(),
+        },
+        "promoted helper continuity intent must survive spawn finalization"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_reconciliation_runs_spawn_customizer_for_missing_session_rebuild() {
+    let definition = sample_definition();
+    let mut override_profile = definition
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline()
+        .expect("worker profile should be inline")
+        .clone();
+    override_profile.external_addressable = true;
+    let customizer = ResumeAddressabilityCustomizer::new(override_profile);
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let spawned = handle
+        .spawn_spec(SpawnMemberSpec::new("worker", "resume-reconcile-member"))
+        .await
+        .expect("spawn");
+    let session_id = handle
+        .resolve_bridge_session_id(&spawned.agent_identity)
+        .await
+        .expect("bridge session");
+    service
+        .archive(&session_id)
+        .await
+        .expect("archive live session before resume reconciliation");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .with_spawn_member_customizer(Arc::new(customizer.clone()))
+    .resume()
+    .await
+    .expect("resume");
+
+    assert!(
+        customizer
+            .calls()
+            .iter()
+            .any(|ctx| ctx.spawn_source == SpawnSource::Resume
+                && ctx.requested_profile.as_str() == "worker"),
+        "resume reconciliation must call the supplied spawn customizer before rebuilding a missing session"
+    );
+    assert!(
+        service
+            .external_tool_names(&session_id)
+            .await
+            .contains(&"customizer_resume".to_string()),
+        "resume reconciliation must use customizer-supplied external tools on the rebuilt session"
+    );
+    assert!(
+        service
+            .recorded_create_requests()
+            .await
+            .last()
+            .is_some_and(|request| request.runtime_build_mode_session_owned),
+        "resume reconciliation must rebuild through the mob provisioner so runtime bindings are SessionOwned"
+    );
+    let member = resumed
+        .member(&AgentIdentity::from("resume-reconcile-member"))
+        .await
+        .expect("member handle after resume reconciliation");
+    member
+        .send(
+            "external resume hello".to_string(),
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect("resume customizer effective profile must seed machine addressability");
+}
+
+struct StaticLeadSpawnPolicy;
+
+#[async_trait]
+impl super::spawn_policy::SpawnPolicy for StaticLeadSpawnPolicy {
+    async fn resolve(&self, _target: &AgentIdentity) -> Option<super::spawn_policy::SpawnSpec> {
+        Some(super::spawn_policy::SpawnSpec {
+            profile: ProfileName::from("lead"),
+            runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct PolicyAddressabilityCustomizer {
+    override_profile: Profile,
+}
+
+impl SpawnMemberCustomizer for PolicyAddressabilityCustomizer {
+    fn customize_spawn(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        if ctx.spawn_source == SpawnSource::PolicySpawn {
+            spec.override_profile = Some(self.override_profile.clone());
+            spec.external_tools = Some(Arc::new(MultiToolDispatcher::new(&[
+                "policy_override_tool",
+            ])));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_policy_auto_spawn_admission_uses_customized_effective_profile() {
+    let definition = sample_definition();
+    let mut override_profile = definition
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline()
+        .expect("worker profile should be inline")
+        .clone();
+    override_profile.external_addressable = true;
+
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(Arc::new(PolicyAddressabilityCustomizer {
+            override_profile,
+        }))
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .set_spawn_policy(Some(Arc::new(StaticWorkerSpawnPolicy)))
+        .await
+        .expect("set spawn policy");
+
+    let target = AgentIdentity::from("policy-customized-addressable");
+    handle
+        .submit_work(
+            AgentRuntimeId::initial(target.clone()),
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new(
+                "queued for customized policy spawn".to_string(),
+                WorkOrigin::External,
+            ),
+        )
+        .await
+        .expect("policy auto-spawn admission should use customized effective profile");
+
+    let session_id = handle
+        .resolve_bridge_session_id(&target)
+        .await
+        .expect("policy bridge session");
+    assert!(
+        service
+            .external_tool_names(&session_id)
+            .await
+            .contains(&"policy_override_tool".to_string()),
+        "policy auto-spawn should build from the customized spec after admission"
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_member_customizer_covers_policy_auto_spawn_and_respawn_builds() {
+    let customizer = RecordingSpawnCustomizer::new();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(Arc::new(customizer.clone()))
+        .create()
+        .await
+        .expect("create mob");
+
+    let target = AgentIdentity::from("policy-auto");
+    handle
+        .set_spawn_policy(Some(Arc::new(StaticLeadSpawnPolicy)))
+        .await
+        .expect("set spawn policy");
+    handle
+        .submit_work(
+            AgentRuntimeId::initial(target.clone()),
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new("queued for policy spawn".to_string(), WorkOrigin::External),
+        )
+        .await
+        .expect("policy auto-spawn submit work");
+    let policy_session_id = handle
+        .resolve_bridge_session_id(&target)
+        .await
+        .expect("policy bridge session");
+    assert!(
+        service
+            .external_tool_names(&policy_session_id)
+            .await
+            .contains(&"customizer_policy_spawn".to_string()),
+        "policy auto-spawn must apply customizer-attached external tools"
+    );
+    let policy_session = service
+        .live_session_clone(&policy_session_id)
+        .await
+        .expect("policy live session");
+    assert!(
+        matches!(
+            policy_session.messages().first(),
+            Some(Message::System(system)) if system.content == "custom prompt for policy_spawn"
+        ),
+        "policy auto-spawn must apply customizer system prompt replacement"
+    );
+
+    handle
+        .respawn(target.clone(), None)
+        .await
+        .expect("respawn policy member");
+    let respawn_session_id = handle
+        .resolve_bridge_session_id(&target)
+        .await
+        .expect("respawn bridge session");
+    assert_ne!(
+        policy_session_id, respawn_session_id,
+        "respawn should create a replacement session"
+    );
+    assert!(
+        service
+            .external_tool_names(&respawn_session_id)
+            .await
+            .contains(&"customizer_respawn".to_string()),
+        "respawn replacement build must apply customizer-attached external tools"
+    );
+    let respawn_session = service
+        .live_session_clone(&respawn_session_id)
+        .await
+        .expect("respawn live session");
+    assert!(
+        matches!(
+            respawn_session.messages().first(),
+            Some(Message::System(system)) if system.content == "custom prompt for respawn"
+        ),
+        "respawn replacement build must apply customizer system prompt replacement"
+    );
+
+    let calls = customizer.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|ctx| ctx.spawn_source == SpawnSource::PolicySpawn
+                && ctx.spawner_identity.is_none()
+                && ctx.requested_profile.as_str() == "lead"),
+        "policy auto-spawn must be customized with explicit source and no spawner"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|ctx| ctx.spawn_source == SpawnSource::Respawn
+                && ctx.spawner_identity.is_none()
+                && ctx.requested_profile.as_str() == "lead"),
+        "respawn replacement build must be customized with explicit source and no spawner"
+    );
 }
 
 #[tokio::test]

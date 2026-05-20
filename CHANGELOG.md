@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.19] - 2026-05-19
+
+Meerkat 0.6.19 is a runtime/session projection hotfix release for
+runtime-committed session checkpointing.
+
+### Fixed
+
+- **Runtime-committed session projections** (#733) — checkpoints committed
+  runtime snapshots back into the `SessionStore` projection after the machine
+  commit succeeds, restoring per-turn projection saves for MobKit and
+  UnifiedRuntime consumers without introducing a pre-commit split-brain.
+
+## [0.6.18] - 2026-05-19
+
+Meerkat 0.6.18 is a runtime/session reliability hotfix release for persistent
+session checkpointing and lost mob session state.
+
+### Fixed
+
+- **Runtime-store session checkpointing** (#731) — fixes persistent session
+  checkpointing through the runtime store so session state is written and
+  recovered through the intended storage path.
+- **Lost mob session status** (#732) — marks lost mob sessions as broken,
+  preserving an explicit failed state instead of leaving unavailable sessions
+  looking active or recoverable.
+
+## [0.6.17] - 2026-05-18
+
+Meerkat 0.6.17 improves mob spawn boundary configuration, task-workflow
+guidance, and steer cancellation behavior.
+
+### Added
+
+- **Mob spawn boundary customization** (#728) — mob spawn flows can customize
+  member spawn boundaries through the mob runtime path, with tests covering the
+  builder, runtime handle, actor, and tool surfaces.
+- **Mob task workflow guidance preload** (#729) — mob build profiles now preload
+  task workflow guidance so spawned members receive the expected workflow context
+  at construction time.
+
+### Fixed
+
+- **Steer admission boundary cancellation** (#730) — fixes cancellation behavior
+  at the steer admission boundary and updates the machine contract/spec coverage
+  around the cancellation path.
+
+## [0.6.16] - 2026-05-18
+
+Meerkat 0.6.16 is a hotfix release for mob peer wake behavior and
+BuildBuddy-backed Windows release assets.
+
+### Changed
+
+- **Mob peer send and tool bridge parity** (#727) — aligns mob peer send
+  behavior with the tool bridge path so peer-to-peer wake and delivery semantics
+  stay consistent across mob surfaces.
+- **Windows BuildBuddy release endpoint** (#726) — Windows release binary builds
+  now route directly to the hosted King BuildBuddy endpoint instead of a mutable
+  secret-backed endpoint, preventing stale private endpoint routing from
+  breaking release asset publication.
+
+### Fixed
+
+- **Peer wake interrupt semantics** (#727) — fixes peer wake interruption so
+  mob members are woken correctly when new peer traffic arrives.
+
 ## [0.6.15] - 2026-05-18
 
 Meerkat 0.6.15 is a smoke-test hotfix release for mob lifecycle, image comms,

@@ -208,6 +208,7 @@ pub(super) fn compose_external_tools_for_profile(
     tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     mob_handle: MobHandle,
     default_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     persisted_mob_tool_authority_context: Option<MobToolAuthorityContext>,
 ) -> Result<Option<Arc<dyn AgentToolDispatcher>>, MobError> {
     let mut dispatchers: Vec<Arc<dyn AgentToolDispatcher>> = Vec::new();
@@ -247,13 +248,37 @@ pub(super) fn compose_external_tools_for_profile(
         dispatchers.push(dispatcher);
     }
 
-    // Compose default external tools (e.g. callback tools from SDK) with
-    // name-collision filtering: profile-declared tools always win.
+    // Compose per-spawn and default external tools with deterministic
+    // name-collision filtering: profile-declared tools win over per-spawn
+    // overlays, and per-spawn overlays win over mob-wide defaults.
     //
     // The dispatcher is always included even if it currently reports 0 tools,
     // because it may be dynamic (e.g. CallbackToolDispatcher backed by a shared
     // registry that gets populated later via tools/register). Dropping it here
     // would permanently disconnect the session from late-registered tools.
+    if let Some(ext) = per_spawn_external_tools {
+        let profile_names: HashSet<String> = dispatchers
+            .iter()
+            .flat_map(|d| {
+                d.tools()
+                    .iter()
+                    .map(|t| t.name.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let collisions: HashSet<String> = ext
+            .tools()
+            .iter()
+            .filter(|t| profile_names.contains(t.name.as_str()))
+            .map(|t| t.name.to_string())
+            .collect();
+        if collisions.is_empty() {
+            dispatchers.push(ext);
+        } else {
+            dispatchers.push(Arc::new(NameFilteredDispatcher::new(ext, collisions)));
+        }
+    }
+
     if let Some(ext) = default_external_tools {
         // Per-profile MCP source scoping: when profile.tools.mcp lists names,
         // restrict MCP-flavored tools from `ext` to those source IDs. Non-MCP

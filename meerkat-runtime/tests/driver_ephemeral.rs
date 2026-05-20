@@ -9,7 +9,7 @@ use meerkat_runtime::{
     MeerkatMachine, PeerConvention, PeerInput, PostAdmissionSignal, PromptInput,
     ResponseProgressPhase, ResponseTerminalStatus, RuntimeControlPlane, RuntimeDriver,
     RuntimeDriverError, RuntimeEvent, RuntimeState, SessionServiceRuntimeExt,
-    classify_runtime_lifecycle_state,
+    classify_runtime_lifecycle_state, post_admission_signal_from_accept_outcome,
 };
 
 fn make_prompt_input(text: &str) -> Input {
@@ -852,13 +852,17 @@ async fn post_admission_signal_steer_is_request_immediate() {
     let outcome = driver.accept_input(steer_input).await.unwrap();
     assert!(outcome.is_accepted());
     assert_eq!(
+        post_admission_signal_from_accept_outcome(&outcome, true),
+        PostAdmissionSignal::RequestImmediateProcessing
+    );
+    assert_eq!(
         driver.take_post_admission_signal(),
         PostAdmissionSignal::RequestImmediateProcessing
     );
 }
 
 #[tokio::test]
-async fn post_admission_signal_queue_peer_message_while_running_interrupts_yielding() {
+async fn post_admission_signal_queue_peer_message_while_running_wakes_after_current_turn() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
 
     // Admit a prompt to start a run
@@ -886,19 +890,23 @@ async fn post_admission_signal_queue_peer_message_while_running_interrupts_yield
             correlation_id: None,
         },
         convention: Some(PeerConvention::Message),
-        body: "interrupt me".into(),
+        body: "wake me after the current turn".into(),
         payload: None,
         blocks: None,
         handling_mode: None,
     });
     let outcome = driver.accept_input(peer).await.unwrap();
     assert!(outcome.is_accepted());
-    let signal = driver.take_post_admission_signal();
+    let signal = post_admission_signal_from_accept_outcome(&outcome, false);
 
     assert_eq!(
         signal,
-        PostAdmissionSignal::InterruptYielding,
-        "queue-mode peer message while running should request cooperative interrupt, got {signal:?}"
+        PostAdmissionSignal::WakeLoop,
+        "queue-mode peer message while running should request an idle wake, got {signal:?}"
+    );
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::WakeLoop
     );
 }
 

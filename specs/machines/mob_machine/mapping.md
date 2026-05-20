@@ -207,6 +207,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverMemberRestoreFailureRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `RecoverMemberRestoreFailureStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `RecoverMemberRestoreFailureCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `AdmitDestroyCleanup`
   - anchors: `mob_actor_authority`
   - scenarios: `orchestrator-coordinator-cleanup`

@@ -1361,6 +1361,24 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        transition RecoverMemberRestoreFailureStopped {
+            on signal RecoverMemberRestoreFailure { agent_identity, reason }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            update {
+                self.member_restore_failures.insert(agent_identity, reason);
+            }
+            to Stopped
+        }
+
+        transition RecoverMemberRestoreFailureCompleted {
+            on signal RecoverMemberRestoreFailure { agent_identity, reason }
+            guard { self.lifecycle_phase == Phase::Completed }
+            update {
+                self.member_restore_failures.insert(agent_identity, reason);
+            }
+            to Completed
+        }
+
         transition AdmitDestroyCleanup {
             on signal AdmitDestroyCleanup
             guard {

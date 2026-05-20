@@ -1209,10 +1209,10 @@ impl AgentToolDispatcher for AgentMobToolSurface {
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         match call.name {
-            TOOL_DELEGATE => self.dispatch_delegate(call).await,
+            TOOL_DELEGATE => Box::pin(self.dispatch_delegate(call)).await,
             TOOL_MOB_CREATE => self.dispatch_mob_create(call).await,
             TOOL_MOB_DESTROY => self.dispatch_mob_destroy(call).await,
-            TOOL_MOB_SPAWN_MEMBER => self.dispatch_mob_spawn_member(call).await,
+            TOOL_MOB_SPAWN_MEMBER => Box::pin(self.dispatch_mob_spawn_member(call)).await,
             TOOL_MOB_RETIRE_MEMBER => self.dispatch_mob_retire_member(call).await,
             TOOL_MOB_CHECK_MEMBER => self.dispatch_mob_check_member(call).await,
             TOOL_MOB_LIST_MEMBERS => self.dispatch_mob_list_members(call).await,

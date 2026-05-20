@@ -2595,7 +2595,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `request_immediate_processing`
   - `interrupt_yielding`
-- Emits: `IngressAccepted`, `PostAdmissionSignal`, `RuntimeEffectFact`
+- Emits: `IngressAccepted`, `PostAdmissionSignal`
 - To: `Running`
 
 ### `AcceptWithCompletionRunningImmediate`
@@ -2605,7 +2605,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `request_immediate_processing`
   - `interrupt_yielding`
-- Emits: `IngressAccepted`, `PostAdmissionSignal`, `RuntimeEffectFact`
+- Emits: `IngressAccepted`, `PostAdmissionSignal`
 - To: `Running`
 
 ### `AcceptWithoutWakeIdle`

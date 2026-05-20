@@ -5,6 +5,7 @@ use meerkat_core::types::HandlingMode;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::driver::PostAdmissionSignal;
 use crate::input_state::{InputState, InputStateSeed};
 use crate::meerkat_machine::dsl as mm_dsl;
 use crate::policy::PolicyDecision;
@@ -280,6 +281,36 @@ pub fn handling_mode_from_policy(policy: &PolicyDecision) -> HandlingMode {
             HandlingMode::Steer
         }
         _ => HandlingMode::Queue,
+    }
+}
+
+/// Classify the machine-owned post-admission control signal for a resolved
+/// accept outcome.
+///
+/// Admission-time wake / interrupt / immediate-processing semantics are owned
+/// by the checked-in Meerkat machine. The runtime driver still carries the
+/// accumulated DSL-emitted signal for loop mechanics, but plain accept
+/// classification should flow through this typed helper.
+pub fn post_admission_signal_from_accept_outcome(
+    outcome: &AcceptOutcome,
+    request_immediate_processing: bool,
+) -> PostAdmissionSignal {
+    if !matches!(outcome, AcceptOutcome::Accepted { .. }) {
+        return PostAdmissionSignal::None;
+    }
+    if request_immediate_processing {
+        return PostAdmissionSignal::RequestImmediateProcessing;
+    }
+
+    match outcome {
+        AcceptOutcome::Accepted { policy, .. } => match policy.wake_mode {
+            crate::WakeMode::InterruptYielding => PostAdmissionSignal::InterruptYielding,
+            crate::WakeMode::WakeIfIdle => PostAdmissionSignal::WakeLoop,
+            crate::WakeMode::None => PostAdmissionSignal::None,
+        },
+        AcceptOutcome::Deduplicated { .. } | AcceptOutcome::Rejected { .. } => {
+            PostAdmissionSignal::None
+        }
     }
 }
 

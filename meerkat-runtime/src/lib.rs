@@ -111,7 +111,7 @@ pub fn session_runtime_bindings_have_machine_authority(
 }
 
 // Re-exports for convenience
-pub use accept::{AcceptOutcome, RejectReason};
+pub use accept::{AcceptOutcome, RejectReason, post_admission_signal_from_accept_outcome};
 pub use coalescing::{
     AggregateDescriptor, CoalescingResult, SupersessionScope, check_supersession,
     create_aggregate_input, is_coalescing_eligible,

@@ -32,6 +32,13 @@ fn mob_realm_id(mob_id: &MobId) -> Result<RealmId, MobError> {
     })
 }
 
+fn builtin_skill_key(name: &str) -> meerkat_core::skills::SkillKey {
+    meerkat_core::skills::SkillKey::builtin(
+        meerkat_core::skills::SkillName::parse(name)
+            .expect("mob build preloads only valid builtin skill slugs"),
+    )
+}
+
 /// Derive the effective `(override_mob, authority)` for a profile.
 ///
 /// `profile.tools.mob` is the policy declaration.
@@ -92,6 +99,8 @@ pub struct BuildAgentConfigParams<'a> {
     /// When set, stored in canonical session tool-visibility state so the
     /// runtime-backed core build restores it through the machine owner.
     pub inherited_tool_filter: Option<WitnessedToolFilter>,
+    /// Typed per-spawn system prompt replacement.
+    pub system_prompt_override: Option<crate::runtime::SpawnSystemPromptOverride>,
 }
 
 pub struct BuildResumedAgentConfigParams<'a> {
@@ -125,6 +134,7 @@ pub async fn build_agent_config(
         shell_env,
         mob_tool_authority_context,
         inherited_tool_filter,
+        system_prompt_override,
     } = params;
 
     if !profile.tools.comms {
@@ -161,20 +171,28 @@ pub async fn build_agent_config(
     config.comms_name = Some(comms_name);
     config.peer_meta = Some(peer_meta);
     config.realm_id = Some(realm_id.to_string());
-    if !system_prompt.is_empty() {
-        config.system_prompt = Some(system_prompt);
+    match system_prompt_override {
+        Some(crate::runtime::SpawnSystemPromptOverride::Replace(prompt)) => {
+            config.system_prompt = Some(prompt);
+        }
+        None if !system_prompt.is_empty() => {
+            config.system_prompt = Some(system_prompt);
+        }
+        None => {}
     }
 
-    // Mob comms instructions are delivered as an embedded skill via
-    // preload_skills. The `skills` feature is required on the meerkat
-    // dependency (enforced in Cargo.toml) so the skill engine is
-    // always available. Skills are appended as extra_sections in
-    // prompt assembly, which survives per-request system_prompt
-    // overrides.
-    config.preload_skills = Some(vec![meerkat_core::skills::SkillKey::builtin(
-        meerkat_core::skills::SkillName::parse("mob-communication")
-            .expect("mob-communication is a valid builtin skill slug"),
-    )]);
+    // Mob comms and task/work coordination instructions are delivered as
+    // embedded skills via preload_skills. The `skills` feature is required on
+    // the meerkat dependency (enforced in Cargo.toml) so the skill engine is
+    // always available. Skills are appended as extra_sections in prompt
+    // assembly, which survives per-request system_prompt overrides.
+    let mut preload_skills = vec![builtin_skill_key("mob-communication")];
+    if profile.tools.workgraph {
+        preload_skills.push(builtin_skill_key("workgraph-workflow"));
+    } else if profile.tools.builtins {
+        preload_skills.push(builtin_skill_key("task-workflow"));
+    }
+    config.preload_skills = Some(preload_skills);
 
     // Mob lifecycle notifications are typed at peer ingress. Do not rely on
     // silent_comms_intents string matching for canonical routing.
@@ -438,8 +456,56 @@ mod tests {
     use super::*;
     use crate::definition::{BackendConfig, MobDefinition, OrchestratorConfig, WiringRules};
     use crate::profile::{ProfileBinding, ToolConfig};
+    use async_trait::async_trait;
+    use meerkat_client::{LlmClient, LlmEvent, LlmRequest, TestClient};
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct CaptureClient {
+        inner: TestClient,
+        seen_tools: Mutex<Vec<String>>,
+    }
+
+    impl CaptureClient {
+        fn tool_names(&self) -> Vec<String> {
+            self.seen_tools.lock().expect("capture lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for CaptureClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<LlmEvent, meerkat_client::LlmError>> + Send + 'a>,
+        > {
+            *self.seen_tools.lock().expect("capture lock") = request
+                .tools
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect();
+            self.inner.stream(request)
+        }
+
+        fn provider(&self) -> &'static str {
+            self.inner.provider()
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            self.inner.health_check().await
+        }
+    }
 
     fn sample_definition() -> MobDefinition {
         let mut profiles = BTreeMap::new();
@@ -611,6 +677,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -637,6 +704,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -667,6 +735,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -703,6 +772,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -735,6 +805,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -784,6 +855,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -810,6 +882,64 @@ mod tests {
         assert_eq!(
             config.override_mob,
             meerkat_core::ToolCategoryOverride::Disable
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_workgraph_does_not_displace_builtin_task_tools_in_agent_build() {
+        let temp = tempfile::tempdir().unwrap();
+        let def = sample_definition();
+        let lead = def.profiles[&ProfileName::from("lead")]
+            .as_inline()
+            .unwrap();
+        let capture = Arc::new(CaptureClient::default());
+        let mut config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            agent_identity: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            inherited_tool_filter: None,
+            system_prompt_override: None,
+        })
+        .await
+        .expect("build_agent_config");
+        config.llm_client_override = Some(capture.clone());
+
+        let factory = meerkat::AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .workgraph(false);
+        let mut agent = factory
+            .build_agent(config, &meerkat_core::Config::default())
+            .await
+            .expect("build agent from mob profile");
+        agent
+            .run("inspect tools".to_string().into())
+            .await
+            .expect("run agent");
+
+        let tool_names = capture.tool_names();
+        assert!(
+            tool_names.iter().any(|name| name == "task_create"),
+            "profile tools.builtins=true must keep builtin task tools visible; saw {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|name| name == "task_list"),
+            "profile tools.builtins=true must keep builtin task list visible; saw {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|name| name == "workgraph_create"),
+            "profile tools.workgraph=true must expose WorkGraph tools; saw {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|name| name == "workgraph_ready"),
+            "profile tools.workgraph=true must expose WorkGraph readiness; saw {tool_names:?}"
         );
     }
 
@@ -849,6 +979,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: Some(inherited_authority),
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -901,6 +1032,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: Some(inherited_authority.clone()),
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -953,6 +1085,7 @@ mod tests {
                 ),
                 Default::default(),
             )),
+            system_prompt_override: None,
         })
         .await
         .expect_err("name-only inherited filter should fail closed");
@@ -982,6 +1115,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: injected_authority(),
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1028,6 +1162,7 @@ mod tests {
                 shell_env: None,
                 mob_tool_authority_context: None,
                 inherited_tool_filter: None,
+                system_prompt_override: None,
             },
             expected_session_id: &session_id,
             resumed_session,
@@ -1074,6 +1209,7 @@ mod tests {
                 shell_env: None,
                 mob_tool_authority_context: None,
                 inherited_tool_filter: None,
+                system_prompt_override: None,
             },
             expected_session_id: &session_id,
             resumed_session,
@@ -1158,6 +1294,7 @@ mod tests {
                 shell_env: None,
                 mob_tool_authority_context: None,
                 inherited_tool_filter: Some(inherited_authority.clone()),
+                system_prompt_override: None,
             },
             expected_session_id: &session_id,
             resumed_session,
@@ -1238,6 +1375,7 @@ mod tests {
                     ),
                     &["parent_shell"],
                 )),
+                system_prompt_override: None,
             },
             expected_session_id: &session_id,
             resumed_session,
@@ -1282,6 +1420,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await;
         assert!(
@@ -1309,6 +1448,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1321,6 +1461,45 @@ mod tests {
         // Mob comms instructions are delivered via preload_skills (embedded
         // skill), not baked into system_prompt — verified in the separate
         // test_build_agent_config_preloads_mob_communication_skill test.
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_system_prompt_replace_keeps_mob_skill_preload() {
+        let def = sample_definition();
+        let lead = def.profiles[&ProfileName::from("lead")]
+            .as_inline()
+            .unwrap();
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            agent_identity: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            inherited_tool_filter: None,
+            system_prompt_override: Some(crate::SpawnSystemPromptOverride::Replace(
+                "OB3 replacement prompt".to_string(),
+            )),
+        })
+        .await
+        .expect("build_agent_config");
+
+        assert_eq!(
+            config.system_prompt.as_deref(),
+            Some("OB3 replacement prompt"),
+            "typed Replace must bypass profile prompt assembly"
+        );
+        assert!(
+            config.preload_skills.as_ref().is_some_and(|skills| skills
+                .iter()
+                .any(|skill| skill.to_string().contains("mob-communication"))),
+            "prompt replacement must not remove required mob runtime skill wiring"
+        );
     }
 
     #[tokio::test]
@@ -1342,6 +1521,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1355,6 +1535,54 @@ mod tests {
                 .iter()
                 .any(|id| id.skill_name.as_str() == "mob-communication"),
             "preload_skills should include mob-communication"
+        );
+        assert!(
+            preload
+                .iter()
+                .any(|id| id.skill_name.as_str() == "workgraph-workflow"),
+            "WorkGraph-capable profiles should preload WorkGraph operating rules"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_preloads_task_workflow_when_workgraph_absent() {
+        let def = sample_definition();
+        let worker = def.profiles[&ProfileName::from("worker")]
+            .as_inline()
+            .unwrap();
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("worker"),
+            agent_identity: &MeerkatId::from("w-1"),
+            profile: worker,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            inherited_tool_filter: None,
+            system_prompt_override: None,
+        })
+        .await
+        .expect("build_agent_config");
+
+        let preload = config
+            .preload_skills
+            .as_ref()
+            .expect("preload_skills should be set");
+        assert!(
+            preload
+                .iter()
+                .any(|id| id.skill_name.as_str() == "task-workflow"),
+            "builtin-only task-capable profiles should preload local task operating rules"
+        );
+        assert!(
+            !preload
+                .iter()
+                .any(|id| id.skill_name.as_str() == "workgraph-workflow"),
+            "profiles without WorkGraph should not preload WorkGraph operating rules"
         );
     }
 
@@ -1377,6 +1605,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1412,6 +1641,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1438,6 +1668,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1464,6 +1695,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1511,6 +1743,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1565,6 +1798,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config should resolve path skill");
@@ -1613,6 +1847,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect_err("missing path skill should fail");
@@ -1646,6 +1881,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1676,6 +1912,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1714,6 +1951,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");
@@ -1763,6 +2001,7 @@ mod tests {
             shell_env: None,
             mob_tool_authority_context: None,
             inherited_tool_filter: None,
+            system_prompt_override: None,
         })
         .await
         .expect("build_agent_config");

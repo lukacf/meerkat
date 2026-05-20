@@ -1339,6 +1339,19 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
+    async fn checkpoint_committed_session_snapshot(
+        &mut self,
+        session_snapshot: &[u8],
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .checkpoint_committed_runtime_session_snapshot(
+                &self.bridge_session_id,
+                session_snapshot,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.session_service
             .cancel_after_boundary_with_machine_authority(

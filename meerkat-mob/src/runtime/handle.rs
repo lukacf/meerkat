@@ -874,8 +874,88 @@ impl Drop for MobEventsSubscription {
     }
 }
 
+/// Typed source of a mob member spawn request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SpawnSource {
+    Consumer,
+    AgentSpawnMember,
+    HelperSpawn,
+    BatchItem,
+    PolicySpawn,
+    Respawn,
+    Resume,
+    Fork,
+}
+
+impl SpawnSource {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Consumer => "consumer",
+            Self::AgentSpawnMember => "agent_spawn_member",
+            Self::HelperSpawn => "helper_spawn",
+            Self::BatchItem => "batch_item",
+            Self::PolicySpawn => "policy_spawn",
+            Self::Respawn => "respawn",
+            Self::Resume => "resume",
+            Self::Fork => "fork",
+        }
+    }
+
+    #[must_use]
+    fn for_launch_mode(base: Self, launch_mode: &crate::launch::MemberLaunchMode) -> Self {
+        match launch_mode {
+            crate::launch::MemberLaunchMode::Resume { .. } => Self::Resume,
+            crate::launch::MemberLaunchMode::Fork { .. } => Self::Fork,
+            crate::launch::MemberLaunchMode::Fresh => base,
+        }
+    }
+}
+
+/// Typed system prompt replacement for a single spawn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SpawnSystemPromptOverride {
+    Replace(String),
+}
+
+/// Durable identity continuity intent attached to a spawn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SpawnContinuityIntent {
+    #[default]
+    Ephemeral,
+    DurableIdentity {
+        continuity_key: String,
+    },
+}
+
+/// Build-boundary context supplied to [`SpawnMemberCustomizer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SpawnCustomizationContext {
+    pub mob_id: MobId,
+    pub spawn_source: SpawnSource,
+    pub spawner_identity: Option<AgentIdentity>,
+    pub spawner_runtime_id: Option<AgentRuntimeId>,
+    pub requested_profile: ProfileName,
+}
+
+/// Narrow pre-build mutator for per-spawn construction inputs.
+pub trait SpawnMemberCustomizer: Send + Sync {
+    fn customize_spawn(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError>;
+}
+
 /// Spawn request for first-class batch member provisioning.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct SpawnMemberSpec {
     /// The role name (profile key) for this member in the mob roster.
@@ -937,6 +1017,41 @@ pub struct SpawnMemberSpec {
     /// provide binding authority; build paths that require a binding must reject
     /// the spawn instead of promoting an ambient fallback.
     pub auth_binding: Option<meerkat_core::AuthBindingRef>,
+    /// Per-spawn external tool overlay. In-process only and not persisted.
+    pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Typed prompt replacement for this spawn.
+    pub system_prompt_override: Option<SpawnSystemPromptOverride>,
+    /// Explicit helper/member continuity intent.
+    pub continuity_intent: SpawnContinuityIntent,
+}
+
+impl std::fmt::Debug for SpawnMemberSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnMemberSpec")
+            .field("role_name", &self.role_name)
+            .field("identity", &self.identity)
+            .field("initial_message", &self.initial_message)
+            .field("runtime_mode", &self.runtime_mode)
+            .field("backend", &self.backend)
+            .field("binding", &self.binding)
+            .field("context", &self.context)
+            .field("labels", &self.labels)
+            .field("launch_mode", &self.launch_mode)
+            .field("tool_access_policy", &self.tool_access_policy)
+            .field("budget_split_policy", &self.budget_split_policy)
+            .field("auto_wire_parent", &self.auto_wire_parent)
+            .field("additional_instructions", &self.additional_instructions)
+            .field("shell_env", &self.shell_env)
+            .field("inherited_tool_filter", &self.inherited_tool_filter)
+            .field("override_profile", &self.override_profile)
+            .field("model_override", &self.model_override)
+            .field("provider_params_override", &self.provider_params_override)
+            .field("auth_binding", &self.auth_binding)
+            .field("external_tools", &self.external_tools.is_some())
+            .field("system_prompt_override", &self.system_prompt_override)
+            .field("continuity_intent", &self.continuity_intent)
+            .finish()
+    }
 }
 
 impl SpawnMemberSpec {
@@ -961,6 +1076,9 @@ impl SpawnMemberSpec {
             model_override: None,
             provider_params_override: None,
             auth_binding: None,
+            external_tools: None,
+            system_prompt_override: None,
+            continuity_intent: SpawnContinuityIntent::Ephemeral,
         }
     }
 
@@ -1350,6 +1468,7 @@ impl MobHandle {
             }
             MobMachineCommand::Spawn {
                 spec,
+                spawn_source,
                 owner_context,
             } => {
                 let (owner_bridge_session_id, ops_registry) = match owner_context {
@@ -1359,6 +1478,7 @@ impl MobHandle {
                 let receipt = self
                     .send_actor_command(|reply_tx| MobCommand::Spawn {
                         spec,
+                        spawn_source,
                         owner_bridge_session_id,
                         ops_registry,
                         reply_tx,
@@ -1897,27 +2017,6 @@ impl MobHandle {
             .and_then(|dsl_session_id| SessionId::parse(&dsl_session_id.0).ok())
     }
 
-    fn machine_runtime_id_and_fence_for_identity(
-        identity: &crate::ids::AgentIdentity,
-        machine_state: &mob_dsl::MobMachineState,
-    ) -> Option<(AgentRuntimeId, FenceToken)> {
-        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
-        let dsl_runtime_id = machine_state.identity_to_runtime.get(&dsl_identity)?;
-        let generation = dsl_runtime_id
-            .0
-            .strip_prefix(&format!("{identity}:"))
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(crate::ids::Generation::new)?;
-        let fence_token = machine_state
-            .runtime_fence_tokens
-            .get(dsl_runtime_id)
-            .map(|token| FenceToken::new(token.0))?;
-        Some((
-            AgentRuntimeId::new(identity.clone(), generation),
-            fence_token,
-        ))
-    }
-
     fn project_member_ref_session_binding(
         member_ref: &crate::event::MemberRef,
         current_bridge_session_id: Option<SessionId>,
@@ -2001,67 +2100,6 @@ impl MobHandle {
             .into_iter()
             .map(|entry| Self::project_roster_entry_from_machine_state(entry, machine_state))
             .collect()
-    }
-
-    async fn project_member_status_from_machine_state(
-        &self,
-        identity: &AgentIdentity,
-        include_session_details: bool,
-    ) -> MobMemberSnapshot {
-        let domain_identity = crate::ids::AgentIdentity::from(identity.as_str());
-        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
-        let machine_state = self.machine_state_watch_rx.borrow().clone();
-        let roster_entry = {
-            let roster = self.roster.read().await;
-            roster.get(&MeerkatId::from(identity)).cloned()
-        };
-        let current_bridge_session_id =
-            Self::machine_bridge_session_id_for_identity(&domain_identity, &machine_state);
-        let machine_runtime =
-            Self::machine_runtime_id_and_fence_for_identity(&domain_identity, &machine_state);
-        let (output_preview, tokens_used) =
-            match (include_session_details, current_bridge_session_id.as_ref()) {
-                (true, Some(bridge_session_id)) => {
-                    match self.session_service.read(bridge_session_id).await {
-                        Ok(view) => (
-                            view.state.last_assistant_text.clone(),
-                            view.billing.total_tokens,
-                        ),
-                        Err(_) => (None, 0),
-                    }
-                }
-                _ => (None, 0),
-            };
-        MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
-            member_present: roster_entry.is_some(),
-            machine_lifecycle: machine_state.member_lifecycle_for_identity(&dsl_identity),
-            output_preview,
-            tokens_used,
-            agent_runtime_id: roster_entry
-                .as_ref()
-                .map(|entry| entry.agent_runtime_id.clone())
-                .or_else(|| {
-                    machine_runtime
-                        .as_ref()
-                        .map(|(agent_runtime_id, _)| agent_runtime_id.clone())
-                })
-                .unwrap_or_else(|| AgentRuntimeId::initial(identity.clone())),
-            fence_token: roster_entry
-                .as_ref()
-                .map(|entry| entry.fence_token)
-                .or_else(|| {
-                    machine_runtime
-                        .as_ref()
-                        .map(|(_, fence_token)| *fence_token)
-                })
-                .unwrap_or(FenceToken::new(0)),
-            current_bridge_session_id,
-            peer_connectivity: None,
-            kickoff: roster_entry
-                .as_ref()
-                .and_then(|entry| entry.kickoff.clone()),
-        })
-        .to_snapshot()
     }
 
     /// List members currently eligible for runtime work dispatch.
@@ -2459,9 +2497,20 @@ impl MobHandle {
         &self,
         spec: SpawnMemberSpec,
     ) -> Result<MemberRef, MobError> {
+        self.spawn_spec_internal_with_source(spec, SpawnSource::Consumer)
+            .await
+    }
+
+    pub(crate) async fn spawn_spec_internal_with_source(
+        &self,
+        spec: SpawnMemberSpec,
+        spawn_source: SpawnSource,
+    ) -> Result<MemberRef, MobError> {
+        let spawn_source = SpawnSource::for_launch_mode(spawn_source, &spec.launch_mode);
         match self
             .execute_machine_command(MobMachineCommand::Spawn {
                 spec: Box::new(spec),
+                spawn_source,
                 owner_context: None,
             })
             .await?
@@ -2478,8 +2527,23 @@ impl MobHandle {
         spec: SpawnMemberSpec,
         owner_context: CanonicalOpsOwnerContext,
     ) -> Result<MemberSpawnReceipt, MobError> {
+        self.spawn_spec_receipt_with_owner_context_and_source(
+            spec,
+            owner_context,
+            SpawnSource::AgentSpawnMember,
+        )
+        .await
+    }
+
+    pub(super) async fn spawn_spec_receipt_with_owner_context_and_source(
+        &self,
+        spec: SpawnMemberSpec,
+        owner_context: CanonicalOpsOwnerContext,
+        spawn_source: SpawnSource,
+    ) -> Result<MemberSpawnReceipt, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::Spawn {
+                spawn_source: SpawnSource::for_launch_mode(spawn_source, &spec.launch_mode),
                 spec: Box::new(spec),
                 owner_context: Some(owner_context),
             })
@@ -2499,7 +2563,22 @@ impl MobHandle {
         &self,
         specs: Vec<SpawnMemberSpec>,
     ) -> Vec<Result<SpawnResult, MobError>> {
-        futures::future::join_all(specs.into_iter().map(|spec| self.spawn_spec(spec))).await
+        futures::future::join_all(specs.into_iter().map(|spec| async move {
+            let identity = spec.identity.clone();
+            self.spawn_spec_internal_with_source(spec, SpawnSource::BatchItem)
+                .await?;
+            let entry = self.get_member(&identity).await.ok_or_else(|| {
+                MobError::Internal(format!(
+                    "spawn succeeded but roster entry missing for '{identity}'"
+                ))
+            })?;
+            Ok(SpawnResult {
+                agent_identity: entry.agent_identity,
+                agent_runtime_id: entry.agent_runtime_id,
+                fence_token: entry.fence_token,
+            })
+        }))
+        .await
     }
 
     pub(super) async fn spawn_many_receipts_with_owner_context(
@@ -2507,11 +2586,13 @@ impl MobHandle {
         specs: Vec<SpawnMemberSpec>,
         owner_context: CanonicalOpsOwnerContext,
     ) -> Vec<Result<MemberSpawnReceipt, MobError>> {
-        futures::future::join_all(
-            specs.into_iter().map(|spec| {
-                self.spawn_spec_receipt_with_owner_context(spec, owner_context.clone())
-            }),
-        )
+        futures::future::join_all(specs.into_iter().map(|spec| {
+            self.spawn_spec_receipt_with_owner_context_and_source(
+                spec,
+                owner_context.clone(),
+                SpawnSource::BatchItem,
+            )
+        }))
         .await
     }
 
@@ -3517,8 +3598,11 @@ impl MobHandle {
         identity: &AgentIdentity,
     ) -> Result<MobMemberSnapshot, MobError> {
         let mut snapshot = self
-            .project_member_status_from_machine_state(identity, true)
-            .await;
+            .send_actor_command(|reply_tx| MobCommand::ProjectMemberStatus {
+                agent_identity: identity.clone(),
+                reply_tx,
+            })
+            .await?;
         snapshot.peer_connectivity = match tokio::time::timeout(
             Duration::from_secs(2),
             self.project_member_peer_connectivity(identity, &snapshot),
@@ -3803,7 +3887,8 @@ impl MobHandle {
         spec.provider_params_override = options.provider_params_override;
         spec.auto_wire_parent = true;
 
-        self.spawn_spec(spec).await?;
+        self.spawn_spec_internal_with_source(spec, SpawnSource::HelperSpawn)
+            .await?;
         let helper_snapshot = self.member_status(&identity).await?;
         let _ = self.retire(identity).await;
 
@@ -3857,7 +3942,8 @@ impl MobHandle {
             fork_context,
         };
 
-        self.spawn_spec(spec).await?;
+        self.spawn_spec_internal_with_source(spec, SpawnSource::Fork)
+            .await?;
         let helper_snapshot = self.member_status(&identity).await?;
         let _ = self.retire(identity).await;
 
@@ -4227,5 +4313,37 @@ mod tests {
 
         assert_eq!(spec.launch_mode.resume_bridge_session_id(), Some(&sid));
         assert_eq!(spec.launch_mode.resume_bridge_session_id(), Some(&sid));
+    }
+
+    #[test]
+    fn spawn_source_launch_mode_classification_is_surface_independent() {
+        let sid = SessionId::new();
+        let resume = crate::launch::MemberLaunchMode::Resume {
+            bridge_session_id: sid,
+        };
+        let fork = crate::launch::MemberLaunchMode::Fork {
+            source_member_id: MeerkatId::from("lead-1"),
+            fork_context: crate::launch::ForkContext::LastMessages { count: 1 },
+        };
+
+        assert_eq!(
+            SpawnSource::for_launch_mode(SpawnSource::Consumer, &resume),
+            SpawnSource::Resume
+        );
+        assert_eq!(
+            SpawnSource::for_launch_mode(SpawnSource::AgentSpawnMember, &resume),
+            SpawnSource::Resume
+        );
+        assert_eq!(
+            SpawnSource::for_launch_mode(SpawnSource::BatchItem, &fork),
+            SpawnSource::Fork
+        );
+        assert_eq!(
+            SpawnSource::for_launch_mode(
+                SpawnSource::AgentSpawnMember,
+                &crate::launch::MemberLaunchMode::Fresh,
+            ),
+            SpawnSource::AgentSpawnMember
+        );
     }
 }

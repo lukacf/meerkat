@@ -1706,6 +1706,234 @@ async fn completion_preserves_structured_output_when_runtime_finalization_fails(
 }
 
 #[tokio::test]
+async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
+    struct SnapshotCheckpointExecutor {
+        session_id: SessionId,
+        runtime_store: std::sync::Arc<crate::store::InMemoryRuntimeStore>,
+        checkpoint_calls: std::sync::Arc<AtomicUsize>,
+        observed_committed_snapshot: std::sync::Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for SnapshotCheckpointExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            let receipt = RunBoundaryReceipt {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            };
+            let session = meerkat_core::Session::with_id(self.session_id.clone());
+            let session_snapshot = serde_json::to_vec(&session)
+                .map_err(|err| CoreExecutorError::Internal(err.to_string()))?;
+            Ok(CoreApplyOutput::with_run_result(
+                receipt,
+                Some(session_snapshot),
+                meerkat_core::RunResult {
+                    text: "done".to_string(),
+                    session_id: self.session_id.clone(),
+                    usage: Default::default(),
+                    turns: 1,
+                    tool_calls: 0,
+                    terminal_cause_kind: None,
+                    structured_output: None,
+                    extraction_error: None,
+                    schema_warnings: None,
+                    skill_diagnostics: None,
+                },
+            ))
+        }
+
+        async fn checkpoint_committed_session_snapshot(
+            &mut self,
+            session_snapshot: &[u8],
+        ) -> Result<(), CoreExecutorError> {
+            self.checkpoint_calls.fetch_add(1, Ordering::SeqCst);
+            let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&self.session_id);
+            let committed = crate::store::RuntimeStore::load_session_snapshot(
+                self.runtime_store.as_ref(),
+                &runtime_id,
+            )
+            .await
+            .map_err(|err| CoreExecutorError::Internal(err.to_string()))?;
+            if committed.as_deref() == Some(session_snapshot) {
+                self.observed_committed_snapshot
+                    .store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let runtime_store = std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let checkpoint_calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let observed_committed_snapshot = std::sync::Arc::new(AtomicBool::new(false));
+    let adapter = std::sync::Arc::new(MeerkatMachine::persistent(
+        runtime_store.clone(),
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(SnapshotCheckpointExecutor {
+                session_id: session_id.clone(),
+                runtime_store,
+                checkpoint_calls: checkpoint_calls.clone(),
+                observed_committed_snapshot: observed_committed_snapshot.clone(),
+            }),
+        )
+        .await;
+
+    let (_accept_outcome, completion_handle) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("checkpoint after commit"))
+        .await
+        .expect("input should be accepted");
+    let completion = tokio::time::timeout(
+        Duration::from_secs(1),
+        completion_handle
+            .expect("accepted input should register a completion waiter")
+            .wait(),
+    )
+    .await
+    .expect("completion waiter should resolve");
+
+    assert!(matches!(completion, CompletionOutcome::Completed(_)));
+    assert_eq!(checkpoint_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        observed_committed_snapshot.load(Ordering::SeqCst),
+        "checkpoint hook must run after the RuntimeStore session snapshot commit is visible"
+    );
+}
+
+#[tokio::test]
+async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
+    struct FailingCheckpointExecutor {
+        session_id: SessionId,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for FailingCheckpointExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            let receipt = RunBoundaryReceipt {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            };
+            let session = meerkat_core::Session::with_id(self.session_id.clone());
+            let session_snapshot = serde_json::to_vec(&session)
+                .map_err(|err| CoreExecutorError::Internal(err.to_string()))?;
+            Ok(CoreApplyOutput::with_run_result(
+                receipt,
+                Some(session_snapshot),
+                meerkat_core::RunResult {
+                    text: "checkpoint-fails-after-output".to_string(),
+                    session_id: self.session_id.clone(),
+                    usage: Default::default(),
+                    turns: 1,
+                    tool_calls: 0,
+                    terminal_cause_kind: None,
+                    structured_output: None,
+                    extraction_error: None,
+                    schema_warnings: None,
+                    skill_diagnostics: None,
+                },
+            ))
+        }
+
+        async fn checkpoint_committed_session_snapshot(
+            &mut self,
+            _session_snapshot: &[u8],
+        ) -> Result<(), CoreExecutorError> {
+            Err(CoreExecutorError::apply_failed_unknown(
+                "synthetic checkpoint projection failure",
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = std::sync::Arc::new(MeerkatMachine::persistent(
+        std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new()),
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(FailingCheckpointExecutor {
+                session_id: session_id.clone(),
+            }),
+        )
+        .await;
+
+    let (_accept_outcome, completion_handle) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("checkpoint failure"))
+        .await
+        .expect("input should be accepted");
+    let completion = tokio::time::timeout(
+        Duration::from_secs(1),
+        completion_handle
+            .expect("accepted input should register a completion waiter")
+            .wait(),
+    )
+    .await
+    .expect("completion waiter should resolve");
+
+    match completion {
+        CompletionOutcome::CompletedWithFinalizationFailure { result, error } => {
+            assert_eq!(result.text, "checkpoint-fails-after-output");
+            assert!(
+                error
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("checkpoint projection failure")),
+                "checkpoint failure detail should remain available: {error:?}"
+            );
+        }
+        other => panic!("expected completed output with finalization failure, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn hook_denial_terminalizes_with_typed_machine_apply_failure_cause() {
     use meerkat_core::lifecycle::core_executor::CoreApplyFailureCause;
 
@@ -5322,7 +5550,7 @@ async fn cancel_after_boundary_full_effect_channel_backpressures_after_live_wake
 }
 
 #[tokio::test]
-async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
+async fn apply_input_intermediate_peer_input_during_running_turn_wakes_without_boundary_cancel() {
     struct BlockingThenImmediateExecutor {
         apply_calls: Arc<AtomicUsize>,
         interrupt_calls: Arc<AtomicUsize>,
@@ -5379,7 +5607,7 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
             self.events
                 .lock()
                 .expect("events mutex poisoned")
-                .push("interrupt_yielding");
+                .push("boundary_cancel");
             Ok(())
         }
 
@@ -5487,7 +5715,7 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
     assert_eq!(
         interrupt_calls.load(Ordering::SeqCst),
         0,
-        "interrupt-yielding should remain queued until the running apply returns"
+        "default peer admission must not cancel the active turn at a boundary"
     );
     assert_eq!(
         apply_calls.load(Ordering::SeqCst),
@@ -5499,7 +5727,7 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
         let first_apply_finish_index = event_log.iter().position(|event| *event == "apply1_finish");
         assert!(
             first_apply_finish_index.is_none(),
-            "the first apply should still be blocked while interrupt-yielding is queued"
+            "the first apply should still be blocked while the peer input is queued"
         );
         assert!(
             event_log.is_empty(),
@@ -5521,7 +5749,7 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
                 && snapshot.inputs.queue.is_empty()
                 && snapshot.inputs.steer_queue.is_empty()
                 && snapshot.completion_waiters.waiter_count == 0
-                && interrupt_calls.load(Ordering::SeqCst) == 1
+                && interrupt_calls.load(Ordering::SeqCst) == 0
                 && apply_calls.load(Ordering::SeqCst) == 2
             {
                 break snapshot;
@@ -5539,7 +5767,7 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
                 .expect("snapshot should still exist after timeout");
             let event_log = events.lock().expect("events mutex poisoned").clone();
             panic!(
-                "attached runtime did not settle after interrupt-yielding as expected: phase={:?} control_run={:?} ingress_run={:?} queue={:?} steer_queue={:?} waiters={} interrupt_calls={} apply_calls={} events={:?}",
+                "attached runtime did not settle after peer wake as expected: phase={:?} control_run={:?} ingress_run={:?} queue={:?} steer_queue={:?} waiters={} interrupt_calls={} apply_calls={} events={:?}",
                 snapshot.control.phase,
                 snapshot.control.current_run_id,
                 snapshot.inputs.current_run_id,
@@ -5558,21 +5786,20 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
     assert_eq!(settled.completion_waiters.input_count, 0);
     assert_eq!(settled.completion_waiters.waiter_count, 0);
 
-    let (interrupt_index, second_apply_index) = {
+    let second_apply_index = {
         let event_log = events.lock().expect("events mutex poisoned");
-        let interrupt_index = event_log
-            .iter()
-            .position(|event| *event == "interrupt_yielding")
-            .expect("interrupt control should be delivered");
-        let second_apply_index = event_log
+        assert!(
+            !event_log.contains(&"boundary_cancel"),
+            "default peer admission must not deliver boundary-cancel control: {event_log:?}"
+        );
+        event_log
             .iter()
             .position(|event| *event == "apply2_start")
-            .expect("queued peer input should eventually start a second apply");
-        (interrupt_index, second_apply_index)
+            .expect("queued peer input should eventually start a second apply")
     };
     assert!(
-        interrupt_index < second_apply_index,
-        "interrupt-yielding control must drain before the next queued input starts"
+        second_apply_index > 0,
+        "queued peer input should run after the first apply finishes"
     );
 
     match completion_handle.wait().await {
@@ -5584,7 +5811,7 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
 }
 
 #[tokio::test]
-async fn service_peer_admission_uses_live_cancel_after_boundary() {
+async fn service_peer_admission_wakes_without_live_cancel_after_boundary() {
     struct LiveBoundaryHandle {
         calls: Arc<AtomicUsize>,
     }
@@ -5727,8 +5954,8 @@ async fn service_peer_admission_uses_live_cancel_after_boundary() {
 
     assert_eq!(
         live_control_calls.load(Ordering::SeqCst),
-        1,
-        "service ext Ingest should signal the live boundary handle while apply is blocked"
+        0,
+        "default peer admission must not signal the live boundary handle while apply is blocked"
     );
     assert_eq!(
         queued_control_calls.load(Ordering::SeqCst),
@@ -5741,14 +5968,185 @@ async fn service_peer_admission_uses_live_cancel_after_boundary() {
 
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if queued_control_calls.load(Ordering::SeqCst) == 1 {
+            if apply_calls.load(Ordering::SeqCst) == 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("queued boundary effect should still drain after apply returns");
+    .expect("queued peer input should run after the active apply returns");
+    assert_eq!(
+        queued_control_calls.load(Ordering::SeqCst),
+        0,
+        "default peer admission must not enqueue a boundary-cancel effect"
+    );
+}
+
+#[tokio::test]
+async fn explicit_running_steer_admission_does_not_emit_boundary_cancel_effect() {
+    struct LiveBoundaryHandle {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorBoundaryHandle for LiveBoundaryHandle {
+        async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct BlockingExecutor {
+        apply_calls: Arc<AtomicUsize>,
+        queued_boundary_cancel_calls: Arc<AtomicUsize>,
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
+        apply_started: Arc<Notify>,
+        allow_finish: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingExecutor {
+        fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(LiveBoundaryHandle {
+                calls: Arc::clone(&self.live_boundary_cancel_calls),
+            }))
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            self.apply_started.notify_waiters();
+            self.allow_finish.notified().await;
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: primitive.apply_boundary(),
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.queued_boundary_cancel_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_calls = Arc::new(AtomicUsize::new(0));
+    let queued_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+    let live_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+    let apply_started = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
+
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                apply_calls: Arc::clone(&apply_calls),
+                queued_boundary_cancel_calls: Arc::clone(&queued_boundary_cancel_calls),
+                live_boundary_cancel_calls: Arc::clone(&live_boundary_cancel_calls),
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Arc::clone(&allow_finish),
+            }),
+        )
+        .await;
+
+    let first_input = Input::Prompt(crate::input::PromptInput::new(
+        "first turn keeps the runtime busy",
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                ..Default::default()
+            },
+        ),
+    ));
+    let (outcome, _completion_handle) = adapter
+        .accept_input_with_completion(&session_id, first_input)
+        .await
+        .expect("initial steer prompt should be accepted");
+    assert!(outcome.is_accepted());
+
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("first apply should start");
+
+    live_boundary_cancel_calls.store(0, Ordering::SeqCst);
+    queued_boundary_cancel_calls.store(0, Ordering::SeqCst);
+
+    let steered_peer_input = Input::Peer(crate::input::PeerInput {
+        header: crate::input::InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::Peer {
+                peer_id: "explicit-steer-peer".into(),
+                display_identity: None,
+                runtime_id: None,
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(crate::input::PeerConvention::Message),
+        body: "explicit steer should not cancel the active run".into(),
+        payload: None,
+        blocks: None,
+        handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+    });
+
+    let result = adapter
+        .accept_input_with_completion(&session_id, steered_peer_input)
+        .await
+        .expect("running explicit steer should be accepted");
+    assert!(result.0.is_accepted());
+    assert_eq!(
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
+        0,
+        "running steer admission must not call the live boundary-cancel handle"
+    );
+    assert_eq!(
+        queued_boundary_cancel_calls.load(Ordering::SeqCst),
+        0,
+        "running steer admission must not enqueue a cancel-after-boundary effect"
+    );
+
+    allow_finish.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if apply_calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("steered peer input should still be processed after the active apply returns");
+    assert_eq!(live_boundary_cancel_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(queued_boundary_cancel_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -18654,11 +19052,11 @@ async fn prepare_runtime_loop_batch_start_unwinds_run_state_when_staging_rejects
 }
 
 #[tokio::test]
-async fn modeled_meerkat_accept_with_completion_running_interrupt_signal_matches_runtime() {
+async fn modeled_meerkat_accept_with_completion_running_peer_wake_signal_matches_runtime() {
     let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Running).await;
     let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
         .await
-        .expect("running interrupt test should capture a pre-state snapshot");
+        .expect("running peer-wake test should capture a pre-state snapshot");
 
     let result = fixture
         .adapter
@@ -18666,7 +19064,7 @@ async fn modeled_meerkat_accept_with_completion_running_interrupt_signal_matches
             None,
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: fixture.session_id.clone(),
-                input: runtime_parity_peer_message("modeled running interrupt admission"),
+                input: runtime_parity_peer_message("modeled running peer wake admission"),
             },
         )
         .await
@@ -18677,23 +19075,23 @@ async fn modeled_meerkat_accept_with_completion_running_interrupt_signal_matches
             handle,
             admission_signal,
         } => (outcome, handle, admission_signal),
-        other => panic!("unexpected running interrupt result: {other:?}"),
+        other => panic!("unexpected running peer-wake result: {other:?}"),
     };
     assert!(outcome.is_accepted());
     let completion_handle =
-        completion_handle.expect("running interrupt input should expose a completion waiter");
+        completion_handle.expect("running peer-wake input should expose a completion waiter");
 
     let after = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
         .await
-        .expect("running interrupt test should capture a post-state snapshot");
+        .expect("running peer-wake test should capture a post-state snapshot");
     let schema = modeled_meerkat_kernel::schema();
     let input = modeled_kernel_input(
         "AcceptWithCompletion",
         [
             ("input_id", runtime_modeled_input_id_value()),
             ("request_immediate_processing", KernelValue::Bool(false)),
-            ("interrupt_yielding", KernelValue::Bool(true)),
-            ("wake_if_idle", KernelValue::Bool(false)),
+            ("interrupt_yielding", KernelValue::Bool(false)),
+            ("wake_if_idle", KernelValue::Bool(true)),
         ],
     );
     assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);

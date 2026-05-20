@@ -22,6 +22,7 @@ use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{Input, InputDurability, PeerConvention};
 use meerkat_runtime::input_state::InputLifecycleState;
 use meerkat_runtime::policy_table::DefaultPolicyTable;
+use meerkat_runtime::post_admission_signal_from_accept_outcome;
 use meerkat_runtime::runtime_state::RuntimeState;
 use meerkat_runtime::traits::RuntimeDriver;
 use uuid::Uuid;
@@ -32,6 +33,17 @@ fn bind_running(driver: &mut EphemeralRuntimeDriver) -> RunId {
     driver.contract_begin_run_authority(run_id.clone()).unwrap();
     assert_eq!(driver.runtime_state(), RuntimeState::Running);
     run_id
+}
+
+fn assert_machine_owned_admission_signal(
+    outcome: &meerkat_runtime::AcceptOutcome,
+    request_immediate_processing: bool,
+    expected: PostAdmissionSignal,
+) {
+    assert_eq!(
+        post_admission_signal_from_accept_outcome(outcome, request_immediate_processing),
+        expected
+    );
 }
 
 fn iid() -> InteractionId {
@@ -575,8 +587,39 @@ async fn message_with_steer_while_running_requests_cooperative_interrupt() {
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
     assert_eq!(
+        post_admission_signal_from_accept_outcome(&outcome, true),
+        PostAdmissionSignal::RequestImmediateProcessing
+    );
+    assert_eq!(
         driver.take_post_admission_signal(),
         PostAdmissionSignal::RequestImmediateProcessing
+    );
+}
+
+#[tokio::test]
+async fn message_without_steer_while_running_requests_idle_wake() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    bind_running(&mut driver);
+
+    let interaction = make_message("peer-1", "hello");
+    let mut input = runtime_input_for_interaction(&interaction, &rid());
+    if let Input::Peer(peer) = &mut input {
+        peer.handling_mode = None;
+    }
+
+    // A default peer message is ordinary queued work. It should wake the
+    // runtime after the active turn, not cancel that turn at its next boundary.
+    let policy = DefaultPolicyTable::resolve(&input, false);
+    assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::WakeLoop
     );
 }
 

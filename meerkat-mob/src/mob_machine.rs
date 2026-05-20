@@ -39,6 +39,7 @@ pub(crate) enum MobMachineCommand {
     },
     Spawn {
         spec: Box<crate::runtime::SpawnMemberSpec>,
+        spawn_source: crate::runtime::SpawnSource,
         owner_context: Option<crate::runtime::CanonicalOpsOwnerContext>,
     },
     /// Declarative spawn-if-absent. Constructed by

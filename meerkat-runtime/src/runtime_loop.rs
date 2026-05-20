@@ -1103,6 +1103,7 @@ async fn process_queue(
                             session_snapshot,
                             terminal,
                         } = output;
+                        let committed_session_snapshot = session_snapshot.clone();
                         if let Err(err) = crate::meerkat_machine::commit_runtime_loop_run(
                             driver,
                             run_id.clone(),
@@ -1131,6 +1132,41 @@ async fn process_queue(
                                 completions,
                                 executor,
                                 format!("runtime loop commit failed for run {run_id}: {err}"),
+                            )
+                            .await;
+                            return should_stop;
+                        }
+
+                        if let Some(session_snapshot) = committed_session_snapshot.as_deref()
+                            && let Err(err) = executor
+                                .checkpoint_committed_session_snapshot(session_snapshot)
+                                .await
+                        {
+                            tracing::error!(
+                                %run_id,
+                                error = %err,
+                                "failed to checkpoint committed runtime session snapshot"
+                            );
+                            let completion_error =
+                                meerkat_core::TurnErrorMetadata::runtime_apply_failure(format!(
+                                    "runtime session checkpoint failed after commit: {err}"
+                                ));
+                            if let Some(completions) = completions.as_ref() {
+                                let mut completions = completions.lock().await;
+                                resolve_completion_waiters_with_finalization_failure(
+                                    &mut completions,
+                                    &input_ids,
+                                    terminal,
+                                    completion_error,
+                                );
+                            }
+                            let should_stop = stop_runtime_loop_executor_from_dsl_effect(
+                                driver,
+                                completions,
+                                executor,
+                                format!(
+                                    "runtime session checkpoint failed after commit for run {run_id}: {err}"
+                                ),
                             )
                             .await;
                             return should_stop;

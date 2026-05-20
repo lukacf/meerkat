@@ -779,6 +779,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverMemberRestoreFailure`(agent_identity, reason)
 - To: `Running`
 
+### `RecoverMemberRestoreFailureStopped`
+- From: `Stopped`
+- On: `RecoverMemberRestoreFailure`(agent_identity, reason)
+- To: `Stopped`
+
+### `RecoverMemberRestoreFailureCompleted`
+- From: `Completed`
+- On: `RecoverMemberRestoreFailure`(agent_identity, reason)
+- To: `Completed`
+
 ### `AdmitDestroyCleanup`
 - From: `Running`, `Stopped`, `Completed`
 - On: `AdmitDestroyCleanup`()

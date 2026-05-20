@@ -82,19 +82,27 @@ impl MeerkatMachine {
         session_id: &SessionId,
         reason: String,
     ) -> Result<(), RuntimeDriverError> {
-        let staged = self
-            .stage_session_dsl_transition(
-                session_id,
-                crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor { reason },
-                "StopRuntimeExecutor",
-            )
-            .await
-            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-        let projected_effect =
-            crate::effect::runtime_effect_projection_from_dsl_effects(&staged.effects)
-                .map_err(RuntimeDriverError::Internal)?;
+        let (effect_tx, state_before_stop, effect) = {
+            let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await
+            else {
+                return Err(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                });
+            };
+            let staged = self
+                .stage_session_dsl_transition(
+                    session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor {
+                        reason,
+                    },
+                    "StopRuntimeExecutor",
+                )
+                .await
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+            let projected_effect =
+                crate::effect::runtime_effect_projection_from_dsl_effects(&staged.effects)
+                    .map_err(RuntimeDriverError::Internal)?;
 
-        let (driver, completions, effect_tx) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
@@ -102,18 +110,12 @@ impl MeerkatMachine {
                     state: RuntimeState::Destroyed,
                 })?;
             (
-                entry.driver.clone(),
-                entry.completions.clone(),
                 entry.effect_sender(),
+                entry.control_snapshot().phase,
+                projected_effect.into_effect(),
             )
         };
 
-        let state_before_stop = self
-            .existing_session_runtime_state(session_id)
-            .await
-            .unwrap_or(RuntimeState::Destroyed);
-
-        let effect = projected_effect.into_effect();
         if let Some(effect_tx) = effect_tx
             && effect_tx.send(effect).await.is_ok()
         {
@@ -135,6 +137,19 @@ impl MeerkatMachine {
             return Ok(());
         }
 
+        let (driver, _gate_guard) = self
+            .current_session_driver_with_authority(session_id)
+            .await?;
+        let completions = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?
+                .completions
+                .clone()
+        };
         crate::control_plane::terminalize_async_stop(&driver, Some(&completions)).await?;
 
         // No live effect sender was available for this stop path. Scrub any

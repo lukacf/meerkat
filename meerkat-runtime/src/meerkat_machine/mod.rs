@@ -973,6 +973,63 @@ impl MeerkatMachine {
         }
     }
 
+    pub(crate) async fn lock_current_runtime_loop_driver_authority(
+        &self,
+        session_id: &SessionId,
+        driver: &SharedDriver,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeDriverError> {
+        let gate_guard = self
+            .lock_current_session_mutation_gate(session_id)
+            .await
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            if !Arc::ptr_eq(&entry.driver, driver) {
+                return Err(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                });
+            }
+            if !entry.generated_executor_registration_active() {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason:
+                        "generated MeerkatMachine has no active runtime-loop executor registration"
+                            .to_string(),
+                });
+            }
+        }
+        Ok(gate_guard)
+    }
+
+    async fn current_session_driver_with_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(SharedDriver, crate::tokio::sync::OwnedMutexGuard<()>), RuntimeDriverError> {
+        let gate_guard = self
+            .lock_current_session_mutation_gate(session_id)
+            .await
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        let driver = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?
+                .driver
+                .clone()
+        };
+        Ok((driver, gate_guard))
+    }
+
     async fn session_dsl_authority(
         &self,
         session_id: &SessionId,

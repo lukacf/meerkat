@@ -455,6 +455,68 @@ pub(crate) fn admitted_input_to_primitive(
     )
 }
 
+#[derive(Clone)]
+struct RuntimeLoopAuthorityBinding {
+    machine: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
+    session_id: meerkat_core::types::SessionId,
+    #[cfg(test)]
+    detached_test_gate: Option<std::sync::Arc<crate::tokio::sync::Mutex<()>>>,
+}
+
+impl RuntimeLoopAuthorityBinding {
+    fn new(
+        machine: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
+        session_id: meerkat_core::types::SessionId,
+    ) -> Self {
+        Self {
+            machine,
+            session_id,
+            #[cfg(test)]
+            detached_test_gate: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn detached_for_test() -> Self {
+        Self {
+            machine: std::sync::Weak::<crate::meerkat_machine::MeerkatMachine>::new(),
+            session_id: meerkat_core::types::SessionId::new(),
+            detached_test_gate: Some(std::sync::Arc::new(crate::tokio::sync::Mutex::new(()))),
+        }
+    }
+
+    async fn lock_current_driver_authority(
+        &self,
+        driver: &crate::meerkat_machine::SharedDriver,
+        context: &'static str,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, crate::traits::RuntimeDriverError> {
+        #[cfg(test)]
+        if let Some(gate) = &self.detached_test_gate {
+            let _ = (driver, context);
+            return Ok(std::sync::Arc::clone(gate).lock_owned().await);
+        }
+
+        let machine =
+            self.machine
+                .upgrade()
+                .ok_or(crate::traits::RuntimeDriverError::NotReady {
+                    state: crate::runtime_state::RuntimeState::Destroyed,
+                })?;
+        machine
+            .lock_current_runtime_loop_driver_authority(&self.session_id, driver)
+            .await
+            .map_err(|err| {
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    error = %err,
+                    context,
+                    "runtime loop refused stale session driver authority"
+                );
+                err
+            })
+    }
+}
+
 /// Spawn the per-session runtime loop with optional completion registry.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_runtime_loop_with_completions(
@@ -465,9 +527,17 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     completions: Option<crate::meerkat_machine::SharedCompletionRegistry>,
     completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
     epoch_cursor_state: Option<std::sync::Arc<meerkat_core::EpochCursorState>>,
-    _machine_weak: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
-    _session_id: meerkat_core::types::SessionId,
+    machine_weak: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
+    session_id: meerkat_core::types::SessionId,
 ) -> tokio::task::JoinHandle<()> {
+    #[cfg(test)]
+    let authority_binding = if machine_weak.strong_count() == 0 {
+        RuntimeLoopAuthorityBinding::detached_for_test()
+    } else {
+        RuntimeLoopAuthorityBinding::new(machine_weak, session_id)
+    };
+    #[cfg(not(test))]
+    let authority_binding = RuntimeLoopAuthorityBinding::new(machine_weak, session_id);
     tokio::spawn(async move {
         // Feed-based idle wake state (local to this loop).
         // Seed from epoch cursor state when available (runtime-backed surfaces).
@@ -516,6 +586,16 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                 maybe_effect = effect_rx.recv() => {
                     match maybe_effect {
                         Some(effect) => {
+                            let _authority_guard = match authority_binding
+                                .lock_current_driver_authority(
+                                    &driver,
+                                    "runtime loop direct executor effect",
+                                )
+                                .await
+                            {
+                                Ok(guard) => guard,
+                                Err(_) => break,
+                            };
                             match crate::control_plane::apply_executor_effect(
                                 &driver,
                                 completions.as_ref(),
@@ -546,6 +626,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 &mut *executor,
                                 &mut effect_rx,
                                 completions.as_ref(),
+                                &authority_binding,
                             )
                             .await
                             {
@@ -560,6 +641,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 &mut observed_seq,
                                 &mut last_injected_seq,
                                 epoch_cursor_state.as_deref(),
+                                &authority_binding,
                             )
                             .await
                                 && process_queue(
@@ -567,6 +649,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                     &mut *executor,
                                     &mut effect_rx,
                                     completions.as_ref(),
+                                    &authority_binding,
                                 )
                                 .await
                             {
@@ -581,61 +664,25 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                     // BackgroundToolOp that hasn't been injected yet.
                     // Only BackgroundToolOp triggers idle wake — MobMemberChild
                     // completions already wake through comms terminal response.
-                    if let Some(ref feed) = completion_feed {
-                        let batch = feed.list_since(observed_seq);
-
-                        let has_new_bg_completion = batch.entries.iter().any(|e| {
-                            e.kind
-                                == meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp
-                                && e.seq > last_injected_seq
-                        });
-
-                        if has_new_bg_completion {
-                            // Verify quiescence before injecting.
-                            let d = driver.lock().await;
-                            let quiescent = d.is_quiescent_for_detached_wake();
-                            drop(d);
-
-                            if quiescent {
-                                let input = crate::input::Input::Continuation(
-                                    crate::input::ContinuationInput::detached_background_op_completed(),
-                                );
-                                let mut d = driver.lock().await;
-                                if d.as_driver_mut().accept_input(input).await.is_ok() {
-                                    last_injected_seq = batch.watermark;
-                                    if let Some(ref cs) = epoch_cursor_state {
-                                        cs.runtime_last_injected_seq.store(batch.watermark, std::sync::atomic::Ordering::Release);
-                                    }
-                                }
-                                // Advance cursor only after successful injection
-                                // or when quiescent (no pending BG work to retry).
-                                observed_seq = batch.watermark;
-                                if let Some(ref cs) = epoch_cursor_state {
-                                    cs.runtime_observed_seq.store(batch.watermark, std::sync::atomic::Ordering::Release);
-                                }
-                                drop(d);
-                                if process_queue(
-                                    &driver,
-                                    &mut *executor,
-                                    &mut effect_rx,
-                                    completions.as_ref(),
-                                )
-                                .await
-                                {
-                                    break;
-                                }
-                            }
-                            // Non-quiescent: do NOT advance observed_seq.
-                            // The completion stays visible for the next wake
-                            // so it's not permanently lost.
-                        } else {
-                            // No new BG completions — advance to prevent hot-spin
-                            // on non-BG entries (MobMemberChild, etc.).
-                            observed_seq = batch.watermark;
-                            if let Some(ref cs) = epoch_cursor_state {
-                                cs.runtime_observed_seq.store(batch.watermark, std::sync::atomic::Ordering::Release);
-                            }
-                        }
+                    if maybe_inject_feed_wake(
+                        &driver,
+                        completion_feed.as_deref(),
+                        &mut observed_seq,
+                        &mut last_injected_seq,
+                        epoch_cursor_state.as_deref(),
+                        &authority_binding,
+                    )
+                    .await
+                        && process_queue(
+                            &driver,
+                            &mut *executor,
+                            &mut effect_rx,
+                            completions.as_ref(),
+                            &authority_binding,
+                        )
+                        .await
+                    {
+                        break;
                     }
                 }
             }
@@ -659,6 +706,7 @@ async fn maybe_inject_feed_wake(
     observed_seq: &mut meerkat_core::completion_feed::CompletionSeq,
     last_injected_seq: &mut meerkat_core::completion_feed::CompletionSeq,
     epoch_cursor_state: Option<&meerkat_core::EpochCursorState>,
+    authority_binding: &RuntimeLoopAuthorityBinding,
 ) -> bool {
     let Some(feed) = feed else {
         return false;
@@ -680,6 +728,13 @@ async fn maybe_inject_feed_wake(
         }
         return false;
     }
+
+    let Ok(_authority_guard) = authority_binding
+        .lock_current_driver_authority(driver, "runtime loop feed wake")
+        .await
+    else {
+        return false;
+    };
 
     // Verify quiescence before injecting.
     let d = driver.lock().await;
@@ -717,8 +772,16 @@ async fn process_queue(
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     effect_rx: &mut tokio::sync::mpsc::Receiver<crate::effect::RuntimeEffect>,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
+    authority_binding: &RuntimeLoopAuthorityBinding,
 ) -> bool {
     loop {
+        let effect_authority_guard = match authority_binding
+            .lock_current_driver_authority(driver, "runtime loop executor effects")
+            .await
+        {
+            Ok(guard) => guard,
+            Err(_) => return true,
+        };
         match crate::control_plane::drain_ready_executor_effects(
             driver,
             completions,
@@ -737,6 +800,15 @@ async fn process_queue(
                 return true;
             }
         }
+        drop(effect_authority_guard);
+
+        let queue_authority_guard = match authority_binding
+            .lock_current_driver_authority(driver, "runtime loop queue processing")
+            .await
+        {
+            Ok(guard) => guard,
+            Err(_) => return true,
+        };
 
         // Dequeue and prepare under the driver lock
         let dequeued = {
@@ -927,6 +999,7 @@ async fn process_queue(
                     }
                     return false;
                 }
+                drop(queue_authority_guard);
 
                 // Execute outside the driver lock (this calls start_turn, which is slow)
                 let result = executor.apply(run_id.clone(), primitive).await;
@@ -935,12 +1008,29 @@ async fn process_queue(
                 let d = driver.lock().await;
                 match result {
                     Ok(output) => {
+                        drop(d);
+                        let terminal_authority_guard = match authority_binding
+                            .lock_current_driver_authority(driver, "runtime loop terminal commit")
+                            .await
+                        {
+                            Ok(guard) => guard,
+                            Err(_) => {
+                                if let Some(completions) = completions.as_ref() {
+                                    let mut completions = completions.lock().await;
+                                    abandon_completion_waiters(
+                                        &mut completions,
+                                        &input_ids,
+                                        "runtime session unregistered before terminal commit",
+                                    );
+                                }
+                                return true;
+                            }
+                        };
                         let meerkat_core::lifecycle::core_executor::CoreApplyOutput {
                             receipt,
                             session_snapshot,
                             terminal,
                         } = output;
-                        drop(d);
                         if let Err(err) = crate::meerkat_machine::commit_runtime_loop_run(
                             driver,
                             run_id.clone(),
@@ -979,8 +1069,27 @@ async fn process_queue(
                             let mut reg = completions.lock().await;
                             resolve_completion_waiters(&mut reg, &input_ids, terminal);
                         }
+                        drop(terminal_authority_guard);
                     }
                     Err(e) => {
+                        drop(d);
+                        let terminal_authority_guard = match authority_binding
+                            .lock_current_driver_authority(driver, "runtime loop terminal failure")
+                            .await
+                        {
+                            Ok(guard) => guard,
+                            Err(_) => {
+                                if let Some(completions) = completions.as_ref() {
+                                    let mut completions = completions.lock().await;
+                                    abandon_completion_waiters(
+                                        &mut completions,
+                                        &input_ids,
+                                        "runtime session unregistered before terminal failure",
+                                    );
+                                }
+                                return true;
+                            }
+                        };
                         let cancelled = e.is_cancelled();
                         let error_msg = e.to_string();
                         let terminal_failure = match &e {
@@ -1010,7 +1119,6 @@ async fn process_queue(
                             )),
                             _ => None,
                         };
-                        drop(d);
                         let fail_result = if cancelled {
                             crate::meerkat_machine::cancel_runtime_loop_run(driver, run_id).await
                         } else if let Some(failure) = terminal_failure {
@@ -1086,6 +1194,7 @@ async fn process_queue(
                         }
                         // Leave the failing input queued for a future wake instead of
                         // hot-looping on the same payload indefinitely.
+                        drop(terminal_authority_guard);
                         return false;
                     }
                 }
@@ -1203,7 +1312,15 @@ mod tests {
             .await
             .expect("test effect should enqueue");
 
-        let should_stop = process_queue(&driver, &mut executor, &mut effect_rx, None).await;
+        let authority_binding = RuntimeLoopAuthorityBinding::detached_for_test();
+        let should_stop = process_queue(
+            &driver,
+            &mut executor,
+            &mut effect_rx,
+            None,
+            &authority_binding,
+        )
+        .await;
 
         assert!(
             should_stop,
@@ -2582,6 +2699,7 @@ mod tests {
             &mut observed_seq,
             &mut last_injected_seq,
             None,
+            &RuntimeLoopAuthorityBinding::detached_for_test(),
         )
         .await;
 
@@ -2621,6 +2739,7 @@ mod tests {
             &mut observed_seq,
             &mut last_injected_seq,
             None,
+            &RuntimeLoopAuthorityBinding::detached_for_test(),
         )
         .await;
 
@@ -2649,6 +2768,7 @@ mod tests {
             &mut observed_seq,
             &mut last_injected_seq,
             None,
+            &RuntimeLoopAuthorityBinding::detached_for_test(),
         )
         .await;
 

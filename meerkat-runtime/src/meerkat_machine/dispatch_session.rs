@@ -368,12 +368,6 @@ impl MeerkatMachine {
                     return Err(RuntimeDriverError::Destroyed);
                 }
 
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
-
                 self.stop_runtime_executor_inner(&session_id, reason)
                     .await?;
                 Ok(MeerkatMachineCommandResult::Unit)

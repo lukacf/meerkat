@@ -15647,6 +15647,85 @@ async fn session_has_executor_follows_generated_registration_phase() {
 }
 
 #[tokio::test]
+async fn runtime_loop_driver_authority_rejects_detached_driver_after_unregister() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await;
+    let driver = {
+        let sessions = adapter.sessions.read().await;
+        sessions
+            .get(&session_id)
+            .expect("executor registration should create session entry")
+            .driver
+            .clone()
+    };
+
+    let guard = adapter
+        .lock_current_runtime_loop_driver_authority(&session_id, &driver)
+        .await
+        .expect("current runtime loop driver should be authoritative");
+    drop(guard);
+
+    adapter.unregister_session(&session_id).await;
+
+    match adapter
+        .lock_current_runtime_loop_driver_authority(&session_id, &driver)
+        .await
+    {
+        Ok(_) => panic!("detached runtime loop driver must not remain authoritative"),
+        Err(err) => assert!(
+            matches!(
+                err,
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed
+                }
+            ),
+            "expected detached driver to fail closed as destroyed, got {err:?}"
+        ),
+    }
+}
+
+#[tokio::test]
 async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_attached_session() {
     struct NoopExecutor;
 

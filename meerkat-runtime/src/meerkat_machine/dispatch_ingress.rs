@@ -546,22 +546,9 @@ impl MeerkatMachine {
                 run_id,
                 output,
             } => {
-                let driver = {
-                    let sessions = self.sessions.read().await;
-                    sessions
-                        .get(&session_id)
-                        .ok_or(RuntimeDriverError::NotReady {
-                            state: RuntimeState::Destroyed,
-                        })?
-                        .driver
-                        .clone()
-                };
-
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let (driver, _gate_guard) = self
+                    .current_session_driver_with_authority(&session_id)
+                    .await?;
 
                 if let Err(err) = commit_runtime_loop_run(
                     &driver,
@@ -606,22 +593,9 @@ impl MeerkatMachine {
                 run_id,
                 failure,
             } => {
-                let driver = {
-                    let sessions = self.sessions.read().await;
-                    sessions
-                        .get(&session_id)
-                        .ok_or(RuntimeDriverError::NotReady {
-                            state: RuntimeState::Destroyed,
-                        })?
-                        .driver
-                        .clone()
-                };
-
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let (driver, _gate_guard) = self
+                    .current_session_driver_with_authority(&session_id)
+                    .await?;
 
                 if let Err(run_err) = fail_machine_run(&driver, run_id, failure).await {
                     let should_unregister = run_err.should_unregister_session();

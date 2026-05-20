@@ -650,7 +650,7 @@ fn emit_mob_topology_freshness_authority(out: &mut String) -> Result<()> {
     writeln!(out)?;
     writeln!(
         out,
-        "    fn validate_topology_epoch(&self, expected_epoch: u64) -> Result<(), String> {{"
+        "    fn validate_topology_epoch(&self, expected_epoch: u64, allow_next_epoch: bool) -> Result<(), String> {{"
     )?;
     writeln!(
         out,
@@ -665,7 +665,15 @@ fn emit_mob_topology_freshness_authority(out: &mut String) -> Result<()> {
         out,
         "        let current_epoch = topology_epoch.load(std::sync::atomic::Ordering::Acquire);"
     )?;
-    writeln!(out, "        if current_epoch == expected_epoch {{")?;
+    writeln!(
+        out,
+        "        let matches_current = current_epoch == expected_epoch;"
+    )?;
+    writeln!(
+        out,
+        "        let matches_next = allow_next_epoch && current_epoch.checked_add(1) == Some(expected_epoch);"
+    )?;
+    writeln!(out, "        if matches_current || matches_next {{")?;
     writeln!(out, "            Ok(())")?;
     writeln!(out, "        }} else {{")?;
     writeln!(
@@ -721,9 +729,15 @@ fn emit_comms_trust_authority_source_impl(
         )?;
     }
     if is_mob_topology_trust_protocol(protocol.name.as_str()) {
+        let allow_next_epoch = if protocol.effect_variant.as_str() == "MemberTrustUnwiringRequested"
+        {
+            "true"
+        } else {
+            "false"
+        };
         writeln!(
             out,
-            "        self.mob_topology_freshness_authority.validate_topology_epoch(self.epoch)?;"
+            "        self.mob_topology_freshness_authority.validate_topology_epoch(self.epoch, {allow_next_epoch})?;"
         )?;
     }
     emit_comms_trust_payload_authorization(out, protocol)?;

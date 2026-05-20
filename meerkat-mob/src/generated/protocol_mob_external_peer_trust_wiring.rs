@@ -51,12 +51,18 @@ impl MobTopologyFreshnessAuthority {
         }
     }
 
-    fn validate_topology_epoch(&self, expected_epoch: u64) -> Result<(), String> {
+    fn validate_topology_epoch(
+        &self,
+        expected_epoch: u64,
+        allow_next_epoch: bool,
+    ) -> Result<(), String> {
         let Some(topology_epoch) = &self.topology_epoch else {
             return Err("generated MobMachine topology freshness authority is absent".to_string());
         };
         let current_epoch = topology_epoch.load(std::sync::atomic::Ordering::Acquire);
-        if current_epoch == expected_epoch {
+        let matches_current = current_epoch == expected_epoch;
+        let matches_next = allow_next_epoch && current_epoch.checked_add(1) == Some(expected_epoch);
+        if matches_current || matches_next {
             Ok(())
         } else {
             Err(format!(
@@ -134,7 +140,7 @@ impl MobExternalPeerTrustWiringObligation {
             ));
         }
         self.mob_topology_freshness_authority
-            .validate_topology_epoch(self.epoch)?;
+            .validate_topology_epoch(self.epoch, false)?;
         if self.peer_id.0 != peer_id {
             return Err(format!(
                 "MobMachine external trust obligation peer_id {:?} does not match requested peer {peer_id:?}",

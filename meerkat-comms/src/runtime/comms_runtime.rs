@@ -2906,11 +2906,11 @@ mod tests {
         )
     }
 
-    fn test_projection_add_authority(
+    fn try_test_projection_add_authority(
         local: &TrustedPeerDescriptor,
         peer: &TrustedPeerDescriptor,
         epoch: u64,
-    ) -> meerkat_core::comms::CommsTrustMutationAuthority {
+    ) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {
         let local_endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(local);
         let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
         let target_epoch = epoch.max(1);
@@ -2970,7 +2970,15 @@ mod tests {
             &obligation,
             &endpoint,
         )
-        .expect("generated peer projection add authority")
+    }
+
+    fn test_projection_add_authority(
+        local: &TrustedPeerDescriptor,
+        peer: &TrustedPeerDescriptor,
+        epoch: u64,
+    ) -> meerkat_core::comms::CommsTrustMutationAuthority {
+        try_test_projection_add_authority(local, peer, epoch)
+            .expect("generated peer projection add authority")
     }
 
     fn test_projection_remove_authority(
@@ -3047,23 +3055,52 @@ mod tests {
         .expect("generated peer projection remove authority")
     }
 
+    async fn try_add_trusted_peer_with_generated_authority(
+        runtime: &CommsRuntime,
+        peer: TrustedPeerDescriptor,
+    ) -> Result<(), SendError> {
+        let authority =
+            try_test_projection_add_authority(&local_descriptor_for_runtime(runtime), &peer, 0)
+                .map_err(SendError::Validation)?;
+        CoreCommsRuntime::apply_trust_mutation(
+            runtime,
+            CommsTrustMutation::AddTrustedPeer { authority, peer },
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn add_trusted_peer_with_generated_authority(
         runtime: &CommsRuntime,
         peer: TrustedPeerDescriptor,
     ) {
-        CoreCommsRuntime::apply_trust_mutation(
+        try_add_trusted_peer_with_generated_authority(runtime, peer)
+            .await
+            .expect("generated add trusted peer should apply");
+    }
+
+    async fn remove_trusted_peer_with_generated_authority(
+        runtime: &CommsRuntime,
+        peer: &TrustedPeerDescriptor,
+    ) -> Result<bool, SendError> {
+        let result = CoreCommsRuntime::apply_trust_mutation(
             runtime,
-            CommsTrustMutation::AddTrustedPeer {
-                authority: test_projection_add_authority(
+            CommsTrustMutation::RemoveTrustedPeer {
+                authority: test_projection_remove_authority(
                     &local_descriptor_for_runtime(runtime),
-                    &peer,
+                    peer,
                     0,
                 ),
-                peer,
+                peer_id: peer.peer_id.to_string(),
             },
         )
-        .await
-        .expect("generated add trusted peer should apply");
+        .await?;
+        match result {
+            CommsTrustMutationResult::Removed { removed } => Ok(removed),
+            other => Err(SendError::Validation(format!(
+                "unexpected generated trust mutation result: {other:?}"
+            ))),
+        }
     }
 
     #[tokio::test]
@@ -3750,7 +3787,7 @@ mod tests {
         assert!(receiver.peer_comms_machine_authority_required());
         assert!(receiver.peer_comms_handle().is_none());
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &sender,
             trusted_descriptor(
                 &receiver_name,
@@ -3758,9 +3795,8 @@ mod tests {
                 &format!("inproc://{receiver_name}"),
             ),
         )
-        .await
-        .unwrap();
-        CoreCommsRuntime::add_trusted_peer(
+        .await;
+        add_trusted_peer_with_generated_authority(
             &receiver,
             trusted_descriptor(
                 &sender_name,
@@ -3768,8 +3804,7 @@ mod tests {
                 &format!("inproc://{sender_name}"),
             ),
         )
-        .await
-        .unwrap();
+        .await;
 
         let result = CoreCommsRuntime::send(
             &sender,
@@ -3920,12 +3955,11 @@ mod tests {
         install_test_peer_comms_handle(&runtime);
 
         let sender = Keypair::generate();
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &runtime,
             trusted_descriptor("sender", sender.public_key(), "tcp://127.0.0.1:4200"),
         )
-        .await
-        .unwrap();
+        .await;
 
         let request_id = Uuid::new_v4();
         let reply_to = Uuid::new_v4();
@@ -4023,12 +4057,11 @@ mod tests {
         install_test_peer_comms_handle(&runtime);
 
         let sender = Keypair::generate();
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &runtime,
             trusted_descriptor("sender", sender.public_key(), "tcp://127.0.0.1:4200"),
         )
-        .await
-        .unwrap();
+        .await;
 
         let lifecycle_id = Uuid::new_v4();
         let mut envelope = signed_envelope(
@@ -4070,12 +4103,11 @@ mod tests {
         install_test_peer_comms_handle(&runtime);
 
         let sender = Keypair::generate();
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &runtime,
             trusted_descriptor("sender", sender.public_key(), "tcp://127.0.0.1:4200"),
         )
-        .await
-        .unwrap();
+        .await;
 
         let blocks = vec![
             meerkat_core::types::ContentBlock::Text {
@@ -4176,9 +4208,9 @@ mod tests {
         // Peer must also trust the runtime: the receive-side admission gate
         // now drops untrusted envelopes with `UntrustedSender` instead of
         // silently reporting success.
-        // Use `add_trusted_peer` so the classified inbox's canonical
-        // `trusted_peers` BTreeSet is synced too, not just the RwLock.
-        CoreCommsRuntime::add_trusted_peer(
+        // Use the generated trust mutation path so the classified inbox's
+        // canonical `trusted_peers` BTreeSet is synced too, not just the RwLock.
+        add_trusted_peer_with_generated_authority(
             &peer,
             trusted_descriptor(
                 &runtime_name,
@@ -4186,8 +4218,7 @@ mod tests {
                 &format!("inproc://{runtime_name}"),
             ),
         )
-        .await
-        .expect("peer should accept trust entry for runtime");
+        .await;
 
         let receipt = CoreCommsRuntime::send(
             runtime.as_ref(),
@@ -4224,7 +4255,7 @@ mod tests {
 
         let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &runtime,
             trusted_descriptor(
                 &peer_name,
@@ -4232,9 +4263,8 @@ mod tests {
                 &format!("inproc://{peer_name}"),
             ),
         )
-        .await
-        .expect("runtime should trust peer");
-        CoreCommsRuntime::add_trusted_peer(
+        .await;
+        add_trusted_peer_with_generated_authority(
             &peer,
             trusted_descriptor(
                 &runtime_name,
@@ -4242,8 +4272,7 @@ mod tests {
                 &format!("inproc://{runtime_name}"),
             ),
         )
-        .await
-        .expect("peer should trust runtime");
+        .await;
 
         let result = CoreCommsRuntime::send(
             &runtime,
@@ -4272,7 +4301,7 @@ mod tests {
 
         let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &runtime,
             trusted_descriptor(
                 &peer_name,
@@ -4280,9 +4309,8 @@ mod tests {
                 &format!("inproc://{peer_name}"),
             ),
         )
-        .await
-        .expect("runtime should trust peer");
-        CoreCommsRuntime::add_trusted_peer(
+        .await;
+        add_trusted_peer_with_generated_authority(
             &peer,
             trusted_descriptor(
                 &runtime_name,
@@ -4290,8 +4318,7 @@ mod tests {
                 &format!("inproc://{runtime_name}"),
             ),
         )
-        .await
-        .expect("peer should trust runtime");
+        .await;
 
         let result = CoreCommsRuntime::send_and_stream(
             &runtime,
@@ -4324,7 +4351,7 @@ mod tests {
 
         let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &runtime,
             trusted_descriptor(
                 &peer_name,
@@ -4332,9 +4359,8 @@ mod tests {
                 &format!("inproc://{peer_name}"),
             ),
         )
-        .await
-        .expect("runtime should trust peer");
-        CoreCommsRuntime::add_trusted_peer(
+        .await;
+        add_trusted_peer_with_generated_authority(
             &peer,
             trusted_descriptor(
                 &runtime_name,
@@ -4342,8 +4368,7 @@ mod tests {
                 &format!("inproc://{runtime_name}"),
             ),
         )
-        .await
-        .expect("peer should trust runtime");
+        .await;
 
         let result = CoreCommsRuntime::send(
             &runtime,
@@ -4431,7 +4456,7 @@ mod tests {
             Arc::new(TestInteractionStreamHandle::default()),
         ));
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             sender.as_ref(),
             trusted_descriptor(
                 &receiver_name,
@@ -4439,9 +4464,8 @@ mod tests {
                 &format!("inproc://{receiver_name}"),
             ),
         )
-        .await
-        .expect("sender should trust receiver");
-        CoreCommsRuntime::add_trusted_peer(
+        .await;
+        add_trusted_peer_with_generated_authority(
             receiver.as_ref(),
             trusted_descriptor(
                 &sender_name,
@@ -4449,8 +4473,7 @@ mod tests {
                 &format!("inproc://{sender_name}"),
             ),
         )
-        .await
-        .expect("receiver should trust sender");
+        .await;
 
         let interaction_id = Uuid::new_v4();
         let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
@@ -4517,7 +4540,7 @@ mod tests {
 
         let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &runtime,
             trusted_descriptor(
                 &peer_name,
@@ -4525,8 +4548,7 @@ mod tests {
                 &format!("inproc://{peer_name}"),
             ),
         )
-        .await
-        .expect("runtime should trust peer");
+        .await;
 
         let peers = CoreCommsRuntime::peers(&runtime).await;
         let entry = peers
@@ -4546,7 +4568,7 @@ mod tests {
         let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = Arc::new(CommsRuntime::inproc_only(&runtime_name).unwrap());
         runtime.install_peer_interaction_handle(Arc::new(TestPeerInteractionHandle::default()));
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             runtime.as_ref(),
             trusted_descriptor(
                 &peer_name,
@@ -4554,8 +4576,7 @@ mod tests {
                 &format!("inproc://{peer_name}"),
             ),
         )
-        .await
-        .expect("runtime should trust peer");
+        .await;
 
         let peers = CoreCommsRuntime::peers(runtime.as_ref()).await;
         let entry = peers
@@ -4575,7 +4596,7 @@ mod tests {
         let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = Arc::new(CommsRuntime::inproc_only(&runtime_name).unwrap());
         runtime.install_peer_interaction_handle(Arc::new(TestPeerInteractionHandle::default()));
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             runtime.as_ref(),
             trusted_descriptor(
                 &peer_name,
@@ -4583,9 +4604,8 @@ mod tests {
                 &format!("inproc://{peer_name}"),
             ),
         )
-        .await
-        .expect("runtime should trust peer");
-        CoreCommsRuntime::add_trusted_peer(
+        .await;
+        add_trusted_peer_with_generated_authority(
             &peer,
             trusted_descriptor(
                 &runtime_name,
@@ -4593,8 +4613,7 @@ mod tests {
                 &format!("inproc://{runtime_name}"),
             ),
         )
-        .await
-        .expect("peer should trust runtime");
+        .await;
 
         let result = CoreCommsRuntime::send(
             runtime.as_ref(),
@@ -4625,7 +4644,7 @@ mod tests {
         let runtime = Arc::new(CommsRuntime::inproc_only(&runtime_name).unwrap());
         let peer_handle = Arc::new(TestPeerInteractionHandle::default());
         runtime.install_peer_interaction_handle(peer_handle.clone());
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             runtime.as_ref(),
             trusted_descriptor(
                 &peer_name,
@@ -4633,9 +4652,8 @@ mod tests {
                 &format!("inproc://{peer_name}"),
             ),
         )
-        .await
-        .expect("runtime should trust peer");
-        CoreCommsRuntime::add_trusted_peer(
+        .await;
+        add_trusted_peer_with_generated_authority(
             &peer,
             trusted_descriptor(
                 &runtime_name,
@@ -4643,8 +4661,7 @@ mod tests {
                 &format!("inproc://{runtime_name}"),
             ),
         )
-        .await
-        .expect("peer should trust runtime");
+        .await;
 
         let interaction_id = Uuid::new_v4();
         let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
@@ -4691,7 +4708,7 @@ mod tests {
         let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = Arc::new(CommsRuntime::inproc_only(&runtime_name).unwrap());
         install_test_peer_request_response_authority(&runtime);
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             runtime.as_ref(),
             trusted_descriptor(
                 &peer_name,
@@ -4699,8 +4716,7 @@ mod tests {
                 &format!("inproc://{peer_name}"),
             ),
         )
-        .await
-        .expect("runtime should trust peer");
+        .await;
 
         let peers = CoreCommsRuntime::peers(runtime.as_ref()).await;
         let entry = peers
@@ -4727,7 +4743,7 @@ mod tests {
         let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
         let receiver = inproc_only_with_test_peer_authority(&receiver_name);
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &sender,
             trusted_descriptor(
                 &receiver_name,
@@ -4735,9 +4751,8 @@ mod tests {
                 &format!("inproc://{receiver_name}"),
             ),
         )
-        .await
-        .expect("sender should trust receiver");
-        CoreCommsRuntime::add_trusted_peer(
+        .await;
+        add_trusted_peer_with_generated_authority(
             &receiver,
             trusted_descriptor(
                 &sender_name,
@@ -4745,8 +4760,7 @@ mod tests {
                 &format!("inproc://{sender_name}"),
             ),
         )
-        .await
-        .expect("receiver should trust sender");
+        .await;
 
         let receipt = CoreCommsRuntime::send(
             &sender,
@@ -5139,9 +5153,7 @@ mod tests {
         let peer_key = Keypair::generate();
         let trusted_peer = trusted_descriptor("ally", peer_key.public_key(), "inproc://ally");
 
-        CoreCommsRuntime::add_trusted_peer(&runtime, trusted_peer.clone())
-            .await
-            .expect("add_trusted_peer should succeed");
+        add_trusted_peer_with_generated_authority(&runtime, trusted_peer.clone()).await;
 
         runtime
             .event_injector()
@@ -5320,9 +5332,7 @@ mod tests {
         }
 
         let trusted_peer = trusted_descriptor("sender", sender.public_key(), "inproc://sender");
-        CoreCommsRuntime::add_trusted_peer(&runtime, trusted_peer)
-            .await
-            .expect("add_trusted_peer should succeed");
+        add_trusted_peer_with_generated_authority(&runtime, trusted_peer.clone()).await;
 
         {
             let inbox = runtime.inbox.lock().await;
@@ -5383,12 +5393,9 @@ mod tests {
             );
         }
 
-        let removed = CoreCommsRuntime::remove_trusted_peer(
-            &runtime,
-            &pubkey_for_authority_check.to_peer_id().to_string(),
-        )
-        .await
-        .expect("remove_trusted_peer should succeed");
+        let removed = remove_trusted_peer_with_generated_authority(&runtime, &trusted_peer)
+            .await
+            .expect("remove_trusted_peer should succeed");
         assert!(removed);
 
         {
@@ -5675,7 +5682,7 @@ mod tests {
         let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
         let receiver = inproc_only_with_test_peer_authority(&receiver_name);
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &sender,
             trusted_descriptor(
                 &receiver_name,
@@ -5683,10 +5690,9 @@ mod tests {
                 &format!("inproc://{receiver_name}"),
             ),
         )
-        .await
-        .unwrap();
+        .await;
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &receiver,
             trusted_descriptor(
                 &sender_name,
@@ -5694,8 +5700,7 @@ mod tests {
                 &format!("inproc://{sender_name}"),
             ),
         )
-        .await
-        .unwrap();
+        .await;
 
         let cmd = CommsCommand::PeerMessage {
             blocks: None,
@@ -5735,7 +5740,7 @@ mod tests {
             .expect("blob stored");
         sender.set_blob_store(blob_store);
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &sender,
             trusted_descriptor(
                 &receiver_name,
@@ -5743,10 +5748,9 @@ mod tests {
                 &format!("inproc://{receiver_name}"),
             ),
         )
-        .await
-        .unwrap();
+        .await;
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &receiver,
             trusted_descriptor(
                 &sender_name,
@@ -5754,8 +5758,7 @@ mod tests {
                 &format!("inproc://{sender_name}"),
             ),
         )
-        .await
-        .unwrap();
+        .await;
 
         let cmd = CommsCommand::PeerMessage {
             blocks: Some(vec![ContentBlock::Image {
@@ -5805,7 +5808,7 @@ mod tests {
         let sender = Arc::new(sender_runtime);
         install_test_peer_request_response_authority(&sender);
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             sender.as_ref(),
             trusted_descriptor(
                 &receiver_name,
@@ -5813,10 +5816,9 @@ mod tests {
                 &format!("inproc://{receiver_name}"),
             ),
         )
-        .await
-        .unwrap();
+        .await;
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &receiver,
             trusted_descriptor(
                 &sender_name,
@@ -5824,8 +5826,7 @@ mod tests {
                 &format!("inproc://{sender_name}"),
             ),
         )
-        .await
-        .unwrap();
+        .await;
 
         let cmd = CommsCommand::PeerRequest {
             blocks: Some(vec![ContentBlock::Image {
@@ -5881,7 +5882,7 @@ mod tests {
             Arc::new(TestInteractionStreamHandle::default()),
         ));
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             sender.as_ref(),
             trusted_descriptor(
                 &receiver_name,
@@ -5889,10 +5890,9 @@ mod tests {
                 &format!("inproc://{receiver_name}"),
             ),
         )
-        .await
-        .unwrap();
+        .await;
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &receiver,
             trusted_descriptor(
                 &sender_name,
@@ -5900,8 +5900,7 @@ mod tests {
                 &format!("inproc://{sender_name}"),
             ),
         )
-        .await
-        .unwrap();
+        .await;
 
         let interaction_id = Uuid::new_v4();
         let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
@@ -6109,9 +6108,7 @@ mod tests {
             &format!("inproc://{receiver_name}"),
         );
 
-        CoreCommsRuntime::add_trusted_peer(&sender, peer_spec)
-            .await
-            .expect("trusted peer add should succeed");
+        add_trusted_peer_with_generated_authority(&sender, peer_spec).await;
 
         let reverse_spec = trusted_descriptor(
             &sender_name,
@@ -6119,9 +6116,7 @@ mod tests {
             &format!("inproc://{sender_name}"),
         );
 
-        CoreCommsRuntime::add_trusted_peer(&receiver, reverse_spec)
-            .await
-            .expect("reverse trusted peer add should succeed");
+        add_trusted_peer_with_generated_authority(&receiver, reverse_spec).await;
 
         let peers = CoreCommsRuntime::peers(&sender).await;
         let receiver_entries: Vec<_> = peers
@@ -6148,7 +6143,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_register_trusted_peer_preserves_meta_and_syncs_peer_authority() {
+    async fn test_register_trusted_peer_fails_closed_without_generated_authority() {
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("trust-register-{suffix}")).unwrap();
         let peer_key = Keypair::generate().public_key();
@@ -6157,36 +6152,17 @@ mod tests {
             .with_description("Coordinates delegated work")
             .with_label("team", "platform");
 
-        runtime
+        let result = runtime
             .register_trusted_peer(crate::TrustedPeer {
                 name: "ally".to_string(),
                 pubkey: peer_key,
                 addr: "inproc://ally".to_string(),
                 meta: meta.clone(),
             })
-            .await
-            .expect("trusted peer registration should succeed");
-
-        {
-            let inbox = runtime.inbox.lock().await;
-            assert_eq!(
-                inbox.peer_authority_trusts_peer_for_test(&pubkey_for_authority_check),
-                Some(true)
-            );
-        }
-
-        let peers = CoreCommsRuntime::peers(&runtime).await;
-        let ally = peers
-            .iter()
-            .find(|entry| entry.name.as_str() == "ally")
-            .expect("registered peer should be listed");
-        assert_eq!(ally.meta, meta);
-
+            .await;
         assert!(
-            runtime
-                .unregister_trusted_pubkey(&peer_key)
-                .await
-                .expect("trusted peer removal should succeed")
+            matches!(result, Err(SendError::Unsupported(ref message)) if message.contains("generated comms trust mutation authority")),
+            "raw trust registration must fail closed: {result:?}"
         );
 
         {
@@ -6196,11 +6172,11 @@ mod tests {
                 Some(false)
             );
         }
+
+        let peers = CoreCommsRuntime::peers(&runtime).await;
         assert!(
-            CoreCommsRuntime::peers(&runtime)
-                .await
-                .iter()
-                .all(|entry| entry.name.as_str() != "ally")
+            peers.iter().all(|entry| entry.name.as_str() != "ally"),
+            "raw trust registration must not mutate peer directory"
         );
     }
 
@@ -6208,8 +6184,8 @@ mod tests {
     async fn test_add_trusted_peer_invalid_peer_id_is_rejected() {
         let sender = CommsRuntime::inproc_only("trust-invalid-sender").unwrap();
         // Construct a descriptor whose `peer_id` does not match the supplied
-        // `pubkey` — `descriptor_to_trusted_peer` derives the id from pubkey
-        // and rejects the mismatch with `SendError::Validation`.
+        // `pubkey`; generated peer-projection authority refuses to package a
+        // trust mutation for a drifting descriptor.
         let bogus_peer_key = Keypair::generate();
         let real_peer_key = Keypair::generate();
         let invalid_peer_spec = meerkat_core::comms::TrustedPeerDescriptor {
@@ -6222,12 +6198,13 @@ mod tests {
             pubkey: *real_peer_key.public_key().as_bytes(),
         };
 
-        let result = CoreCommsRuntime::add_trusted_peer(&sender, invalid_peer_spec).await;
+        let result =
+            try_add_trusted_peer_with_generated_authority(&sender, invalid_peer_spec).await;
         assert!(matches!(result, Err(SendError::Validation(_))));
     }
 
     #[tokio::test]
-    async fn test_add_trusted_peer_zero_pubkey_is_rejected_at_trust_registration() {
+    async fn test_add_trusted_peer_zero_pubkey_fails_closed_without_generated_authority() {
         let runtime = CommsRuntime::inproc_only("trust-zero-pubkey-sender").unwrap();
         let zero_pubkey_spec = TrustedPeerDescriptor::test_only_unsigned_typed(
             "zero-pubkey-peer",
@@ -6238,15 +6215,10 @@ mod tests {
 
         let result = CoreCommsRuntime::add_trusted_peer(&runtime, zero_pubkey_spec).await;
 
-        match result {
-            Err(SendError::Validation(message)) => {
-                assert!(
-                    message.contains("pubkey") && message.contains("non-zero"),
-                    "unexpected validation message: {message}"
-                );
-            }
-            other => panic!("zero-pubkey trust registration must fail, got {other:?}"),
-        }
+        assert!(
+            matches!(result, Err(SendError::Unsupported(ref message)) if message.contains("generated comms trust mutation authority")),
+            "raw zero-pubkey add must fail closed before mutation: {result:?}"
+        );
         assert!(
             CoreCommsRuntime::peers(&runtime)
                 .await
@@ -6257,7 +6229,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_register_trusted_peer_zero_pubkey_is_rejected_at_raw_boundary() {
+    async fn test_register_trusted_peer_zero_pubkey_fails_closed_without_generated_authority() {
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("raw-zero-pubkey-{suffix}")).unwrap();
         let zero_pubkey = PubKey::new([0u8; 32]);
@@ -6271,15 +6243,10 @@ mod tests {
             })
             .await;
 
-        match result {
-            Err(SendError::Validation(message)) => {
-                assert!(
-                    message.contains("pubkey") && message.contains("non-zero"),
-                    "unexpected validation message: {message}"
-                );
-            }
-            other => panic!("raw zero-pubkey trust registration must fail, got {other:?}"),
-        }
+        assert!(
+            matches!(result, Err(SendError::Unsupported(ref message)) if message.contains("generated comms trust mutation authority")),
+            "raw zero-pubkey registration must fail closed before mutation: {result:?}"
+        );
         assert!(
             !runtime.trusted_peers_shared().is_trusted(&zero_pubkey),
             "raw zero-pubkey peer must not enter the shared trust authority"
@@ -6475,7 +6442,7 @@ mod tests {
         .await
         .expect("create session-scoped runtime");
         let peer = CommsRuntime::inproc_only("session-scoped-trust-peer").unwrap();
-        CoreCommsRuntime::add_trusted_peer(
+        add_trusted_peer_with_generated_authority(
             &sender,
             trusted_descriptor(
                 "session-scoped-trust-peer",
@@ -6483,8 +6450,7 @@ mod tests {
                 &format!("inproc://{}", peer.participant_name()),
             ),
         )
-        .await
-        .expect("add trusted peer");
+        .await;
         assert_eq!(
             sender.peers().await.len(),
             1,
@@ -6593,7 +6559,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_register_trusted_peer_rejects_unknown_and_schemeless_addresses() {
+    async fn test_register_trusted_peer_with_invalid_address_fails_closed_without_generated_authority()
+     {
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime =
             CommsRuntime::inproc_only(&format!("runtime-register-address-{suffix}")).unwrap();
@@ -6608,9 +6575,9 @@ mod tests {
                 meta: crate::PeerMeta::default(),
             })
             .await
-            .expect_err("unknown address scheme must be rejected at registration");
+            .expect_err("raw registration must fail closed");
         assert!(
-            matches!(err, SendError::Validation(ref message) if message.contains("unknown peer address transport")),
+            matches!(err, SendError::Unsupported(ref message) if message.contains("generated comms trust mutation authority")),
             "unexpected error: {err:?}",
         );
 
@@ -6622,9 +6589,9 @@ mod tests {
                 meta: crate::PeerMeta::default(),
             })
             .await
-            .expect_err("schemeless TCP address must be rejected at registration");
+            .expect_err("raw registration must fail closed");
         assert!(
-            matches!(err, SendError::Validation(ref message) if message.contains("missing transport scheme")),
+            matches!(err, SendError::Unsupported(ref message) if message.contains("generated comms trust mutation authority")),
             "unexpected error: {err:?}",
         );
 
@@ -6639,7 +6606,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_register_private_trusted_peer_rejects_unknown_and_schemeless_addresses() {
+    async fn test_register_private_trusted_peer_with_invalid_address_fails_closed_without_generated_authority()
+     {
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime =
             CommsRuntime::inproc_only(&format!("runtime-private-address-{suffix}")).unwrap();
@@ -6654,9 +6622,9 @@ mod tests {
                 meta: crate::PeerMeta::default(),
             })
             .await
-            .expect_err("unknown address scheme must be rejected for private peers");
+            .expect_err("raw private registration must fail closed");
         assert!(
-            matches!(err, SendError::Validation(ref message) if message.contains("unknown peer address transport")),
+            matches!(err, SendError::Unsupported(ref message) if message.contains("generated comms private trust mutation authority")),
             "unexpected error: {err:?}",
         );
 
@@ -6668,9 +6636,9 @@ mod tests {
                 meta: crate::PeerMeta::default(),
             })
             .await
-            .expect_err("schemeless TCP address must be rejected for private peers");
+            .expect_err("raw private registration must fail closed");
         assert!(
-            matches!(err, SendError::Validation(ref message) if message.contains("missing transport scheme")),
+            matches!(err, SendError::Unsupported(ref message) if message.contains("generated comms private trust mutation authority")),
             "unexpected error: {err:?}",
         );
 
@@ -7090,8 +7058,8 @@ mod tests {
                 .expect("valid test peer should upsert");
         }
         // Receive side must also trust the sender after the silent-drop fix.
-        // Use `add_trusted_peer` so the classified queue's trust set syncs.
-        CoreCommsRuntime::add_trusted_peer(
+        // Use generated trust mutation so the classified queue's trust set syncs.
+        add_trusted_peer_with_generated_authority(
             &peer,
             trusted_descriptor(
                 &runtime_name,
@@ -7099,8 +7067,7 @@ mod tests {
                 &format!("inproc://{runtime_name}"),
             ),
         )
-        .await
-        .expect("peer should accept trust entry for runtime");
+        .await;
 
         let cmd = CommsCommand::PeerMessage {
             blocks: None,
@@ -7230,9 +7197,7 @@ mod tests {
             &format!("inproc://{receiver_name}"),
         );
 
-        CoreCommsRuntime::add_trusted_peer(&sender, peer_spec)
-            .await
-            .expect("add_trusted_peer should succeed");
+        add_trusted_peer_with_generated_authority(&sender, peer_spec.clone()).await;
 
         // Verify receiver appears in sender's peers
         let peers = CoreCommsRuntime::peers(&sender).await;
@@ -7247,8 +7212,7 @@ mod tests {
         );
 
         // Remove the trusted peer by canonical PeerId.
-        let peer_id = receiver.public_key().to_peer_id().to_string();
-        let removed = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_id)
+        let removed = remove_trusted_peer_with_generated_authority(&sender, &peer_spec)
             .await
             .expect("remove_trusted_peer should succeed");
         assert!(removed, "remove should return true for existing peer");
@@ -7279,7 +7243,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_add_private_trusted_peer_zero_pubkey_is_rejected_at_trust_registration() {
+    async fn test_add_private_trusted_peer_zero_pubkey_fails_closed_without_generated_authority() {
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("rm-private-zero-{suffix}")).unwrap();
         let peer_id = PeerId::new();
@@ -7293,19 +7257,17 @@ mod tests {
 
         let result = CoreCommsRuntime::add_private_trusted_peer(&runtime, spec).await;
 
-        match result {
-            Err(SendError::Validation(message)) => {
-                assert!(
-                    message.contains("pubkey") && message.contains("non-zero"),
-                    "unexpected validation message: {message}"
-                );
-            }
-            other => panic!("private zero-pubkey trust registration must fail, got {other:?}"),
-        }
+        assert!(
+            matches!(result, Err(SendError::Unsupported(ref message)) if message.contains("generated comms private trust mutation authority")),
+            "raw private zero-pubkey add must fail closed before mutation: {result:?}"
+        );
         let removed = CoreCommsRuntime::remove_private_trusted_peer(&runtime, &peer_id.to_string())
             .await
-            .expect("remove after rejected private add should still validate peer id");
-        assert!(!removed, "rejected private peer must not enter trust");
+            .expect_err("raw private removal must fail closed");
+        assert!(
+            matches!(removed, SendError::Unsupported(ref message) if message.contains("generated comms private trust mutation authority")),
+            "raw private removal must fail closed: {removed:?}"
+        );
     }
 
     #[tokio::test]
@@ -7315,9 +7277,15 @@ mod tests {
         let other = CommsRuntime::inproc_only(&format!("rm-absent-other-{suffix}")).unwrap();
 
         let peer_id = other.public_key().to_peer_id().to_string();
-        let removed = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_id)
+        let peer = trusted_descriptor(
+            &format!("rm-absent-other-{suffix}"),
+            other.public_key(),
+            &format!("inproc://rm-absent-other-{suffix}"),
+        );
+        let removed = remove_trusted_peer_with_generated_authority(&sender, &peer)
             .await
             .expect("remove_trusted_peer should succeed even for absent peer");
+        assert_eq!(peer.peer_id.to_string(), peer_id);
         assert!(
             !removed,
             "remove should return false for peer that was never trusted"
@@ -7331,7 +7299,23 @@ mod tests {
         let receiver = CommsRuntime::inproc_only(&format!("rm-pubkey-receiver-{suffix}")).unwrap();
 
         let peer_pubkey_string = receiver.public_key().to_pubkey_string();
-        let result = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_pubkey_string).await;
+        let peer = trusted_descriptor(
+            &format!("rm-pubkey-receiver-{suffix}"),
+            receiver.public_key(),
+            &format!("inproc://rm-pubkey-receiver-{suffix}"),
+        );
+        let result = CoreCommsRuntime::apply_trust_mutation(
+            &sender,
+            CommsTrustMutation::RemoveTrustedPeer {
+                authority: test_projection_remove_authority(
+                    &local_descriptor_for_runtime(&sender),
+                    &peer,
+                    0,
+                ),
+                peer_id: peer_pubkey_string,
+            },
+        )
+        .await;
 
         assert!(
             matches!(result, Err(SendError::Validation(_))),

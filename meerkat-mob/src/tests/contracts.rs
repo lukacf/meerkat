@@ -16,14 +16,15 @@ use meerkat_core::PeerCorrelationId;
 use meerkat_core::Provider;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, PeerDirectorySource, PeerName, PeerRoute, SendReceipt, TrustedPeerDescriptor,
+    CommsCommand, CommsTrustMutation, PeerDirectorySource, PeerName, PeerRoute, SendReceipt,
+    TrustedPeerDescriptor,
 };
 use meerkat_core::service::{
     CreateSessionRequest, SessionBuildOptions, SessionError, SessionInfo, SessionQuery,
     SessionService, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, Usage};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
@@ -72,6 +73,116 @@ fn install_ephemeral_peer_request_response_authority(runtime: &Arc<CommsRuntime>
     ));
 }
 
+fn test_comms_reconcile_obligation(
+    local_peer_id: meerkat_core::comms::PeerId,
+    direct_peer_endpoints: BTreeSet<meerkat_runtime::meerkat_machine::dsl::PeerEndpoint>,
+) -> meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
+    let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+    authority
+        .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
+        .expect("Initialize signal");
+    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+            session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                "mob-contract-test-comms-reconcile",
+            ),
+        },
+    )
+    .expect("RegisterSession input");
+    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+            endpoint: meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+                "local",
+                local_peer_id.to_string(),
+                "inproc://local",
+                [0x7f; 32],
+            ),
+        },
+    )
+    .expect("PublishLocalEndpoint input");
+    let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+            epoch: 1,
+            endpoints: direct_peer_endpoints,
+        },
+    )
+    .expect("ApplyMobPeerOverlay input");
+    let mut obligations =
+        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+            &transition,
+            meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                Arc::new(std::sync::Mutex::new(authority)),
+            ),
+        );
+    assert_eq!(
+        obligations.len(),
+        1,
+        "test reconcile effect must produce one generated obligation"
+    );
+    obligations.pop().expect("obligation count checked")
+}
+
+async fn apply_generated_peer_projection_trust(
+    runtime: &dyn CoreCommsRuntime,
+    peer: TrustedPeerDescriptor,
+    context: &'static str,
+) {
+    let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
+    let obligation = test_comms_reconcile_obligation(
+        runtime
+            .peer_id()
+            .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable")),
+        BTreeSet::from([endpoint.clone()]),
+    );
+    CoreCommsRuntime::apply_trust_mutation(
+        runtime,
+        CommsTrustMutation::AddTrustedPeer {
+            authority: meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+                &obligation,
+                &endpoint,
+            )
+            .expect("generated peer projection add authority"),
+            peer,
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{context}: {error}"));
+}
+
+async fn remove_generated_peer_projection_trust(
+    runtime: &dyn CoreCommsRuntime,
+    peer_id: &str,
+    context: &'static str,
+) -> bool {
+    let obligation = test_comms_reconcile_obligation(
+        runtime
+            .peer_id()
+            .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable")),
+        BTreeSet::new(),
+    );
+    let result = CoreCommsRuntime::apply_trust_mutation(
+        runtime,
+        CommsTrustMutation::RemoveTrustedPeer {
+            authority:
+                meerkat_runtime::protocol_comms_trust_reconcile::removal_authority_for_peer_id(
+                    &obligation,
+                    peer_id,
+                )
+                .expect("generated peer projection remove authority"),
+            peer_id: peer_id.to_string(),
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{context}: {error}"));
+    match result {
+        meerkat_core::comms::CommsTrustMutationResult::Removed { removed } => removed,
+        other => panic!("{context}: unexpected trust mutation result {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CONTRACT-MOB-002: PeerRequest/PeerResponse round-trip via CommsRuntime
 // ---------------------------------------------------------------------------
@@ -93,15 +204,17 @@ async fn contract_mob_002_peer_request_response_round_trip() {
     // Establish bidirectional trust
     let peer_spec =
         inproc_peer_descriptor(&receiver_name, receiver.as_ref()).expect("valid peer spec");
-    CoreCommsRuntime::add_trusted_peer(sender.as_ref(), peer_spec)
-        .await
-        .expect("add sender->receiver trust");
+    apply_generated_peer_projection_trust(sender.as_ref(), peer_spec, "add sender->receiver trust")
+        .await;
 
     let reverse_spec =
         inproc_peer_descriptor(&sender_name, sender.as_ref()).expect("valid reverse spec");
-    CoreCommsRuntime::add_trusted_peer(receiver.as_ref(), reverse_spec)
-        .await
-        .expect("add receiver->sender trust");
+    apply_generated_peer_projection_trust(
+        receiver.as_ref(),
+        reverse_spec,
+        "add receiver->sender trust",
+    )
+    .await;
 
     // Send PeerRequest from sender to receiver
     let request_cmd = CommsCommand::PeerRequest {
@@ -271,18 +384,18 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
     receiver.install_peer_comms_handle(meerkat_runtime::test_peer_comms_handle());
 
     // Establish bidirectional trust.
-    CoreCommsRuntime::add_trusted_peer(
+    apply_generated_peer_projection_trust(
         sender.as_ref(),
         inproc_peer_descriptor(&receiver_name, &receiver).unwrap(),
+        "add sender->receiver trust",
     )
-    .await
-    .unwrap();
-    CoreCommsRuntime::add_trusted_peer(
+    .await;
+    apply_generated_peer_projection_trust(
         &receiver,
         inproc_peer_descriptor(&sender_name, sender.as_ref()).unwrap(),
+        "add receiver->sender trust",
     )
-    .await
-    .unwrap();
+    .await;
 
     // Sender reserves the interaction stream at send time. With the DSL
     // installed, the send path fires `PeerRequestSent` before the
@@ -405,20 +518,20 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
     ));
     receiver.install_peer_comms_handle(meerkat_runtime::test_peer_comms_handle());
 
-    CoreCommsRuntime::add_trusted_peer(
+    apply_generated_peer_projection_trust(
         sender.as_ref(),
         inproc_peer_descriptor(&receiver_name, &receiver).unwrap(),
+        "add sender->receiver trust",
     )
-    .await
-    .unwrap();
+    .await;
     // Bidirectional trust — W1-B's typed admission drops from untrusted
     // senders at the receiver's inbox.
-    CoreCommsRuntime::add_trusted_peer(
+    apply_generated_peer_projection_trust(
         &receiver,
         inproc_peer_descriptor(&sender_name, sender.as_ref()).unwrap(),
+        "add receiver->sender trust",
     )
-    .await
-    .unwrap();
+    .await;
 
     // Seed the DSL with a `Sent` entry for a specific corr_id.
     let corr_id = meerkat_core::PeerCorrelationId::new();
@@ -520,23 +633,23 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
     ));
     originator.install_peer_comms_handle(meerkat_runtime::test_peer_comms_handle());
 
-    CoreCommsRuntime::add_trusted_peer(
+    apply_generated_peer_projection_trust(
         responder.as_ref(),
         inproc_peer_descriptor(&originator_name, &originator).unwrap(),
+        "add responder->originator trust",
     )
-    .await
-    .unwrap();
+    .await;
     // Bidirectional trust — W1-B's typed admission drops responses from
     // untrusted senders at the receiver (originator)'s inbox. Without
     // originator trusting responder, `send(PeerResponse)` surfaces an
     // `AdmissionDropped { reason: UntrustedSender }` error even though
     // the DSL transition on the sender side (responder) fires correctly.
-    CoreCommsRuntime::add_trusted_peer(
+    apply_generated_peer_projection_trust(
         &originator,
         inproc_peer_descriptor(&responder_name, responder.as_ref()).unwrap(),
+        "add originator->responder trust",
     )
-    .await
-    .unwrap();
+    .await;
 
     // Seed an inbound entry directly — mirrors what `comms_drain.rs` would
     // fire on classified ActionableRequest admission.
@@ -629,9 +742,8 @@ async fn contract_mob_003_inproc_namespace_isolation() {
 
     // Now add alpha_b as trusted peer of alpha_a (within the same namespace)
     let spec = inproc_peer_descriptor(&alpha_b_name, &alpha_b).expect("valid spec");
-    CoreCommsRuntime::add_trusted_peer(&alpha_a, spec)
-        .await
-        .expect("add trusted peer within namespace");
+    apply_generated_peer_projection_trust(&alpha_a, spec, "add trusted peer within namespace")
+        .await;
 
     let alpha_a_peers_after = CoreCommsRuntime::peers(&alpha_a).await;
     let peer_names_after: Vec<String> = alpha_a_peers_after
@@ -665,12 +777,8 @@ async fn contract_mob_004_add_trusted_peer_is_idempotent() {
     let make_spec = || inproc_peer_descriptor(&peer_name, &peer).expect("valid spec");
 
     // Add the same peer twice
-    CoreCommsRuntime::add_trusted_peer(&runtime, make_spec())
-        .await
-        .expect("first add should succeed");
-    CoreCommsRuntime::add_trusted_peer(&runtime, make_spec())
-        .await
-        .expect("second (idempotent) add should succeed");
+    apply_generated_peer_projection_trust(&runtime, make_spec(), "first add should succeed").await;
+    apply_generated_peer_projection_trust(&runtime, make_spec(), "second add should succeed").await;
 
     // Verify no duplicates in peers list
     let peers = CoreCommsRuntime::peers(&runtime).await;
@@ -703,18 +811,15 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
 
     // Establish trust
     let spec = inproc_peer_descriptor(&receiver_name, &receiver).expect("valid spec");
-    CoreCommsRuntime::add_trusted_peer(&sender, spec)
-        .await
-        .expect("add trusted peer");
+    apply_generated_peer_projection_trust(&sender, spec, "add trusted peer").await;
     // Receiver must trust the sender too: after typed `AdmissionOutcome`
     // landed, the receiver's classified inbox rejects envelopes from
     // untrusted senders with `Dropped { UntrustedSender }` (surfaced
     // upstream as `PeerOffline`) instead of silently returning `Ok(())`.
     // Mutual trust matches what real deployments set up.
     let reverse_spec = inproc_peer_descriptor(&sender_name, &sender).expect("valid spec");
-    CoreCommsRuntime::add_trusted_peer(&receiver, reverse_spec)
-        .await
-        .expect("add reverse trusted peer");
+    apply_generated_peer_projection_trust(&receiver, reverse_spec, "add reverse trusted peer")
+        .await;
 
     // Verify send works before removal
     let cmd = CommsCommand::PeerMessage {
@@ -734,9 +839,8 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
 
     // Remove trusted peer by canonical PeerId.
     let peer_id = receiver.public_key().to_peer_id().to_string();
-    let removed = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_id)
-        .await
-        .expect("remove should succeed");
+    let removed =
+        remove_generated_peer_projection_trust(&sender, &peer_id, "remove should succeed").await;
     assert!(removed, "should return true for existing peer");
 
     // Verify peers() no longer returns the removed peer
@@ -782,9 +886,12 @@ async fn contract_mobx_001_trust_accepts_non_inproc_addresses_and_preserves_peer
         backend_address.clone(),
     )
     .expect("valid trusted peer spec");
-    CoreCommsRuntime::add_trusted_peer(&runtime, spec)
-        .await
-        .expect("add trusted peer should accept backend-provided address");
+    apply_generated_peer_projection_trust(
+        &runtime,
+        spec,
+        "add trusted peer should accept backend-provided address",
+    )
+    .await;
 
     let peers_after_add = CoreCommsRuntime::peers(&runtime).await;
     let entry = peers_after_add
@@ -802,9 +909,12 @@ async fn contract_mobx_001_trust_accepts_non_inproc_addresses_and_preserves_peer
         "runtime should preserve backend-provided address string"
     );
 
-    let removed = CoreCommsRuntime::remove_trusted_peer(&runtime, &peer_id)
-        .await
-        .expect("remove_trusted_peer should succeed by peer_id");
+    let removed = remove_generated_peer_projection_trust(
+        &runtime,
+        &peer_id,
+        "remove_trusted_peer should succeed by peer_id",
+    )
+    .await;
     assert!(
         removed,
         "remove_trusted_peer should return true for existing peer"
@@ -820,14 +930,13 @@ async fn contract_mobx_001_trust_accepts_non_inproc_addresses_and_preserves_peer
 }
 
 // ---------------------------------------------------------------------------
-// CONTRACT-MOB-006: PeerMeta labels discoverable via peers()
+// CONTRACT-MOB-006: generated trust gates peer discovery
 // ---------------------------------------------------------------------------
 
 /// Helper: build a `ResolvedCommsConfig` suitable for contract tests.
 ///
-/// Uses `require_peer_auth: false` so that inproc-registered peers
-/// (with their PeerMeta) appear in `peers()` without needing to
-/// manipulate private trust state.
+/// Uses `require_peer_auth: false` so inproc transport can deliver in
+/// tests. Peer discovery still requires generated trust authority.
 fn test_config(
     name: &str,
     tmp: &tempfile::TempDir,
@@ -852,7 +961,7 @@ fn test_config(
 }
 
 #[tokio::test]
-async fn contract_mob_006_peer_meta_labels_discoverable_via_peers() {
+async fn contract_mob_006_generated_trust_gates_peer_discovery() {
     let suffix = Uuid::new_v4().simple().to_string();
     let ns = format!("c006-{suffix}");
     let runtime_name = format!("c006-runtime-{suffix}");
@@ -883,12 +992,28 @@ async fn contract_mob_006_peer_meta_labels_discoverable_via_peers() {
         meta.clone(),
     );
 
-    // Create a runtime that sees inproc peers (require_peer_auth=false)
+    // Create a runtime that can deliver to inproc peers.
     let runtime_tmp = tempfile::tempdir().unwrap();
     let runtime_config = test_config(&runtime_name, &runtime_tmp, Some(ns));
     let runtime = CommsRuntime::new(runtime_config).await.unwrap();
 
-    // Retrieve via peers() and verify labels are present
+    let registry_only_peers = CoreCommsRuntime::peers(&runtime).await;
+    assert!(
+        registry_only_peers
+            .iter()
+            .all(|entry| entry.name.as_str() != peer_name),
+        "inproc registry metadata must not create peer directory truth"
+    );
+
+    let peer_spec = inproc_peer_descriptor(&peer_name, &_peer).expect("valid trusted peer spec");
+    apply_generated_peer_projection_trust(
+        &runtime,
+        peer_spec,
+        "generated trust should expose inproc peer",
+    )
+    .await;
+
+    // Retrieve via peers() and verify the generated trust edge owns discovery.
     let peers = CoreCommsRuntime::peers(&runtime).await;
     let matching: Vec<_> = peers
         .iter()
@@ -897,26 +1022,15 @@ async fn contract_mob_006_peer_meta_labels_discoverable_via_peers() {
     assert_eq!(matching.len(), 1, "peer should appear exactly once");
 
     let entry = matching[0];
-    assert_eq!(entry.meta, meta);
     assert_eq!(
-        entry.meta.description.as_deref(),
-        Some("test worker"),
-        "description should be preserved"
-    );
-    assert_eq!(
-        entry.meta.labels.get("mob_id").map(String::as_str),
-        Some("test-mob"),
-        "mob_id label should be preserved"
-    );
-    assert_eq!(
-        entry.meta.labels.get("role").map(String::as_str),
-        Some("coder"),
-        "role label should be preserved"
+        entry.meta,
+        meerkat_core::PeerMeta::default(),
+        "registry-only metadata is not peer-directory authority"
     );
     assert_eq!(
         entry.source,
-        PeerDirectorySource::Inproc,
-        "source should be Inproc since peer is only visible via registry"
+        PeerDirectorySource::Trusted,
+        "source should be generated trust, not registry projection"
     );
 
     // Clean up global registry
@@ -1108,14 +1222,10 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
 
     // Trust both sides so peer requests can flow.
     let a_to_b = inproc_peer_descriptor(&b_name, &comms_b).expect("valid trusted peer spec a->b");
-    CoreCommsRuntime::add_trusted_peer(&*comms_a, a_to_b)
-        .await
-        .expect("trust a->b");
+    apply_generated_peer_projection_trust(&*comms_a, a_to_b, "trust a->b").await;
 
     let b_to_a = inproc_peer_descriptor(&a_name, &comms_a).expect("valid trusted peer spec b->a");
-    CoreCommsRuntime::add_trusted_peer(&*comms_b, b_to_a)
-        .await
-        .expect("trust b->a");
+    apply_generated_peer_projection_trust(&*comms_b, b_to_a, "trust b->a").await;
 
     // Verify comms request before additional turns.
     let before_cmd = CommsCommand::PeerRequest {

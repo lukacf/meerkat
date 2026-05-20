@@ -7545,6 +7545,10 @@ mod tests {
     use meerkat::AgentBuildConfig;
     use meerkat_client::{LlmClient, LlmError};
     use meerkat_core::StopReason;
+    #[cfg(feature = "comms")]
+    use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
+    #[cfg(feature = "comms")]
+    use meerkat_core::comms::TrustedPeerDescriptor;
     use meerkat_core::skills::{
         SkillKey, SkillKeyRemap, SkillName, SourceIdentityLineage, SourceIdentityLineageEvent,
         SourceUuid,
@@ -7634,6 +7638,73 @@ mod tests {
                 Arc::new(meerkat_runtime::RuntimeInteractionStreamHandle::new(dsl)),
             ),
         );
+    }
+
+    #[cfg(feature = "comms")]
+    async fn add_generated_peer_projection_trust(
+        runtime: &dyn CoreCommsRuntime,
+        peer: TrustedPeerDescriptor,
+        context: &'static str,
+    ) {
+        let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
+        let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+        authority
+            .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
+            .expect("Initialize signal");
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                    "rpc-session-runtime-test-comms-reconcile",
+                ),
+            },
+        )
+        .expect("RegisterSession input");
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+                endpoint: meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+                    "local",
+                    runtime
+                        .peer_id()
+                        .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable"))
+                        .to_string(),
+                    "inproc://local",
+                    [0x7f; 32],
+                ),
+            },
+        )
+        .expect("PublishLocalEndpoint input");
+        let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                epoch: 1,
+                endpoints: std::collections::BTreeSet::from([endpoint.clone()]),
+            },
+        )
+        .expect("ApplyMobPeerOverlay input");
+        let obligation =
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &transition,
+                meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                    Arc::new(std::sync::Mutex::new(authority)),
+                ),
+            )
+            .pop()
+            .expect("generated reconcile obligation");
+        CoreCommsRuntime::apply_trust_mutation(
+            runtime,
+            meerkat_core::comms::CommsTrustMutation::AddTrustedPeer {
+                authority: meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+                    &obligation,
+                    &endpoint,
+                )
+                .expect("generated peer projection add authority"),
+                peer,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{context}: {error}"));
     }
 
     // ---------------------------------------------------------------------
@@ -10300,7 +10371,7 @@ mod tests {
         let operator_pubkey =
             meerkat_comms::PubKey::from_pubkey_string(&operator_peer_id).expect("operator pubkey");
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_generated_peer_projection_trust(
             &*sender,
             TrustedPeerDescriptor::unsigned_with_pubkey(
                 operator_name,
@@ -10309,10 +10380,10 @@ mod tests {
                 operator_addr,
             )
             .expect("operator trusted peer spec"),
+            "sender trusts operator",
         )
-        .await
-        .expect("sender trusts operator");
-        CoreCommsRuntime::add_trusted_peer(
+        .await;
+        add_generated_peer_projection_trust(
             operator_comms.as_ref(),
             TrustedPeerDescriptor::unsigned_with_pubkey(
                 "analyst-drain-test",
@@ -10321,9 +10392,9 @@ mod tests {
                 sender_addr,
             )
             .expect("sender trusted peer spec"),
+            "operator trusts sender",
         )
-        .await
-        .expect("operator trusts sender");
+        .await;
 
         let mut events = runtime
             .service
@@ -10332,13 +10403,16 @@ mod tests {
             .expect("subscribe_session_events");
 
         let in_reply_to = InteractionId(uuid::Uuid::new_v4());
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0);
+        operator_comms
+            .peer_interaction_handle()
+            .expect("operator peer request authority")
+            .request_sent(corr_id, sender_public_key.to_peer_id().to_string())
+            .expect("seed outbound request before terminal peer response");
         sender
             .peer_interaction_handle()
             .expect("sender peer response authority")
-            .request_received(
-                meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0),
-                meerkat_core::types::HandlingMode::Queue,
-            )
+            .request_received(corr_id, meerkat_core::types::HandlingMode::Queue)
             .expect("seed inbound request before terminal peer response");
 
         CoreCommsRuntime::send(

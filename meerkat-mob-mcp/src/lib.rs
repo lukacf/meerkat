@@ -1727,6 +1727,7 @@ impl MobMcpState {
 }
 
 struct LocalCommsRuntime {
+    name: String,
     peer_id: PeerId,
     public_key_bytes: [u8; 32],
     address: String,
@@ -1778,6 +1779,7 @@ impl LocalCommsRuntime {
         }
         let peer_id = PeerId::from_ed25519_pubkey(&public_key_bytes);
         Self {
+            name: name.to_string(),
             peer_id,
             public_key_bytes,
             address: format!("inproc://{name}"),
@@ -1818,6 +1820,10 @@ impl CoreCommsRuntime for LocalCommsRuntime {
 
     fn public_key_bytes(&self) -> Option<[u8; 32]> {
         Some(self.public_key_bytes)
+    }
+
+    fn comms_name(&self) -> Option<String> {
+        Some(self.name.clone())
     }
 
     fn advertised_address(&self) -> Option<String> {

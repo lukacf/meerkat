@@ -36,6 +36,72 @@ fn make_keypair() -> Keypair {
     Keypair::generate()
 }
 
+async fn add_generated_peer_projection_trust(
+    runtime: &dyn CoreCommsRuntime,
+    peer: TrustedPeerDescriptor,
+    context: &'static str,
+) {
+    let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
+    let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+    authority
+        .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
+        .expect("Initialize signal");
+    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+            session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                "comms-e2e-test-reconcile",
+            ),
+        },
+    )
+    .expect("RegisterSession input");
+    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+            endpoint: meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+                "local",
+                runtime
+                    .peer_id()
+                    .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable"))
+                    .to_string(),
+                "inproc://local",
+                [0x7f; 32],
+            ),
+        },
+    )
+    .expect("PublishLocalEndpoint input");
+    let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+            epoch: 1,
+            endpoints: std::collections::BTreeSet::from([endpoint.clone()]),
+        },
+    )
+    .expect("ApplyMobPeerOverlay input");
+    let obligation =
+        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+            &transition,
+            meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                Arc::new(std::sync::Mutex::new(authority)),
+            ),
+        )
+        .pop()
+        .expect("generated reconcile obligation");
+    CoreCommsRuntime::apply_trust_mutation(
+        runtime,
+        meerkat_core::comms::CommsTrustMutation::AddTrustedPeer {
+            authority: meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+                &obligation,
+                &endpoint,
+            )
+            .expect("generated peer projection add authority"),
+            peer,
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{context}: {error}"));
+}
+
 #[derive(Default)]
 struct TestBlobStore {
     blobs: tokio::sync::RwLock<HashMap<BlobId, BlobPayload>>,
@@ -518,7 +584,7 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
     let peer_b_id = runtime_b.public_key().to_peer_id();
     let peer_a_id = runtime_a.public_key().to_peer_id();
 
-    CoreCommsRuntime::add_trusted_peer(
+    add_generated_peer_projection_trust(
         runtime_a.as_ref(),
         TrustedPeerDescriptor::unsigned_with_pubkey(
             name_b.clone(),
@@ -527,10 +593,10 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
             format!("inproc://{name_b}"),
         )
         .expect("B trusted descriptor"),
+        "A trusts B",
     )
-    .await
-    .expect("A trusts B");
-    CoreCommsRuntime::add_trusted_peer(
+    .await;
+    add_generated_peer_projection_trust(
         runtime_b.as_ref(),
         TrustedPeerDescriptor::unsigned_with_pubkey(
             name_a.clone(),
@@ -539,9 +605,9 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
             format!("inproc://{name_a}"),
         )
         .expect("A trusted descriptor"),
+        "B trusts A",
     )
-    .await
-    .expect("B trusts A");
+    .await;
 
     let ctx_a = tool_context(&runtime_a);
     let ctx_b = tool_context(&runtime_b);

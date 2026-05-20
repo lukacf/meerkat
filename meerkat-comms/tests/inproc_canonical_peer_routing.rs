@@ -58,9 +58,16 @@ fn trusted_descriptor_for(
 }
 
 fn test_projection_authority(
+    runtime: &CommsRuntime,
     peer: &meerkat_core::comms::TrustedPeerDescriptor,
     _epoch: u64,
 ) -> meerkat_core::comms::CommsTrustMutationAuthority {
+    let local_endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+        "local",
+        runtime.public_key().to_peer_id().to_string(),
+        "inproc://local",
+        *runtime.public_key().as_bytes(),
+    );
     let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
     let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
     authority
@@ -75,6 +82,13 @@ fn test_projection_authority(
         },
     )
     .expect("RegisterSession input");
+    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+            endpoint: local_endpoint,
+        },
+    )
+    .expect("PublishLocalEndpoint input");
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut authority,
         meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
@@ -101,7 +115,7 @@ async fn apply_generated_trust(
     CoreCommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
-            authority: test_projection_authority(&peer, 0),
+            authority: test_projection_authority(runtime, &peer, 0),
             peer,
         },
     )
@@ -769,7 +783,7 @@ async fn runtime_auth_disabled_directory_suppresses_inproc_for_duplicate_live_ca
 }
 
 #[tokio::test]
-async fn router_inproc_same_namespace_delivers_to_resolved_peer_identity_not_display_name() {
+async fn router_new_raw_trust_does_not_create_canonical_inproc_route() {
     let _lock = INPROC_REGISTRY_LOCK.lock().await;
     let registry = InprocRegistry::global();
     registry.clear();
@@ -800,7 +814,7 @@ async fn router_inproc_same_namespace_delivers_to_resolved_peer_identity_not_dis
     let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
         name: "shared-display-name".to_string(),
         pubkey: target_pubkey,
-        addr: "inproc://shared-display-name".to_string(),
+        addr: "inproc://canonical-target".to_string(),
         meta: PeerMeta::default(),
     }]);
     let (_, router_inbox_sender) = Inbox::new();
@@ -812,13 +826,14 @@ async fn router_inproc_same_namespace_delivers_to_resolved_peer_identity_not_dis
         true,
     );
 
-    router
-        .send(
-            meerkat_comms::router::peer_id_from_pubkey(&target_pubkey),
-            message("canonical route"),
-        )
-        .await
-        .expect("send should route to the trusted peer identity");
+    let target_peer_id = meerkat_comms::router::peer_id_from_pubkey(&target_pubkey);
+    let result = router
+        .send(target_peer_id, message("raw trust should not route"))
+        .await;
+    assert!(
+        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == target_peer_id),
+        "raw Router::new trust must not become send authority: {result:?}"
+    );
 
     let target_items = CoreCommsRuntime::drain_inbox_interactions(&target_runtime).await;
     let shadow_items = shadow_inbox.try_drain();
@@ -828,14 +843,9 @@ async fn router_inproc_same_namespace_delivers_to_resolved_peer_identity_not_dis
         0,
         "display-name shadow must not receive"
     );
-    assert_eq!(target_items.len(), 1, "canonical target should receive");
-
     assert!(
-        matches!(
-            &target_items[0].content,
-            meerkat_core::InteractionContent::Message { body, .. } if body == "canonical route"
-        ),
-        "canonical target should receive the routed message"
+        target_items.is_empty(),
+        "raw Router::new trust must not deliver to canonical target"
     );
 
     registry.clear();

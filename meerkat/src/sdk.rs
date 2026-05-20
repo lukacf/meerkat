@@ -705,6 +705,73 @@ mod tests {
     }
 
     #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+    async fn add_generated_peer_projection_trust(
+        runtime: &dyn meerkat_core::agent::CommsRuntime,
+        peer: meerkat_core::comms::TrustedPeerDescriptor,
+        context: &'static str,
+    ) {
+        let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
+        let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+        authority
+            .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
+            .expect("Initialize signal");
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                    "sdk-test-comms-reconcile",
+                ),
+            },
+        )
+        .expect("RegisterSession input");
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+                endpoint: meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+                    "local",
+                    runtime
+                        .peer_id()
+                        .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable"))
+                        .to_string(),
+                    "inproc://local",
+                    [0x7f; 32],
+                ),
+            },
+        )
+        .expect("PublishLocalEndpoint input");
+        let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                epoch: 1,
+                endpoints: std::collections::BTreeSet::from([endpoint.clone()]),
+            },
+        )
+        .expect("ApplyMobPeerOverlay input");
+        let obligation =
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &transition,
+                meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                    std::sync::Arc::new(std::sync::Mutex::new(authority)),
+                ),
+            )
+            .pop()
+            .expect("generated reconcile obligation");
+        meerkat_core::agent::CommsRuntime::apply_trust_mutation(
+            runtime,
+            meerkat_core::comms::CommsTrustMutation::AddTrustedPeer {
+                authority: meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+                    &obligation,
+                    &endpoint,
+                )
+                .expect("generated peer projection add authority"),
+                peer,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{context}: {error}"));
+    }
+
+    #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
     #[tokio::test]
     async fn sdk_tcp_runtime_fails_closed_before_session_machine_handle() {
         use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
@@ -732,7 +799,7 @@ mod tests {
             "fixture must prove the pre-handle ingress path is closed"
         );
 
-        CoreCommsRuntime::add_trusted_peer(
+        add_generated_peer_projection_trust(
             &sender,
             trusted_descriptor(
                 &receiver_name,
@@ -742,10 +809,10 @@ mod tests {
                     receiver_name.clone(),
                 ),
             ),
+            "sender trusts receiver",
         )
-        .await
-        .expect("sender trusts receiver");
-        CoreCommsRuntime::add_trusted_peer(
+        .await;
+        add_generated_peer_projection_trust(
             &receiver,
             trusted_descriptor(
                 &sender_name,
@@ -755,9 +822,9 @@ mod tests {
                     sender_name.clone(),
                 ),
             ),
+            "receiver trusts sender",
         )
-        .await
-        .expect("receiver trusts sender");
+        .await;
 
         let result = CoreCommsRuntime::send(
             &sender,

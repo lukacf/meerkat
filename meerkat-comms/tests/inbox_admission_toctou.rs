@@ -43,9 +43,16 @@ fn descriptor_for(name: &str, pubkey: &meerkat_comms::identity::PubKey) -> Trust
 }
 
 fn test_projection_add_authority(
+    runtime: &CommsRuntime,
     peer: &TrustedPeerDescriptor,
     _epoch: u64,
 ) -> meerkat_core::comms::CommsTrustMutationAuthority {
+    let local_endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+        "local",
+        runtime.public_key().to_peer_id().to_string(),
+        "inproc://local",
+        *runtime.public_key().as_bytes(),
+    );
     let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
     let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
     authority
@@ -60,6 +67,13 @@ fn test_projection_add_authority(
         },
     )
     .expect("RegisterSession input");
+    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+            endpoint: local_endpoint,
+        },
+    )
+    .expect("PublishLocalEndpoint input");
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut authority,
         meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
@@ -80,9 +94,16 @@ fn test_projection_add_authority(
 }
 
 fn test_projection_remove_authority(
+    runtime: &CommsRuntime,
     peer: &TrustedPeerDescriptor,
     _epoch: u64,
 ) -> meerkat_core::comms::CommsTrustMutationAuthority {
+    let local_endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+        "local",
+        runtime.public_key().to_peer_id().to_string(),
+        "inproc://local",
+        *runtime.public_key().as_bytes(),
+    );
     let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
     let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
     authority
@@ -97,6 +118,13 @@ fn test_projection_remove_authority(
         },
     )
     .expect("RegisterSession input");
+    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+            endpoint: local_endpoint,
+        },
+    )
+    .expect("PublishLocalEndpoint input");
     meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut authority,
         meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
@@ -130,7 +158,7 @@ async fn apply_generated_trust(runtime: &CommsRuntime, peer: TrustedPeerDescript
     meerkat_core::agent::CommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::AddTrustedPeer {
-            authority: test_projection_add_authority(&peer, 0),
+            authority: test_projection_add_authority(runtime, &peer, 0),
             peer,
         },
     )
@@ -143,7 +171,7 @@ async fn revoke_generated_trust(runtime: &CommsRuntime, peer: TrustedPeerDescrip
     match meerkat_core::agent::CommsRuntime::apply_trust_mutation(
         runtime,
         CommsTrustMutation::RemoveTrustedPeer {
-            authority: test_projection_remove_authority(&peer, 0),
+            authority: test_projection_remove_authority(runtime, &peer, 0),
             peer_id: peer_id.clone(),
         },
     )

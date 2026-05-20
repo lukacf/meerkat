@@ -92,7 +92,7 @@ impl WorkGraphEdgeCommit {
         current_items: &[WorkItem],
         current_edges: &[WorkEdge],
     ) -> Result<(), WorkGraphError> {
-        let current = topology_basis(current_items, current_edges);
+        let current = topology_basis(current_items, current_edges)?;
         if current != self.topology {
             return Err(WorkGraphError::Conflict(
                 "current WorkGraph topology differs from generated link authority snapshot"
@@ -105,8 +105,8 @@ impl WorkGraphEdgeCommit {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkGraphTopologyBasis {
-    item_ids: BTreeSet<WorkItemId>,
-    edge_keys: BTreeSet<WorkGraphEdgeIdentity>,
+    item_keys: BTreeSet<wg_dsl::WorkItemKey>,
+    edge_keys: BTreeSet<wg_dsl::WorkEdgeKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,13 +115,6 @@ struct WorkGraphTopologyObservation {
     edge_keys: BTreeSet<wg_dsl::WorkEdgeKey>,
     blocks_reachability: BTreeSet<wg_dsl::WorkDependencyPathKey>,
     parent_reachability: BTreeSet<wg_dsl::WorkDependencyPathKey>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct WorkGraphEdgeIdentity {
-    kind: WorkEdgeKind,
-    from_id: WorkItemId,
-    to_id: WorkItemId,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -482,11 +475,11 @@ impl WorkGraphMachine {
         existing_items: &[WorkItem],
         existing_edges: &[WorkEdge],
     ) -> Result<WorkGraphEventAuthority, WorkGraphError> {
-        let topology = topology_observation(existing_items, existing_edges);
+        let topology = topology_observation(existing_items, existing_edges)?;
         let effects = apply_link_validation_dsl(wg_dsl::WorkGraphLifecycleInput::ValidateLink {
             kind: dsl_edge_kind(edge.kind),
-            from_item_key: work_item_key(&edge.from_id),
-            to_item_key: work_item_key(&edge.to_id),
+            from_item_key: work_item_key_for_id(&edge.from_id),
+            to_item_key: work_item_key_for_id(&edge.to_id),
             edge_key: work_edge_key(edge.kind, &edge.from_id, &edge.to_id),
             reverse_path_key: dependency_path_key(edge.kind, &edge.to_id, &edge.from_id),
             topology_item_keys: topology.item_keys,
@@ -507,7 +500,7 @@ impl WorkGraphMachine {
         now: DateTime<Utc>,
     ) -> Result<WorkGraphEdgeCommit, WorkGraphError> {
         let event_authority = Self::validate_link(&edge, existing_items, existing_edges)?;
-        let topology = topology_basis(existing_items, existing_edges);
+        let topology = topology_basis(existing_items, existing_edges)?;
         edge_commit_from_authority(edge, topology, &event_authority, now)
     }
 }
@@ -810,36 +803,66 @@ fn work_owner_key(owner: &crate::types::WorkOwner) -> Result<wg_dsl::WorkOwnerKe
 fn topology_observation(
     existing_items: &[WorkItem],
     existing_edges: &[WorkEdge],
-) -> WorkGraphTopologyObservation {
-    WorkGraphTopologyObservation {
-        item_keys: existing_items
-            .iter()
-            .map(|item| work_item_key(&item.id))
-            .collect(),
+) -> Result<WorkGraphTopologyObservation, WorkGraphError> {
+    let item_keys = generated_item_keys(existing_items)?;
+    validate_existing_edges_against_generated_items(existing_edges, &item_keys)?;
+    Ok(WorkGraphTopologyObservation {
+        item_keys,
         edge_keys: existing_edges
             .iter()
             .map(|edge| work_edge_key(edge.kind, &edge.from_id, &edge.to_id))
             .collect(),
         blocks_reachability: dependency_reachability(existing_edges, WorkEdgeKind::Blocks),
         parent_reachability: dependency_reachability(existing_edges, WorkEdgeKind::Parent),
-    }
+    })
 }
 
 fn topology_basis(
     existing_items: &[WorkItem],
     existing_edges: &[WorkEdge],
-) -> WorkGraphTopologyBasis {
-    WorkGraphTopologyBasis {
-        item_ids: existing_items.iter().map(|item| item.id.clone()).collect(),
+) -> Result<WorkGraphTopologyBasis, WorkGraphError> {
+    let item_keys = generated_item_keys(existing_items)?;
+    validate_existing_edges_against_generated_items(existing_edges, &item_keys)?;
+    Ok(WorkGraphTopologyBasis {
+        item_keys,
         edge_keys: existing_edges
             .iter()
-            .map(|edge| WorkGraphEdgeIdentity {
-                kind: edge.kind,
-                from_id: edge.from_id.clone(),
-                to_id: edge.to_id.clone(),
-            })
+            .map(|edge| work_edge_key(edge.kind, &edge.from_id, &edge.to_id))
             .collect(),
+    })
+}
+
+fn generated_item_keys(
+    existing_items: &[WorkItem],
+) -> Result<BTreeSet<wg_dsl::WorkItemKey>, WorkGraphError> {
+    existing_items.iter().map(generated_item_key).collect()
+}
+
+fn generated_item_key(item: &WorkItem) -> Result<wg_dsl::WorkItemKey, WorkGraphError> {
+    validate_item_machine_projection(item)?;
+    item.machine_state.item_key.clone().ok_or_else(|| {
+        WorkGraphError::Store(format!(
+            "work item {} machine state is missing generated item identity",
+            item.id
+        ))
+    })
+}
+
+fn validate_existing_edges_against_generated_items(
+    existing_edges: &[WorkEdge],
+    item_keys: &BTreeSet<wg_dsl::WorkItemKey>,
+) -> Result<(), WorkGraphError> {
+    for edge in existing_edges {
+        let from_item_key = work_item_key_for_id(&edge.from_id);
+        let to_item_key = work_item_key_for_id(&edge.to_id);
+        if !item_keys.contains(&from_item_key) || !item_keys.contains(&to_item_key) {
+            return Err(WorkGraphError::Store(format!(
+                "existing WorkGraph edge {:?} from {} to {} is not backed by generated item identity",
+                edge.kind, edge.from_id, edge.to_id
+            )));
+        }
     }
+    Ok(())
 }
 
 fn dependency_reachability(
@@ -875,10 +898,6 @@ fn dependency_reachability(
     reachability
 }
 
-fn work_item_key(id: &WorkItemId) -> wg_dsl::WorkItemKey {
-    wg_dsl::WorkItemKey(id.as_str().to_string())
-}
-
 fn work_edge_key(
     kind: WorkEdgeKind,
     from_id: &WorkItemId,
@@ -886,8 +905,8 @@ fn work_edge_key(
 ) -> wg_dsl::WorkEdgeKey {
     wg_dsl::WorkEdgeKey {
         kind: dsl_edge_kind(kind),
-        from_item_key: work_item_key(from_id),
-        to_item_key: work_item_key(to_id),
+        from_item_key: work_item_key_for_id(from_id),
+        to_item_key: work_item_key_for_id(to_id),
     }
 }
 
@@ -898,8 +917,8 @@ fn dependency_path_key(
 ) -> wg_dsl::WorkDependencyPathKey {
     wg_dsl::WorkDependencyPathKey {
         kind: dsl_edge_kind(kind),
-        from_item_key: work_item_key(from_id),
-        to_item_key: work_item_key(to_id),
+        from_item_key: work_item_key_for_id(from_id),
+        to_item_key: work_item_key_for_id(to_id),
     }
 }
 
@@ -1199,12 +1218,6 @@ mod tests {
         .into_insert_parts()
         .expect("insert parts")
         .0
-    }
-
-    fn create_with_id(id: &str, now: DateTime<Utc>) -> WorkItem {
-        let mut item = create(id, now);
-        item.id = WorkItemId::new(id).expect("work item id");
-        item
     }
 
     fn owner(id: &str) -> WorkOwner {
@@ -1717,33 +1730,66 @@ mod tests {
 
     #[test]
     fn link_identity_uses_structured_machine_keys() {
-        let now = Utc::now();
-        let a = create_with_id("a", now);
-        let b_colon_c = create_with_id("b:c", now);
-        let a_colon_b = create_with_id("a:b", now);
-        let c = create_with_id("c", now);
-        let items = vec![a.clone(), b_colon_c.clone(), a_colon_b.clone(), c.clone()];
-        let first_edge = WorkEdge {
-            realm_id: "realm".to_string(),
-            namespace: WorkNamespace::default(),
-            kind: WorkEdgeKind::Blocks,
-            from_id: a.id.clone(),
-            to_id: b_colon_c.id.clone(),
-            created_at: now,
-        };
-        WorkGraphMachine::link_edge(first_edge.clone(), &items, &[], now)
-            .expect("first edge should validate");
+        let a = WorkItemId::new("a").expect("id");
+        let b_colon_c = WorkItemId::new("b:c").expect("id");
+        let a_colon_b = WorkItemId::new("a:b").expect("id");
+        let c = WorkItemId::new("c").expect("id");
 
-        let second_edge = WorkEdge {
+        assert_ne!(
+            work_edge_key(WorkEdgeKind::Blocks, &a, &b_colon_c),
+            work_edge_key(WorkEdgeKind::Blocks, &a_colon_b, &c)
+        );
+    }
+
+    #[test]
+    fn link_admission_rejects_tampered_item_identity_projection() {
+        let now = Utc::now();
+        let first = create("first", now);
+        let second = create("second", now);
+        let mut tampered = first.clone();
+        tampered.id = WorkItemId::new("forged").expect("forged id");
+        let edge = WorkEdge {
             realm_id: "realm".to_string(),
             namespace: WorkNamespace::default(),
             kind: WorkEdgeKind::Blocks,
-            from_id: a_colon_b.id,
-            to_id: c.id,
+            from_id: tampered.id.clone(),
+            to_id: second.id.clone(),
             created_at: now,
         };
-        WorkGraphMachine::link_edge(second_edge, &items, &[first_edge], now)
-            .expect("distinct structured edge key should not collide");
+
+        let error = WorkGraphMachine::link_edge(edge, &[tampered, second], &[], now)
+            .expect_err("tampered item identity projection should fail closed");
+
+        assert!(
+            matches!(error, WorkGraphError::Store(message) if message.contains("id projection"))
+        );
+    }
+
+    #[test]
+    fn edge_commit_validation_rejects_tampered_item_identity_projection() {
+        let now = Utc::now();
+        let first = create("first", now);
+        let second = create("second", now);
+        let edge = WorkEdge {
+            realm_id: "realm".to_string(),
+            namespace: WorkNamespace::default(),
+            kind: WorkEdgeKind::Blocks,
+            from_id: first.id.clone(),
+            to_id: second.id.clone(),
+            created_at: now,
+        };
+        let commit = WorkGraphMachine::link_edge(edge, &[first.clone(), second.clone()], &[], now)
+            .expect("generated edge commit");
+        let mut tampered = first;
+        tampered.id = WorkItemId::new("forged").expect("forged id");
+
+        let error = commit
+            .validate_topology(&[tampered, second], &[])
+            .expect_err("tampered commit topology should fail closed");
+
+        assert!(
+            matches!(error, WorkGraphError::Store(message) if message.contains("id projection"))
+        );
     }
 
     #[test]

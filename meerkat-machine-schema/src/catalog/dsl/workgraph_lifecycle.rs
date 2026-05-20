@@ -178,7 +178,7 @@ pub enum WorkGraphPublicErrorClass {
 
 machine! {
     machine WorkGraphLifecycleMachine {
-        version: 1,
+        version: 2,
         rust: "self" / "catalog::dsl::workgraph_lifecycle",
 
         state {

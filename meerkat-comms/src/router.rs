@@ -484,28 +484,11 @@ impl Router {
         envelope_id: Uuid,
         kind: MessageKind,
     ) -> Result<Uuid, SendError> {
-        let inproc_namespace = self.inproc_namespace.as_deref().unwrap_or("");
         let peer = match self.trusted_peer_by_peer_id(&dest) {
             TrustedPeerLookup::Resolved(peer) => peer,
             TrustedPeerLookup::Ambiguous => return Err(SendError::PeerNotFound(dest)),
-            TrustedPeerLookup::Missing if self.require_peer_auth => {
-                return Err(SendError::PeerNotFound(dest));
-            }
             TrustedPeerLookup::Missing => {
-                // Auth-disabled fallback: scan the inproc registry for an
-                // entry whose derived PeerId matches. Display names remain
-                // the inproc lookup key, but the routing match is PeerId.
-                InprocRegistry::global()
-                    .peers_in_namespace(inproc_namespace)
-                    .into_iter()
-                    .find(|p| !p.pubkey.is_zero() && peer_id_from_pubkey(&p.pubkey) == dest)
-                    .map(|p| TrustedPeer {
-                        name: p.name.clone(),
-                        pubkey: p.pubkey,
-                        addr: format!("inproc://{}", p.name),
-                        meta: p.meta,
-                    })
-                    .ok_or(SendError::PeerNotFound(dest))?
+                return Err(SendError::PeerNotFound(dest));
             }
         };
         let addr = PeerAddr::parse(&peer.addr)?;

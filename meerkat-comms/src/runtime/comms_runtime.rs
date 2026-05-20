@@ -2251,17 +2251,8 @@ impl CommsRuntime {
     where
         F: FnMut(ResolvedPeer),
     {
-        let registry = InprocRegistry::global();
-        let inproc_peers = registry.peers_in_namespace(self.inproc_namespace().unwrap_or(""));
-        let inproc_by_name: std::collections::HashMap<String, crate::identity::PubKey> =
-            inproc_peers
-                .iter()
-                .map(|p| (p.name.clone(), p.pubkey))
-                .collect();
         let participant_name = self.participant_name().to_string();
         let private_peer_ids = self.router.private_peer_ids();
-        let mut trusted_names = HashSet::new();
-        let mut trusted_pubkeys = HashSet::new();
         let mut emitted = 0usize;
 
         {
@@ -2287,8 +2278,6 @@ impl CommsRuntime {
                     continue;
                 }
                 let peer_id = self.router.peer_id_for_pubkey(&peer.pubkey);
-                trusted_names.insert(peer.name.clone());
-                trusted_pubkeys.insert(peer.pubkey);
                 if trusted_peer_id_counts.get(&peer_id).copied().unwrap_or(0) != 1 {
                     tracing::warn!(
                         peer_name = %peer.name,
@@ -2300,14 +2289,6 @@ impl CommsRuntime {
                 if private_peer_ids.contains(&peer_id) {
                     continue;
                 }
-                let source = if inproc_by_name
-                    .get(&peer.name)
-                    .is_some_and(|key| *key == peer.pubkey)
-                {
-                    PeerDirectorySource::TrustedAndInproc
-                } else {
-                    PeerDirectorySource::Trusted
-                };
                 let name = match PeerName::new(peer.name.clone()) {
                     Ok(name) => name,
                     Err(_) => {
@@ -2336,62 +2317,11 @@ impl CommsRuntime {
                     name,
                     peer_id,
                     address,
-                    source,
+                    source: PeerDirectorySource::Trusted,
                     meta: peer.meta.clone(),
                 });
                 emitted += 1;
             }
-        }
-
-        if self.require_peer_auth {
-            return emitted;
-        }
-
-        for inproc in &inproc_peers {
-            if inproc.pubkey.is_zero() {
-                continue;
-            }
-            let peer_id = peer_id_from_pubkey(&inproc.pubkey);
-            if registry.pubkey_registration_count_any_namespace(&inproc.pubkey) != 1 {
-                tracing::warn!(
-                    peer_name = %inproc.name,
-                    peer_id = %peer_id,
-                    "skipping duplicate inproc peer id in auth-disabled peer directory"
-                );
-                continue;
-            }
-            if private_peer_ids.contains(&peer_id) {
-                continue;
-            }
-            let name = match PeerName::new(inproc.name.clone()) {
-                Ok(name) => name,
-                Err(_) => {
-                    tracing::warn!(
-                        peer_name = %inproc.name,
-                        peer_id = %inproc.pubkey.to_peer_id(),
-                        "skipping invalid inproc peer name"
-                    );
-                    continue;
-                }
-            };
-            let peer_name_str = name.as_string();
-            if trusted_names.contains(name.as_str()) || trusted_pubkeys.contains(&inproc.pubkey) {
-                continue;
-            }
-            if peer_name_str == participant_name || inproc.pubkey == self.public_key {
-                continue;
-            }
-            on_peer(ResolvedPeer {
-                name,
-                peer_id,
-                address: meerkat_core::comms::PeerAddress::new(
-                    meerkat_core::comms::PeerTransport::Inproc,
-                    peer_name_str.clone(),
-                ),
-                source: PeerDirectorySource::Inproc,
-                meta: inproc.meta.clone(),
-            });
-            emitted += 1;
         }
 
         emitted
@@ -2968,10 +2898,20 @@ mod tests {
         }
     }
 
+    fn local_descriptor_for_runtime(runtime: &CommsRuntime) -> TrustedPeerDescriptor {
+        trusted_descriptor(
+            runtime.participant_name(),
+            runtime.public_key(),
+            &runtime.advertised_address(),
+        )
+    }
+
     fn test_projection_add_authority(
+        local: &TrustedPeerDescriptor,
         peer: &TrustedPeerDescriptor,
         epoch: u64,
     ) -> meerkat_core::comms::CommsTrustMutationAuthority {
+        let local_endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(local);
         let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
         let target_epoch = epoch.max(1);
         let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
@@ -2987,6 +2927,13 @@ mod tests {
             },
         )
         .expect("RegisterSession input");
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+                endpoint: local_endpoint,
+            },
+        )
+        .expect("PublishLocalEndpoint input");
         for filler_index in 1..target_epoch {
             let filler_key = Keypair::generate().public_key();
             let filler = trusted_descriptor(
@@ -3027,9 +2974,11 @@ mod tests {
     }
 
     fn test_projection_remove_authority(
+        local: &TrustedPeerDescriptor,
         peer: &TrustedPeerDescriptor,
         epoch: u64,
     ) -> meerkat_core::comms::CommsTrustMutationAuthority {
+        let local_endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(local);
         let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
         let target_epoch = epoch.max(2);
         let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
@@ -3045,6 +2994,13 @@ mod tests {
             },
         )
         .expect("RegisterSession input");
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+                endpoint: local_endpoint,
+            },
+        )
+        .expect("PublishLocalEndpoint input");
         meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
             &mut authority,
             meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
@@ -3098,7 +3054,11 @@ mod tests {
         CoreCommsRuntime::apply_trust_mutation(
             runtime,
             CommsTrustMutation::AddTrustedPeer {
-                authority: test_projection_add_authority(&peer, 0),
+                authority: test_projection_add_authority(
+                    &local_descriptor_for_runtime(runtime),
+                    &peer,
+                    0,
+                ),
                 peer,
             },
         )
@@ -3133,11 +3093,12 @@ mod tests {
     #[tokio::test]
     async fn generated_trust_mutation_updates_projection() {
         let runtime = CommsRuntime::inproc_only("trust-mutator-generated").expect("runtime");
+        let local = local_descriptor_for_runtime(&runtime);
         let peer_key = Keypair::generate().public_key();
         let descriptor = trusted_descriptor("peer", peer_key, "inproc://peer");
         let peer_id = descriptor.peer_id.to_string();
 
-        let add_authority = test_projection_add_authority(&descriptor, 7);
+        let add_authority = test_projection_add_authority(&local, &descriptor, 7);
         let add_authority_replay = add_authority.clone();
         let add = CoreCommsRuntime::apply_trust_mutation(
             &runtime,
@@ -3167,7 +3128,7 @@ mod tests {
             &runtime,
             CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
-                authority: test_projection_add_authority(&descriptor, 9),
+                authority: test_projection_add_authority(&local, &descriptor, 9),
             },
         )
         .await
@@ -3186,7 +3147,7 @@ mod tests {
             &runtime,
             CommsTrustMutation::RemoveTrustedPeer {
                 peer_id: peer_id.clone(),
-                authority: test_projection_remove_authority(&descriptor, 8),
+                authority: test_projection_remove_authority(&local, &descriptor, 8),
             },
         )
         .await
@@ -3199,6 +3160,7 @@ mod tests {
     async fn generated_remove_does_not_remove_trust_owned_by_other_source() {
         let runtime =
             CommsRuntime::inproc_only("trust-mutator-source-scoped-remove").expect("runtime");
+        let local = local_descriptor_for_runtime(&runtime);
         let peer_key = Keypair::generate().public_key();
         let descriptor = trusted_descriptor("mob-owned-peer", peer_key, "inproc://mob-owned-peer");
         let peer_id = descriptor.peer_id.to_string();
@@ -3229,7 +3191,7 @@ mod tests {
             &runtime,
             CommsTrustMutation::RemoveTrustedPeer {
                 peer_id,
-                authority: test_projection_remove_authority(&descriptor, 8),
+                authority: test_projection_remove_authority(&local, &descriptor, 8),
             },
         )
         .await
@@ -3313,6 +3275,7 @@ mod tests {
     #[tokio::test]
     async fn generated_add_authority_rejects_descriptor_drift() {
         let runtime = CommsRuntime::inproc_only("trust-mutator-descriptor-drift").expect("runtime");
+        let local = local_descriptor_for_runtime(&runtime);
         let peer_key = Keypair::generate().public_key();
         let descriptor = trusted_descriptor("peer", peer_key, "inproc://peer");
         let drifted_descriptor =
@@ -3322,7 +3285,7 @@ mod tests {
             &runtime,
             CommsTrustMutation::AddTrustedPeer {
                 peer: drifted_descriptor,
-                authority: test_projection_add_authority(&descriptor, 11),
+                authority: test_projection_add_authority(&local, &descriptor, 11),
             },
         )
         .await
@@ -3340,6 +3303,7 @@ mod tests {
     #[tokio::test]
     async fn public_trust_projection_excludes_and_cannot_remove_private_peer() {
         let runtime = CommsRuntime::inproc_only("trust-mutator-private-split").expect("runtime");
+        let local = local_descriptor_for_runtime(&runtime);
         let peer_key = Keypair::generate().public_key();
         let descriptor = trusted_descriptor("private-peer", peer_key, "inproc://private-peer");
         let peer_id = descriptor.peer_id.to_string();
@@ -3363,7 +3327,7 @@ mod tests {
             &runtime,
             CommsTrustMutation::RemoveTrustedPeer {
                 peer_id,
-                authority: test_projection_remove_authority(&descriptor, 12),
+                authority: test_projection_remove_authority(&local, &descriptor, 12),
             },
         )
         .await
@@ -6008,7 +5972,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_core_send_succeeds_without_trusted_entry_when_auth_disabled() {
+    async fn test_core_send_requires_generated_trust_when_auth_disabled() {
         let suffix = Uuid::new_v4().simple().to_string();
         let sender_name = format!("sender-ipc-no-auth-{suffix}");
         let receiver_name = format!("receiver-ipc-no-auth-{suffix}");
@@ -6061,25 +6025,74 @@ mod tests {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
 
+        let expected_peer_id = receiver.public_key().to_peer_id().to_string();
         let receipt = CoreCommsRuntime::send(&sender, cmd).await;
         match receipt {
-            Ok(SendReceipt::PeerMessageSent {
-                envelope_id: _,
-                acked,
-            }) => assert!(!acked),
-            other => panic!("Expected peer message receipt, got: {other:?}"),
+            Err(SendError::PeerNotFound(peer_id)) if peer_id == expected_peer_id => {}
+            other => panic!("Expected peer-not-found without generated trust, got: {other:?}"),
         }
 
         let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
-        assert_eq!(interactions.len(), 1);
-        assert_eq!(interactions[0].from, sender_name);
-        assert!(matches!(
-            &interactions[0].content,
-            meerkat_core::InteractionContent::Message { body, .. } if body == "hello without trusted"
-        ));
+        assert_eq!(interactions.len(), 0);
 
         assert!(crate::InprocRegistry::global().unregister(&sender_pubkey));
         assert!(crate::InprocRegistry::global().unregister(&receiver_pubkey));
+    }
+
+    #[tokio::test]
+    async fn test_core_peers_excludes_inproc_without_generated_trust_when_auth_disabled() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime_name = format!("directory-no-auth-runtime-{suffix}");
+        let peer_name = format!("directory-no-auth-peer-{suffix}");
+        let runtime_tmp = tempfile::tempdir().unwrap();
+        let peer_tmp = tempfile::tempdir().unwrap();
+
+        let runtime_config = ResolvedCommsConfig {
+            enabled: true,
+            name: runtime_name.clone(),
+            inproc_namespace: None,
+            identity_dir: runtime_tmp.path().join("identity"),
+            trusted_peers_path: runtime_tmp.path().join("trusted_peers.json"),
+            comms_config: crate::CommsConfig::default(),
+            auth: meerkat_core::CommsAuthMode::Open,
+            require_peer_auth: false,
+            listen_uds: None,
+            listen_tcp: None,
+            event_listen_tcp: None,
+            #[cfg(unix)]
+            event_listen_uds: None,
+            allow_external_unauthenticated: false,
+        };
+        let peer_config = ResolvedCommsConfig {
+            enabled: true,
+            name: peer_name.clone(),
+            inproc_namespace: None,
+            identity_dir: peer_tmp.path().join("identity"),
+            trusted_peers_path: peer_tmp.path().join("trusted_peers.json"),
+            comms_config: crate::CommsConfig::default(),
+            auth: meerkat_core::CommsAuthMode::Open,
+            require_peer_auth: false,
+            listen_uds: None,
+            listen_tcp: None,
+            event_listen_tcp: None,
+            #[cfg(unix)]
+            event_listen_uds: None,
+            allow_external_unauthenticated: false,
+        };
+
+        let runtime = CommsRuntime::new(runtime_config).await.unwrap();
+        let peer = CommsRuntime::new(peer_config).await.unwrap();
+        let runtime_pubkey = runtime.public_key();
+        let peer_pubkey = peer.public_key();
+
+        let peers = CoreCommsRuntime::peers(&runtime).await;
+        assert!(
+            peers.iter().all(|entry| entry.name.as_str() != peer_name),
+            "inproc registry membership must not enter the peer directory without generated trust"
+        );
+
+        assert!(crate::InprocRegistry::global().unregister(&runtime_pubkey));
+        assert!(crate::InprocRegistry::global().unregister(&peer_pubkey));
     }
 
     #[tokio::test]
@@ -6529,14 +6542,7 @@ mod tests {
         assert_eq!(matched.len(), 1);
 
         let peer = matched[0];
-        assert!(
-            matches!(
-                peer.source,
-                PeerDirectorySource::Trusted | PeerDirectorySource::TrustedAndInproc
-            ),
-            "expected Trusted or TrustedAndInproc, got {:?}",
-            peer.source
-        );
+        assert_eq!(peer.source, PeerDirectorySource::Trusted);
         assert_eq!(peer.address.to_string(), format!("inproc://{peer_name}"));
         assert_eq!(peer.sendable_kinds, vec![PeerSendability::PeerMessage]);
     }

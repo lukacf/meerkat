@@ -316,19 +316,6 @@ impl InprocRegistry {
         found
     }
 
-    /// Count live registrations for a canonical pubkey across all namespaces.
-    pub(crate) fn pubkey_registration_count_any_namespace(&self, pubkey: &PubKey) -> usize {
-        if pubkey.is_zero() {
-            return 0;
-        }
-        self.state
-            .read()
-            .namespaces
-            .values()
-            .filter(|namespace_state| namespace_state.peers.contains_key(pubkey))
-            .count()
-    }
-
     /// Look up an inproc peer name by public key.
     pub fn get_name_by_pubkey(&self, pubkey: &PubKey) -> Option<String> {
         self.get_name_by_pubkey_in_namespace(DEFAULT_NAMESPACE, pubkey)

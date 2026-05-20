@@ -81,11 +81,67 @@ fn test_comms_reconcile_obligation(
     Arc<meerkat_runtime::HandleDslAuthority>,
     meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation,
 ) {
-    meerkat_runtime::test_peer_projection_reconcile_obligation(
-        session_id,
-        local_peer_id,
-        direct_peer_endpoints,
+    let dsl = Arc::new(meerkat_runtime::HandleDslAuthority::ephemeral());
+    dsl.apply_signal(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
+        "test::initialize",
     )
+    .expect("Initialize signal");
+    dsl.apply_input(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+            session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                session_id.to_string(),
+            ),
+        },
+        "test::register_session",
+    )
+    .expect("RegisterSession input");
+    dsl.apply_input(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
+            agent_runtime_id: meerkat_runtime::meerkat_machine::dsl::AgentRuntimeId::from(format!(
+                "test-runtime-{session_id}"
+            )),
+            fence_token: meerkat_runtime::meerkat_machine::dsl::FenceToken::from(0),
+            generation: meerkat_runtime::meerkat_machine::dsl::Generation::from(0),
+            session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                session_id.to_string(),
+            ),
+        },
+        "test::prepare_bindings",
+    )
+    .expect("PrepareBindings input");
+    dsl.apply_input(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+            endpoint: meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+                "local",
+                local_peer_id.to_string(),
+                "inproc://local",
+                [0x7f; 32],
+            ),
+        },
+        "test::publish_local_endpoint",
+    )
+    .expect("PublishLocalEndpoint input");
+    let transition = dsl
+        .apply_input_with_transition(
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                epoch: 1,
+                endpoints: direct_peer_endpoints,
+            },
+            "test::apply_mob_peer_overlay",
+        )
+        .expect("ApplyMobPeerOverlay input");
+    let mut obligations =
+        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+            &transition,
+            dsl.peer_projection_freshness_authority(),
+        );
+    assert_eq!(
+        obligations.len(),
+        1,
+        "test reconcile effect must produce one generated obligation"
+    );
+    (dsl, obligations.pop().expect("obligation count checked"))
 }
 
 async fn apply_generated_peer_projection_trust(

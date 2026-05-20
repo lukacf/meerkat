@@ -5015,6 +5015,18 @@ impl MobActor {
                             .pending_session_ingress_detach_runtime_ids
                             .clone(),
                         topology_epoch: dsl.topology_epoch,
+                        spawn_policy_enabled: dsl.spawn_policy_enabled,
+                        spawn_policy_revision: dsl.spawn_policy_revision,
+                        spawn_policy_resolution_revision: dsl
+                            .spawn_policy_resolution_revision
+                            .clone(),
+                        spawn_policy_resolution_profiles: dsl
+                            .spawn_policy_resolution_profiles
+                            .clone(),
+                        spawn_policy_resolution_runtime_modes: dsl
+                            .spawn_policy_resolution_runtime_modes
+                            .clone(),
+                        spawn_policy_resolution_absent: dsl.spawn_policy_resolution_absent.clone(),
                     });
                 }
                 MobCommand::StartupKickoffSnapshot { reply_tx } => {
@@ -10625,8 +10637,8 @@ impl MobActor {
         identity: &AgentIdentity,
     ) -> BTreeSet<AgentIdentity> {
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
-        self.dsl_authority
-            .state()
+        let state = self.dsl_authority.state();
+        let mut wired_to = state
             .wiring_edges
             .iter()
             .filter_map(|edge| {
@@ -10638,7 +10650,15 @@ impl MobActor {
                     None
                 }
             })
-            .collect()
+            .collect::<BTreeSet<_>>();
+        wired_to.extend(
+            state
+                .external_peer_edges
+                .iter()
+                .filter(|edge| edge.local == dsl_identity)
+                .map(|edge| AgentIdentity::from(edge.endpoint.name.0.as_str())),
+        );
+        wired_to
     }
 
     async fn member_retire_trust_cleanup_plan(

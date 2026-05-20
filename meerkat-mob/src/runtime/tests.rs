@@ -70,10 +70,43 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
+type TestMeerkatMachineAuthority = std::sync::Arc<
+    std::sync::Mutex<meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority>,
+>;
+
+trait TestPeerProjectionOwnerInstall {
+    fn install_test_peer_projection_owner(&self, _authority: TestMeerkatMachineAuthority) {}
+}
+
+impl TestPeerProjectionOwnerInstall for meerkat_comms::CommsRuntime {
+    fn install_test_peer_projection_owner(&self, authority: TestMeerkatMachineAuthority) {
+        self.install_peer_comms_handle(Arc::new(meerkat_runtime::RuntimePeerCommsHandle::new(
+            Arc::new(meerkat_runtime::HandleDslAuthority::from_shared(authority)),
+        )));
+    }
+}
+
+fn test_comms_reconcile_obligation_for_runtime<R>(
+    runtime: &R,
+    local_peer_id: PeerId,
+    direct_peer_endpoints: BTreeSet<meerkat_runtime::meerkat_machine::dsl::PeerEndpoint>,
+) -> meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation
+where
+    R: TestPeerProjectionOwnerInstall + ?Sized,
+{
+    let (obligation, authority) =
+        test_comms_reconcile_obligation(local_peer_id, direct_peer_endpoints);
+    runtime.install_test_peer_projection_owner(authority);
+    obligation
+}
+
 fn test_comms_reconcile_obligation(
     local_peer_id: PeerId,
     direct_peer_endpoints: BTreeSet<meerkat_runtime::meerkat_machine::dsl::PeerEndpoint>,
-) -> meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation {
+) -> (
+    meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation,
+    TestMeerkatMachineAuthority,
+) {
     let mut authority = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new();
     authority
         .apply_signal(meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize)
@@ -107,11 +140,12 @@ fn test_comms_reconcile_obligation(
         },
     )
     .expect("ApplyMobPeerOverlay input");
+    let authority = std::sync::Arc::new(std::sync::Mutex::new(authority));
     let mut obligations =
         meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
             &transition,
             meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
-                std::sync::Arc::new(std::sync::Mutex::new(authority)),
+                std::sync::Arc::clone(&authority),
             ),
         );
     assert_eq!(
@@ -119,16 +153,22 @@ fn test_comms_reconcile_obligation(
         1,
         "test reconcile effect must produce one generated obligation"
     );
-    obligations.pop().expect("obligation count checked")
+    (
+        obligations.pop().expect("obligation count checked"),
+        authority,
+    )
 }
 
-async fn apply_test_peer_projection_trust(
-    runtime: &dyn CoreCommsRuntime,
+async fn apply_test_peer_projection_trust<R>(
+    runtime: &R,
     peer: TrustedPeerDescriptor,
     context: &'static str,
-) {
+) where
+    R: CoreCommsRuntime + TestPeerProjectionOwnerInstall + ?Sized,
+{
     let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
-    let obligation = test_comms_reconcile_obligation(
+    let obligation = test_comms_reconcile_obligation_for_runtime(
+        runtime,
         runtime
             .peer_id()
             .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable")),
@@ -149,18 +189,18 @@ async fn apply_test_peer_projection_trust(
     .unwrap_or_else(|error| panic!("{context}: {error}"));
 }
 
-async fn remove_test_peer_projection_trust(
-    runtime: &dyn CoreCommsRuntime,
-    peer_id: &str,
-    context: &'static str,
-) {
+async fn remove_test_peer_projection_trust<R>(runtime: &R, peer_id: &str, context: &'static str)
+where
+    R: CoreCommsRuntime + TestPeerProjectionOwnerInstall + ?Sized,
+{
     let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
         "",
         peer_id.to_string(),
         "",
         [0u8; 32],
     );
-    let obligation = test_comms_reconcile_obligation(
+    let obligation = test_comms_reconcile_obligation_for_runtime(
+        runtime,
         runtime
             .peer_id()
             .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable")),
@@ -429,6 +469,8 @@ impl MockCommsRuntime {
         self.sent_intents.read().await.clone()
     }
 }
+
+impl TestPeerProjectionOwnerInstall for MockCommsRuntime {}
 
 #[async_trait]
 impl CoreCommsRuntime for MockCommsRuntime {
@@ -4431,7 +4473,8 @@ async fn trust_candidate_sender_for_reply(
     )
     .expect("typed ingress sender should convert to a reply trusted peer");
     let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&descriptor);
-    let obligation = test_comms_reconcile_obligation(
+    let obligation = test_comms_reconcile_obligation_for_runtime(
+        comms,
         CoreCommsRuntime::peer_id(comms).expect("test comms runtime peer_id unavailable"),
         BTreeSet::from([endpoint.clone()]),
     );
@@ -32295,6 +32338,12 @@ struct MobRuntimeParitySnapshotSummary {
     // here as 0 for the parity evaluator; full projection lands with the
     // observer wiring PR alongside `member_session_bindings`.
     topology_epoch: u64,
+    spawn_policy_enabled: bool,
+    spawn_policy_revision: u64,
+    spawn_policy_resolution_revision: BTreeMap<String, u64>,
+    spawn_policy_resolution_profiles: BTreeMap<String, String>,
+    spawn_policy_resolution_runtime_modes: BTreeMap<String, String>,
+    spawn_policy_resolution_absent: BTreeSet<String>,
 }
 
 /// Lock-in test for T2 DSL field projection in the runtime parity snapshot.
@@ -32976,6 +33025,12 @@ async fn mob_runtime_parity_snapshot_summary(
         pending_spawn_sessions,
         pending_session_ingress_detach_runtime_ids,
         topology_epoch,
+        spawn_policy_enabled,
+        spawn_policy_revision,
+        spawn_policy_resolution_revision,
+        spawn_policy_resolution_profiles,
+        spawn_policy_resolution_runtime_modes,
+        spawn_policy_resolution_absent,
     ) = dsl_t2
         .map(|snap| {
             (
@@ -33025,6 +33080,24 @@ async fn mob_runtime_parity_snapshot_summary(
                     .map(|id| format!("{id:?}"))
                     .collect::<BTreeSet<_>>(),
                 snap.topology_epoch,
+                snap.spawn_policy_enabled,
+                snap.spawn_policy_revision,
+                snap.spawn_policy_resolution_revision
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), v))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.spawn_policy_resolution_profiles
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), v))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.spawn_policy_resolution_runtime_modes
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.spawn_policy_resolution_absent
+                    .into_iter()
+                    .map(|id| format!("{id:?}"))
+                    .collect::<BTreeSet<_>>(),
             )
         })
         .unwrap_or_else(|| {
@@ -33042,6 +33115,12 @@ async fn mob_runtime_parity_snapshot_summary(
                 BTreeMap::new(),
                 BTreeSet::new(),
                 0,
+                false,
+                0,
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeSet::new(),
             )
         });
 
@@ -33084,6 +33163,12 @@ async fn mob_runtime_parity_snapshot_summary(
         pending_spawn_sessions,
         pending_session_ingress_detach_runtime_ids,
         topology_epoch,
+        spawn_policy_enabled,
+        spawn_policy_revision,
+        spawn_policy_resolution_revision,
+        spawn_policy_resolution_profiles,
+        spawn_policy_resolution_runtime_modes,
+        spawn_policy_resolution_absent,
     })
 }
 
@@ -33175,6 +33260,32 @@ fn mob_runtime_parity_field_value(
             snapshot.pending_session_ingress_detach_runtime_ids.clone(),
         )),
         "topology_epoch" => Some(MobRuntimeParityExprValue::U64(snapshot.topology_epoch)),
+        "spawn_policy_enabled" => Some(MobRuntimeParityExprValue::Bool(
+            snapshot.spawn_policy_enabled,
+        )),
+        "spawn_policy_revision" => Some(MobRuntimeParityExprValue::U64(
+            snapshot.spawn_policy_revision,
+        )),
+        "spawn_policy_resolution_revision" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.spawn_policy_resolution_revision.clone(),
+        )),
+        "spawn_policy_resolution_profiles" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .spawn_policy_resolution_profiles
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "spawn_policy_resolution_runtime_modes" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .spawn_policy_resolution_runtime_modes
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "spawn_policy_resolution_absent" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.spawn_policy_resolution_absent.clone(),
+        )),
         "externally_addressable_runtime_ids" => Some(MobRuntimeParityExprValue::Set(
             snapshot.externally_addressable_runtime_ids.clone(),
         )),

@@ -767,7 +767,9 @@ mod tests {
 
         let mut removes = comms.remove_calls();
         removes.sort();
-        assert_eq!(removes, vec![UUID_A.to_string(), UUID_B.to_string()]);
+        let mut expected = vec![UUID_A.to_string(), UUID_B.to_string()];
+        expected.sort();
+        assert_eq!(removes, expected);
     }
 
     /// Invalid peer endpoint (non-UUID peer_id) surfaces

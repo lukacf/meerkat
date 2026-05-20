@@ -141,6 +141,18 @@ pub(crate) struct MobDslT2Snapshot {
     pub pending_session_ingress_detach_runtime_ids:
         std::collections::BTreeSet<crate::machines::mob_machine::AgentRuntimeId>,
     pub topology_epoch: u64,
+    pub spawn_policy_enabled: bool,
+    pub spawn_policy_revision: u64,
+    pub spawn_policy_resolution_revision:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, u64>,
+    pub spawn_policy_resolution_profiles:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub spawn_policy_resolution_runtime_modes: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        Option<crate::machines::mob_machine::SpawnPolicyRuntimeMode>,
+    >,
+    pub spawn_policy_resolution_absent:
+        std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
 }
 
 #[derive(Debug, Clone, Default)]

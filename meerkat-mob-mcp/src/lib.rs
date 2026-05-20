@@ -1718,10 +1718,8 @@ impl MobMcpState {
 
     /// Create MCP state backed by an in-memory local session service.
     pub fn new_in_memory() -> Arc<Self> {
-        let state = Self::new_with_runtime_adapter(
-            Arc::new(LocalSessionService::new()),
-            Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral())),
-        );
+        let service = Arc::new(LocalSessionService::new());
+        let state = Self::new(service);
         Arc::new(state)
     }
 }

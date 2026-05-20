@@ -2069,7 +2069,7 @@ impl MobHandle {
         machine_state: &mob_dsl::MobMachineState,
     ) -> BTreeSet<crate::ids::AgentIdentity> {
         let local = mob_dsl::AgentIdentity::from_domain(identity);
-        machine_state
+        let mut wired_to = machine_state
             .wiring_edges
             .iter()
             .filter_map(|edge| {
@@ -2081,7 +2081,15 @@ impl MobHandle {
                     None
                 }
             })
-            .collect()
+            .collect::<BTreeSet<_>>();
+        wired_to.extend(
+            machine_state
+                .external_peer_edges
+                .iter()
+                .filter(|edge| edge.local == local)
+                .map(|edge| crate::ids::AgentIdentity::from(edge.endpoint.name.0.as_str())),
+        );
+        wired_to
     }
 
     fn member_lifecycle_from_machine_state(

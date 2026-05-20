@@ -274,11 +274,12 @@ impl MeerkatMachine {
                 loop {
                     let state = {
                         let sessions = self.sessions.read().await;
-                        let entry = sessions
-                            .get(session_id)
-                            .ok_or(RuntimeDriverError::NotReady {
-                                state: RuntimeState::Destroyed,
-                            })?;
+                        let entry =
+                            sessions
+                                .get(session_id)
+                                .ok_or(RuntimeDriverError::NotReady {
+                                    state: RuntimeState::Destroyed,
+                                })?;
                         if !Arc::ptr_eq(&entry.driver, &driver) {
                             return Err(RuntimeDriverError::NotReady {
                                 state: RuntimeState::Destroyed,
@@ -297,12 +298,35 @@ impl MeerkatMachine {
                     }
                 }
             })
-            .await
-            .map_err(|_| RuntimeDriverError::ValidationFailed {
-                reason: "StopRuntimeExecutor effect was accepted but generated authority did not reach stopped"
-                    .to_string(),
-            })?;
-            stopped?;
+            .await;
+            match stopped {
+                Ok(result) => result?,
+                Err(_) => {
+                    let deferred = {
+                        let sessions = self.sessions.read().await;
+                        let entry =
+                            sessions
+                                .get(session_id)
+                                .ok_or(RuntimeDriverError::NotReady {
+                                    state: RuntimeState::Destroyed,
+                                })?;
+                        if !Arc::ptr_eq(&entry.driver, &driver) {
+                            return Err(RuntimeDriverError::NotReady {
+                                state: RuntimeState::Destroyed,
+                            });
+                        }
+                        let snapshot = entry.control_snapshot();
+                        snapshot.phase == RuntimeState::Running && snapshot.current_run_id.is_some()
+                    };
+                    if deferred {
+                        return Ok(());
+                    }
+                    return Err(RuntimeDriverError::ValidationFailed {
+                        reason: "StopRuntimeExecutor effect was accepted but generated authority did not reach stopped"
+                            .to_string(),
+                    });
+                }
+            }
 
             let _gate_guard = self
                 .lock_current_session_driver_gate(session_id, &driver)

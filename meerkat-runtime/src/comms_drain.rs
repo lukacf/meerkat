@@ -2632,7 +2632,7 @@ mod tests {
     }
 
     async fn add_test_projection_trust(
-        runtime: &dyn CommsRuntime,
+        runtime: &meerkat_comms::CommsRuntime,
         peer: TrustedPeerDescriptor,
         context: &str,
     ) {
@@ -2673,10 +2673,18 @@ mod tests {
             },
         )
         .expect("ApplyMobPeerOverlay input");
+        let shared_authority = std::sync::Arc::new(std::sync::Mutex::new(authority));
+        runtime.install_peer_comms_handle(std::sync::Arc::new(
+            crate::handles::RuntimePeerCommsHandle::new(std::sync::Arc::new(
+                crate::handles::HandleDslAuthority::from_shared(std::sync::Arc::clone(
+                    &shared_authority,
+                )),
+            )),
+        ));
         let obligation = crate::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
             &transition,
             crate::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
-                std::sync::Arc::new(std::sync::Mutex::new(authority)),
+                shared_authority,
             ),
         )
         .into_iter()
@@ -3542,19 +3550,20 @@ mod tests {
             "inproc://bridge-response-peer",
         )
         .expect("valid peer spec");
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(
+        let runtime = Arc::new(
             meerkat_comms::CommsRuntime::inproc_only("bridge-response-route").expect("runtime"),
         );
+        let runtime_dyn: Arc<dyn CommsRuntime> = runtime.clone();
         add_test_projection_trust(runtime.as_ref(), peer_spec.clone(), "trust peer").await;
 
-        let route = resolve_peer_route(&runtime, peer_spec.peer_id)
+        let route = resolve_peer_route(&runtime_dyn, peer_spec.peer_id)
             .await
             .expect("canonical peer id should resolve through the peer directory");
 
         assert_eq!(route.peer_id, peer_spec.peer_id);
         let unknown_peer_id = PeerId::new();
         assert!(
-            resolve_peer_route(&runtime, unknown_peer_id)
+            resolve_peer_route(&runtime_dyn, unknown_peer_id)
                 .await
                 .is_none(),
             "unknown PeerIds must not synthesize bridge response routes"
@@ -3563,9 +3572,10 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_response_route_uses_pubkey_sender_not_spoofed_payload_peer_id() {
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(
+        let runtime = Arc::new(
             meerkat_comms::CommsRuntime::inproc_only("bridge-response-spoof").expect("runtime"),
         );
+        let runtime_dyn: Arc<dyn CommsRuntime> = runtime.clone();
         let spoofed_key = meerkat_comms::Keypair::generate();
         let spoofed_pubkey = spoofed_key.public_key();
         let spoofed_peer_id = spoofed_pubkey.to_peer_id();
@@ -3616,7 +3626,7 @@ mod tests {
             response_terminality: None,
         };
 
-        let route = resolve_bridge_response_route(&runtime, &candidate)
+        let route = resolve_bridge_response_route(&runtime_dyn, &candidate)
             .await
             .expect("raw pubkey sender should resolve to its derived route");
 
@@ -3639,9 +3649,10 @@ mod tests {
             "inproc://mob/__mob_supervisor__",
         )
         .expect("valid peer spec");
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(
+        let runtime = Arc::new(
             meerkat_comms::CommsRuntime::inproc_only("bridge-response-display").expect("runtime"),
         );
+        let runtime_dyn: Arc<dyn CommsRuntime> = runtime.clone();
         add_test_projection_trust(runtime.as_ref(), peer_spec.clone(), "trust peer").await;
 
         let command = BridgeCommand::ObserveMember(BridgeSupervisorPayload {
@@ -3668,7 +3679,7 @@ mod tests {
             .with_signing_pubkey(*peer_pubkey.as_bytes()),
         );
         let candidate = bridge_candidate_with_ingress(peer_spec.name.as_str(), &command, ingress);
-        let route = resolve_bridge_response_route(&runtime, &candidate)
+        let route = resolve_bridge_response_route(&runtime_dyn, &candidate)
             .await
             .expect("trusted display-name sender should resolve through peer directory");
 
@@ -3690,10 +3701,11 @@ mod tests {
             "inproc://mob/__mob_supervisor__",
         )
         .expect("valid peer spec");
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(
+        let runtime = Arc::new(
             meerkat_comms::CommsRuntime::inproc_only("bridge-response-typed-sender")
                 .expect("runtime"),
         );
+        let runtime_dyn: Arc<dyn CommsRuntime> = runtime.clone();
         add_test_projection_trust(runtime.as_ref(), peer_spec.clone(), "trust peer").await;
 
         let payload_pubkey = meerkat_comms::Keypair::generate().public_key();
@@ -3728,7 +3740,7 @@ mod tests {
         );
         let spoofed_candidate =
             bridge_candidate_with_ingress(peer_spec.name.as_str(), &command, ingress);
-        let route = resolve_bridge_response_route(&runtime, &spoofed_candidate)
+        let route = resolve_bridge_response_route(&runtime_dyn, &spoofed_candidate)
             .await
             .expect("typed ingress route should ignore spoofed payload peer_id");
         assert_eq!(route.peer_id, peer_spec.peer_id);
@@ -4161,7 +4173,7 @@ mod tests {
 
     #[tokio::test]
     async fn peer_lifecycle_unwired_and_retired_do_not_revoke_comms_trust() {
-        let runtime: Arc<dyn CommsRuntime> =
+        let runtime =
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-removed").unwrap());
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-removed").unwrap();
         let peer_spec = trusted_peer_from_runtime("peer-removed", &peer);

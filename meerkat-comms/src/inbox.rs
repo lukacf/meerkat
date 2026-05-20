@@ -26,6 +26,19 @@ use meerkat_core::{
 
 const DEFAULT_INBOX_CAPACITY: usize = 1024;
 
+#[cfg(test)]
+tokio::task_local! {
+    static CLASSIFIED_SEND_WAIT_BEFORE_AWAIT_HOOK: Arc<dyn Fn() + Send + Sync>;
+}
+
+#[cfg(test)]
+fn run_classified_send_wait_before_await_hook() {
+    let _ = CLASSIFIED_SEND_WAIT_BEFORE_AWAIT_HOOK.try_with(|hook| hook());
+}
+
+#[cfg(not(test))]
+fn run_classified_send_wait_before_await_hook() {}
+
 /// Reason an ingress item was dropped before it reached the classified queue.
 ///
 /// Every variant is a semantic failure mode — the envelope or event did not
@@ -281,6 +294,7 @@ impl ClassifiedInboxQueue {
 
     fn close(&mut self) {
         self.closed = true;
+        self.capacity_notify.notify_waiters();
     }
 
     fn snapshot(&self) -> PeerIngressQueueSnapshot {
@@ -837,9 +851,14 @@ impl InboxSender {
         let kind = result.kind;
         let is_actionable = result.class.is_actionable();
         let mut prepared = Some(result);
+        let capacity_notify = classified_queue.lock().capacity_notifier();
 
         loop {
-            let capacity_notify = {
+            let notified = capacity_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            {
                 let mut queue = classified_queue.lock();
                 if queue.closed {
                     tracing::warn!(
@@ -882,9 +901,9 @@ impl InboxSender {
                     self.notify.notify_waiters();
                     return AdmissionOutcome::Admitted;
                 }
-                queue.capacity_notifier()
-            };
-            capacity_notify.notified().await;
+            }
+            run_classified_send_wait_before_await_hook();
+            notified.await;
         }
     }
 
@@ -1968,6 +1987,138 @@ mod tests {
             0,
             "revoked ingress must not be queued after capacity opens"
         );
+    }
+
+    #[tokio::test]
+    async fn test_classified_send_wait_cannot_miss_capacity_notify_between_check_and_await() {
+        let sender_pubkey = PubKey::new([1u8; 32]);
+        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
+        let actionable_notify = Arc::new(Notify::new());
+        let notify = Arc::new(Notify::new());
+        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let counter = queue.dropped_counter();
+        let classified_queue = Arc::new(Mutex::new(queue));
+        let (tx, _rx) = mpsc::channel::<InboxItem>(1);
+        let sender = InboxSender {
+            tx,
+            notify,
+            classification_context: Some(ctx),
+            classified_queue: Some(classified_queue.clone()),
+            actionable_notify: Some(actionable_notify),
+            dropped_count: Some(counter.clone()),
+        };
+
+        assert_eq!(
+            sender.send_classified(InboxItem::External {
+                envelope: make_test_envelope(),
+            }),
+            AdmissionOutcome::Admitted
+        );
+
+        let released_capacity = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_queue = classified_queue.clone();
+        let hook_released_capacity = released_capacity.clone();
+        let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if !hook_released_capacity.swap(true, Ordering::SeqCst) {
+                assert!(
+                    hook_queue.lock().pop_front().is_some(),
+                    "test hook must free the exactly-full queue"
+                );
+            }
+        });
+
+        let waiting_sender = sender.clone();
+        let waiting = tokio::spawn(CLASSIFIED_SEND_WAIT_BEFORE_AWAIT_HOOK.scope(
+            hook,
+            async move {
+                waiting_sender
+                    .send_wait(InboxItem::External {
+                        envelope: make_test_envelope(),
+                    })
+                    .await
+            },
+        ));
+
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+                .await
+                .expect("send_wait must observe the capacity wake registered before awaiting")
+                .expect("send_wait task should join"),
+            AdmissionOutcome::Admitted
+        );
+        assert!(
+            released_capacity.load(Ordering::SeqCst),
+            "test hook must have exercised the full-queue wait path"
+        );
+        assert_eq!(
+            classified_queue.lock().entries.len(),
+            1,
+            "waiting send should be admitted after the raced capacity wake"
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn test_classified_send_wait_wakes_when_queue_closes_while_full() {
+        let sender_pubkey = PubKey::new([1u8; 32]);
+        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
+        let actionable_notify = Arc::new(Notify::new());
+        let notify = Arc::new(Notify::new());
+        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let counter = queue.dropped_counter();
+        let classified_queue = Arc::new(Mutex::new(queue));
+        let (tx, _rx) = mpsc::channel::<InboxItem>(1);
+        let sender = InboxSender {
+            tx,
+            notify,
+            classification_context: Some(ctx),
+            classified_queue: Some(classified_queue.clone()),
+            actionable_notify: Some(actionable_notify),
+            dropped_count: Some(counter.clone()),
+        };
+
+        assert_eq!(
+            sender.send_classified(InboxItem::External {
+                envelope: make_test_envelope(),
+            }),
+            AdmissionOutcome::Admitted
+        );
+
+        let closed_queue = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_queue = classified_queue.clone();
+        let hook_closed_queue = closed_queue.clone();
+        let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if !hook_closed_queue.swap(true, Ordering::SeqCst) {
+                hook_queue.lock().close();
+            }
+        });
+
+        let waiting_sender = sender.clone();
+        let waiting = tokio::spawn(CLASSIFIED_SEND_WAIT_BEFORE_AWAIT_HOOK.scope(
+            hook,
+            async move {
+                waiting_sender
+                    .send_wait(InboxItem::External {
+                        envelope: make_test_envelope(),
+                    })
+                    .await
+            },
+        ));
+
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+                .await
+                .expect("send_wait must wake when a full queue is closed")
+                .expect("send_wait task should join"),
+            AdmissionOutcome::Dropped {
+                reason: DropReason::SessionClosed
+            }
+        );
+        assert!(
+            closed_queue.load(Ordering::SeqCst),
+            "test hook must have exercised the full-queue close path"
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -368,7 +368,6 @@ pub mod inputs {
         pub due_at_utc_ms: Option<u64>,
         pub not_before_utc_ms: Option<u64>,
         pub snoozed_until_utc_ms: Option<u64>,
-        pub unresolved_blocker_count: u64,
         pub requested_status: Option<WorkLifecycleState>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -380,7 +379,6 @@ pub mod inputs {
         pub due_at_utc_ms: Option<u64>,
         pub not_before_utc_ms: Option<u64>,
         pub snoozed_until_utc_ms: Option<u64>,
-        pub unresolved_blocker_count: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CreateBlocked {
@@ -391,7 +389,6 @@ pub mod inputs {
         pub due_at_utc_ms: Option<u64>,
         pub not_before_utc_ms: Option<u64>,
         pub snoozed_until_utc_ms: Option<u64>,
-        pub unresolved_blocker_count: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Update {
@@ -400,7 +397,6 @@ pub mod inputs {
         pub due_at_utc_ms: Option<u64>,
         pub not_before_utc_ms: Option<u64>,
         pub snoozed_until_utc_ms: Option<u64>,
-        pub unresolved_blocker_count: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Claim {
@@ -419,7 +415,10 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RefreshEligibility {
-        pub unresolved_blocker_count: u64,
+        pub target_item_key: WorkItemKey,
+        pub blocking_from_item_keys: std::collections::BTreeSet<WorkItemKey>,
+        pub satisfied_blocker_item_keys: std::collections::BTreeSet<WorkItemKey>,
+        pub unsatisfied_blocker_item_keys: std::collections::BTreeSet<WorkItemKey>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyReadiness {

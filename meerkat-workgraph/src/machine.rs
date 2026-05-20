@@ -153,6 +153,14 @@ struct WorkGraphTopologyObservation {
     parent_reachability: BTreeSet<wg_dsl::WorkDependencyPathKey>,
 }
 
+#[derive(Debug, Clone)]
+struct WorkGraphEligibilityObservation {
+    target_item_key: wg_dsl::WorkItemKey,
+    blocking_from_item_keys: BTreeSet<wg_dsl::WorkItemKey>,
+    satisfied_blocker_item_keys: BTreeSet<wg_dsl::WorkItemKey>,
+    unsatisfied_blocker_item_keys: BTreeSet<wg_dsl::WorkItemKey>,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WorkGraphMachine;
 
@@ -199,7 +207,6 @@ impl WorkGraphMachine {
                 request.snoozed_until,
                 "snoozed_until",
             )?,
-            unresolved_blocker_count: 0,
             requested_status: request.status.map(dsl_work_lifecycle_state),
         };
         let applied = apply_new_item_dsl(input)?;
@@ -260,7 +267,6 @@ impl WorkGraphMachine {
                 due_at_utc_ms: optional_datetime_to_millis(due_at, "due_at")?,
                 not_before_utc_ms: optional_datetime_to_millis(not_before, "not_before")?,
                 snoozed_until_utc_ms: optional_datetime_to_millis(snoozed_until, "snoozed_until")?,
-                unresolved_blocker_count: item.machine_state.unresolved_blocker_count,
             },
             Some(request.expected_revision),
         )?;
@@ -284,25 +290,14 @@ impl WorkGraphMachine {
         item_commit_from_effects(item, &applied.effects, now, Some(previous))
     }
 
-    pub fn claim_item(
+    pub(crate) fn claim_item(
         item: WorkItem,
         request: ClaimWorkItemRequest,
+        existing_items: &[WorkItem],
+        existing_edges: &[WorkEdge],
         now: DateTime<Utc>,
     ) -> Result<WorkGraphItemCommit, WorkGraphError> {
-        Self::claim_ready_item(item, request, now)
-    }
-
-    pub fn claim_ready_item(
-        item: WorkItem,
-        request: ClaimWorkItemRequest,
-        now: DateTime<Utc>,
-    ) -> Result<WorkGraphItemCommit, WorkGraphError> {
-        Self::claim_item_with_unresolved_blockers(
-            item.clone(),
-            item.machine_state.unresolved_blocker_count,
-            request,
-            now,
-        )
+        Self::claim_item_with_topology(item, request, existing_items, existing_edges, now)
     }
 
     pub(crate) fn refresh_eligibility(
@@ -311,41 +306,13 @@ impl WorkGraphMachine {
         existing_edges: &[WorkEdge],
         now: DateTime<Utc>,
     ) -> Result<Option<WorkGraphItemCommit>, WorkGraphError> {
-        topology_basis(existing_items, existing_edges)?;
-        let all_items = item_map(existing_items);
-        let Some(topology_item) = all_items.get(&item.id) else {
-            return Err(WorkGraphError::Store(format!(
-                "work item {} is missing from generated WorkGraph topology authority snapshot",
-                item.id
-            )));
-        };
-        if topology_item.realm_id != item.realm_id || topology_item.namespace != item.namespace {
-            return Err(WorkGraphError::Store(format!(
-                "work item {} scope differs from generated WorkGraph topology authority snapshot",
-                item.id
-            )));
-        }
-        let unresolved_blocker_count =
-            unresolved_blocker_count(topology_item, &all_items, existing_edges)?;
-        Self::refresh_eligibility_with_count(item, unresolved_blocker_count, now)
-    }
-
-    fn refresh_eligibility_with_count(
-        mut item: WorkItem,
-        unresolved_blocker_count: u64,
-        now: DateTime<Utc>,
-    ) -> Result<Option<WorkGraphItemCommit>, WorkGraphError> {
-        if item.machine_state.unresolved_blocker_count == unresolved_blocker_count {
+        let input = refresh_eligibility_input(&item, existing_items, existing_edges)?;
+        let applied = apply_item_dsl(&item, input, None)?;
+        if applied.state == item.machine_state {
             return Ok(None);
         }
         let previous = item.clone();
-        let applied = apply_item_dsl(
-            &item,
-            wg_dsl::WorkGraphLifecycleInput::RefreshEligibility {
-                unresolved_blocker_count,
-            },
-            None,
-        )?;
+        let mut item = item;
         item.machine_state = applied.state;
         sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
@@ -357,18 +324,11 @@ impl WorkGraphMachine {
         )?))
     }
 
-    pub(crate) fn unresolved_blocker_count_for_item(
-        item: &WorkItem,
-        all_items: &BTreeMap<WorkItemId, WorkItem>,
-        edges: &[WorkEdge],
-    ) -> Result<u64, WorkGraphError> {
-        unresolved_blocker_count(item, all_items, edges)
-    }
-
-    pub(crate) fn claim_item_with_unresolved_blockers(
+    fn claim_item_with_topology(
         mut item: WorkItem,
-        unresolved_blocker_count: u64,
         request: ClaimWorkItemRequest,
+        existing_items: &[WorkItem],
+        existing_edges: &[WorkEdge],
         now: DateTime<Utc>,
     ) -> Result<WorkGraphItemCommit, WorkGraphError> {
         let previous = item.clone();
@@ -378,27 +338,22 @@ impl WorkGraphMachine {
                 .map(|seconds| now + seconds_to_duration(seconds))
         });
         let owner_key = work_owner_key(&request.owner)?;
-        let dsl_inputs = [
-            (item.machine_state.unresolved_blocker_count != unresolved_blocker_count).then_some(
-                wg_dsl::WorkGraphLifecycleInput::RefreshEligibility {
-                    unresolved_blocker_count,
-                },
-            ),
-            Some(wg_dsl::WorkGraphLifecycleInput::Claim {
-                expected_revision: request.expected_revision,
-                owner_key,
-                now_utc_ms: datetime_to_millis(now, "now")?,
-                lease_expires_at_utc_ms: optional_datetime_to_millis(
-                    lease_expires_at,
-                    "lease_expires_at",
-                )?,
-            }),
-        ];
-        let applied = apply_item_dsl_inputs(
-            &item,
-            dsl_inputs.into_iter().flatten(),
-            Some(request.expected_revision),
-        )?;
+        let refresh_input = refresh_eligibility_input(&item, existing_items, existing_edges)?;
+        let refreshed = apply_item_dsl(&item, refresh_input.clone(), None)?;
+        let mut dsl_inputs = Vec::new();
+        if refreshed.state != item.machine_state {
+            dsl_inputs.push(refresh_input);
+        }
+        dsl_inputs.push(wg_dsl::WorkGraphLifecycleInput::Claim {
+            expected_revision: request.expected_revision,
+            owner_key,
+            now_utc_ms: datetime_to_millis(now, "now")?,
+            lease_expires_at_utc_ms: optional_datetime_to_millis(
+                lease_expires_at,
+                "lease_expires_at",
+            )?,
+        });
+        let applied = apply_item_dsl_inputs(&item, dsl_inputs, Some(request.expected_revision))?;
         item.owner = Some(request.owner.clone());
         item.claim = Some(WorkClaim {
             owner: request.owner,
@@ -588,8 +543,7 @@ impl WorkGraphMachine {
         };
         let mut edges = existing_edges.to_vec();
         edges.push(edge.clone());
-        let unresolved_blockers = unresolved_blocker_count(&item, &all_items, &edges)?;
-        Self::refresh_eligibility_with_count(item, unresolved_blockers, now)
+        Self::refresh_eligibility(item, existing_items, &edges, now)
     }
 
     pub(crate) fn dependent_refreshes_after_blocker_change(
@@ -601,6 +555,7 @@ impl WorkGraphMachine {
         let topology = topology_basis(existing_items, existing_edges)?;
         let mut all_items = item_map(existing_items);
         all_items.insert(blocker.id.clone(), blocker.clone());
+        let items_after_blocker_change = all_items.values().cloned().collect::<Vec<_>>();
         let mut commits = Vec::new();
         for edge in existing_edges
             .iter()
@@ -609,10 +564,10 @@ impl WorkGraphMachine {
             let Some(item) = all_items.get(&edge.to_id) else {
                 continue;
             };
-            let unresolved_blockers = unresolved_blocker_count(item, &all_items, existing_edges)?;
-            if let Some(commit) = WorkGraphMachine::refresh_eligibility_with_count(
+            if let Some(commit) = WorkGraphMachine::refresh_eligibility(
                 item.clone(),
-                unresolved_blockers,
+                &items_after_blocker_change,
+                existing_edges,
                 now,
             )? {
                 commits.push(commit);
@@ -957,6 +912,69 @@ fn item_map(existing_items: &[WorkItem]) -> BTreeMap<WorkItemId, WorkItem> {
         .collect()
 }
 
+fn refresh_eligibility_input(
+    item: &WorkItem,
+    existing_items: &[WorkItem],
+    existing_edges: &[WorkEdge],
+) -> Result<wg_dsl::WorkGraphLifecycleInput, WorkGraphError> {
+    let observation = eligibility_observation(item, existing_items, existing_edges)?;
+    Ok(wg_dsl::WorkGraphLifecycleInput::RefreshEligibility {
+        target_item_key: observation.target_item_key,
+        blocking_from_item_keys: observation.blocking_from_item_keys,
+        satisfied_blocker_item_keys: observation.satisfied_blocker_item_keys,
+        unsatisfied_blocker_item_keys: observation.unsatisfied_blocker_item_keys,
+    })
+}
+
+fn eligibility_observation(
+    item: &WorkItem,
+    existing_items: &[WorkItem],
+    existing_edges: &[WorkEdge],
+) -> Result<WorkGraphEligibilityObservation, WorkGraphError> {
+    topology_basis(existing_items, existing_edges)?;
+    let all_items = item_map(existing_items);
+    let Some(topology_item) = all_items.get(&item.id) else {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} is missing from generated WorkGraph topology authority snapshot",
+            item.id
+        )));
+    };
+    if topology_item.realm_id != item.realm_id || topology_item.namespace != item.namespace {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} scope differs from generated WorkGraph topology authority snapshot",
+            item.id
+        )));
+    }
+    let target_item_key = generated_item_key(topology_item)?;
+    let mut blocking_from_item_keys = BTreeSet::new();
+    let mut satisfied_blocker_item_keys = BTreeSet::new();
+    let mut unsatisfied_blocker_item_keys = BTreeSet::new();
+    for edge in existing_edges
+        .iter()
+        .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.to_id == item.id)
+    {
+        let Some(blocker) = all_items.get(&edge.from_id) else {
+            return Err(WorkGraphError::Store(format!(
+                "blocking edge from {} to {} is missing its generated blocker item",
+                edge.from_id, edge.to_id
+            )));
+        };
+        let blocker_key = generated_item_key(blocker)?;
+        blocking_from_item_keys.insert(blocker_key.clone());
+        if WorkGraphMachine::blocker_satisfies_dependency(blocker)? {
+            satisfied_blocker_item_keys.insert(blocker_key);
+        } else {
+            unsatisfied_blocker_item_keys.insert(blocker_key);
+        }
+    }
+    Ok(WorkGraphEligibilityObservation {
+        target_item_key,
+        blocking_from_item_keys,
+        satisfied_blocker_item_keys,
+        unsatisfied_blocker_item_keys,
+    })
+}
+
 fn validate_link_item_refresh(
     edge: &WorkEdge,
     item_refresh: Option<&WorkGraphItemCommit>,
@@ -981,8 +999,9 @@ fn validate_link_item_refresh(
     };
     let mut edges = current_edges.to_vec();
     edges.push(edge.clone());
-    let unresolved_blockers = unresolved_blocker_count(item, &all_items, &edges)?;
-    if item.machine_state.unresolved_blocker_count == unresolved_blockers {
+    let input = refresh_eligibility_input(item, current_items, &edges)?;
+    let applied = apply_item_dsl(item, input, None)?;
+    if applied.state == item.machine_state {
         if item_refresh.is_some() {
             return Err(WorkGraphError::Conflict(
                 "generated WorkGraph edge refresh was supplied when readiness facts were unchanged"
@@ -1007,33 +1026,12 @@ fn validate_link_item_refresh(
             "generated WorkGraph edge refresh targets a different work item".to_string(),
         ));
     }
-    if refreshed.machine_state.unresolved_blocker_count != unresolved_blockers {
+    if refreshed.machine_state != applied.state {
         return Err(WorkGraphError::Conflict(
             "generated WorkGraph edge refresh carries stale dependent readiness facts".to_string(),
         ));
     }
     Ok(())
-}
-
-fn unresolved_blocker_count(
-    item: &WorkItem,
-    all_items: &BTreeMap<WorkItemId, WorkItem>,
-    edges: &[WorkEdge],
-) -> Result<u64, WorkGraphError> {
-    let mut count = 0_u64;
-    for edge in edges
-        .iter()
-        .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.to_id == item.id)
-    {
-        let Some(blocker) = all_items.get(&edge.from_id) else {
-            count = count.saturating_add(1);
-            continue;
-        };
-        if !WorkGraphMachine::blocker_satisfies_dependency(blocker)? {
-            count = count.saturating_add(1);
-        }
-    }
-    Ok(count)
 }
 
 fn generated_item_keys(
@@ -1801,8 +1799,9 @@ mod tests {
         .expect("close")
         .into_update_parts()
         .expect("update parts");
+        let existing_items = vec![item.clone()];
         let error = WorkGraphMachine::claim_item(
-            item,
+            item.clone(),
             ClaimWorkItemRequest {
                 id: WorkItemId::generated(),
                 realm_id: None,
@@ -1812,6 +1811,8 @@ mod tests {
                 lease_seconds: None,
                 lease_expires_at: None,
             },
+            &existing_items,
+            &[],
             now,
         )
         .expect_err("terminal claim should fail");
@@ -1831,8 +1832,9 @@ mod tests {
     fn only_one_active_claim_can_exist() {
         let now = Utc::now();
         let item = create("claim", now);
+        let existing_items = vec![item.clone()];
         let (claimed, _, _) = WorkGraphMachine::claim_item(
-            item,
+            item.clone(),
             ClaimWorkItemRequest {
                 id: WorkItemId::generated(),
                 realm_id: None,
@@ -1842,13 +1844,16 @@ mod tests {
                 lease_seconds: Some(60),
                 lease_expires_at: None,
             },
+            &existing_items,
+            &[],
             now,
         )
         .expect("claim")
         .into_update_parts()
         .expect("update parts");
+        let existing_items = vec![claimed.clone()];
         let error = WorkGraphMachine::claim_item(
-            claimed,
+            claimed.clone(),
             ClaimWorkItemRequest {
                 id: WorkItemId::generated(),
                 realm_id: None,
@@ -1858,6 +1863,8 @@ mod tests {
                 lease_seconds: Some(60),
                 lease_expires_at: None,
             },
+            &existing_items,
+            &[],
             now,
         )
         .expect_err("double claim should fail");
@@ -1917,15 +1924,34 @@ mod tests {
         let blocker = create("blocker", now);
         let item = create("claim after refresh", now);
         let edge = blocks_edge(&blocker, &item, now);
-        let (blocked_projection, _, _) =
-            WorkGraphMachine::refresh_eligibility(item.clone(), &[blocker, item], &[edge], now)
-                .expect("refresh transition")
-                .expect("changed")
-                .into_update_parts()
-                .expect("update parts");
-        let (_, event, _) = WorkGraphMachine::claim_item_with_unresolved_blockers(
+        let (blocked_projection, _, _) = WorkGraphMachine::refresh_eligibility(
+            item.clone(),
+            &[blocker.clone(), item],
+            &[edge.clone()],
+            now,
+        )
+        .expect("refresh transition")
+        .expect("changed")
+        .into_update_parts()
+        .expect("update parts");
+        let (completed_blocker, _, _) = WorkGraphMachine::close_item(
+            blocker,
+            CloseWorkItemRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                status: Some(WorkStatus::Completed),
+            },
+            now,
+        )
+        .expect("complete blocker")
+        .into_update_parts()
+        .expect("update parts");
+        let existing_items = vec![completed_blocker, blocked_projection.clone()];
+        let existing_edges = vec![edge];
+        let (_, event, _) = WorkGraphMachine::claim_item(
             blocked_projection,
-            0,
             ClaimWorkItemRequest {
                 id: WorkItemId::generated(),
                 realm_id: None,
@@ -1935,6 +1961,8 @@ mod tests {
                 lease_seconds: Some(60),
                 lease_expires_at: None,
             },
+            &existing_items,
+            &existing_edges,
             now,
         )
         .expect("claim")

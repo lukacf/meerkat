@@ -66,7 +66,7 @@ TerminalStutter ==
     /\ phase = "Completed" \/ phase = "Cancelled" \/ phase = "Failed"
     /\ UNCHANGED vars
 
-CreateDefaultOrOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status) ==
+CreateDefaultOrOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, requested_status) ==
     /\ phase = "Absent"
     /\ ((requested_status = None) \/ (requested_status = Some("Open")))
     /\ workgraph_item_key_present(arg_item_key)
@@ -76,7 +76,7 @@ CreateDefaultOrOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_toke
     /\ item_key' = Some(arg_item_key)
     /\ external_ref_tokens' = arg_external_ref_tokens
     /\ evidence_ref_tokens' = arg_evidence_ref_tokens
-    /\ unresolved_blocker_count' = arg_unresolved_blocker_count
+    /\ unresolved_blocker_count' = 0
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
@@ -84,7 +84,7 @@ CreateDefaultOrOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_toke
     /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms >>
 
 
-CreateRequestedBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status) ==
+CreateRequestedBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, requested_status) ==
     /\ phase = "Absent"
     /\ (requested_status = Some("Blocked"))
     /\ workgraph_item_key_present(arg_item_key)
@@ -94,7 +94,7 @@ CreateRequestedBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_t
     /\ item_key' = Some(arg_item_key)
     /\ external_ref_tokens' = arg_external_ref_tokens
     /\ evidence_ref_tokens' = arg_evidence_ref_tokens
-    /\ unresolved_blocker_count' = arg_unresolved_blocker_count
+    /\ unresolved_blocker_count' = 0
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
@@ -102,7 +102,7 @@ CreateRequestedBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_t
     /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms >>
 
 
-CreateOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
+CreateOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms) ==
     /\ phase = "Absent"
     /\ workgraph_item_key_present(arg_item_key)
     /\ phase' = "Open"
@@ -111,7 +111,7 @@ CreateOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evide
     /\ item_key' = Some(arg_item_key)
     /\ external_ref_tokens' = arg_external_ref_tokens
     /\ evidence_ref_tokens' = arg_evidence_ref_tokens
-    /\ unresolved_blocker_count' = arg_unresolved_blocker_count
+    /\ unresolved_blocker_count' = 0
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
@@ -119,7 +119,7 @@ CreateOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evide
     /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms >>
 
 
-CreateBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
+CreateBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms) ==
     /\ phase = "Absent"
     /\ workgraph_item_key_present(arg_item_key)
     /\ phase' = "Blocked"
@@ -128,7 +128,7 @@ CreateBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, ev
     /\ item_key' = Some(arg_item_key)
     /\ external_ref_tokens' = arg_external_ref_tokens
     /\ evidence_ref_tokens' = arg_evidence_ref_tokens
-    /\ unresolved_blocker_count' = arg_unresolved_blocker_count
+    /\ unresolved_blocker_count' = 0
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
@@ -136,46 +136,43 @@ CreateBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, ev
     /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms >>
 
 
-UpdateOpen(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
+UpdateOpen(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms) ==
     /\ phase = "Open"
     /\ (revision = expected_revision)
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ external_ref_tokens' = arg_external_ref_tokens
-    /\ unresolved_blocker_count' = arg_unresolved_blocker_count
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << item_key, evidence_ref_tokens, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
-UpdateInProgress(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
+UpdateInProgress(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms) ==
     /\ phase = "InProgress"
     /\ (revision = expected_revision)
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ external_ref_tokens' = arg_external_ref_tokens
-    /\ unresolved_blocker_count' = arg_unresolved_blocker_count
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << item_key, evidence_ref_tokens, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
-UpdateBlocked(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
+UpdateBlocked(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms) ==
     /\ phase = "Blocked"
     /\ (revision = expected_revision)
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ external_ref_tokens' = arg_external_ref_tokens
-    /\ unresolved_blocker_count' = arg_unresolved_blocker_count
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << item_key, evidence_ref_tokens, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << item_key, evidence_ref_tokens, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClaimOpen(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms) ==
@@ -261,27 +258,39 @@ BlockBlocked(expected_revision) ==
     /\ UNCHANGED << item_key, external_ref_tokens, evidence_ref_tokens, unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
-RefreshEligibilityOpen(arg_unresolved_blocker_count) ==
+RefreshEligibilityOpen(target_item_key, blocking_from_item_keys, satisfied_blocker_item_keys, unsatisfied_blocker_item_keys) ==
     /\ phase = "Open"
+    /\ (item_key = Some(target_item_key))
+    /\ (\A blocker_key \in blocking_from_item_keys : ((blocker_key \in satisfied_blocker_item_keys) \/ (blocker_key \in unsatisfied_blocker_item_keys)))
+    /\ (\A blocker_key \in satisfied_blocker_item_keys : ((blocker_key \in blocking_from_item_keys) /\ ((blocker_key \in unsatisfied_blocker_item_keys) = FALSE)))
+    /\ (\A blocker_key \in unsatisfied_blocker_item_keys : ((blocker_key \in blocking_from_item_keys) /\ ((blocker_key \in satisfied_blocker_item_keys) = FALSE)))
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
-    /\ unresolved_blocker_count' = arg_unresolved_blocker_count
+    /\ unresolved_blocker_count' = Cardinality(unsatisfied_blocker_item_keys)
     /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
-RefreshEligibilityInProgress(arg_unresolved_blocker_count) ==
+RefreshEligibilityInProgress(target_item_key, blocking_from_item_keys, satisfied_blocker_item_keys, unsatisfied_blocker_item_keys) ==
     /\ phase = "InProgress"
+    /\ (item_key = Some(target_item_key))
+    /\ (\A blocker_key \in blocking_from_item_keys : ((blocker_key \in satisfied_blocker_item_keys) \/ (blocker_key \in unsatisfied_blocker_item_keys)))
+    /\ (\A blocker_key \in satisfied_blocker_item_keys : ((blocker_key \in blocking_from_item_keys) /\ ((blocker_key \in unsatisfied_blocker_item_keys) = FALSE)))
+    /\ (\A blocker_key \in unsatisfied_blocker_item_keys : ((blocker_key \in blocking_from_item_keys) /\ ((blocker_key \in satisfied_blocker_item_keys) = FALSE)))
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
-    /\ unresolved_blocker_count' = arg_unresolved_blocker_count
+    /\ unresolved_blocker_count' = Cardinality(unsatisfied_blocker_item_keys)
     /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
-RefreshEligibilityBlocked(arg_unresolved_blocker_count) ==
+RefreshEligibilityBlocked(target_item_key, blocking_from_item_keys, satisfied_blocker_item_keys, unsatisfied_blocker_item_keys) ==
     /\ phase = "Blocked"
+    /\ (item_key = Some(target_item_key))
+    /\ (\A blocker_key \in blocking_from_item_keys : ((blocker_key \in satisfied_blocker_item_keys) \/ (blocker_key \in unsatisfied_blocker_item_keys)))
+    /\ (\A blocker_key \in satisfied_blocker_item_keys : ((blocker_key \in blocking_from_item_keys) /\ ((blocker_key \in unsatisfied_blocker_item_keys) = FALSE)))
+    /\ (\A blocker_key \in unsatisfied_blocker_item_keys : ((blocker_key \in blocking_from_item_keys) /\ ((blocker_key \in satisfied_blocker_item_keys) = FALSE)))
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
-    /\ unresolved_blocker_count' = arg_unresolved_blocker_count
+    /\ unresolved_blocker_count' = Cardinality(unsatisfied_blocker_item_keys)
     /\ UNCHANGED << revision, item_key, external_ref_tokens, evidence_ref_tokens, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
@@ -858,22 +867,22 @@ ClassifyPublicErrorStore(error_kind) ==
 
 
 Next ==
-    \/ \E arg_item_key \in WorkItemKeyValues : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CreateDefaultOrOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status)
-    \/ \E arg_item_key \in WorkItemKeyValues : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E requested_status \in OptionWorkLifecycleStateValues : CreateRequestedBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count, requested_status)
-    \/ \E arg_item_key \in WorkItemKeyValues : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
-    \/ \E arg_item_key \in WorkItemKeyValues : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
-    \/ \E expected_revision \in 0..2 : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : UpdateOpen(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
-    \/ \E expected_revision \in 0..2 : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : UpdateInProgress(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
-    \/ \E expected_revision \in 0..2 : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : UpdateBlocked(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count)
+    \/ \E arg_item_key \in WorkItemKeyValues : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E requested_status \in OptionWorkLifecycleStateValues : CreateDefaultOrOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, requested_status)
+    \/ \E arg_item_key \in WorkItemKeyValues : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E requested_status \in OptionWorkLifecycleStateValues : CreateRequestedBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, requested_status)
+    \/ \E arg_item_key \in WorkItemKeyValues : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : CreateOpen(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms)
+    \/ \E arg_item_key \in WorkItemKeyValues : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_evidence_ref_tokens \in SeqOfStringValues : \E evidence_ref_count \in 0..2 : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : CreateBlocked(arg_item_key, arg_external_ref_tokens, arg_evidence_ref_tokens, evidence_ref_count, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms)
+    \/ \E expected_revision \in 0..2 : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : UpdateOpen(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms)
+    \/ \E expected_revision \in 0..2 : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : UpdateInProgress(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms)
+    \/ \E expected_revision \in 0..2 : \E arg_external_ref_tokens \in SeqOfStringValues : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : UpdateBlocked(expected_revision, arg_external_ref_tokens, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms)
     \/ \E expected_revision \in 0..2 : \E owner_key \in WorkOwnerKeyValues : \E now_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in OptionU64Values : ClaimOpen(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms)
     \/ \E expected_revision \in 0..2 : \E owner_key \in WorkOwnerKeyValues : \E now_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in OptionU64Values : ClaimExpiredInProgress(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms)
     \/ \E expected_revision \in 0..2 : ReleaseInProgress(expected_revision)
     \/ \E expected_revision \in 0..2 : BlockOpen(expected_revision)
     \/ \E expected_revision \in 0..2 : BlockInProgress(expected_revision)
     \/ \E expected_revision \in 0..2 : BlockBlocked(expected_revision)
-    \/ \E arg_unresolved_blocker_count \in 0..2 : RefreshEligibilityOpen(arg_unresolved_blocker_count)
-    \/ \E arg_unresolved_blocker_count \in 0..2 : RefreshEligibilityInProgress(arg_unresolved_blocker_count)
-    \/ \E arg_unresolved_blocker_count \in 0..2 : RefreshEligibilityBlocked(arg_unresolved_blocker_count)
+    \/ \E target_item_key \in WorkItemKeyValues : \E blocking_from_item_keys \in SetOfWorkItemKeyValues : \E satisfied_blocker_item_keys \in SetOfWorkItemKeyValues : \E unsatisfied_blocker_item_keys \in SetOfWorkItemKeyValues : RefreshEligibilityOpen(target_item_key, blocking_from_item_keys, satisfied_blocker_item_keys, unsatisfied_blocker_item_keys)
+    \/ \E target_item_key \in WorkItemKeyValues : \E blocking_from_item_keys \in SetOfWorkItemKeyValues : \E satisfied_blocker_item_keys \in SetOfWorkItemKeyValues : \E unsatisfied_blocker_item_keys \in SetOfWorkItemKeyValues : RefreshEligibilityInProgress(target_item_key, blocking_from_item_keys, satisfied_blocker_item_keys, unsatisfied_blocker_item_keys)
+    \/ \E target_item_key \in WorkItemKeyValues : \E blocking_from_item_keys \in SetOfWorkItemKeyValues : \E satisfied_blocker_item_keys \in SetOfWorkItemKeyValues : \E unsatisfied_blocker_item_keys \in SetOfWorkItemKeyValues : RefreshEligibilityBlocked(target_item_key, blocking_from_item_keys, satisfied_blocker_item_keys, unsatisfied_blocker_item_keys)
     \/ \E now_utc_ms \in 0..2 : ClassifyReadinessOpenReady(now_utc_ms)
     \/ \E now_utc_ms \in 0..2 : ClassifyReadinessExpiredInProgressReady(now_utc_ms)
     \/ \E now_utc_ms \in 0..2 : ClassifyReadinessAbsentNotReady(now_utc_ms)

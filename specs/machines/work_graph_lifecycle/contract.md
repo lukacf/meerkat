@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `2`
+- Version: `3`
 - Rust owner: `self` / `catalog::dsl::workgraph_lifecycle`
 
 ## State
@@ -22,14 +22,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `evidence_count`: `u64`
 
 ## Inputs
-- `Create`(item_key: WorkItemKey, external_ref_tokens: Seq<String>, evidence_ref_tokens: Seq<String>, evidence_ref_count: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64, requested_status: Option<WorkLifecycleState>)
-- `CreateOpen`(item_key: WorkItemKey, external_ref_tokens: Seq<String>, evidence_ref_tokens: Seq<String>, evidence_ref_count: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
-- `CreateBlocked`(item_key: WorkItemKey, external_ref_tokens: Seq<String>, evidence_ref_tokens: Seq<String>, evidence_ref_count: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
-- `Update`(expected_revision: u64, external_ref_tokens: Seq<String>, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
+- `Create`(item_key: WorkItemKey, external_ref_tokens: Seq<String>, evidence_ref_tokens: Seq<String>, evidence_ref_count: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, requested_status: Option<WorkLifecycleState>)
+- `CreateOpen`(item_key: WorkItemKey, external_ref_tokens: Seq<String>, evidence_ref_tokens: Seq<String>, evidence_ref_count: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>)
+- `CreateBlocked`(item_key: WorkItemKey, external_ref_tokens: Seq<String>, evidence_ref_tokens: Seq<String>, evidence_ref_count: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>)
+- `Update`(expected_revision: u64, external_ref_tokens: Seq<String>, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>)
 - `Claim`(expected_revision: u64, owner_key: WorkOwnerKey, now_utc_ms: u64, lease_expires_at_utc_ms: Option<u64>)
 - `Release`(expected_revision: u64)
 - `Block`(expected_revision: u64)
-- `RefreshEligibility`(unresolved_blocker_count: u64)
+- `RefreshEligibility`(target_item_key: WorkItemKey, blocking_from_item_keys: Set<WorkItemKey>, satisfied_blocker_item_keys: Set<WorkItemKey>, unsatisfied_blocker_item_keys: Set<WorkItemKey>)
 - `ClassifyReadiness`(now_utc_ms: u64)
 - `ClassifyBlockerSatisfaction`
 - `ClassifyTerminality`
@@ -76,7 +76,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Transitions
 ### `CreateDefaultOrOpen`
 - From: `Absent`
-- On: `Create`(item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status)
+- On: `Create`(item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, requested_status)
 - Guards:
   - `default_or_open`
   - `item_key_present`
@@ -85,7 +85,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CreateRequestedBlocked`
 - From: `Absent`
-- On: `Create`(item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status)
+- On: `Create`(item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, requested_status)
 - Guards:
   - `requested_blocked`
   - `item_key_present`
@@ -94,7 +94,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CreateOpen`
 - From: `Absent`
-- On: `CreateOpen`(item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `CreateOpen`(item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms)
 - Guards:
   - `item_key_present`
 - Emits: `Created`
@@ -102,7 +102,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CreateBlocked`
 - From: `Absent`
-- On: `CreateBlocked`(item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `CreateBlocked`(item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms)
 - Guards:
   - `item_key_present`
 - Emits: `Created`
@@ -110,7 +110,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `UpdateOpen`
 - From: `Open`
-- On: `Update`(expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `Update`(expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms)
 - Guards:
   - ``
 - Emits: `Updated`
@@ -118,7 +118,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `UpdateInProgress`
 - From: `InProgress`
-- On: `Update`(expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `Update`(expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms)
 - Guards:
   - ``
 - Emits: `Updated`
@@ -126,7 +126,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `UpdateBlocked`
 - From: `Blocked`
-- On: `Update`(expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `Update`(expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms)
 - Guards:
   - ``
 - Emits: `Updated`
@@ -193,19 +193,34 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RefreshEligibilityOpen`
 - From: `Open`
-- On: `RefreshEligibility`(unresolved_blocker_count)
+- On: `RefreshEligibility`(target_item_key, blocking_from_item_keys, satisfied_blocker_item_keys, unsatisfied_blocker_item_keys)
+- Guards:
+  - `target_matches`
+  - `partition_covers_blockers`
+  - `satisfied_subset`
+  - `unsatisfied_subset`
 - Emits: `Updated`
 - To: `Open`
 
 ### `RefreshEligibilityInProgress`
 - From: `InProgress`
-- On: `RefreshEligibility`(unresolved_blocker_count)
+- On: `RefreshEligibility`(target_item_key, blocking_from_item_keys, satisfied_blocker_item_keys, unsatisfied_blocker_item_keys)
+- Guards:
+  - `target_matches`
+  - `partition_covers_blockers`
+  - `satisfied_subset`
+  - `unsatisfied_subset`
 - Emits: `Updated`
 - To: `InProgress`
 
 ### `RefreshEligibilityBlocked`
 - From: `Blocked`
-- On: `RefreshEligibility`(unresolved_blocker_count)
+- On: `RefreshEligibility`(target_item_key, blocking_from_item_keys, satisfied_blocker_item_keys, unsatisfied_blocker_item_keys)
+- Guards:
+  - `target_matches`
+  - `partition_covers_blockers`
+  - `satisfied_subset`
+  - `unsatisfied_subset`
 - Emits: `Updated`
 - To: `Blocked`
 

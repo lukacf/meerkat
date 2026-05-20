@@ -11,6 +11,7 @@ use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
     dsl_occurrence_lifecycle_machine as occurrence_lifecycle_machine,
     dsl_schedule_lifecycle_machine as schedule_lifecycle_machine,
+    dsl_workgraph_lifecycle_machine as workgraph_lifecycle_machine,
 };
 use meerkat_machine_schema::identity::{
     ActorId, CompositionDriverId, CompositionId, EffectVariantId, EnumTypeId, EnumVariantId,
@@ -93,6 +94,45 @@ fn workgraph_machine_state_wire_rejects_topology_mirror_fields() {
         error.to_string().contains("topology_item_keys"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn workgraph_refresh_eligibility_input_uses_partition_authority_not_scalar_count() {
+    let schema = workgraph_lifecycle_machine();
+    let refresh = schema
+        .inputs
+        .variants
+        .iter()
+        .find(|variant| variant.name.as_str() == "RefreshEligibility")
+        .expect("RefreshEligibility input");
+
+    let field_names = refresh
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        field_names,
+        vec![
+            "target_item_key",
+            "blocking_from_item_keys",
+            "satisfied_blocker_item_keys",
+            "unsatisfied_blocker_item_keys",
+        ]
+    );
+
+    let work_item_key = TypeRef::Named(NamedTypeId::parse("WorkItemKey").expect("named type"));
+    assert_eq!(refresh.fields[0].ty, work_item_key);
+    for field in &refresh.fields[1..] {
+        assert_eq!(
+            field.ty,
+            TypeRef::Set(Box::new(TypeRef::Named(
+                NamedTypeId::parse("WorkItemKey").expect("named type")
+            ))),
+            "RefreshEligibility field `{}` must carry typed WorkItemKey partition evidence",
+            field.name.as_str()
+        );
+    }
 }
 
 #[test]

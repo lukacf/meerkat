@@ -178,7 +178,7 @@ pub enum WorkGraphPublicErrorClass {
 
 machine! {
     machine WorkGraphLifecycleMachine {
-        version: 2,
+        version: 3,
         rust: "self" / "catalog::dsl::workgraph_lifecycle",
 
         state {
@@ -235,7 +235,6 @@ machine! {
                 due_at_utc_ms: Option<u64>,
                 not_before_utc_ms: Option<u64>,
                 snoozed_until_utc_ms: Option<u64>,
-                unresolved_blocker_count: u64,
                 requested_status: Option<Enum<WorkLifecycleState>>,
             },
             CreateOpen {
@@ -246,7 +245,6 @@ machine! {
                 due_at_utc_ms: Option<u64>,
                 not_before_utc_ms: Option<u64>,
                 snoozed_until_utc_ms: Option<u64>,
-                unresolved_blocker_count: u64,
             },
             CreateBlocked {
                 item_key: WorkItemKey,
@@ -256,7 +254,6 @@ machine! {
                 due_at_utc_ms: Option<u64>,
                 not_before_utc_ms: Option<u64>,
                 snoozed_until_utc_ms: Option<u64>,
-                unresolved_blocker_count: u64,
             },
             Update {
                 expected_revision: u64,
@@ -264,7 +261,6 @@ machine! {
                 due_at_utc_ms: Option<u64>,
                 not_before_utc_ms: Option<u64>,
                 snoozed_until_utc_ms: Option<u64>,
-                unresolved_blocker_count: u64,
             },
             Claim {
                 expected_revision: u64,
@@ -274,7 +270,12 @@ machine! {
             },
             Release { expected_revision: u64 },
             Block { expected_revision: u64 },
-            RefreshEligibility { unresolved_blocker_count: u64 },
+            RefreshEligibility {
+                target_item_key: WorkItemKey,
+                blocking_from_item_keys: Set<WorkItemKey>,
+                satisfied_blocker_item_keys: Set<WorkItemKey>,
+                unsatisfied_blocker_item_keys: Set<WorkItemKey>,
+            },
             ClassifyReadiness { now_utc_ms: u64 },
             ClassifyBlockerSatisfaction,
             ClassifyTerminality,
@@ -369,7 +370,7 @@ machine! {
         disposition PublicErrorClassified => local,
 
         transition CreateDefaultOrOpen {
-            on input Create { item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status }
+            on input Create { item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, requested_status }
             guard "absent" { self.lifecycle_phase == Phase::Absent }
             guard "default_or_open" { requested_status == None || requested_status == Some(WorkLifecycleState::Open) }
             guard "item_key_present" { workgraph_item_key_present(item_key) }
@@ -379,7 +380,7 @@ machine! {
                 self.external_ref_tokens = external_ref_tokens;
                 self.evidence_ref_tokens = evidence_ref_tokens;
                 self.evidence_count = evidence_ref_count;
-                self.unresolved_blocker_count = unresolved_blocker_count;
+                self.unresolved_blocker_count = 0;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
@@ -389,7 +390,7 @@ machine! {
         }
 
         transition CreateRequestedBlocked {
-            on input Create { item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count, requested_status }
+            on input Create { item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, requested_status }
             guard "absent" { self.lifecycle_phase == Phase::Absent }
             guard "requested_blocked" { requested_status == Some(WorkLifecycleState::Blocked) }
             guard "item_key_present" { workgraph_item_key_present(item_key) }
@@ -399,7 +400,7 @@ machine! {
                 self.external_ref_tokens = external_ref_tokens;
                 self.evidence_ref_tokens = evidence_ref_tokens;
                 self.evidence_count = evidence_ref_count;
-                self.unresolved_blocker_count = unresolved_blocker_count;
+                self.unresolved_blocker_count = 0;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
@@ -409,7 +410,7 @@ machine! {
         }
 
         transition CreateOpen {
-            on input CreateOpen { item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input CreateOpen { item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms }
             guard { self.lifecycle_phase == Phase::Absent }
             guard "item_key_present" { workgraph_item_key_present(item_key) }
             update {
@@ -418,7 +419,7 @@ machine! {
                 self.external_ref_tokens = external_ref_tokens;
                 self.evidence_ref_tokens = evidence_ref_tokens;
                 self.evidence_count = evidence_ref_count;
-                self.unresolved_blocker_count = unresolved_blocker_count;
+                self.unresolved_blocker_count = 0;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
@@ -428,7 +429,7 @@ machine! {
         }
 
         transition CreateBlocked {
-            on input CreateBlocked { item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input CreateBlocked { item_key, external_ref_tokens, evidence_ref_tokens, evidence_ref_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms }
             guard { self.lifecycle_phase == Phase::Absent }
             guard "item_key_present" { workgraph_item_key_present(item_key) }
             update {
@@ -437,7 +438,7 @@ machine! {
                 self.external_ref_tokens = external_ref_tokens;
                 self.evidence_ref_tokens = evidence_ref_tokens;
                 self.evidence_count = evidence_ref_count;
-                self.unresolved_blocker_count = unresolved_blocker_count;
+                self.unresolved_blocker_count = 0;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
@@ -447,12 +448,11 @@ machine! {
         }
 
         transition UpdateOpen {
-            on input Update { expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input Update { expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms }
             guard { self.lifecycle_phase == Phase::Open && self.revision == expected_revision }
             update {
                 self.revision += 1;
                 self.external_ref_tokens = external_ref_tokens;
-                self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
@@ -462,12 +462,11 @@ machine! {
         }
 
         transition UpdateInProgress {
-            on input Update { expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input Update { expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms }
             guard { self.lifecycle_phase == Phase::InProgress && self.revision == expected_revision }
             update {
                 self.revision += 1;
                 self.external_ref_tokens = external_ref_tokens;
-                self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
@@ -477,12 +476,11 @@ machine! {
         }
 
         transition UpdateBlocked {
-            on input Update { expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input Update { expected_revision, external_ref_tokens, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms }
             guard { self.lifecycle_phase == Phase::Blocked && self.revision == expected_revision }
             update {
                 self.revision += 1;
                 self.external_ref_tokens = external_ref_tokens;
-                self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
@@ -581,30 +579,42 @@ machine! {
         }
 
         transition RefreshEligibilityOpen {
-            on input RefreshEligibility { unresolved_blocker_count }
+            on input RefreshEligibility { target_item_key, blocking_from_item_keys, satisfied_blocker_item_keys, unsatisfied_blocker_item_keys }
             guard { self.lifecycle_phase == Phase::Open }
+            guard "target_matches" { self.item_key == Some(target_item_key) }
+            guard "partition_covers_blockers" { for_all(blocker_key in blocking_from_item_keys, satisfied_blocker_item_keys.contains(blocker_key) || unsatisfied_blocker_item_keys.contains(blocker_key)) }
+            guard "satisfied_subset" { for_all(blocker_key in satisfied_blocker_item_keys, blocking_from_item_keys.contains(blocker_key) && unsatisfied_blocker_item_keys.contains(blocker_key) == false) }
+            guard "unsatisfied_subset" { for_all(blocker_key in unsatisfied_blocker_item_keys, blocking_from_item_keys.contains(blocker_key) && satisfied_blocker_item_keys.contains(blocker_key) == false) }
             update {
-                self.unresolved_blocker_count = unresolved_blocker_count;
+                self.unresolved_blocker_count = unsatisfied_blocker_item_keys.len();
             }
             to Open
             emit Updated
         }
 
         transition RefreshEligibilityInProgress {
-            on input RefreshEligibility { unresolved_blocker_count }
+            on input RefreshEligibility { target_item_key, blocking_from_item_keys, satisfied_blocker_item_keys, unsatisfied_blocker_item_keys }
             guard { self.lifecycle_phase == Phase::InProgress }
+            guard "target_matches" { self.item_key == Some(target_item_key) }
+            guard "partition_covers_blockers" { for_all(blocker_key in blocking_from_item_keys, satisfied_blocker_item_keys.contains(blocker_key) || unsatisfied_blocker_item_keys.contains(blocker_key)) }
+            guard "satisfied_subset" { for_all(blocker_key in satisfied_blocker_item_keys, blocking_from_item_keys.contains(blocker_key) && unsatisfied_blocker_item_keys.contains(blocker_key) == false) }
+            guard "unsatisfied_subset" { for_all(blocker_key in unsatisfied_blocker_item_keys, blocking_from_item_keys.contains(blocker_key) && satisfied_blocker_item_keys.contains(blocker_key) == false) }
             update {
-                self.unresolved_blocker_count = unresolved_blocker_count;
+                self.unresolved_blocker_count = unsatisfied_blocker_item_keys.len();
             }
             to InProgress
             emit Updated
         }
 
         transition RefreshEligibilityBlocked {
-            on input RefreshEligibility { unresolved_blocker_count }
+            on input RefreshEligibility { target_item_key, blocking_from_item_keys, satisfied_blocker_item_keys, unsatisfied_blocker_item_keys }
             guard { self.lifecycle_phase == Phase::Blocked }
+            guard "target_matches" { self.item_key == Some(target_item_key) }
+            guard "partition_covers_blockers" { for_all(blocker_key in blocking_from_item_keys, satisfied_blocker_item_keys.contains(blocker_key) || unsatisfied_blocker_item_keys.contains(blocker_key)) }
+            guard "satisfied_subset" { for_all(blocker_key in satisfied_blocker_item_keys, blocking_from_item_keys.contains(blocker_key) && unsatisfied_blocker_item_keys.contains(blocker_key) == false) }
+            guard "unsatisfied_subset" { for_all(blocker_key in unsatisfied_blocker_item_keys, blocking_from_item_keys.contains(blocker_key) && satisfied_blocker_item_keys.contains(blocker_key) == false) }
             update {
-                self.unresolved_blocker_count = unresolved_blocker_count;
+                self.unresolved_blocker_count = unsatisfied_blocker_item_keys.len();
             }
             to Blocked
             emit Updated

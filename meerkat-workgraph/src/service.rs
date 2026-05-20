@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::WorkGraphError;
@@ -193,15 +193,17 @@ impl WorkGraphService {
             .ok_or_else(|| {
                 WorkGraphError::not_found(realm_id.clone(), namespace.clone(), request.id.clone())
             })?;
-        let unresolved_blockers = self
-            .unresolved_blocker_count_for_item(&realm_id, &namespace, &item)
+        let all_items = self
+            .store
+            .list_items(WorkItemFilter {
+                realm_id: Some(realm_id.clone()),
+                namespace: Some(namespace.clone()),
+                include_terminal: true,
+                ..WorkItemFilter::default()
+            })
             .await?;
-        let commit = WorkGraphMachine::claim_item_with_unresolved_blockers(
-            item,
-            unresolved_blockers,
-            request,
-            now,
-        )?;
+        let edges = self.store.list_edges(&realm_id, &namespace).await?;
+        let commit = WorkGraphMachine::claim_item(item, request, &all_items, &edges, now)?;
         self.store.update_item_cas(commit).await
     }
 
@@ -572,28 +574,6 @@ impl WorkGraphService {
             self.store.update_item_cas(commit).await?;
         }
         Ok(())
-    }
-
-    async fn unresolved_blocker_count_for_item(
-        &self,
-        realm_id: &str,
-        namespace: &WorkNamespace,
-        item: &WorkItem,
-    ) -> Result<u64, WorkGraphError> {
-        let all_items = self
-            .store
-            .list_items(WorkItemFilter {
-                realm_id: Some(realm_id.to_string()),
-                namespace: Some(namespace.clone()),
-                include_terminal: true,
-                ..WorkItemFilter::default()
-            })
-            .await?
-            .into_iter()
-            .map(|item| (item.id.clone(), item))
-            .collect::<BTreeMap<_, _>>();
-        let edges = self.store.list_edges(realm_id, namespace).await?;
-        WorkGraphMachine::unresolved_blocker_count_for_item(item, &all_items, &edges)
     }
 }
 

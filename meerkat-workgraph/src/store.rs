@@ -1214,6 +1214,7 @@ mod tests {
             )
             .await
             .expect("insert item");
+        let existing_items = vec![stored.clone()];
         let claimed = WorkGraphMachine::claim_item(
             stored,
             ClaimWorkItemRequest {
@@ -1225,6 +1226,8 @@ mod tests {
                 lease_seconds: Some(60),
                 lease_expires_at: None,
             },
+            &existing_items,
+            &[],
             now,
         )
         .expect("claim")

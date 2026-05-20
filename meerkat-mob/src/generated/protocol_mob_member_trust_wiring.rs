@@ -154,7 +154,9 @@ impl MobMemberTrustWiringObligation {
                         "generated comms trust descriptor for peer {peer_id:?} does not match requested mutation descriptor"
                     ));
                 }
-                meerkat_core::generated::comms_trust_authority_sources::mob_member_trust_wiring_public_add(self.epoch, if self.a_peer_id.0 == peer_id { self.b_peer_id.0.as_str() } else if self.b_peer_id.0 == peer_id { self.a_peer_id.0.as_str() } else { return Err(format!("MobMachine member trust obligation does not carry requested peer {peer_id:?}")); }, peer_descriptor)
+                let trust_store_peer_id = if self.a_peer_id.0 == peer_id { self.b_peer_id.0.as_str() } else if self.b_peer_id.0 == peer_id { self.a_peer_id.0.as_str() } else { return Err(format!("MobMachine member trust obligation does not carry requested peer {peer_id:?}")); }.to_string();
+                let generated_peer_id = peer_descriptor.peer_id.to_string();
+                meerkat_core::comms::CommsTrustMutationAuthority::from_generated_parts(meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring, meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicAdd, generated_peer_id, Some(trust_store_peer_id), Some(peer_descriptor))
             }
             _ => unreachable!("operation checked above"),
         }

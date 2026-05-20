@@ -114,7 +114,8 @@ impl MobExternalPeerTrustUnwiringObligation {
                         "generated comms trust remove for peer {peer_id:?} must not carry a trusted peer descriptor"
                     ));
                 }
-                meerkat_core::generated::comms_trust_authority_sources::mob_external_peer_trust_unwiring_public_remove(self.epoch, self.local_peer_id.0.as_str(), peer_id)
+                let trust_store_peer_id = self.local_peer_id.0.as_str().to_string();
+                meerkat_core::comms::CommsTrustMutationAuthority::from_generated_parts(meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustUnwiring, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring, meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicRemove, peer_id, Some(trust_store_peer_id), None)
             }
             _ => unreachable!("operation checked above"),
         }

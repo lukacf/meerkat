@@ -1153,7 +1153,8 @@ impl AuthLeaseTransition {
         }
     }
 
-    pub(crate) fn from_generated_auth_lease_publication_parts(
+    #[doc(hidden)]
+    pub fn from_generated_auth_lease_publication_parts(
         lease_key: LeaseKey,
         expires_at: u64,
         generation: u64,

@@ -414,7 +414,7 @@ fn emit_auth_lease_transition_authority_helper(
     obligation_type: &str,
 ) -> Result<()> {
     writeln!(out, "impl {obligation_type} {{")?;
-    writeln!(out, "    pub fn into_auth_lease_transition(")?;
+    writeln!(out, "    pub(crate) fn into_auth_lease_transition(")?;
     writeln!(out, "        &self,")?;
     writeln!(out, "        lease_key: meerkat_core::handles::LeaseKey,")?;
     writeln!(out, "        expires_at: u64,")?;
@@ -433,7 +433,7 @@ fn emit_auth_lease_transition_authority_helper(
     writeln!(out, "        }}")?;
     writeln!(
         out,
-        "        Ok(meerkat_core::generated::auth_lease_transition_authority_sources::auth_lease_lifecycle_publication_transition("
+        "        Ok(meerkat_core::handles::AuthLeaseTransition::from_generated_auth_lease_publication_parts("
     )?;
     writeln!(out, "            lease_key,")?;
     writeln!(out, "            expires_at,")?;
@@ -656,7 +656,11 @@ fn emit_comms_trust_grant_return(out: &mut String, protocol: &EffectHandoffProto
     writeln!(out, "        match operation {{")?;
     for operation in &trust_authority.allowed_operations {
         let operation_variant = operation.core_variant();
-        let mint_fn = comms_trust_mint_fn(protocol.name.as_str(), *operation)?;
+        let source_kind = trust_authority.source_kind.core_variant();
+        let row_owner_kind = trust_authority
+            .row_owner_kind
+            .unwrap_or(trust_authority.source_kind)
+            .core_variant();
         let target_peer_expr = comms_trust_target_peer_expr(protocol)?;
         let Some(target_peer_expr) = target_peer_expr else {
             bail!(
@@ -686,7 +690,15 @@ fn emit_comms_trust_grant_return(out: &mut String, protocol: &EffectHandoffProto
                 writeln!(out, "                }}")?;
                 writeln!(
                     out,
-                    "                meerkat_core::generated::comms_trust_authority_sources::{mint_fn}({}, {target_peer_expr}, peer_descriptor)",
+                    "                let trust_store_peer_id = {target_peer_expr}.to_string();"
+                )?;
+                writeln!(
+                    out,
+                    "                let generated_peer_id = peer_descriptor.peer_id.to_string();"
+                )?;
+                writeln!(
+                    out,
+                    "                meerkat_core::comms::CommsTrustMutationAuthority::from_generated_parts(meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{source_kind}, {}, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{row_owner_kind}, meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::{operation_variant}, generated_peer_id, Some(trust_store_peer_id), Some(peer_descriptor))",
                     comms_trust_epoch_expr(protocol)?,
                 )?;
                 writeln!(out, "            }}")?;
@@ -702,7 +714,11 @@ fn emit_comms_trust_grant_return(out: &mut String, protocol: &EffectHandoffProto
                 writeln!(out, "                }}")?;
                 writeln!(
                     out,
-                    "                meerkat_core::generated::comms_trust_authority_sources::{mint_fn}({}, {target_peer_expr}, peer_id)",
+                    "                let trust_store_peer_id = {target_peer_expr}.to_string();"
+                )?;
+                writeln!(
+                    out,
+                    "                meerkat_core::comms::CommsTrustMutationAuthority::from_generated_parts(meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{source_kind}, {}, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::{row_owner_kind}, meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::{operation_variant}, peer_id, Some(trust_store_peer_id), None)",
                     comms_trust_epoch_expr(protocol)?,
                 )?;
                 writeln!(out, "            }}")?;
@@ -715,19 +731,6 @@ fn emit_comms_trust_grant_return(out: &mut String, protocol: &EffectHandoffProto
     )?;
     writeln!(out, "        }}")?;
     Ok(())
-}
-
-fn comms_trust_mint_fn(
-    protocol_name: &str,
-    operation: CommsTrustAuthorityOperation,
-) -> Result<String> {
-    let operation_name = match operation {
-        CommsTrustAuthorityOperation::PublicAdd => "public_add",
-        CommsTrustAuthorityOperation::PublicRemove => "public_remove",
-        CommsTrustAuthorityOperation::PrivateAdd => "private_add",
-        CommsTrustAuthorityOperation::PrivateRemove => "private_remove",
-    };
-    Ok(format!("{protocol_name}_{operation_name}"))
 }
 
 fn emit_comms_trust_descriptor_helper(
@@ -1052,115 +1055,23 @@ fn comms_trust_target_peer_expr(protocol: &EffectHandoffProtocol) -> Result<Opti
     }
 }
 
-fn generate_comms_trust_authority_sources(compositions: &[CompositionSchema]) -> Result<String> {
+fn generate_comms_trust_authority_sources(_compositions: &[CompositionSchema]) -> Result<String> {
     let mut out = String::new();
     writeln!(
         &mut out,
-        "// @generated — comms trust authority mint helpers"
+        "// @generated — comms trust authority source marker"
     )?;
     writeln!(&mut out, "// Generated by `xtask protocol-codegen`")?;
     writeln!(&mut out)?;
     writeln!(
         &mut out,
-        "use crate::comms::{{CommsTrustMutationAuthority, GeneratedCommsTrustAuthorityOperation as Operation, GeneratedCommsTrustAuthoritySourceKind as Kind, TrustedPeerDescriptor}};"
-    )?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "fn mint_add(")?;
-    writeln!(&mut out, "    source_kind: Kind,")?;
-    writeln!(&mut out, "    source_epoch: u64,")?;
-    writeln!(&mut out, "    trust_row_owner_kind: Kind,")?;
-    writeln!(&mut out, "    trust_store_peer_id: impl Into<String>,")?;
-    writeln!(&mut out, "    operation: Operation,")?;
-    writeln!(&mut out, "    peer: TrustedPeerDescriptor,")?;
-    writeln!(
-        &mut out,
-        ") -> Result<CommsTrustMutationAuthority, String> {{"
-    )?;
-    writeln!(&mut out, "    let peer_id = peer.peer_id.to_string();")?;
-    writeln!(
-        &mut out,
-        "    CommsTrustMutationAuthority::from_generated_parts(source_kind, source_epoch, trust_row_owner_kind, operation, peer_id, Some(trust_store_peer_id.into()), Some(peer))"
-    )?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "fn mint_remove(")?;
-    writeln!(&mut out, "    source_kind: Kind,")?;
-    writeln!(&mut out, "    source_epoch: u64,")?;
-    writeln!(&mut out, "    trust_row_owner_kind: Kind,")?;
-    writeln!(&mut out, "    trust_store_peer_id: impl Into<String>,")?;
-    writeln!(&mut out, "    operation: Operation,")?;
-    writeln!(&mut out, "    peer_id: impl Into<String>,")?;
-    writeln!(
-        &mut out,
-        ") -> Result<CommsTrustMutationAuthority, String> {{"
+        "// Raw comms trust minting is intentionally not exposed from this public generated module."
     )?;
     writeln!(
         &mut out,
-        "    CommsTrustMutationAuthority::from_generated_parts(source_kind, source_epoch, trust_row_owner_kind, operation, peer_id, Some(trust_store_peer_id.into()), None)"
+        "// Protocol-specific generated obligation helpers mint authorities only after validating"
     )?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-
-    let mut entries = Vec::new();
-    for composition in compositions {
-        for protocol in &composition.handoff_protocols {
-            if let Some(trust_authority) = protocol.comms_trust_authority.as_ref() {
-                for operation in &trust_authority.allowed_operations {
-                    entries.push((
-                        protocol.name.as_str().to_string(),
-                        *operation,
-                        trust_authority.clone(),
-                    ));
-                }
-            }
-        }
-    }
-    entries.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-
-    for (protocol_name, operation, trust_authority) in entries {
-        let fn_name = comms_trust_mint_fn(protocol_name.as_str(), operation)?;
-        let source_kind = trust_authority.source_kind.core_variant();
-        let row_owner_kind = trust_authority
-            .row_owner_kind
-            .unwrap_or(trust_authority.source_kind)
-            .core_variant();
-        let operation_variant = operation.core_variant();
-        match operation {
-            CommsTrustAuthorityOperation::PublicAdd | CommsTrustAuthorityOperation::PrivateAdd => {
-                writeln!(&mut out, "pub fn {fn_name}(")?;
-                writeln!(&mut out, "    source_epoch: u64,")?;
-                writeln!(&mut out, "    trust_store_peer_id: impl Into<String>,")?;
-                writeln!(&mut out, "    peer: TrustedPeerDescriptor,")?;
-                writeln!(
-                    &mut out,
-                    ") -> Result<CommsTrustMutationAuthority, String> {{"
-                )?;
-                writeln!(
-                    &mut out,
-                    "    mint_add(Kind::{source_kind}, source_epoch, Kind::{row_owner_kind}, trust_store_peer_id, Operation::{operation_variant}, peer)"
-                )?;
-                writeln!(&mut out, "}}")?;
-                writeln!(&mut out)?;
-            }
-            CommsTrustAuthorityOperation::PublicRemove
-            | CommsTrustAuthorityOperation::PrivateRemove => {
-                writeln!(&mut out, "pub fn {fn_name}(")?;
-                writeln!(&mut out, "    source_epoch: u64,")?;
-                writeln!(&mut out, "    trust_store_peer_id: impl Into<String>,")?;
-                writeln!(&mut out, "    peer_id: impl Into<String>,")?;
-                writeln!(
-                    &mut out,
-                    ") -> Result<CommsTrustMutationAuthority, String> {{"
-                )?;
-                writeln!(
-                    &mut out,
-                    "    mint_remove(Kind::{source_kind}, source_epoch, Kind::{row_owner_kind}, trust_store_peer_id, Operation::{operation_variant}, peer_id)"
-                )?;
-                writeln!(&mut out, "}}")?;
-                writeln!(&mut out)?;
-            }
-        }
-    }
+    writeln!(&mut out, "// extracted machine/composition obligations.")?;
     Ok(out)
 }
 

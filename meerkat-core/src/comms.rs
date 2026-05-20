@@ -391,7 +391,8 @@ pub enum GeneratedCommsTrustAuthorityOperation {
 }
 
 impl CommsTrustMutationAuthority {
-    pub(crate) fn from_generated_parts(
+    #[doc(hidden)]
+    pub fn from_generated_parts(
         source_kind: GeneratedCommsTrustAuthoritySourceKind,
         source_epoch: u64,
         trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,

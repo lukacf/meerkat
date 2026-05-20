@@ -102,7 +102,9 @@ impl SupervisorTrustPublishObligation {
                         "generated comms trust descriptor for peer {peer_id:?} does not match requested mutation descriptor"
                     ));
                 }
-                meerkat_core::generated::comms_trust_authority_sources::supervisor_trust_publish_private_add(self.epoch, self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str(), peer_descriptor)
+                let trust_store_peer_id = self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str().to_string();
+                let generated_peer_id = peer_descriptor.peer_id.to_string();
+                meerkat_core::comms::CommsTrustMutationAuthority::from_generated_parts(meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish, meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PrivateAdd, generated_peer_id, Some(trust_store_peer_id), Some(peer_descriptor))
             }
             Operation::PrivateRemove => {
                 if peer_descriptor.is_some() {
@@ -110,7 +112,8 @@ impl SupervisorTrustPublishObligation {
                         "generated comms trust remove for peer {peer_id:?} must not carry a trusted peer descriptor"
                     ));
                 }
-                meerkat_core::generated::comms_trust_authority_sources::supervisor_trust_publish_private_remove(self.epoch, self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str(), peer_id)
+                let trust_store_peer_id = self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str().to_string();
+                meerkat_core::comms::CommsTrustMutationAuthority::from_generated_parts(meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish, meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PrivateRemove, peer_id, Some(trust_store_peer_id), None)
             }
             _ => unreachable!("operation checked above"),
         }

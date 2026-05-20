@@ -261,6 +261,13 @@ fn comms_trust_authority_minting_is_generated_only() {
         concat!("generated_comms_trust_", "authority::Sealed"),
         concat!("GeneratedCommsTrust", "AuthorityRequest"),
         concat!("GeneratedCommsTrust", "AuthorityGrant"),
+        concat!("__meerkat_core_generated_", "comms_trust_authority"),
+        concat!("__meerkat_core_generated_", "auth_lease_transition"),
+        concat!("generated::comms_trust_", "authority_sources::"),
+        concat!(
+            "auth_lease_transition_authority_sources::",
+            "auth_lease_lifecycle_publication_transition"
+        ),
     ];
     let mut violations = Vec::new();
     for path in files {
@@ -278,6 +285,6 @@ fn comms_trust_authority_minting_is_generated_only() {
 
     assert!(
         violations.is_empty(),
-        "comms trust authority must not reintroduce public source traits, grants, requests, or legacy public constructors; found {violations:?}",
+        "generated authority must not reintroduce public source traits, grants, requests, legacy public constructors, or raw public generated-module mint helpers; found {violations:?}",
     );
 }

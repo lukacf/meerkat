@@ -28,7 +28,7 @@ impl AuthLeaseLifecyclePublicationObligation {
 }
 
 impl AuthLeaseLifecyclePublicationObligation {
-    pub fn into_auth_lease_transition(
+    pub(crate) fn into_auth_lease_transition(
         &self,
         lease_key: meerkat_core::handles::LeaseKey,
         expires_at: u64,
@@ -39,12 +39,14 @@ impl AuthLeaseLifecyclePublicationObligation {
         {
             return Err("generated auth lease lifecycle publication was already consumed".into());
         }
-        Ok(meerkat_core::generated::auth_lease_transition_authority_sources::auth_lease_lifecycle_publication_transition(
-            lease_key,
-            expires_at,
-            self.credential_generation,
-            self.credential_published_at_millis,
-        ))
+        Ok(
+            meerkat_core::handles::AuthLeaseTransition::from_generated_auth_lease_publication_parts(
+                lease_key,
+                expires_at,
+                self.credential_generation,
+                self.credential_published_at_millis,
+            ),
+        )
     }
 }
 

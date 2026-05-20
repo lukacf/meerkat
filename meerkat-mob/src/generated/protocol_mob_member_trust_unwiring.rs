@@ -113,7 +113,8 @@ impl MobMemberTrustUnwiringObligation {
                         "generated comms trust remove for peer {peer_id:?} must not carry a trusted peer descriptor"
                     ));
                 }
-                meerkat_core::generated::comms_trust_authority_sources::mob_member_trust_unwiring_public_remove(self.epoch, if self.a_peer_id.0 == peer_id { self.b_peer_id.0.as_str() } else if self.b_peer_id.0 == peer_id { self.a_peer_id.0.as_str() } else { return Err(format!("MobMachine member trust obligation does not carry requested peer {peer_id:?}")); }, peer_id)
+                let trust_store_peer_id = if self.a_peer_id.0 == peer_id { self.b_peer_id.0.as_str() } else if self.b_peer_id.0 == peer_id { self.a_peer_id.0.as_str() } else { return Err(format!("MobMachine member trust obligation does not carry requested peer {peer_id:?}")); }.to_string();
+                meerkat_core::comms::CommsTrustMutationAuthority::from_generated_parts(meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustUnwiring, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring, meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicRemove, peer_id, Some(trust_store_peer_id), None)
             }
             _ => unreachable!("operation checked above"),
         }

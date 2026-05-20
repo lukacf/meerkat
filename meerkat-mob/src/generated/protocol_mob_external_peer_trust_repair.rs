@@ -140,7 +140,9 @@ impl MobExternalPeerTrustRepairObligation {
                         "generated comms trust descriptor for peer {peer_id:?} does not match requested mutation descriptor"
                     ));
                 }
-                meerkat_core::generated::comms_trust_authority_sources::mob_external_peer_trust_repair_public_add(self.epoch, self.local_peer_id.0.as_str(), peer_descriptor)
+                let trust_store_peer_id = self.local_peer_id.0.as_str().to_string();
+                let generated_peer_id = peer_descriptor.peer_id.to_string();
+                meerkat_core::comms::CommsTrustMutationAuthority::from_generated_parts(meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustRepair, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring, meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicAdd, generated_peer_id, Some(trust_store_peer_id), Some(peer_descriptor))
             }
             _ => unreachable!("operation checked above"),
         }

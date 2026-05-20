@@ -67,6 +67,35 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
 }
 
 #[test]
+fn workgraph_machine_state_wire_rejects_topology_mirror_fields() {
+    let value = serde_json::json!({
+        "lifecycle_phase": "open",
+        "revision": 1,
+        "unresolved_blocker_count": 0,
+        "topology_item_keys": [],
+        "claim_owner_key": null,
+        "claimed_at_utc_ms": null,
+        "lease_expires_at_utc_ms": null,
+        "due_at_utc_ms": null,
+        "not_before_utc_ms": null,
+        "snoozed_until_utc_ms": null,
+        "terminal_at_utc_ms": null,
+        "evidence_count": 0
+    });
+
+    let error = serde_json::from_value::<
+        meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkGraphLifecycleMachineState,
+    >(value)
+    .err()
+    .expect("topology mirror fields must fail closed");
+
+    assert!(
+        error.to_string().contains("topology_item_keys"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn external_tool_surface_failure_cause_fields_are_typed() {
     let schema = meerkat_machine();
     let cause_ty = TypeRef::Enum(

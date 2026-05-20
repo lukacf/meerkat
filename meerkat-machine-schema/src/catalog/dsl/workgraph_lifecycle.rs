@@ -1266,6 +1266,7 @@ impl<'de> serde::Deserialize<'de> for WorkLifecycleState {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WorkGraphLifecycleMachineStateWire {
     lifecycle_phase: WorkLifecycleState,
     revision: u64,
@@ -1276,14 +1277,6 @@ struct WorkGraphLifecycleMachineStateWire {
     #[serde(default)]
     evidence_ref_tokens: Vec<String>,
     unresolved_blocker_count: u64,
-    #[serde(default)]
-    topology_item_keys: std::collections::BTreeSet<WorkItemKey>,
-    #[serde(default)]
-    topology_edge_keys: std::collections::BTreeSet<WorkEdgeKey>,
-    #[serde(default)]
-    blocks_reachability: std::collections::BTreeSet<WorkDependencyPathKey>,
-    #[serde(default)]
-    parent_reachability: std::collections::BTreeSet<WorkDependencyPathKey>,
     claim_owner_key: Option<WorkOwnerKey>,
     claimed_at_utc_ms: Option<u64>,
     lease_expires_at_utc_ms: Option<u64>,
@@ -1303,10 +1296,6 @@ impl From<&WorkGraphLifecycleMachineState> for WorkGraphLifecycleMachineStateWir
             external_ref_tokens: state.external_ref_tokens.clone(),
             evidence_ref_tokens: state.evidence_ref_tokens.clone(),
             unresolved_blocker_count: state.unresolved_blocker_count,
-            topology_item_keys: Default::default(),
-            topology_edge_keys: Default::default(),
-            blocks_reachability: Default::default(),
-            parent_reachability: Default::default(),
             claim_owner_key: state.claim_owner_key.clone(),
             claimed_at_utc_ms: state.claimed_at_utc_ms,
             lease_expires_at_utc_ms: state.lease_expires_at_utc_ms,

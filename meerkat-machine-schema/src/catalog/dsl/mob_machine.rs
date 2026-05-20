@@ -489,9 +489,12 @@ macro_rules! mob_catalog_machine_dsl {
             //   transition": `old=None, new=Some` → set, `Some, Some` →
             //   rotate, `Some, None` → release.
             //
-            // Both carry the post-transition `topology_epoch` so the
-            // driver can linearize recomputes against the newest topology
-            // snapshot.
+            // Topology-change signals carry the post-transition
+            // `topology_epoch` so the driver can linearize recomputes
+            // against the newest topology snapshot. Trust handoffs carry the
+            // topology epoch they authorize; member unwiring is a two-step
+            // authorize-then-remove path, so its handoff carries the next
+            // epoch that the graph-removal transition must produce.
             WiringGraphChanged { epoch: u64 },
             MemberSessionBindingChanged { epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId> },
             MemberTrustWiringRequested { edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, a_endpoint: MemberPeerEndpoint, b_endpoint: MemberPeerEndpoint, epoch: u64 },
@@ -1790,7 +1793,7 @@ macro_rules! mob_catalog_machine_dsl {
                 edge: edge,
                 a_peer_id: self.member_peer_ids.get_cloned(a_identity).get("value"),
                 b_peer_id: self.member_peer_ids.get_cloned(b_identity).get("value"),
-                epoch: self.topology_epoch
+                epoch: self.topology_epoch + 1
             }
         }
 

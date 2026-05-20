@@ -246,33 +246,27 @@ fn comms_trust_authority_minting_is_generated_only() {
         }
     }
 
-    fn allowed_minting_file(root: &std::path::Path, path: &std::path::Path) -> bool {
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or_else(|_| panic!("strip repo root from {}", path.display()));
-        let rel = rel.to_string_lossy();
-        rel == "meerkat-core/src/comms.rs"
-            || rel == "xtask/src/protocol_codegen.rs"
-            || rel == "xtask/tests/protocol_codegen_drift.rs"
-            || (rel.contains("/src/generated/protocol_") && rel.ends_with(".rs"))
-    }
-
     let root = repo_root();
     let mut files = Vec::new();
     visit_rs_files(&root, &mut files);
 
     let patterns = [
-        "CommsTrustMutationAuthority::from_generated_",
-        "impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource",
-        "impl meerkat_core::comms::generated_comms_trust_authority::Sealed",
+        concat!("from_generated_", "public_"),
+        concat!("from_generated_", "private_"),
+        concat!("trait GeneratedCommsTrust", "AuthoritySource"),
+        concat!(
+            "impl meerkat_core::comms::GeneratedCommsTrust",
+            "AuthoritySource"
+        ),
+        concat!("generated_comms_trust_", "authority::Sealed"),
+        concat!("GeneratedCommsTrust", "AuthorityRequest"),
+        concat!("GeneratedCommsTrust", "AuthorityGrant"),
     ];
     let mut violations = Vec::new();
     for path in files {
         let source =
             std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {}", path.display()));
-        if patterns.iter().any(|pattern| source.contains(pattern))
-            && !allowed_minting_file(&root, &path)
-        {
+        if patterns.iter().any(|pattern| source.contains(pattern)) {
             violations.push(
                 path.strip_prefix(&root)
                     .unwrap_or_else(|_| panic!("strip repo root from {}", path.display()))
@@ -284,6 +278,6 @@ fn comms_trust_authority_minting_is_generated_only() {
 
     assert!(
         violations.is_empty(),
-        "comms trust authority minting/source impls must stay in generated protocol helpers or the codegen template; found {violations:?}",
+        "comms trust authority must not reintroduce public source traits, grants, requests, or legacy public constructors; found {violations:?}",
     );
 }

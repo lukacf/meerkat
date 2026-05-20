@@ -28,48 +28,45 @@ impl SupervisorTrustRevokeObligation {
     }
 }
 
-impl meerkat_core::comms::generated_comms_trust_authority::Sealed
-    for SupervisorTrustRevokeObligation
-{
-}
-impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for SupervisorTrustRevokeObligation {
-    fn comms_trust_authority_source_kind(
-        &self,
-    ) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
-        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke
-    }
-
+impl SupervisorTrustRevokeObligation {
     fn authorize_comms_trust_authority(
         &self,
-        request: &meerkat_core::comms::GeneratedCommsTrustAuthorityRequest<'_>,
-    ) -> Result<meerkat_core::comms::GeneratedCommsTrustAuthorityGrant, String> {
+        operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation,
+        peer_id: &str,
+        peer_descriptor: Option<meerkat_core::comms::TrustedPeerDescriptor>,
+    ) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {
         use meerkat_core::comms::GeneratedCommsTrustAuthorityOperation as Operation;
-        if !matches!(request.operation(), Operation::PrivateRemove) {
+        if !matches!(operation, Operation::PrivateRemove) {
             return Err(format!(
-                "generated comms trust source {:?} cannot authorize operation {:?}",
-                self.comms_trust_authority_source_kind(),
-                request.operation()
+                "generated comms trust source cannot authorize operation {operation:?}"
             ));
         }
-        if self.peer_id != request.peer_id() {
+        if self.peer_id != peer_id {
             return Err(format!(
-                "MeerkatMachine supervisor trust obligation peer_id {:?} does not match requested peer {:?}",
-                self.peer_id,
-                request.peer_id()
+                "MeerkatMachine supervisor trust obligation peer_id {:?} does not match requested peer {peer_id:?}",
+                self.peer_id
             ));
         }
-        let claim_key = format!("{:?}:{}", request.operation(), request.peer_id());
+        let claim_key = format!("{operation:?}:{peer_id}");
         let mut claims = self.comms_trust_authority_claims.lock().map_err(|_| {
             "generated comms trust authority source claims were poisoned".to_string()
         })?;
         if !claims.insert(claim_key) {
             return Err(format!(
-                "generated comms trust authority source already minted {:?} for peer {:?}",
-                request.operation(),
-                request.peer_id()
+                "generated comms trust authority source already minted {operation:?} for peer {peer_id:?}"
             ));
         }
-        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish).with_trust_store_peer_id(self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str()))
+        match operation {
+            Operation::PrivateRemove => {
+                if peer_descriptor.is_some() {
+                    return Err(format!(
+                        "generated comms trust remove for peer {peer_id:?} must not carry a trusted peer descriptor"
+                    ));
+                }
+                meerkat_core::generated::comms_trust_authority_sources::supervisor_trust_revoke_private_remove(self.epoch, self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str(), peer_id)
+            }
+            _ => unreachable!("operation checked above"),
+        }
     }
 }
 
@@ -118,8 +115,9 @@ pub fn revoke_authority_for_peer(
         &obligation.peer_id,
         expected_peer_id,
     )?;
-    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_private_remove(
-        obligation,
-        obligation.peer_id.clone(),
+    obligation.authorize_comms_trust_authority(
+        meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PrivateRemove,
+        obligation.peer_id.as_str(),
+        None,
     )
 }

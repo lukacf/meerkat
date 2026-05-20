@@ -390,209 +390,16 @@ pub enum GeneratedCommsTrustAuthorityOperation {
     PrivateRemove,
 }
 
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy)]
-pub struct GeneratedCommsTrustAuthorityRequest<'a> {
-    operation: GeneratedCommsTrustAuthorityOperation,
-    peer_id: &'a str,
-    peer_descriptor: Option<&'a TrustedPeerDescriptor>,
-}
-
-impl<'a> GeneratedCommsTrustAuthorityRequest<'a> {
-    pub fn operation(&self) -> GeneratedCommsTrustAuthorityOperation {
-        self.operation
-    }
-
-    pub fn peer_id(&self) -> &'a str {
-        self.peer_id
-    }
-
-    pub fn peer_descriptor(&self) -> Option<&'a TrustedPeerDescriptor> {
-        self.peer_descriptor
-    }
-}
-
-#[doc(hidden)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GeneratedCommsTrustAuthorityGrant {
-    operation: GeneratedCommsTrustAuthorityOperation,
-    source_epoch: u64,
-    trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
-    peer_id: String,
-    trust_store_peer_id: Option<String>,
-    peer_descriptor: Option<TrustedPeerDescriptor>,
-}
-
-impl GeneratedCommsTrustAuthorityGrant {
-    pub fn new(
-        request: &GeneratedCommsTrustAuthorityRequest<'_>,
-        source_epoch: u64,
-        trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
-    ) -> Self {
-        Self {
-            operation: request.operation,
-            source_epoch,
-            trust_row_owner_kind,
-            peer_id: request.peer_id.to_owned(),
-            trust_store_peer_id: None,
-            peer_descriptor: None,
-        }
-    }
-
-    pub fn new_add(
-        request: &GeneratedCommsTrustAuthorityRequest<'_>,
-        source_epoch: u64,
-        trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
-        peer_descriptor: TrustedPeerDescriptor,
-    ) -> Result<Self, String> {
-        if !matches!(
-            request.operation,
-            GeneratedCommsTrustAuthorityOperation::PublicAdd
-                | GeneratedCommsTrustAuthorityOperation::PrivateAdd
-        ) {
-            return Err(format!(
-                "generated comms trust descriptor grant cannot authorize {:?}",
-                request.operation
-            ));
-        }
-        let Some(requested_descriptor) = request.peer_descriptor else {
-            return Err(format!(
-                "generated comms trust add for peer {:?} requires a trusted peer descriptor",
-                request.peer_id
-            ));
-        };
-        if peer_descriptor.peer_id.to_string() != request.peer_id {
-            return Err(format!(
-                "generated comms trust descriptor peer_id {} does not match requested {:?}",
-                peer_descriptor.peer_id, request.peer_id
-            ));
-        }
-        if requested_descriptor != &peer_descriptor {
-            return Err(format!(
-                "generated comms trust descriptor for peer {:?} does not match requested mutation descriptor",
-                request.peer_id
-            ));
-        }
-        Ok(Self {
-            operation: request.operation,
-            source_epoch,
-            trust_row_owner_kind,
-            peer_id: request.peer_id.to_owned(),
-            trust_store_peer_id: None,
-            peer_descriptor: Some(peer_descriptor),
-        })
-    }
-
-    pub fn with_trust_store_peer_id(mut self, peer_id: impl Into<String>) -> Self {
-        self.trust_store_peer_id = Some(peer_id.into());
-        self
-    }
-}
-
-#[doc(hidden)]
-pub mod generated_comms_trust_authority {
-    #[doc(hidden)]
-    pub trait Sealed {}
-}
-
-#[doc(hidden)]
-pub trait GeneratedCommsTrustAuthoritySource: generated_comms_trust_authority::Sealed {
-    fn comms_trust_authority_source_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind;
-
-    fn authorize_comms_trust_authority(
-        &self,
-        request: &GeneratedCommsTrustAuthorityRequest<'_>,
-    ) -> Result<GeneratedCommsTrustAuthorityGrant, String>;
-}
-
 impl CommsTrustMutationAuthority {
-    #[doc(hidden)]
-    ///
-    /// Call only from generated protocol helpers that carry a typed obligation
-    /// extracted from an unforgeable generated machine transition.
-    pub fn from_generated_public_add(
-        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
-        peer: TrustedPeerDescriptor,
-    ) -> Result<Self, String> {
-        Self::from_generated_add(
-            source,
-            GeneratedCommsTrustAuthorityOperation::PublicAdd,
-            peer,
-        )
-    }
-
-    #[doc(hidden)]
-    ///
-    /// Call only from generated protocol helpers that carry a typed obligation
-    /// extracted from an unforgeable generated machine transition.
-    pub fn from_generated_public_remove(
-        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
-        peer_id: impl Into<String>,
-    ) -> Result<Self, String> {
-        Self::from_generated(
-            source,
-            GeneratedCommsTrustAuthorityOperation::PublicRemove,
-            peer_id,
-            None,
-        )
-    }
-
-    #[doc(hidden)]
-    ///
-    /// Call only from generated protocol helpers that carry a typed obligation
-    /// extracted from an unforgeable generated machine transition.
-    pub fn from_generated_private_add(
-        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
-        peer: TrustedPeerDescriptor,
-    ) -> Result<Self, String> {
-        Self::from_generated_add(
-            source,
-            GeneratedCommsTrustAuthorityOperation::PrivateAdd,
-            peer,
-        )
-    }
-
-    fn from_generated_add(
-        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
-        operation: GeneratedCommsTrustAuthorityOperation,
-        peer: TrustedPeerDescriptor,
-    ) -> Result<Self, String> {
-        let peer_id = peer.peer_id.to_string();
-        Self::from_generated(source, operation, peer_id, Some(peer))
-    }
-
-    #[doc(hidden)]
-    ///
-    /// Call only from generated protocol helpers that carry a typed obligation
-    /// extracted from an unforgeable generated machine transition.
-    pub fn from_generated_private_remove(
-        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
-        peer_id: impl Into<String>,
-    ) -> Result<Self, String> {
-        Self::from_generated(
-            source,
-            GeneratedCommsTrustAuthorityOperation::PrivateRemove,
-            peer_id,
-            None,
-        )
-    }
-
-    fn from_generated(
-        source: &(impl GeneratedCommsTrustAuthoritySource + ?Sized),
+    pub(crate) fn from_generated_parts(
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+        source_epoch: u64,
+        trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
         operation: GeneratedCommsTrustAuthorityOperation,
         peer_id: impl Into<String>,
+        trust_store_peer_id: Option<String>,
         peer_descriptor: Option<TrustedPeerDescriptor>,
     ) -> Result<Self, String> {
-        let source_kind = source.comms_trust_authority_source_kind();
-        let source_type_name = std::any::type_name_of_val(source);
-        if !crate::generated::comms_trust_authority_sources::source_type_allowed_for_kind(
-            source_kind,
-            source_type_name,
-        ) {
-            return Err(format!(
-                "generated comms trust source type {source_type_name:?} is not registered for {source_kind:?}",
-            ));
-        }
         let peer_id = peer_id.into();
         if matches!(
             operation,
@@ -604,43 +411,32 @@ impl CommsTrustMutationAuthority {
                 "generated comms trust add for peer {peer_id:?} requires a trusted peer descriptor"
             ));
         }
-        let request = GeneratedCommsTrustAuthorityRequest {
-            operation,
-            peer_id: peer_id.as_str(),
-            peer_descriptor: peer_descriptor.as_ref(),
-        };
-        let grant = source.authorize_comms_trust_authority(&request)?;
-        if grant.operation != operation {
+        if let Some(peer) = peer_descriptor.as_ref()
+            && peer.peer_id.to_string() != peer_id
+        {
             return Err(format!(
-                "generated comms trust source {source_kind:?} returned {returned:?} for requested {operation:?}",
-                returned = grant.operation,
-            ));
-        }
-        if grant.peer_id != peer_id {
-            return Err(format!(
-                "generated comms trust source {source_kind:?} returned peer_id {:?} for requested {:?}",
-                grant.peer_id, peer_id,
+                "generated comms trust descriptor peer_id {} does not match requested {:?}",
+                peer.peer_id, peer_id,
             ));
         }
         if matches!(
             operation,
-            GeneratedCommsTrustAuthorityOperation::PublicAdd
-                | GeneratedCommsTrustAuthorityOperation::PrivateAdd
-        ) && grant.peer_descriptor.as_ref() != peer_descriptor.as_ref()
+            GeneratedCommsTrustAuthorityOperation::PublicRemove
+                | GeneratedCommsTrustAuthorityOperation::PrivateRemove
+        ) && peer_descriptor.is_some()
         {
             return Err(format!(
-                "generated comms trust source {source_kind:?} returned descriptor for peer {:?} that does not match requested mutation descriptor",
-                grant.peer_id,
+                "generated comms trust remove for peer {peer_id:?} must not carry a trusted peer descriptor"
             ));
         }
         Ok(Self {
             source_kind,
-            source_epoch: grant.source_epoch,
-            trust_row_owner_kind: grant.trust_row_owner_kind,
+            source_epoch,
+            trust_row_owner_kind,
             operation,
-            peer_id: grant.peer_id,
-            trust_store_peer_id: grant.trust_store_peer_id,
-            peer_descriptor: grant.peer_descriptor,
+            peer_id,
+            trust_store_peer_id,
+            peer_descriptor,
             consumed: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -1595,41 +1391,30 @@ mod tests {
         Ok(())
     }
 
-    struct FakeGeneratedSource;
-
-    impl generated_comms_trust_authority::Sealed for FakeGeneratedSource {}
-
-    impl GeneratedCommsTrustAuthoritySource for FakeGeneratedSource {
-        fn comms_trust_authority_source_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind {
-            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection
-        }
-
-        fn authorize_comms_trust_authority(
-            &self,
-            _request: &GeneratedCommsTrustAuthorityRequest<'_>,
-        ) -> Result<GeneratedCommsTrustAuthorityGrant, String> {
-            panic!("unregistered fake source must be rejected before authorization");
-        }
-    }
-
     #[test]
-    fn handwritten_generated_source_cannot_mint_trust_authority() {
+    fn generated_trust_authority_rejects_descriptor_peer_mismatch() {
         let pubkey = [1u8; 32];
-        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let descriptor_peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let requested_peer_id = PeerId::from_ed25519_pubkey(&[2u8; 32]);
         let descriptor = TrustedPeerDescriptor::unsigned_with_pubkey(
             "fake",
-            peer_id.to_string(),
+            descriptor_peer_id.to_string(),
             pubkey,
             "inproc://fake",
         )
         .expect("valid descriptor");
-        let err = CommsTrustMutationAuthority::from_generated_public_add(
-            &FakeGeneratedSource,
-            descriptor,
+        let err = CommsTrustMutationAuthority::from_generated_parts(
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+            1,
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+            GeneratedCommsTrustAuthorityOperation::PublicAdd,
+            requested_peer_id.to_string(),
+            Some(requested_peer_id.to_string()),
+            Some(descriptor),
         )
-        .expect_err("unregistered handwritten source type must not mint authority");
+        .expect_err("descriptor for another peer must not mint authority");
         assert!(
-            err.contains("is not registered"),
+            err.contains("does not match requested"),
             "unexpected rejection: {err}"
         );
     }

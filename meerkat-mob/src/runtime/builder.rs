@@ -2162,6 +2162,10 @@ impl MobBuilder {
         #[cfg(not(feature = "runtime-adapter"))]
         let composition_binding = meerkat_runtime::composition::CompositionBinding::Standalone;
 
+        let dsl_topology_epoch = Arc::new(std::sync::atomic::AtomicU64::new(
+            dsl_authority.state().topology_epoch,
+        ));
+
         let actor = MobActor {
             definition,
             roster,
@@ -2192,6 +2196,7 @@ impl MobBuilder {
             pending_supervisor_rotation_fallback,
             spawn_policy,
             dsl_authority: *dsl_authority,
+            dsl_topology_epoch,
             machine_state_watch_tx,
             phase_watch_tx: phase_watch_tx_actor,
             default_external_tools_provider,

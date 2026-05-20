@@ -115,45 +115,31 @@ fn trusted_peer_descriptor_for_request(
     trusted_peer_descriptor_from_peer_endpoint(endpoint)
 }
 
-impl meerkat_core::comms::generated_comms_trust_authority::Sealed
-    for CommsTrustReconcileObligation
-{
-}
-impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for CommsTrustReconcileObligation {
-    fn comms_trust_authority_source_kind(
-        &self,
-    ) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
-        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection
-    }
-
+impl CommsTrustReconcileObligation {
     fn authorize_comms_trust_authority(
         &self,
-        request: &meerkat_core::comms::GeneratedCommsTrustAuthorityRequest<'_>,
-    ) -> Result<meerkat_core::comms::GeneratedCommsTrustAuthorityGrant, String> {
+        operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation,
+        peer_id: &str,
+        peer_descriptor: Option<meerkat_core::comms::TrustedPeerDescriptor>,
+    ) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {
         use meerkat_core::comms::GeneratedCommsTrustAuthorityOperation as Operation;
-        if !matches!(
-            request.operation(),
-            Operation::PublicAdd | Operation::PublicRemove
-        ) {
+        if !matches!(operation, Operation::PublicAdd | Operation::PublicRemove) {
             return Err(format!(
-                "generated comms trust source {:?} cannot authorize operation {:?}",
-                self.comms_trust_authority_source_kind(),
-                request.operation()
+                "generated comms trust source cannot authorize operation {operation:?}"
             ));
         }
         self.peer_projection_freshness_authority
             .validate_peer_projection_epoch(self.peer_projection_epoch)?;
-        match request.operation() {
+        match operation {
             Operation::PublicAdd => {
                 let requested = self
                     .direct_peer_endpoints
                     .iter()
                     .chain(self.mob_overlay_peer_endpoints.iter())
-                    .any(|endpoint| endpoint.peer_id.0 == request.peer_id());
+                    .any(|endpoint| endpoint.peer_id.0 == peer_id);
                 if !requested {
                     return Err(format!(
-                        "MeerkatMachine peer projection did not request trust for peer {:?}",
-                        request.peer_id()
+                        "MeerkatMachine peer projection did not request trust for peer {peer_id:?}"
                     ));
                 }
             }
@@ -162,36 +148,45 @@ impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for CommsTrustRecon
                     .direct_peer_endpoints
                     .iter()
                     .chain(self.mob_overlay_peer_endpoints.iter())
-                    .any(|endpoint| endpoint.peer_id.0 == request.peer_id());
+                    .any(|endpoint| endpoint.peer_id.0 == peer_id);
                 if still_requested {
                     return Err(format!(
-                        "MeerkatMachine peer projection still requests trust for peer {:?}",
-                        request.peer_id()
+                        "MeerkatMachine peer projection still requests trust for peer {peer_id:?}"
                     ));
                 }
             }
             _ => unreachable!("operation checked above"),
         }
-        let claim_key = format!("{:?}:{}", request.operation(), request.peer_id());
+        let claim_key = format!("{operation:?}:{peer_id}");
         let mut claims = self.comms_trust_authority_claims.lock().map_err(|_| {
             "generated comms trust authority source claims were poisoned".to_string()
         })?;
         if !claims.insert(claim_key) {
             return Err(format!(
-                "generated comms trust authority source already minted {:?} for peer {:?}",
-                request.operation(),
-                request.peer_id()
+                "generated comms trust authority source already minted {operation:?} for peer {peer_id:?}"
             ));
         }
-        if matches!(
-            request.operation(),
-            Operation::PublicAdd | Operation::PrivateAdd
-        ) {
-            let peer_descriptor = trusted_peer_descriptor_for_request(self, request.peer_id())?;
-            let grant = meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new_add(request, self.peer_projection_epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection, peer_descriptor)?;
-            return Ok(grant.with_trust_store_peer_id(self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str()));
+        match operation {
+            Operation::PublicAdd => {
+                let peer_descriptor = peer_descriptor.ok_or_else(|| format!("generated comms trust add for peer {peer_id:?} requires a trusted peer descriptor"))?;
+                let expected_descriptor = trusted_peer_descriptor_for_request(self, peer_id)?;
+                if expected_descriptor != peer_descriptor {
+                    return Err(format!(
+                        "generated comms trust descriptor for peer {peer_id:?} does not match requested mutation descriptor"
+                    ));
+                }
+                meerkat_core::generated::comms_trust_authority_sources::comms_trust_reconcile_public_add(self.peer_projection_epoch, self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str(), peer_descriptor)
+            }
+            Operation::PublicRemove => {
+                if peer_descriptor.is_some() {
+                    return Err(format!(
+                        "generated comms trust remove for peer {peer_id:?} must not carry a trusted peer descriptor"
+                    ));
+                }
+                meerkat_core::generated::comms_trust_authority_sources::comms_trust_reconcile_public_remove(self.peer_projection_epoch, self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str(), peer_id)
+            }
+            _ => unreachable!("operation checked above"),
         }
-        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.peer_projection_epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection).with_trust_store_peer_id(self.local_endpoint.as_ref().ok_or_else(|| "generated MeerkatMachine trust obligation did not carry local trust-store endpoint".to_string())?.peer_id.0.as_str()))
     }
 }
 
@@ -252,9 +247,10 @@ pub fn authority_for_endpoint(
             endpoint.peer_id.0
         ));
     }
-    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_public_add(
-        obligation,
-        trusted_peer_descriptor_from_peer_endpoint(endpoint)?,
+    obligation.authorize_comms_trust_authority(
+        meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicAdd,
+        endpoint.peer_id.0.as_str(),
+        Some(trusted_peer_descriptor_from_peer_endpoint(endpoint)?),
     )
 }
 
@@ -270,8 +266,9 @@ pub fn removal_authority_for_peer_id(
             "MeerkatMachine peer projection still requests trust for peer '{peer_id}'"
         ));
     }
-    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_public_remove(
-        obligation,
-        peer_id.to_string(),
+    obligation.authorize_comms_trust_authority(
+        meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicRemove,
+        peer_id,
+        None,
     )
 }

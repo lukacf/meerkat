@@ -9,13 +9,21 @@ use crate::machines::mob_machine::{
 
 #[derive(Debug, Clone)]
 pub struct MobTopologyFreshnessAuthority {
-    topology_epoch: Option<u64>,
+    topology_epoch: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl MobTopologyFreshnessAuthority {
     pub fn from_authority(authority: &crate::machines::mob_machine::MobMachineAuthority) -> Self {
+        Self::from_live_topology_epoch(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+            authority.state().topology_epoch,
+        )))
+    }
+
+    pub fn from_live_topology_epoch(
+        topology_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
         Self {
-            topology_epoch: Some(authority.state().topology_epoch),
+            topology_epoch: Some(topology_epoch),
         }
     }
 
@@ -26,9 +34,10 @@ impl MobTopologyFreshnessAuthority {
     }
 
     fn validate_topology_epoch(&self, expected_epoch: u64) -> Result<(), String> {
-        let Some(current_epoch) = self.topology_epoch else {
+        let Some(topology_epoch) = &self.topology_epoch else {
             return Err("generated MobMachine topology freshness authority is absent".to_string());
         };
+        let current_epoch = topology_epoch.load(std::sync::atomic::Ordering::Acquire);
         if current_epoch == expected_epoch {
             Ok(())
         } else {
@@ -68,49 +77,46 @@ impl MobMemberTrustUnwiringObligation {
     }
 }
 
-impl meerkat_core::comms::generated_comms_trust_authority::Sealed
-    for MobMemberTrustUnwiringObligation
-{
-}
-impl meerkat_core::comms::GeneratedCommsTrustAuthoritySource for MobMemberTrustUnwiringObligation {
-    fn comms_trust_authority_source_kind(
-        &self,
-    ) -> meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind {
-        meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustUnwiring
-    }
-
+impl MobMemberTrustUnwiringObligation {
     fn authorize_comms_trust_authority(
         &self,
-        request: &meerkat_core::comms::GeneratedCommsTrustAuthorityRequest<'_>,
-    ) -> Result<meerkat_core::comms::GeneratedCommsTrustAuthorityGrant, String> {
+        operation: meerkat_core::comms::GeneratedCommsTrustAuthorityOperation,
+        peer_id: &str,
+        peer_descriptor: Option<meerkat_core::comms::TrustedPeerDescriptor>,
+    ) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {
         use meerkat_core::comms::GeneratedCommsTrustAuthorityOperation as Operation;
-        if !matches!(request.operation(), Operation::PublicRemove) {
+        if !matches!(operation, Operation::PublicRemove) {
             return Err(format!(
-                "generated comms trust source {:?} cannot authorize operation {:?}",
-                self.comms_trust_authority_source_kind(),
-                request.operation()
+                "generated comms trust source cannot authorize operation {operation:?}"
             ));
         }
         self.mob_topology_freshness_authority
             .validate_topology_epoch(self.epoch)?;
-        if self.a_peer_id.0 != request.peer_id() && self.b_peer_id.0 != request.peer_id() {
+        if self.a_peer_id.0 != peer_id && self.b_peer_id.0 != peer_id {
             return Err(format!(
-                "MobMachine member trust obligation does not carry requested peer {:?}",
-                request.peer_id()
+                "MobMachine member trust obligation does not carry requested peer {peer_id:?}"
             ));
         }
-        let claim_key = format!("{:?}:{}", request.operation(), request.peer_id());
+        let claim_key = format!("{operation:?}:{peer_id}");
         let mut claims = self.comms_trust_authority_claims.lock().map_err(|_| {
             "generated comms trust authority source claims were poisoned".to_string()
         })?;
         if !claims.insert(claim_key) {
             return Err(format!(
-                "generated comms trust authority source already minted {:?} for peer {:?}",
-                request.operation(),
-                request.peer_id()
+                "generated comms trust authority source already minted {operation:?} for peer {peer_id:?}"
             ));
         }
-        Ok(meerkat_core::comms::GeneratedCommsTrustAuthorityGrant::new(request, self.epoch, meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring).with_trust_store_peer_id(if self.a_peer_id.0 == request.peer_id() { self.b_peer_id.0.as_str() } else if self.b_peer_id.0 == request.peer_id() { self.a_peer_id.0.as_str() } else { return Err(format!("MobMachine member trust obligation does not carry requested peer {:?}", request.peer_id())); }))
+        match operation {
+            Operation::PublicRemove => {
+                if peer_descriptor.is_some() {
+                    return Err(format!(
+                        "generated comms trust remove for peer {peer_id:?} must not carry a trusted peer descriptor"
+                    ));
+                }
+                meerkat_core::generated::comms_trust_authority_sources::mob_member_trust_unwiring_public_remove(self.epoch, if self.a_peer_id.0 == peer_id { self.b_peer_id.0.as_str() } else if self.b_peer_id.0 == peer_id { self.a_peer_id.0.as_str() } else { return Err(format!("MobMachine member trust obligation does not carry requested peer {peer_id:?}")); }, peer_id)
+            }
+            _ => unreachable!("operation checked above"),
+        }
     }
 }
 
@@ -193,8 +199,9 @@ pub fn unwiring_authority_for_identity(
     expected_peer_id: &str,
 ) -> Result<meerkat_core::comms::CommsTrustMutationAuthority, String> {
     let peer_id = required_peer_id_for_identity(obligation, identity, expected_peer_id)?;
-    meerkat_core::comms::CommsTrustMutationAuthority::from_generated_public_remove(
-        obligation,
-        peer_id.to_owned(),
+    obligation.authorize_comms_trust_authority(
+        meerkat_core::comms::GeneratedCommsTrustAuthorityOperation::PublicRemove,
+        peer_id,
+        None,
     )
 }

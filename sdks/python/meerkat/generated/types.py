@@ -1669,18 +1669,16 @@ realtime adapter today)."""
 
 # Status of a `live/refresh` request relative to the adapter pump.
 #
-# R4-5 (P3): the refresh path is asynchronous — `LiveAdapterHost::send_command`
-# returns when the command has been queued on the adapter's mpsc channel,
-# not when the adapter pump has applied the resulting `session.update`. The
+# R4-5 (P3): the refresh path is asynchronous — host queue acceptance happens
+# before the adapter pump has applied the resulting `session.update`. The
 # realtime stream is the source of truth for the actual refresh outcome
 # (failures surface as `LiveAdapterObservation::Error`).
 #
-# Today every refresh path is `Queued`. The enum is `#[non_exhaustive]` so
-# a future revision can add `AppliedSync` (e.g. when a oneshot ack from the
-# adapter pump back through the command channel lands, or when a refresh
-# is detected as a no-op against the currently-applied snapshot) without
-# breaking the wire shape. SDK consumers route on the string value and
-# treat unknown values as "outcome unknown — observe the realtime stream".
+# Today generated runtime authority emits only `Queued`. The enum is
+# `#[non_exhaustive]` so a future generated contract can add a typed status
+# without changing the object shape. SDK consumers must route on the string
+# value and fail closed for values outside the generated contract they were
+# built with.
 #
 # Serializes as a plain string (no envelope) so [`LiveRefreshResult`] can
 # place this typed status alongside the back-compat `refresh_enqueued`

@@ -46,7 +46,8 @@ use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::ToolError;
 use meerkat_core::live_adapter::{
     LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterErrorCode,
-    LiveAdapterObservation, LiveAdapterStatus, LiveInputChunk, LiveToolResult,
+    LiveAdapterObservation, LiveAdapterStatus, LiveInputChunk, LiveRefreshQueueAcceptance,
+    LiveToolResult,
 };
 use meerkat_core::types::{SessionId, StopReason, ToolCall, ToolResult, Usage};
 use serde_json::value::RawValue;
@@ -550,6 +551,7 @@ struct ChannelState {
     /// not by the host asserting `Ready` at attach time (F32, F33).
     status: LiveAdapterStatus,
     snapshot_version: u64,
+    refresh_acceptance_sequence: u64,
     adapter: Option<Arc<dyn LiveAdapter>>,
     /// When `Some`, the channel was closed and is retained until this instant
     /// (G42). Reads are still serviced; commands are rejected.
@@ -602,6 +604,8 @@ pub enum LiveAdapterHostError {
     SessionAlreadyBound(SessionId),
     #[error("no adapter attached to channel {0}")]
     NoAdapter(LiveChannelId),
+    #[error("unsupported host command: {0}")]
+    UnsupportedCommand(&'static str),
     /// E29: typed adapter error preserved structurally (not flattened to String).
     #[error(transparent)]
     AdapterError(#[from] LiveAdapterError),
@@ -910,6 +914,7 @@ impl LiveAdapterHost {
                 session_id: session_id.clone(),
                 status: LiveAdapterStatus::Opening,
                 snapshot_version: 0,
+                refresh_acceptance_sequence: 0,
                 adapter: None,
                 retire_at: None,
                 bound_llm_identity: None,
@@ -994,11 +999,46 @@ impl LiveAdapterHost {
         channel_id: &LiveChannelId,
         command: LiveAdapterCommand,
     ) -> Result<(), LiveAdapterHostError> {
+        if matches!(&command, LiveAdapterCommand::Refresh { .. }) {
+            return Err(LiveAdapterHostError::UnsupportedCommand(
+                "refresh commands must use LiveAdapterHost::enqueue_refresh",
+            ));
+        }
         let adapter = self
             .adapter_for(channel_id, /* require_ready = */ false)
             .await?;
         adapter.send_command(command).await?;
         Ok(())
+    }
+
+    /// Enqueue a refresh command and return typed queue-acceptance evidence.
+    ///
+    /// The acceptance receipt is minted only after the adapter command queue
+    /// accepts the refresh. MeerkatMachine consumes the receipt to decide the
+    /// public `live/refresh` result; the host does not construct that result.
+    pub async fn enqueue_refresh(
+        &self,
+        channel_id: &LiveChannelId,
+        snapshot: meerkat_core::live_adapter::LiveProjectionSnapshot,
+    ) -> Result<LiveRefreshQueueAcceptance, LiveAdapterHostError> {
+        let adapter = self
+            .adapter_for(channel_id, /* require_ready = */ false)
+            .await?;
+        adapter
+            .send_command(LiveAdapterCommand::Refresh { snapshot })
+            .await?;
+
+        let mut inner = self.inner.lock().await;
+        let channel = inner
+            .channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        channel.refresh_acceptance_sequence = channel.refresh_acceptance_sequence.saturating_add(1);
+        LiveRefreshQueueAcceptance::from_host_queue_acceptance(
+            channel_id.as_str().to_owned(),
+            channel.refresh_acceptance_sequence,
+        )
+        .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
     }
 
     /// Send an input chunk to the adapter on a channel.
@@ -2465,6 +2505,31 @@ mod tests {
         // F31: with no adapter, status is still `Opening`; rejection is the
         // not-ready guard. (If status were `Ready`, we'd hit `NoAdapter`.)
         assert!(matches!(err, LiveAdapterHostError::ChannelNotReady(_, _)));
+    }
+
+    #[tokio::test]
+    async fn send_command_rejects_refresh_without_typed_acceptance_path() {
+        let session_id = test_session_id();
+        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
+        let ch = host.open_channel(session_id.clone()).await.unwrap();
+        let snapshot = meerkat_core::live_adapter::LiveProjectionSnapshot {
+            session_id,
+            snapshot_version: 1,
+            seed_messages: vec![],
+            visible_tools: vec![],
+            system_prompt: None,
+            model_id: "model-a".into(),
+            provider_id: "provider-a".into(),
+            audio_config: None,
+            runtime_system_context: vec![],
+        };
+
+        let err = host
+            .send_command(&ch, LiveAdapterCommand::Refresh { snapshot })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LiveAdapterHostError::UnsupportedCommand(_)));
     }
 
     #[tokio::test]

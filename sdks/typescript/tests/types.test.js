@@ -1381,6 +1381,33 @@ describe("Session wrappers", () => {
     });
   });
 
+  it("drops malformed resolved capabilities instead of fabricating false defaults", async () => {
+    const client = new MeerkatClient();
+    client.request = async (method) => {
+      assert.equal(method, "session/read");
+      return {
+        session_id: "s1",
+        created_at: 10,
+        updated_at: 20,
+        message_count: 2,
+        is_active: false,
+        resolved_capabilities: {
+          vision: true,
+          image_input: true,
+          image_tool_results: true,
+          inline_video: false,
+          realtime: false,
+          web_search: "yes",
+          image_generation: true,
+        },
+      };
+    };
+
+    const details = await client.readSession("s1");
+
+    assert.equal(details.resolvedCapabilities, undefined);
+  });
+
   it("session/deferred injectContext call public wrapper", async () => {
     const calls = [];
     const client = new MeerkatClient();
@@ -2001,6 +2028,29 @@ describe("Parity wrappers", () => {
     assert.equal(calls[1].params.session_id, "s1");
     assert.equal(calls[1].params.kind, "generic_json");
     assert.equal(calls[1].params.event_type, "test");
+  });
+
+  it("rejects missing or malformed models/catalog contract_version", async () => {
+    const malformedResponses = [
+      { providers: [] },
+      { contract_version: { major: -1, minor: 5, patch: 1 }, providers: [] },
+    ];
+
+    for (const response of malformedResponses) {
+      const client = new MeerkatClient();
+      client.request = async (method) => {
+        assert.equal(method, "models/catalog");
+        return response;
+      };
+
+      await assert.rejects(
+        () => client.getModelsCatalog(),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          String(error.message).includes("contract_version"),
+      );
+    }
   });
 
   it("adds wrappers for schedule APIs", async () => {
@@ -2707,6 +2757,48 @@ describe("Mob ready wait wrappers", () => {
     assert.equal(direct[0].agentIdentity, "lead");
     assert.equal(legacy[0].agentIdentity, "lead");
     assert.equal(fromHandle[0].agentIdentity, "lead");
+  });
+});
+
+describe("Live wrappers", () => {
+  it("returns generated live/refresh result only when required fields are present", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return { status: "queued", refresh_enqueued: true };
+    };
+
+    const result = await client.liveRefresh({ channel_id: "live_channel_42" });
+
+    assert.deepEqual(calls, [
+      { method: "live/refresh", params: { channel_id: "live_channel_42" } },
+    ]);
+    assert.deepEqual(result, { status: "queued", refresh_enqueued: true });
+  });
+
+  it("rejects missing or unknown live/refresh generated status", async () => {
+    const malformedResponses = [
+      { refresh_enqueued: true },
+      { status: "queued" },
+      { status: "applied_sync", refresh_enqueued: true },
+    ];
+
+    for (const response of malformedResponses) {
+      const client = new MeerkatClient();
+      client.request = async (method) => {
+        assert.equal(method, "live/refresh");
+        return response;
+      };
+
+      await assert.rejects(
+        () => client.liveRefresh({ channel_id: "live_channel_43" }),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          String(error.message).includes("Invalid live/refresh response"),
+      );
+    }
   });
 });
 

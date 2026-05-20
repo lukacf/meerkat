@@ -634,8 +634,9 @@ pub async fn handle_live_close(
 /// identity is bound at WebSocket handshake time.
 ///
 /// Triggered by upstream session-state changes (mutable-config edits via
-/// `config/patch`, instructions drift after a session edit, etc.). Maps to
-/// [`LiveAdapterCommand::Refresh { snapshot }`].
+/// `config/patch`, instructions drift after a session edit, etc.). The host
+/// maps this to [`LiveAdapterCommand::Refresh { snapshot }`] and returns typed
+/// queue-acceptance evidence.
 ///
 /// The adapter does not decide whether the refresh is legal — the runtime
 /// builds a snapshot from the same `live_open_config_for_session` helper
@@ -644,15 +645,12 @@ pub async fn handle_live_close(
 /// observation.
 ///
 /// **R7 — honest response shape.** The reply field is `refresh_enqueued`,
-/// not `refreshed`. `LiveAdapterHost::send_command` queues the command on
-/// the adapter's mpsc command channel and returns once the queue accepts
-/// it; the adapter pump applies the refresh asynchronously. The RPC reply
-/// only confirms enqueue. Callers that need the actual refresh outcome
-/// must observe the adapter's realtime stream — failures surface as
-/// `LiveAdapterObservation::Error`. A future revision may add a oneshot
-/// ack from the adapter pump back through the command channel; today the
-/// pump is fire-and-forget and adding the ack would require coordinated
-/// changes in every provider's pump (out of scope for this fix wave).
+/// not `refreshed`. `LiveAdapterHost::enqueue_refresh` queues the command on
+/// the adapter command channel and returns typed queue-acceptance evidence;
+/// generated MeerkatMachine authority projects that evidence to the public
+/// result class. The adapter pump applies the refresh asynchronously. Callers
+/// that need the actual refresh outcome must observe the adapter's realtime
+/// stream — failures surface as `LiveAdapterObservation::Error`.
 pub async fn handle_live_refresh(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
@@ -708,18 +706,15 @@ pub async fn handle_live_refresh(
         Err(err) => return RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
     }
 
-    match host
-        .send_command(&channel_id, LiveAdapterCommand::Refresh { snapshot })
-        .await
-    {
+    match host.enqueue_refresh(&channel_id, snapshot).await {
         // R7 + Dogma #1: host queue acceptance is an observation only. The
         // public `status: queued` discriminator and the back-compat
         // `refresh_enqueued` mirror are emitted by generated MeerkatMachine
         // authority before the RPC surface projects the wire payload.
-        Ok(()) => {
+        Ok(acceptance) => {
             let authority = match runtime
                 .runtime_adapter()
-                .resolve_live_refresh_queued_result(&session_id, channel_id.as_str())
+                .resolve_live_refresh_queued_result(&session_id, &acceptance)
                 .await
             {
                 Ok(authority) => authority,
@@ -1474,12 +1469,12 @@ mod tests {
 
     // ---------------------------------------------------------------------
     // P1#5: live/refresh dispatches LiveAdapterCommand::Refresh through
-    // LiveAdapterHost::send_command on the channel's adapter.
+    // LiveAdapterHost::enqueue_refresh on the channel's adapter.
     // ---------------------------------------------------------------------
 
     /// P1#5: an adapter that records every command it receives so the test
     /// can assert that `Refresh { snapshot }` actually propagates through
-    /// `LiveAdapterHost::send_command`.
+    /// `LiveAdapterHost::enqueue_refresh`.
     struct RecordingAdapter {
         log: Arc<tokio::sync::Mutex<Vec<LiveAdapterCommand>>>,
     }
@@ -1509,13 +1504,10 @@ mod tests {
         }
     }
 
-    /// P1#5: the host-level send_command path must forward
+    /// P1#5: the host-level refresh enqueue path must forward
     /// `LiveAdapterCommand::Refresh { snapshot }` verbatim to the channel's
-    /// adapter. `handle_live_refresh` calls `host.send_command(channel_id,
-    /// Refresh { snapshot })` after building a fresh snapshot from the
-    /// session's runtime config; this test pins the host-side dispatch
-    /// half of that path so a future refactor that drops the Refresh arm
-    /// or routes it elsewhere fails here.
+    /// adapter and mint typed queue-acceptance evidence. `handle_live_refresh`
+    /// consumes that evidence before projecting the generated machine result.
     #[tokio::test]
     async fn host_forwards_refresh_command_to_adapter() {
         use meerkat_core::live_adapter::LiveProjectionSnapshot;
@@ -1551,14 +1543,12 @@ mod tests {
             audio_config: None,
             runtime_system_context: vec![],
         };
-        host.send_command(
-            &channel_id,
-            LiveAdapterCommand::Refresh {
-                snapshot: snapshot.clone(),
-            },
-        )
-        .await
-        .expect("send Refresh command");
+        let acceptance = host
+            .enqueue_refresh(&channel_id, snapshot.clone())
+            .await
+            .expect("enqueue Refresh command");
+        assert_eq!(acceptance.channel_id(), channel_id.as_str());
+        assert_eq!(acceptance.acceptance_sequence(), 1);
 
         let recorded = log.lock().await;
         assert_eq!(recorded.len(), 1, "exactly one command should be recorded");
@@ -1626,10 +1616,11 @@ mod tests {
 
     // ---------------------------------------------------------------------
     // R7: live/refresh's reply field is `refresh_enqueued`, not
-    // `refreshed`, because `LiveAdapterHost::send_command` returns when the
-    // command is queued on the adapter's mpsc channel — not when the pump
-    // has applied it. The field name documents the honest semantics; the
-    // realtime stream is the source of truth for the actual outcome.
+    // `refreshed`, because `LiveAdapterHost::enqueue_refresh` returns typed
+    // evidence that the command was queued on the adapter command channel —
+    // not that the pump has applied it. The field name documents the honest
+    // semantics; the realtime stream is the source of truth for the actual
+    // outcome.
     // ---------------------------------------------------------------------
 
     /// R7: reconstruct the success-reply shape `handle_live_refresh` emits
@@ -1644,6 +1635,7 @@ mod tests {
             status: meerkat_runtime::meerkat_machine::dsl::LiveRefreshPublicStatus::Queued,
             refresh_enqueued: true,
             sequence: 1,
+            queue_acceptance_sequence: 1,
         };
         let reply = serde_json::to_value(
             live_refresh_result_from_machine_authority(&authority)
@@ -1661,8 +1653,8 @@ mod tests {
              pump is async and the field name was a lie about completion timing"
         );
         // R4-5 (P3): typed status discriminator coexists with the legacy
-        // boolean. New SDK code routes on `status` and treats unknown
-        // variants as "outcome unknown — observe the realtime stream".
+        // boolean. SDKs fail closed for statuses outside their generated
+        // contract.
         assert_eq!(
             reply.get("status"),
             Some(&serde_json::Value::String("queued".into())),
@@ -1746,9 +1738,9 @@ mod tests {
                 .next_snapshot_version(&channel_id)
                 .await
                 .expect("next_snapshot_version");
-            host.send_command(&channel_id, LiveAdapterCommand::Refresh { snapshot })
+            host.enqueue_refresh(&channel_id, snapshot)
                 .await
-                .expect("send Refresh");
+                .expect("enqueue Refresh");
         }
 
         let recorded = log.lock().await;

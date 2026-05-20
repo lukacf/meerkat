@@ -4,14 +4,15 @@ impl MeerkatMachine {
     pub async fn resolve_live_refresh_queued_result(
         &self,
         session_id: &SessionId,
-        channel_id: impl Into<String>,
+        acceptance: &meerkat_core::live_adapter::LiveRefreshQueueAcceptance,
     ) -> Result<LiveRefreshResultAuthority, RuntimeDriverError> {
-        let channel_id = channel_id.into();
+        let channel_id = acceptance.channel_id().to_string();
         let (_, effects) = self
             .apply_session_dsl_input(
                 session_id,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveRefreshQueued {
                     channel_id: channel_id.clone(),
+                    queue_acceptance_sequence: acceptance.acceptance_sequence(),
                 },
                 "RecordLiveRefreshQueued",
             )
@@ -27,10 +28,12 @@ impl MeerkatMachine {
                     status,
                     refresh_enqueued,
                     sequence,
+                    queue_acceptance_sequence,
                 } if *effect_channel_id == channel_id => Some(LiveRefreshResultAuthority {
                     status: *status,
                     refresh_enqueued: *refresh_enqueued,
                     sequence: *sequence,
+                    queue_acceptance_sequence: *queue_acceptance_sequence,
                 }),
                 _ => None,
             })

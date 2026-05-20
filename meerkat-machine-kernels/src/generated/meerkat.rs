@@ -6548,6 +6548,7 @@ pub struct State {
     pub surface_request_terminal_policies:
         std::collections::BTreeMap<String, SurfaceRequestTerminalPolicy>,
     pub live_refresh_result_sequence: u64,
+    pub live_refresh_queue_acceptance_sequence_by_channel: std::collections::BTreeMap<String, u64>,
     pub live_refresh_status_by_channel: std::collections::BTreeMap<String, LiveRefreshPublicStatus>,
     pub known_surfaces: std::collections::BTreeSet<String>,
     pub active_surfaces: std::collections::BTreeSet<String>,
@@ -7336,6 +7337,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordLiveRefreshQueued {
         pub channel_id: String,
+        pub queue_acceptance_sequence: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnDrain {
@@ -8657,6 +8659,7 @@ pub mod effects {
         pub status: LiveRefreshPublicStatus,
         pub refresh_enqueued: bool,
         pub sequence: u64,
+        pub queue_acceptance_sequence: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnqueueClassifiedEntry {}
@@ -10213,6 +10216,7 @@ pub fn initial_state() -> State {
         surface_request_phases: Default::default(),
         surface_request_terminal_policies: Default::default(),
         live_refresh_result_sequence: 0,
+        live_refresh_queue_acceptance_sequence_by_channel: Default::default(),
         live_refresh_status_by_channel: Default::default(),
         known_surfaces: Default::default(),
         active_surfaces: Default::default(),

@@ -1275,6 +1275,7 @@ pub struct LiveRefreshResultAuthority {
     pub status: dsl::LiveRefreshPublicStatus,
     pub refresh_enqueued: bool,
     pub sequence: u64,
+    pub queue_acceptance_sequence: u64,
 }
 
 /// Session-scoped execution kernel for the Meerkat runtime.

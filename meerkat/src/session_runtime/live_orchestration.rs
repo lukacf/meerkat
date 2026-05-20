@@ -949,19 +949,13 @@ mod orchestrator {
                         continue;
                     }
                 }
-                if let Err(err) = host
-                    .send_command(
-                        &channel_id,
-                        meerkat_core::live_adapter::LiveAdapterCommand::Refresh { snapshot },
-                    )
-                    .await
-                {
+                if let Err(err) = host.enqueue_refresh(&channel_id, snapshot).await {
                     tracing::warn!(
                         target: "meerkat::session_runtime::live_orchestration",
                         ?channel_id,
                         ?session_id,
                         ?err,
-                        "failed to dispatch Refresh command to live channel"
+                        "failed to enqueue Refresh command to live channel"
                     );
                 }
             }

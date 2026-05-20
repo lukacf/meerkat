@@ -2496,13 +2496,13 @@ export class MeerkatClient {
    * identity and rejects swaps with a typed adapter-level error.
    *
    * R4-5 (P3): the result is a typed `LiveRefreshResult` carrying both the
-   * typed `status` discriminator (today: always `"queued"`; the wire enum
-   * is open so future variants like `applied_sync` can land without breaking
-   * the shape) and the legacy `refresh_enqueued: true` back-compat boolean.
-   * The host's `send_command` returns when the command has been queued on
-   * the adapter's mpsc channel; the adapter pump applies the
-   * `session.update` asynchronously, and the realtime stream is the source
-   * of truth for the actual outcome (failures surface as
+   * generated-authority `status` discriminator (today: `"queued"`) and the
+   * legacy `refresh_enqueued: true` back-compat boolean. This SDK build
+   * accepts the generated status set it was built with and rejects missing or
+   * unknown status values until regenerated for a newer contract. The host
+   * queue acceptance happens before this result is projected; the adapter
+   * pump applies the `session.update` asynchronously, and the realtime stream
+   * is the source of truth for the actual outcome (failures surface as
    * `WireLiveAdapterObservation::Error`).
    */
   async liveRefresh(params: LiveChannelParams): Promise<LiveRefreshResult> {
@@ -2510,7 +2510,7 @@ export class MeerkatClient {
       "live/refresh",
       params as unknown as Record<string, unknown>,
     );
-    return result as unknown as LiveRefreshResult;
+    return MeerkatClient.parseLiveRefreshResult(result);
   }
 
   /**
@@ -2861,6 +2861,27 @@ export class MeerkatClient {
     return value;
   }
 
+  private static parseLiveRefreshResult(raw: unknown): LiveRefreshResult {
+    const context = "Invalid live/refresh response";
+    const record = MeerkatClient.requireRecord(raw, "result", context);
+    const refreshEnqueued = MeerkatClient.requireBooleanField(
+      record,
+      "refresh_enqueued",
+      context,
+    );
+    const status = MeerkatClient.requireStringField(record, "status", context);
+    if (status !== "queued") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: unsupported status ${JSON.stringify(status)}`,
+      );
+    }
+    return {
+      refresh_enqueued: refreshEnqueued,
+      status,
+    };
+  }
+
   private static parseSkillDiagnostics(raw: unknown): SkillRuntimeDiagnostics | undefined {
     if (!raw || typeof raw !== "object") return undefined;
     const data = raw as Record<string, unknown>;
@@ -3013,14 +3034,32 @@ export class MeerkatClient {
       return undefined;
     }
     const raw = data as Record<string, unknown>;
+    const vision = raw.vision;
+    const imageInput = raw.image_input;
+    const imageToolResults = raw.image_tool_results;
+    const inlineVideo = raw.inline_video;
+    const realtime = raw.realtime;
+    const webSearch = raw.web_search;
+    const imageGeneration = raw.image_generation;
+    if (
+      typeof vision !== "boolean" ||
+      typeof imageInput !== "boolean" ||
+      typeof imageToolResults !== "boolean" ||
+      typeof inlineVideo !== "boolean" ||
+      typeof realtime !== "boolean" ||
+      typeof webSearch !== "boolean" ||
+      typeof imageGeneration !== "boolean"
+    ) {
+      return undefined;
+    }
     return {
-      vision: Boolean(raw.vision),
-      imageInput: Boolean(raw.image_input),
-      imageToolResults: Boolean(raw.image_tool_results),
-      inlineVideo: Boolean(raw.inline_video),
-      realtime: Boolean(raw.realtime),
-      webSearch: Boolean(raw.web_search),
-      imageGeneration: Boolean(raw.image_generation),
+      vision,
+      imageInput,
+      imageToolResults,
+      inlineVideo,
+      realtime,
+      webSearch,
+      imageGeneration,
     };
   }
 
@@ -3061,24 +3100,10 @@ export class MeerkatClient {
     const providersRaw = Array.isArray(data.providers)
       ? (data.providers as Array<Record<string, unknown>>)
       : [];
-    let contractVersion = { major: 0, minor: 0, patch: 0 };
-    if (data.contract_version && typeof data.contract_version === "object") {
-      const contractVersionRaw = data.contract_version as Record<string, unknown>;
-      contractVersion = {
-        major: Number(contractVersionRaw.major ?? 0),
-        minor: Number(contractVersionRaw.minor ?? 0),
-        patch: Number(contractVersionRaw.patch ?? 0),
-      };
-    } else if (typeof data.contract_version === "string") {
-      const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(data.contract_version);
-      if (match) {
-        contractVersion = {
-          major: Number(match[1]),
-          minor: Number(match[2]),
-          patch: Number(match[3]),
-        };
-      }
-    }
+    const contractVersion = MeerkatClient.parseContractVersion(
+      data.contract_version,
+      "Invalid models/catalog response",
+    );
     return {
       contractVersion,
       providers: providersRaw.map((provider) => ({
@@ -3136,6 +3161,45 @@ export class MeerkatClient {
           : [],
       })),
     };
+  }
+
+  private static parseContractVersion(raw: unknown, context: string): {
+    major: number;
+    minor: number;
+    patch: number;
+  } {
+    const parseComponent = (value: unknown, field: string): number => {
+      if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+        return value;
+      }
+      if (typeof value === "string" && /^\d+$/.test(value)) {
+        return Number(value);
+      }
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: contract_version.${field} must be non-negative integer`,
+      );
+    };
+
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      const record = raw as Record<string, unknown>;
+      return {
+        major: parseComponent(record.major, "major"),
+        minor: parseComponent(record.minor, "minor"),
+        patch: parseComponent(record.patch, "patch"),
+      };
+    }
+    if (typeof raw === "string") {
+      const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(raw);
+      if (match) {
+        return {
+          major: parseComponent(match[1], "major"),
+          minor: parseComponent(match[2], "minor"),
+          patch: parseComponent(match[3], "patch"),
+        };
+      }
+    }
+    throw new MeerkatError("INVALID_RESPONSE", `${context}: missing contract_version`);
   }
 
   static parseSchedule(data: Record<string, unknown>): Schedule {

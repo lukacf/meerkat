@@ -1777,6 +1777,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             // below owns the public `Queued` result class and the compatibility
             // `refresh_enqueued` mirror.
             live_refresh_result_sequence: u64,
+            live_refresh_queue_acceptance_sequence_by_channel: Map<String, u64>,
             live_refresh_status_by_channel: Map<String, Enum<LiveRefreshPublicStatus>>,
 
             // --- External tool surface substate ---
@@ -2062,6 +2063,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             surface_request_terminal_policies = EmptyMap,
             // Live refresh public result authority
             live_refresh_result_sequence = 0,
+            live_refresh_queue_acceptance_sequence_by_channel = EmptyMap,
             live_refresh_status_by_channel = EmptyMap,
             // External tool surface substate
             known_surfaces = EmptySet,
@@ -2492,7 +2494,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             PublishSurfaceRequest { request_key: String },
             PublishOrCancelSurfaceRequest { request_key: String },
             FinishSurfaceRequestUnpublished { request_key: String },
-            RecordLiveRefreshQueued { channel_id: String },
+            RecordLiveRefreshQueued { channel_id: String, queue_acceptance_sequence: u64 },
             // Comms drain inputs
             SpawnDrain { mode: DrainMode },
             StopDrain,
@@ -2893,6 +2895,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 status: Enum<LiveRefreshPublicStatus>,
                 refresh_enqueued: bool,
                 sequence: u64,
+                queue_acceptance_sequence: u64,
             },
             EnqueueClassifiedEntry,
             PeerIngressClassified {
@@ -11152,10 +11155,19 @@ macro_rules! meerkat_catalog_machine_dsl {
         // `refresh_enqueued` fact without this generated effect.
         transition RecordLiveRefreshQueued {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RecordLiveRefreshQueued { channel_id }
+            on input RecordLiveRefreshQueued { channel_id, queue_acceptance_sequence }
             guard "channel_id_present" { channel_id != "" }
+            guard "queue_acceptance_sequence_present" { queue_acceptance_sequence > 0 }
+            guard "queue_acceptance_sequence_advances" {
+                !self.live_refresh_queue_acceptance_sequence_by_channel.contains_key(channel_id)
+                || queue_acceptance_sequence > self.live_refresh_queue_acceptance_sequence_by_channel.get_copied(channel_id).get("value")
+            }
             update {
                 self.live_refresh_result_sequence += 1;
+                self.live_refresh_queue_acceptance_sequence_by_channel.insert(
+                    channel_id,
+                    queue_acceptance_sequence
+                );
                 self.live_refresh_status_by_channel.insert(
                     channel_id,
                     LiveRefreshPublicStatus::Queued
@@ -11166,7 +11178,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 channel_id: channel_id,
                 status: LiveRefreshPublicStatus::Queued,
                 refresh_enqueued: true,
-                sequence: self.live_refresh_result_sequence
+                sequence: self.live_refresh_result_sequence,
+                queue_acceptance_sequence: queue_acceptance_sequence
             }
         }
 

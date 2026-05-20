@@ -7714,7 +7714,7 @@ mod tests {
     // in `live_channel_requires_close_for_identity_change`; the
     // integration tests below pin the host-driven side of the wiring
     // (`channel_llm_identity` setter/getter + `propagate_config_to_live_channels`
-    // routing the `host.send_command(Refresh)` vs `host.close_channel`).
+    // routing the `host.enqueue_refresh` vs `host.close_channel`).
     // ---------------------------------------------------------------------
 
     #[test]

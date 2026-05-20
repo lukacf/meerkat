@@ -15086,6 +15086,7 @@ fn live_refresh_queued_result_is_machine_owned() {
         &mut authority,
         mm_dsl::MeerkatMachineInput::RecordLiveRefreshQueued {
             channel_id: "live-channel-1".to_string(),
+            queue_acceptance_sequence: 7,
         },
     )
     .expect("machine authority should accept queued live-refresh observation");
@@ -15094,6 +15095,14 @@ fn live_refresh_queued_result_is_machine_owned() {
         authority.state().live_refresh_result_sequence,
         1,
         "machine authority should assign the public result sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_refresh_queue_acceptance_sequence_by_channel
+            .get("live-channel-1"),
+        Some(&7),
+        "machine state should retain the host queue-acceptance evidence sequence"
     );
     assert_eq!(
         authority
@@ -15111,9 +15120,22 @@ fn live_refresh_queued_result_is_machine_owned() {
                 status: mm_dsl::LiveRefreshPublicStatus::Queued,
                 refresh_enqueued: true,
                 sequence: 1,
+                queue_acceptance_sequence: 7,
             } if channel_id == "live-channel-1"
         )),
         "machine authority must emit the typed public result effect"
+    );
+
+    let stale = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveRefreshQueued {
+            channel_id: "live-channel-1".to_string(),
+            queue_acceptance_sequence: 7,
+        },
+    );
+    assert!(
+        stale.is_err(),
+        "machine authority must reject reused host queue-acceptance evidence"
     );
 }
 

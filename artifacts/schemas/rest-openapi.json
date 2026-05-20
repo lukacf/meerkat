@@ -2990,7 +2990,6 @@
       "Occurrence": {
         "properties": {
           "attempt_count": {
-            "default": 0,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -3134,6 +3133,7 @@
           "misfire_policy",
           "overlap_policy",
           "missing_target_policy",
+          "attempt_count",
           "created_at_utc"
         ],
         "type": "object"
@@ -4371,6 +4371,72 @@
       },
       "Schedule": {
         "properties": {
+          "config": {
+            "$ref": "#/components/schemas/ScheduleConfig"
+          },
+          "misfire_policy": {
+            "$ref": "#/components/schemas/MisfirePolicy"
+          },
+          "missing_target_policy": {
+            "$ref": "#/components/schemas/MissingTargetPolicy"
+          },
+          "next_occurrence_ordinal": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "overlap_policy": {
+            "$ref": "#/components/schemas/OverlapPolicy"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/SchedulePhase"
+          },
+          "planning_cursor_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schedule_id": {
+            "$ref": "#/components/schemas/ScheduleId"
+          },
+          "superseded_ack_ids": {
+            "items": {
+              "$ref": "#/components/schemas/OccurrenceId"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "target": {
+            "$ref": "#/components/schemas/TargetBinding"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/TriggerSpec"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "phase",
+          "revision",
+          "trigger",
+          "target",
+          "misfire_policy",
+          "overlap_policy",
+          "missing_target_policy",
+          "next_occurrence_ordinal",
+          "superseded_ack_ids",
+          "config"
+        ],
+        "type": "object"
+      },
+      "ScheduleConfig": {
+        "properties": {
           "created_at_utc": {
             "format": "date-time",
             "type": "string"
@@ -4394,36 +4460,7 @@
             },
             "type": "object"
           },
-          "misfire_policy": {
-            "$ref": "#/components/schemas/MisfirePolicy",
-            "default": {
-              "type": "skip"
-            }
-          },
-          "missing_target_policy": {
-            "$ref": "#/components/schemas/MissingTargetPolicy",
-            "default": "mark_misfired"
-          },
           "name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "next_occurrence_ordinal": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "overlap_policy": {
-            "$ref": "#/components/schemas/OverlapPolicy",
-            "default": "skip_if_running"
-          },
-          "phase": {
-            "$ref": "#/components/schemas/SchedulePhase"
-          },
-          "planning_cursor_utc": {
-            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -4439,39 +4476,12 @@
             "minimum": 0,
             "type": "integer"
           },
-          "revision": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "schedule_id": {
-            "$ref": "#/components/schemas/ScheduleId"
-          },
-          "superseded_ack_ids": {
-            "items": {
-              "$ref": "#/components/schemas/OccurrenceId"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "target": {
-            "$ref": "#/components/schemas/TargetBinding"
-          },
-          "trigger": {
-            "$ref": "#/components/schemas/TriggerSpec"
-          },
           "updated_at_utc": {
             "format": "date-time",
             "type": "string"
           }
         },
         "required": [
-          "schedule_id",
-          "phase",
-          "revision",
-          "trigger",
-          "target",
-          "next_occurrence_ordinal",
           "planning_horizon_days",
           "planning_horizon_occurrences",
           "created_at_utc",
@@ -7912,7 +7922,11 @@
             "uniqueItems": true
           },
           "machine_state": {
-            "description": "Catalog-generated WorkGraphLifecycleMachine state projection.",
+            "description": "Catalog-generated WorkGraphLifecycleMachine state projection with generated machine identity and schema version.",
+            "required": [
+              "machine",
+              "schema_version"
+            ],
             "type": "object"
           },
           "namespace": {

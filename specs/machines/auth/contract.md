@@ -28,8 +28,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MarkExpiring`
 - `BeginRefresh`
 - `CompleteRefresh`(new_expires_at: Option<u64>, now_ts: u64, credential_published_at_millis: u64)
-- `RefreshFailedTransient`
-- `RefreshFailedPermanent`
+- `RefreshFailed`(http_status: Option<u64>, oauth_error_code: Option<String>, local_credential_unusable: Bool)
 - `MarkReauthRequired`
 - `ClearCredentialLifecycle`
 - `Release`
@@ -90,13 +89,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RefreshFailedTransient`
 - From: `Refreshing`
-- On: `RefreshFailedTransient`()
+- On: `RefreshFailed`(http_status, oauth_error_code, local_credential_unusable)
+- Guards:
+  - `refresh_failure_observation_transient`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
 
 ### `RefreshFailedPermanent`
 - From: `Refreshing`
-- On: `RefreshFailedPermanent`()
+- On: `RefreshFailed`(http_status, oauth_error_code, local_credential_unusable)
+- Guards:
+  - `refresh_failure_observation_permanent`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 

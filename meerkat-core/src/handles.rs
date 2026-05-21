@@ -25,6 +25,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::LoopState;
+use crate::auth::RefreshFailureObservation;
 use crate::comms::InputSource;
 use crate::interaction::{
     PeerIngressAdmission, PeerIngressDequeueAuthority, PeerIngressDequeueFacts,
@@ -1328,13 +1329,13 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         now: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError>;
 
-    /// Fire `AuthRefreshFailed { lease_key, permanent }` — only legal from
-    /// `refreshing`. `permanent=true` routes to `reauth_required` and emits a
-    /// reauth notice; `permanent=false` routes back to `expiring`.
+    /// Fire the typed refresh-failure observation input — only legal from
+    /// `refreshing`. AuthMachine decides the permanent/transient lifecycle
+    /// result from the observation.
     fn refresh_failed(
         &self,
         lease_key: &LeaseKey,
-        permanent: bool,
+        observation: RefreshFailureObservation,
     ) -> Result<(), DslTransitionError>;
 
     /// Fire `MarkReauthRequired { lease_key }` — any known state → reauth.

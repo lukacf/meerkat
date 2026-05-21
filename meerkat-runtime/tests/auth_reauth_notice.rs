@@ -15,6 +15,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use meerkat_core::RefreshFailureObservation;
 use meerkat_core::connection::{BindingId, RealmId};
 use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
 use meerkat_runtime::RuntimeAuthLeaseHandle;
@@ -80,7 +81,9 @@ fn refresh_path_terminates_in_reauth_required_on_permanent_failure() {
     );
 
     // Permanent refresh failure → reauth_required.
-    handle.refresh_failed(&key, true).unwrap();
+    handle
+        .refresh_failed(&key, RefreshFailureObservation::local_credential_unusable())
+        .unwrap();
     assert_eq!(
         handle.snapshot(&key).phase,
         Some(AuthLeasePhase::ReauthRequired),
@@ -108,7 +111,7 @@ fn begin_refresh_rejected_from_refreshing_state() {
     );
 }
 
-/// Transient failure path: refresh_failed(permanent=false) returns the
+/// Transient failure path: refresh_failed with retryable observation returns the
 /// binding to `expiring`, not `reauth_required` — the runner can retry.
 #[test]
 fn transient_refresh_failure_returns_to_expiring() {
@@ -118,7 +121,9 @@ fn transient_refresh_failure_returns_to_expiring() {
     handle.acquire_lease(&key, 1_000).unwrap();
     handle.mark_expiring(&key).unwrap();
     handle.begin_refresh(&key).unwrap();
-    handle.refresh_failed(&key, false).unwrap();
+    handle
+        .refresh_failed(&key, RefreshFailureObservation::transient())
+        .unwrap();
     assert_eq!(
         handle.snapshot(&key).phase,
         Some(AuthLeasePhase::Expiring),

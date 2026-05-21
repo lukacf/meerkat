@@ -84,8 +84,11 @@ macro_rules! auth_catalog_machine_dsl {
                 MarkExpiring,
                 BeginRefresh,
                 CompleteRefresh { new_expires_at: Option<u64>, now_ts: u64, credential_published_at_millis: u64 },
-                RefreshFailedTransient,
-                RefreshFailedPermanent,
+                RefreshFailed {
+                    http_status: Option<u64>,
+                    oauth_error_code: Option<String>,
+                    local_credential_unusable: bool,
+                },
                 MarkReauthRequired,
                 ClearCredentialLifecycle,
                 Release,
@@ -231,8 +234,20 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition RefreshFailedTransient {
-                on input RefreshFailedTransient
+                on input RefreshFailed { http_status, oauth_error_code, local_credential_unusable }
                 guard { self.lifecycle_phase == Phase::Refreshing }
+                guard "refresh_failure_observation_transient" {
+                    local_credential_unusable == false
+                    && http_status != Some(401)
+                    && http_status != Some(403)
+                    && oauth_error_code != Some("invalid_grant")
+                    && oauth_error_code != Some("invalid_client")
+                    && oauth_error_code != Some("unauthorized_client")
+                    && oauth_error_code != Some("invalid_scope")
+                    && oauth_error_code != Some("access_denied")
+                    && oauth_error_code != Some("permission_denied")
+                    && oauth_error_code != Some("expired_token")
+                }
                 update {
                     self.refresh_attempt = self.refresh_attempt + 1;
                 }
@@ -246,8 +261,20 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition RefreshFailedPermanent {
-                on input RefreshFailedPermanent
+                on input RefreshFailed { http_status, oauth_error_code, local_credential_unusable }
                 guard { self.lifecycle_phase == Phase::Refreshing }
+                guard "refresh_failure_observation_permanent" {
+                    local_credential_unusable == true
+                    || http_status == Some(401)
+                    || http_status == Some(403)
+                    || oauth_error_code == Some("invalid_grant")
+                    || oauth_error_code == Some("invalid_client")
+                    || oauth_error_code == Some("unauthorized_client")
+                    || oauth_error_code == Some("invalid_scope")
+                    || oauth_error_code == Some("access_denied")
+                    || oauth_error_code == Some("permission_denied")
+                    || oauth_error_code == Some("expired_token")
+                }
                 update {
                     self.refresh_attempt = self.refresh_attempt + 1;
                 }

@@ -10,6 +10,7 @@ Some(v) == [tag |-> "some", value |-> v]
 
 MapStringStringValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in StringValues }
 MapStringU64Values == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in NatValues }
+OptionStringValues == {None} \cup {Some(x) : x \in StringValues}
 OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
 
 MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
@@ -217,12 +218,16 @@ auth_machine_CompleteRefresh(arg_new_expires_at, arg_now_ts, arg_credential_publ
        /\ model_step_count' = model_step_count + 1
 
 
-auth_machine_RefreshFailedTransient ==
+auth_machine_RefreshFailedTransient(arg_http_status, arg_oauth_error_code, arg_local_credential_unusable) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
-       /\ packet.variant = "RefreshFailedTransient"
+       /\ packet.variant = "RefreshFailed"
+       /\ packet.payload.http_status = arg_http_status
+       /\ packet.payload.oauth_error_code = arg_oauth_error_code
+       /\ packet.payload.local_credential_unusable = arg_local_credential_unusable
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Refreshing"
+       /\ ((packet.payload.local_credential_unusable = FALSE) /\ (packet.payload.http_status # Some(401)) /\ (packet.payload.http_status # Some(403)) /\ (packet.payload.oauth_error_code # Some("invalid_grant")) /\ (packet.payload.oauth_error_code # Some("invalid_client")) /\ (packet.payload.oauth_error_code # Some("unauthorized_client")) /\ (packet.payload.oauth_error_code # Some("invalid_scope")) /\ (packet.payload.oauth_error_code # Some("access_denied")) /\ (packet.payload.oauth_error_code # Some("permission_denied")) /\ (packet.payload.oauth_error_code # Some("expired_token")))
        /\ auth_machine_phase' = "Expiring"
        /\ auth_machine_refresh_attempt' = (auth_machine_refresh_attempt + 1)
        /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
@@ -236,12 +241,16 @@ auth_machine_RefreshFailedTransient ==
        /\ model_step_count' = model_step_count + 1
 
 
-auth_machine_RefreshFailedPermanent ==
+auth_machine_RefreshFailedPermanent(arg_http_status, arg_oauth_error_code, arg_local_credential_unusable) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
-       /\ packet.variant = "RefreshFailedPermanent"
+       /\ packet.variant = "RefreshFailed"
+       /\ packet.payload.http_status = arg_http_status
+       /\ packet.payload.oauth_error_code = arg_oauth_error_code
+       /\ packet.payload.local_credential_unusable = arg_local_credential_unusable
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Refreshing"
+       /\ ((packet.payload.local_credential_unusable = TRUE) \/ (packet.payload.http_status = Some(401)) \/ (packet.payload.http_status = Some(403)) \/ (packet.payload.oauth_error_code = Some("invalid_grant")) \/ (packet.payload.oauth_error_code = Some("invalid_client")) \/ (packet.payload.oauth_error_code = Some("unauthorized_client")) \/ (packet.payload.oauth_error_code = Some("invalid_scope")) \/ (packet.payload.oauth_error_code = Some("access_denied")) \/ (packet.payload.oauth_error_code = Some("permission_denied")) \/ (packet.payload.oauth_error_code = Some("expired_token")))
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_refresh_attempt' = (auth_machine_refresh_attempt + 1)
        /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
@@ -1995,8 +2004,8 @@ CoreNext ==
     \/ auth_machine_BeginRefreshFromValid
     \/ auth_machine_BeginRefreshFromExpiring
     \/ \E arg_new_expires_at \in OptionU64Values : \E arg_now_ts \in 0..2 : \E arg_credential_published_at_millis \in 0..2 : auth_machine_CompleteRefresh(arg_new_expires_at, arg_now_ts, arg_credential_published_at_millis)
-    \/ auth_machine_RefreshFailedTransient
-    \/ auth_machine_RefreshFailedPermanent
+    \/ \E arg_http_status \in OptionU64Values : \E arg_oauth_error_code \in OptionStringValues : \E arg_local_credential_unusable \in BOOLEAN : auth_machine_RefreshFailedTransient(arg_http_status, arg_oauth_error_code, arg_local_credential_unusable)
+    \/ \E arg_http_status \in OptionU64Values : \E arg_oauth_error_code \in OptionStringValues : \E arg_local_credential_unusable \in BOOLEAN : auth_machine_RefreshFailedPermanent(arg_http_status, arg_oauth_error_code, arg_local_credential_unusable)
     \/ auth_machine_MarkReauthRequiredFromValid
     \/ auth_machine_MarkReauthRequiredFromExpiring
     \/ auth_machine_MarkReauthRequiredFromRefreshing
@@ -2094,8 +2103,8 @@ WitnessFairness_auth_lease_lifecycle_publication_round_trip_1 ==
     /\ WF_vars(auth_machine_BeginRefreshFromValid)
     /\ WF_vars(auth_machine_BeginRefreshFromExpiring)
     /\ WF_vars(\E arg_new_expires_at \in OptionU64Values : \E arg_now_ts \in 0..2 : \E arg_credential_published_at_millis \in 0..2 : auth_machine_CompleteRefresh(arg_new_expires_at, arg_now_ts, arg_credential_published_at_millis))
-    /\ WF_vars(auth_machine_RefreshFailedTransient)
-    /\ WF_vars(auth_machine_RefreshFailedPermanent)
+    /\ WF_vars(\E arg_http_status \in OptionU64Values : \E arg_oauth_error_code \in OptionStringValues : \E arg_local_credential_unusable \in BOOLEAN : auth_machine_RefreshFailedTransient(arg_http_status, arg_oauth_error_code, arg_local_credential_unusable))
+    /\ WF_vars(\E arg_http_status \in OptionU64Values : \E arg_oauth_error_code \in OptionStringValues : \E arg_local_credential_unusable \in BOOLEAN : auth_machine_RefreshFailedPermanent(arg_http_status, arg_oauth_error_code, arg_local_credential_unusable))
     /\ WF_vars(auth_machine_MarkReauthRequiredFromValid)
     /\ WF_vars(auth_machine_MarkReauthRequiredFromExpiring)
     /\ WF_vars(auth_machine_MarkReauthRequiredFromRefreshing)

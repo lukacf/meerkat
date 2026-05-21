@@ -21,8 +21,8 @@ use meerkat_auth_core::resolver::interactive_login_error;
 use meerkat_auth_core::resolver::{
     ManagedStoreLifecycle, begin_managed_store_oauth_refresh_lifecycle,
     load_managed_store_tokens_with_lifecycle, managed_store_oauth_refresh_failure_coordinator,
-    managed_store_oauth_refresh_failure_is_permanent, mark_managed_store_oauth_refresh_failed,
-    publish_managed_store_tokens_lifecycle_and_save, refresh_allowed,
+    mark_managed_store_oauth_refresh_failed, publish_managed_store_tokens_lifecycle_and_save,
+    refresh_allowed,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, resolve_external_authorizer, resolve_simple_secret,
@@ -329,19 +329,19 @@ async fn resolve_code_assist_user_project(
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
-fn google_code_assist_oauth_refresh_failure_is_permanent(
+fn google_code_assist_oauth_refresh_failure_observation(
     error: &oauth::GoogleCodeAssistOAuthError,
-) -> bool {
+) -> meerkat_auth_core::RefreshFailureObservation {
     match error {
         oauth::GoogleCodeAssistOAuthError::InteractiveLoginRequired
-        | oauth::GoogleCodeAssistOAuthError::MissingRefreshToken => true,
-        oauth::GoogleCodeAssistOAuthError::Refresh(meerkat_auth_core::RefreshError::Refresh(
-            message,
-        )) => managed_store_oauth_refresh_failure_is_permanent(message),
-        oauth::GoogleCodeAssistOAuthError::OAuth(error) => {
-            managed_store_oauth_refresh_failure_is_permanent(&error.to_string())
+        | oauth::GoogleCodeAssistOAuthError::MissingRefreshToken => {
+            meerkat_auth_core::RefreshFailureObservation::local_credential_unusable()
         }
-        _ => false,
+        oauth::GoogleCodeAssistOAuthError::Refresh(error) => error.observation(),
+        oauth::GoogleCodeAssistOAuthError::OAuth(error) => {
+            meerkat_auth_core::auth_oauth::oauth_refresh_observation(error)
+        }
+        _ => meerkat_auth_core::RefreshFailureObservation::transient(),
     }
 }
 
@@ -570,13 +570,13 @@ impl ProviderRuntime for GoogleProviderRuntime {
                             .refresh_tokens_with_commit(commit, env.force_refresh)
                             .await;
                         refreshed.map_err(|e| {
-                            let permanent =
-                                google_code_assist_oauth_refresh_failure_is_permanent(&e);
+                            let observation =
+                                google_code_assist_oauth_refresh_failure_observation(&e);
                             let failure = mark_managed_store_oauth_refresh_failed(
                                 env,
                                 binding,
                                 refresh_started,
-                                permanent,
+                                observation,
                             )
                             .err()
                             .map(|err| format!("; {err}"))

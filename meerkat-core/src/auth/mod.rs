@@ -45,6 +45,6 @@ pub use principal::{
 };
 pub use status::{AuthErrorSummary, AuthStatus, AuthStatusPhase};
 pub use token_store::{
-    PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError, RefreshFn, TokenKey,
-    TokenStore, TokenStoreError,
+    PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
+    RefreshFailureObservation, RefreshFn, TokenKey, TokenStore, TokenStoreError,
 };

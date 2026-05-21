@@ -10,6 +10,7 @@ Some(v) == [tag |-> "some", value |-> v]
 
 MapStringStringValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in StringValues }
 MapStringU64Values == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in NatValues }
+OptionStringValues == {None} \cup {Some(x) : x \in StringValues}
 OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
 
 MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
@@ -98,16 +99,18 @@ CompleteRefresh(new_expires_at, now_ts, arg_credential_published_at_millis) ==
     /\ UNCHANGED << oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
 
 
-RefreshFailedTransient ==
+RefreshFailedTransient(http_status, oauth_error_code, local_credential_unusable) ==
     /\ phase = "Refreshing"
+    /\ ((local_credential_unusable = FALSE) /\ (http_status # Some(401)) /\ (http_status # Some(403)) /\ (oauth_error_code # Some("invalid_grant")) /\ (oauth_error_code # Some("invalid_client")) /\ (oauth_error_code # Some("unauthorized_client")) /\ (oauth_error_code # Some("invalid_scope")) /\ (oauth_error_code # Some("access_denied")) /\ (oauth_error_code # Some("permission_denied")) /\ (oauth_error_code # Some("expired_token")))
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
     /\ refresh_attempt' = (refresh_attempt + 1)
     /\ UNCHANGED << expires_at, last_refresh, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
 
 
-RefreshFailedPermanent ==
+RefreshFailedPermanent(http_status, oauth_error_code, local_credential_unusable) ==
     /\ phase = "Refreshing"
+    /\ ((local_credential_unusable = TRUE) \/ (http_status = Some(401)) \/ (http_status = Some(403)) \/ (oauth_error_code = Some("invalid_grant")) \/ (oauth_error_code = Some("invalid_client")) \/ (oauth_error_code = Some("unauthorized_client")) \/ (oauth_error_code = Some("invalid_scope")) \/ (oauth_error_code = Some("access_denied")) \/ (oauth_error_code = Some("permission_denied")) \/ (oauth_error_code = Some("expired_token")))
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ refresh_attempt' = (refresh_attempt + 1)
@@ -920,8 +923,8 @@ Next ==
     \/ BeginRefreshFromValid
     \/ BeginRefreshFromExpiring
     \/ \E new_expires_at \in OptionU64Values : \E now_ts \in 0..2 : \E arg_credential_published_at_millis \in 0..2 : CompleteRefresh(new_expires_at, now_ts, arg_credential_published_at_millis)
-    \/ RefreshFailedTransient
-    \/ RefreshFailedPermanent
+    \/ \E http_status \in OptionU64Values : \E oauth_error_code \in OptionStringValues : \E local_credential_unusable \in BOOLEAN : RefreshFailedTransient(http_status, oauth_error_code, local_credential_unusable)
+    \/ \E http_status \in OptionU64Values : \E oauth_error_code \in OptionStringValues : \E local_credential_unusable \in BOOLEAN : RefreshFailedPermanent(http_status, oauth_error_code, local_credential_unusable)
     \/ MarkReauthRequiredFromValid
     \/ MarkReauthRequiredFromExpiring
     \/ MarkReauthRequiredFromRefreshing

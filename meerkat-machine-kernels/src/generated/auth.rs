@@ -133,9 +133,11 @@ pub mod inputs {
         pub credential_published_at_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RefreshFailedTransient {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RefreshFailedPermanent {}
+    pub struct RefreshFailed {
+        pub http_status: Option<u64>,
+        pub oauth_error_code: Option<String>,
+        pub local_credential_unusable: bool,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MarkReauthRequired {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -240,8 +242,7 @@ pub enum Input {
     MarkExpiring(inputs::MarkExpiring),
     BeginRefresh(inputs::BeginRefresh),
     CompleteRefresh(inputs::CompleteRefresh),
-    RefreshFailedTransient(inputs::RefreshFailedTransient),
-    RefreshFailedPermanent(inputs::RefreshFailedPermanent),
+    RefreshFailed(inputs::RefreshFailed),
     MarkReauthRequired(inputs::MarkReauthRequired),
     ClearCredentialLifecycle(inputs::ClearCredentialLifecycle),
     Release(inputs::Release),
@@ -267,8 +268,7 @@ impl Input {
             Self::MarkExpiring(_) => InputKind::MarkExpiring,
             Self::BeginRefresh(_) => InputKind::BeginRefresh,
             Self::CompleteRefresh(_) => InputKind::CompleteRefresh,
-            Self::RefreshFailedTransient(_) => InputKind::RefreshFailedTransient,
-            Self::RefreshFailedPermanent(_) => InputKind::RefreshFailedPermanent,
+            Self::RefreshFailed(_) => InputKind::RefreshFailed,
             Self::MarkReauthRequired(_) => InputKind::MarkReauthRequired,
             Self::ClearCredentialLifecycle(_) => InputKind::ClearCredentialLifecycle,
             Self::Release(_) => InputKind::Release,
@@ -295,8 +295,7 @@ pub enum InputKind {
     MarkExpiring,
     BeginRefresh,
     CompleteRefresh,
-    RefreshFailedTransient,
-    RefreshFailedPermanent,
+    RefreshFailed,
     MarkReauthRequired,
     ClearCredentialLifecycle,
     Release,

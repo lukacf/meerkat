@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::AuthBindingRef;
+use meerkat_core::RefreshFailureObservation;
 use meerkat_core::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot,
     AuthLeaseTransition, DslTransitionError, LeaseKey,
@@ -399,8 +400,28 @@ fn auth_lease_transition_from_generated_publication(
     transition: &auth_dsl::AuthMachineTransition,
     context: &'static str,
 ) -> Result<AuthLeaseTransition, DslTransitionError> {
+    match maybe_auth_lease_transition_from_generated_publication(
+        lease_key, authority, transition, context,
+    )? {
+        Some(transition) => Ok(transition),
+        None => Err(DslTransitionError::new(
+            context,
+            "AuthMachine transition emitted no lifecycle publication obligation",
+        )),
+    }
+}
+
+fn maybe_auth_lease_transition_from_generated_publication(
+    lease_key: &LeaseKey,
+    authority: &auth_dsl::AuthMachineAuthority,
+    transition: &auth_dsl::AuthMachineTransition,
+    context: &'static str,
+) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
     let mut obligations =
         crate::protocol_auth_lease_lifecycle_publication::extract_obligations(transition);
+    if obligations.is_empty() {
+        return Ok(None);
+    }
     if obligations.len() != 1 {
         return Err(DslTransitionError::new(
             context,
@@ -418,6 +439,7 @@ fn auth_lease_transition_from_generated_publication(
     obligations
         .remove(0)
         .into_auth_lease_transition(scope)
+        .map(Some)
         .map_err(|err| {
             DslTransitionError::new(
                 context,
@@ -705,11 +727,17 @@ impl RuntimeAuthLeaseHandle {
         let action = Self::audit_action_for(&input);
         if create_if_missing && !guard.authorities.contains_key(&lease_key) {
             let mut authority = auth_dsl::AuthMachineAuthority::new();
-            auth_dsl::AuthMachineMutator::apply(
+            let transition = auth_dsl::AuthMachineMutator::apply(
                 &mut authority,
                 auth_dsl::AuthMachineInput::MarkReauthRequired,
             )
             .map_err(|err| map_auth_machine_error(err, context))?;
+            auth_lease_transition_from_generated_publication(
+                &lease_key,
+                &authority,
+                &transition,
+                context,
+            )?;
             guard.authorities.insert(lease_key.clone(), authority);
         }
         let (from_phase, to_phase) = {
@@ -723,8 +751,14 @@ impl RuntimeAuthLeaseHandle {
                 }
             };
             let from_phase = map_phase(entry.state().lifecycle_phase);
-            auth_dsl::AuthMachineMutator::apply(entry, input)
+            let transition = auth_dsl::AuthMachineMutator::apply(entry, input)
                 .map_err(|err| map_auth_machine_error(err, context))?;
+            maybe_auth_lease_transition_from_generated_publication(
+                &lease_key,
+                entry,
+                &transition,
+                context,
+            )?;
             let to_phase = map_phase(entry.state().lifecycle_phase);
             (from_phase, to_phase)
         };
@@ -760,8 +794,14 @@ impl RuntimeAuthLeaseHandle {
                 }
             };
             let from_phase = map_phase(entry.state().lifecycle_phase);
-            auth_dsl::AuthMachineMutator::apply(entry, input)
+            let transition = auth_dsl::AuthMachineMutator::apply(entry, input)
                 .map_err(|err| map_auth_machine_error(err, context))?;
+            maybe_auth_lease_transition_from_generated_publication(
+                &lease_key,
+                entry,
+                &transition,
+                context,
+            )?;
             let to_phase = map_phase(entry.state().lifecycle_phase);
             (from_phase, to_phase)
         };
@@ -946,8 +986,7 @@ impl RuntimeAuthLeaseHandle {
             auth_dsl::AuthMachineInput::MarkExpiring => "mark_expiring",
             auth_dsl::AuthMachineInput::BeginRefresh => "begin_refresh",
             auth_dsl::AuthMachineInput::CompleteRefresh { .. } => "complete_refresh",
-            auth_dsl::AuthMachineInput::RefreshFailedTransient => "refresh_failed_transient",
-            auth_dsl::AuthMachineInput::RefreshFailedPermanent => "refresh_failed_permanent",
+            auth_dsl::AuthMachineInput::RefreshFailed { .. } => "refresh_failed",
             auth_dsl::AuthMachineInput::MarkReauthRequired => "mark_reauth_required",
             auth_dsl::AuthMachineInput::ClearCredentialLifecycle => "clear_credential_lifecycle",
             auth_dsl::AuthMachineInput::Release => "release_lease",
@@ -1082,12 +1121,12 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
     fn refresh_failed(
         &self,
         lease_key: &LeaseKey,
-        permanent: bool,
+        observation: RefreshFailureObservation,
     ) -> Result<(), DslTransitionError> {
-        let input = if permanent {
-            auth_dsl::AuthMachineInput::RefreshFailedPermanent
-        } else {
-            auth_dsl::AuthMachineInput::RefreshFailedTransient
+        let input = auth_dsl::AuthMachineInput::RefreshFailed {
+            http_status: observation.http_status,
+            oauth_error_code: observation.oauth_error_code,
+            local_credential_unusable: observation.local_credential_unusable,
         };
         self.apply(lease_key, input, "AuthLeaseHandle::refresh_failed", false)
             .map(|_| ())
@@ -1142,8 +1181,15 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                 released.dedup();
             }
             let from_phase = map_phase(entry.state().lifecycle_phase);
-            auth_dsl::AuthMachineMutator::apply(entry, auth_dsl::AuthMachineInput::Release)
-                .map_err(|err| map_auth_machine_error(err, context))?;
+            let transition =
+                auth_dsl::AuthMachineMutator::apply(entry, auth_dsl::AuthMachineInput::Release)
+                    .map_err(|err| map_auth_machine_error(err, context))?;
+            auth_lease_transition_from_generated_publication(
+                lease_key,
+                entry,
+                &transition,
+                context,
+            )?;
             let to_phase = map_phase(entry.state().lifecycle_phase);
             (from_phase, to_phase)
         };
@@ -1176,8 +1222,14 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                 auth_dsl::AuthMachineInput::Release
             };
             let from_phase = map_phase(entry.state().lifecycle_phase);
-            auth_dsl::AuthMachineMutator::apply(entry, input.clone())
+            let transition = auth_dsl::AuthMachineMutator::apply(entry, input.clone())
                 .map_err(|err| map_auth_machine_error(err, context))?;
+            auth_lease_transition_from_generated_publication(
+                lease_key,
+                entry,
+                &transition,
+                context,
+            )?;
             let to_phase = map_phase(entry.state().lifecycle_phase);
             (input, from_phase, to_phase)
         };
@@ -1389,7 +1441,8 @@ mod tests {
 
         h.acquire_lease(&k, 1_800_000_000).unwrap();
         h.begin_refresh(&k).unwrap();
-        h.refresh_failed(&k, true).unwrap();
+        h.refresh_failed(&k, RefreshFailureObservation::local_credential_unusable())
+            .unwrap();
 
         assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::ReauthRequired));
     }
@@ -1401,7 +1454,8 @@ mod tests {
 
         h.acquire_lease(&k, 1_800_000_000).unwrap();
         h.begin_refresh(&k).unwrap();
-        h.refresh_failed(&k, false).unwrap();
+        h.refresh_failed(&k, RefreshFailureObservation::transient())
+            .unwrap();
 
         assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Expiring));
     }
@@ -1414,7 +1468,8 @@ mod tests {
         h.acquire_lease(&k, 1_800_000_000).unwrap();
         let before = h.snapshot(&k);
         h.begin_refresh(&k).unwrap();
-        h.refresh_failed(&k, false).unwrap();
+        h.refresh_failed(&k, RefreshFailureObservation::transient())
+            .unwrap();
         let after = h.snapshot(&k);
 
         assert_eq!(after.phase, Some(AuthLeasePhase::Expiring));

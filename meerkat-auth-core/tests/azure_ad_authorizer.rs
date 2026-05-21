@@ -12,8 +12,8 @@
 #![cfg(all(not(target_arch = "wasm32"), feature = "azure-ad"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::extract::{Form, State};
@@ -351,7 +351,7 @@ async fn short_lived_token_refresh_uses_auth_lease_lifecycle() {
         "https://cognitiveservices.azure.com/.default",
         creds(&mock.base_url),
     )
-    .with_auth_lease_observer(lease_handle, lease_key)
+    .with_auth_lease_observer(lease_handle, lease_key.clone())
     .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url));
 
     for _ in 0..2 {
@@ -494,7 +494,7 @@ async fn concurrent_refresh_observers_wait_for_inflight_refresh() {
             "https://cognitiveservices.azure.com/.default",
             creds(&mock.base_url),
         )
-        .with_auth_lease_observer(lease_handle, lease_key)
+        .with_auth_lease_observer(lease_handle, lease_key.clone())
         .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url)),
     );
 

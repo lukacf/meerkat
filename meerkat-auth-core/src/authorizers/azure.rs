@@ -25,7 +25,8 @@ use parking_lot::Mutex;
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::{LeaseFreshnessObserver, oauth_endpoint_failure_is_permanent};
+use super::{LeaseFreshnessObserver, oauth_endpoint_failure_observation};
+use meerkat_core::RefreshFailureObservation;
 use meerkat_core::handles::{GeneratedAuthLeaseHandle, LeaseKey};
 use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
 
@@ -242,7 +243,7 @@ impl AzureAdAuthorizer {
                 observer.refresh_failed(
                     &self.label,
                     lifecycle,
-                    azure_refresh_failure_is_permanent(&err),
+                    azure_refresh_failure_observation(&err),
                 )?;
                 return Err(err.into());
             }
@@ -256,12 +257,14 @@ impl AzureAdAuthorizer {
     }
 }
 
-fn azure_refresh_failure_is_permanent(err: &AzureAuthError) -> bool {
+fn azure_refresh_failure_observation(err: &AzureAuthError) -> RefreshFailureObservation {
     match err {
-        AzureAuthError::MissingEnv(_) | AzureAuthError::InvalidResponse(_) => true,
-        AzureAuthError::Network(_) => false,
+        AzureAuthError::MissingEnv(_) | AzureAuthError::InvalidResponse(_) => {
+            RefreshFailureObservation::local_credential_unusable()
+        }
+        AzureAuthError::Network(_) => RefreshFailureObservation::transient(),
         AzureAuthError::TokenEndpoint { status, body } => {
-            oauth_endpoint_failure_is_permanent(*status, body)
+            oauth_endpoint_failure_observation(*status, body)
         }
     }
 }

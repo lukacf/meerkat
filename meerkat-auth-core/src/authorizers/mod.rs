@@ -13,6 +13,8 @@ use chrono::{DateTime, Utc};
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 use meerkat_core::AuthError;
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+use meerkat_core::RefreshFailureObservation;
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 use meerkat_core::handles::{
     AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeasePhase, DslTransitionError,
     GeneratedAuthLeaseHandle, LeaseKey,
@@ -182,11 +184,11 @@ impl LeaseFreshnessObserver {
         &self,
         authorizer_label: &str,
         lifecycle: LeaseRefreshLifecycle,
-        permanent: bool,
+        observation: RefreshFailureObservation,
     ) -> Result<(), AuthError> {
         if lifecycle == LeaseRefreshLifecycle::Refresh {
             self.handle
-                .refresh_failed(&self.lease_key, permanent)
+                .refresh_failed(&self.lease_key, observation)
                 .map_err(|err| self.observer_error(authorizer_label, "refresh_failed", err))?;
         }
         Ok(())
@@ -226,56 +228,19 @@ fn lease_epoch_secs_is_fresh_at(expires_at: u64, now: DateTime<Utc>) -> bool {
 }
 
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
-pub(crate) fn oauth_endpoint_failure_is_permanent(status: u16, body: &str) -> bool {
-    if endpoint_failure_is_transient(status, body) {
-        return false;
-    }
-
-    if matches!(status, 401 | 403) {
-        return true;
-    }
-
-    matches!(status, 400) && body_mentions_permanent_oauth_error(body)
-}
-
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
-pub(crate) fn endpoint_failure_is_transient(status: u16, body: &str) -> bool {
-    matches!(status, 408 | 409 | 425 | 429 | 500..=599)
-        || body_mentions_any(
-            body,
-            &[
-                "temporarily_unavailable",
-                "temporary_unavailable",
-                "server_error",
-                "rate_limit",
-                "rate_limited",
-                "too_many_requests",
-                "timeout",
-                "timed out",
-                "try again",
-            ],
-        )
-}
-
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
-fn body_mentions_permanent_oauth_error(body: &str) -> bool {
-    body_mentions_any(
-        body,
-        &[
-            "invalid_client",
-            "invalid_grant",
-            "unauthorized_client",
-            "invalid_scope",
-            "access_denied",
-            "permission_denied",
-        ],
+pub(crate) fn oauth_endpoint_failure_observation(
+    status: u16,
+    body: &str,
+) -> RefreshFailureObservation {
+    RefreshFailureObservation::oauth_token_endpoint(
+        status,
+        crate::auth_oauth::oauth_token_endpoint_error_code(body),
     )
 }
 
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
-fn body_mentions_any(body: &str, needles: &[&str]) -> bool {
-    let body = body.to_ascii_lowercase();
-    needles.iter().any(|needle| body.contains(needle))
+#[cfg(feature = "gcp-auth")]
+pub(crate) fn endpoint_failure_is_transient(status: u16) -> bool {
+    matches!(status, 408 | 409 | 425 | 429 | 500..=599)
 }
 
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]

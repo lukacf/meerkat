@@ -1502,6 +1502,7 @@ impl ScheduleSpawnTooling {
 /// At execution time, the schedule driver uses this snapshot directly — no
 /// parent context is needed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedSpawnSnapshot {
     /// The tool filter to apply as the child's inherited base filter.
     pub tool_filter: meerkat_core::tool_scope::ToolFilter,
@@ -2655,6 +2656,28 @@ mod tests {
         let json = serde_json::to_string(&snapshot).unwrap();
         let parsed: ResolvedSpawnSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, snapshot);
+    }
+
+    #[test]
+    fn resolved_spawn_snapshot_rejects_legacy_profile_material() {
+        let snapshot = ResolvedSpawnSnapshot {
+            tool_filter: meerkat_core::tool_scope::ToolFilter::All,
+            tool_filter_witnesses: Default::default(),
+        };
+        let mut legacy = serde_json::to_value(snapshot).unwrap();
+        let legacy_object = legacy.as_object_mut().unwrap();
+        legacy_object.insert("model".to_string(), serde_json::json!("legacy-model"));
+        legacy_object.insert(
+            "provider_params".to_string(),
+            serde_json::json!({"temperature": 0.2}),
+        );
+
+        let parsed = serde_json::from_value::<ResolvedSpawnSnapshot>(legacy);
+
+        assert!(
+            parsed.is_err(),
+            "legacy profile-material fields must not be silently accepted"
+        );
     }
 
     // -----------------------------------------------------------------------

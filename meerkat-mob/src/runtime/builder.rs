@@ -1915,7 +1915,7 @@ impl MobBuilder {
                     build::open_profile_tool_categories_for_inherited_filter(&mut profile);
                 }
                 authorize_spawn_profile_material(
-                    dsl_authority.state(),
+                    dsl_authority,
                     &entry.agent_identity,
                     &entry.role,
                     &profile,
@@ -2054,7 +2054,7 @@ impl MobBuilder {
                 build::open_profile_tool_categories_for_inherited_filter(&mut profile);
             }
             authorize_spawn_profile_material(
-                dsl_authority.state(),
+                dsl_authority,
                 &entry.agent_identity,
                 &entry.role,
                 &profile,

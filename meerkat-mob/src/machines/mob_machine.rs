@@ -1275,6 +1275,22 @@ mod tests {
         runtime_id: &AgentRuntimeId,
     ) -> SessionId {
         let bridge_session_id = SessionId::from(format!("session-{}", identity.0.as_str()));
+        let profile_material_digest = format!("test-profile-digest-{}", identity.0.as_str());
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: identity.clone(),
+                profile_name: "test".to_string(),
+                model: "test-model".to_string(),
+                profile_material_digest: profile_material_digest.clone(),
+                tool_config_digest: "test-tool-config-digest".to_string(),
+                skills_digest: "test-skills-digest".to_string(),
+                provider_params_digest: None,
+                output_schema_digest: None,
+                external_addressable: true,
+            },
+        )
+        .expect("AuthorizeSpawnProfile should seed live member authority");
         MobMachineMutator::apply(
             authority,
             MobMachineInput::Spawn {
@@ -1282,6 +1298,7 @@ mod tests {
                 agent_runtime_id: runtime_id.clone(),
                 fence_token: FenceToken(7),
                 generation: Generation(1),
+                profile_material_digest,
                 external_addressable: true,
                 bridge_session_id: bridge_session_id.clone(),
                 replacing: None,
@@ -1616,7 +1633,11 @@ mod tests {
                 agent_identity: identity.clone(),
                 profile_name: "worker".to_string(),
                 model: "claude-sonnet-4-5".to_string(),
+                profile_material_digest: "profile-digest".to_string(),
+                tool_config_digest: "tool-config-digest".to_string(),
+                skills_digest: "skills-digest".to_string(),
                 provider_params_digest: Some("provider-digest".to_string()),
+                output_schema_digest: None,
                 external_addressable: true,
             },
         )
@@ -1629,11 +1650,18 @@ mod tests {
                     agent_identity,
                     profile_name,
                     model,
+                    profile_material_digest,
+                    tool_config_digest,
+                    skills_digest,
                     provider_params_digest: Some(digest),
+                    output_schema_digest: None,
                     external_addressable: true,
                 } if *agent_identity == identity
                     && profile_name == "worker"
                     && model == "claude-sonnet-4-5"
+                    && profile_material_digest == "profile-digest"
+                    && tool_config_digest == "tool-config-digest"
+                    && skills_digest == "skills-digest"
                     && digest == "provider-digest"
             )
         }));

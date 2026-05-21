@@ -2234,6 +2234,18 @@ pub struct State {
     pub spawn_policy_resolution_runtime_modes:
         std::collections::BTreeMap<AgentIdentity, Option<SpawnPolicyRuntimeMode>>,
     pub spawn_policy_resolution_absent: std::collections::BTreeSet<AgentIdentity>,
+    pub spawn_profile_authority_profile_names: std::collections::BTreeMap<AgentIdentity, String>,
+    pub spawn_profile_authority_models: std::collections::BTreeMap<AgentIdentity, String>,
+    pub spawn_profile_authority_material_digests: std::collections::BTreeMap<AgentIdentity, String>,
+    pub spawn_profile_authority_tool_config_digests:
+        std::collections::BTreeMap<AgentIdentity, String>,
+    pub spawn_profile_authority_skills_digests: std::collections::BTreeMap<AgentIdentity, String>,
+    pub spawn_profile_authority_provider_params_digests:
+        std::collections::BTreeMap<AgentIdentity, Option<String>>,
+    pub spawn_profile_authority_output_schema_digests:
+        std::collections::BTreeMap<AgentIdentity, Option<String>>,
+    pub spawn_profile_authority_external_addressable:
+        std::collections::BTreeMap<AgentIdentity, bool>,
     pub topology_epoch: u64,
 }
 impl Default for State {
@@ -2362,6 +2374,7 @@ pub mod inputs {
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
         pub generation: Generation,
+        pub profile_material_digest: String,
         pub external_addressable: bool,
         pub bridge_session_id: SessionId,
         pub replacing: Option<SessionId>,
@@ -2371,7 +2384,11 @@ pub mod inputs {
         pub agent_identity: AgentIdentity,
         pub profile_name: String,
         pub model: String,
+        pub profile_material_digest: String,
+        pub tool_config_digest: String,
+        pub skills_digest: String,
         pub provider_params_digest: Option<String>,
+        pub output_schema_digest: Option<String>,
         pub external_addressable: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3217,7 +3234,11 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub profile_name: String,
         pub model: String,
+        pub profile_material_digest: String,
+        pub tool_config_digest: String,
+        pub skills_digest: String,
         pub provider_params_digest: Option<String>,
+        pub output_schema_digest: Option<String>,
         pub external_addressable: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -4039,6 +4060,14 @@ pub fn initial_state() -> State {
         spawn_policy_resolution_profiles: Default::default(),
         spawn_policy_resolution_runtime_modes: Default::default(),
         spawn_policy_resolution_absent: Default::default(),
+        spawn_profile_authority_profile_names: Default::default(),
+        spawn_profile_authority_models: Default::default(),
+        spawn_profile_authority_material_digests: Default::default(),
+        spawn_profile_authority_tool_config_digests: Default::default(),
+        spawn_profile_authority_skills_digests: Default::default(),
+        spawn_profile_authority_provider_params_digests: Default::default(),
+        spawn_profile_authority_output_schema_digests: Default::default(),
+        spawn_profile_authority_external_addressable: Default::default(),
         topology_epoch: 0,
     }
 }

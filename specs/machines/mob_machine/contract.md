@@ -112,6 +112,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `spawn_policy_resolution_profiles`: `Map<AgentIdentity, String>`
 - `spawn_policy_resolution_runtime_modes`: `Map<AgentIdentity, Option<SpawnPolicyRuntimeMode>>`
 - `spawn_policy_resolution_absent`: `Set<AgentIdentity>`
+- `spawn_profile_authority_profile_names`: `Map<AgentIdentity, String>`
+- `spawn_profile_authority_models`: `Map<AgentIdentity, String>`
+- `spawn_profile_authority_material_digests`: `Map<AgentIdentity, String>`
+- `spawn_profile_authority_tool_config_digests`: `Map<AgentIdentity, String>`
+- `spawn_profile_authority_skills_digests`: `Map<AgentIdentity, String>`
+- `spawn_profile_authority_provider_params_digests`: `Map<AgentIdentity, Option<String>>`
+- `spawn_profile_authority_output_schema_digests`: `Map<AgentIdentity, Option<String>>`
+- `spawn_profile_authority_external_addressable`: `Map<AgentIdentity, Bool>`
 - `topology_epoch`: `u64`
 
 ## Inputs
@@ -127,8 +135,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeLoopIterationReducerCommand`(loop_instance_id: LoopInstanceId, command: LoopIterationReducerCommandKind, body_frame_id: Option<FrameId>, body_frame_iteration: Option<u64>)
 - `CancelFlow`(run_id: RunId)
 - `FlowStatus`
-- `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, bridge_session_id: SessionId, replacing: Option<SessionId>)
-- `AuthorizeSpawnProfile`(agent_identity: AgentIdentity, profile_name: String, model: String, provider_params_digest: Option<String>, external_addressable: Bool)
+- `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: Bool, bridge_session_id: SessionId, replacing: Option<SessionId>)
+- `AuthorizeSpawnProfile`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: SessionId)
@@ -247,7 +255,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Effects
 - `RequestRuntimeBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId)
-- `SpawnProfileAuthorized`(agent_identity: AgentIdentity, profile_name: String, model: String, provider_params_digest: Option<String>, external_addressable: Bool)
+- `SpawnProfileAuthorized`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool)
 - `RequestRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
 - `SubmitWorkRejected`(agent_runtime_id: AgentRuntimeId, origin: WorkOrigin, reason: SubmitWorkRejectReasonKind, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>)
 - `CancelAllWorkRejected`(agent_runtime_id: AgentRuntimeId, reason: CancelAllWorkRejectReasonKind, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>)
@@ -304,28 +312,32 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Transitions
 ### `SpawnRunningFresh`
 - From: `Running`
-- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing)
+- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, bridge_session_id, replacing)
 - Guards:
   - `coordinator_bound`
   - `no_prior_session_binding`
   - `replacing_absent`
+  - `spawn_profile_authorized`
+  - `spawn_profile_addressability_authorized`
 - Emits: `RequestRuntimeBinding`, `AppendLifecycleJournal`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
 ### `SpawnRunningReplacing`
 - From: `Running`
-- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing)
+- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, bridge_session_id, replacing)
 - Guards:
   - `coordinator_bound`
   - `prior_session_binding_present`
   - `replacing_present`
   - `replacing_matches_current`
+  - `spawn_profile_authorized`
+  - `spawn_profile_addressability_authorized`
 - Emits: `RequestRuntimeBinding`, `AppendLifecycleJournal`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
 ### `AuthorizeSpawnProfileRunning`
 - From: `Running`
-- On: `AuthorizeSpawnProfile`(agent_identity, profile_name, model, provider_params_digest, external_addressable)
+- On: `AuthorizeSpawnProfile`(agent_identity, profile_name, model, profile_material_digest, tool_config_digest, skills_digest, provider_params_digest, output_schema_digest, external_addressable)
 - Guards:
   - `coordinator_bound`
 - Emits: `SpawnProfileAuthorized`

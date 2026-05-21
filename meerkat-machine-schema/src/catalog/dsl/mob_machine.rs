@@ -137,6 +137,18 @@ macro_rules! mob_catalog_machine_dsl {
             spawn_policy_resolution_profiles: Map<AgentIdentity, String>,
             spawn_policy_resolution_runtime_modes: Map<AgentIdentity, Option<Enum<SpawnPolicyRuntimeMode>>>,
             spawn_policy_resolution_absent: Set<AgentIdentity>,
+            // Effective profile material authorized for the next member
+            // session build. The shell may resolve inline/realm profiles and
+            // inherited-tool overlays, but MobMachine owns the exact material
+            // digest and addressability fact that `Spawn` may admit.
+            spawn_profile_authority_profile_names: Map<AgentIdentity, String>,
+            spawn_profile_authority_models: Map<AgentIdentity, String>,
+            spawn_profile_authority_material_digests: Map<AgentIdentity, String>,
+            spawn_profile_authority_tool_config_digests: Map<AgentIdentity, String>,
+            spawn_profile_authority_skills_digests: Map<AgentIdentity, String>,
+            spawn_profile_authority_provider_params_digests: Map<AgentIdentity, Option<String>>,
+            spawn_profile_authority_output_schema_digests: Map<AgentIdentity, Option<String>>,
+            spawn_profile_authority_external_addressable: Map<AgentIdentity, bool>,
             topology_epoch: u64,
         }
 
@@ -246,6 +258,14 @@ macro_rules! mob_catalog_machine_dsl {
             spawn_policy_resolution_profiles = EmptyMap,
             spawn_policy_resolution_runtime_modes = EmptyMap,
             spawn_policy_resolution_absent = EmptySet,
+            spawn_profile_authority_profile_names = EmptyMap,
+            spawn_profile_authority_models = EmptyMap,
+            spawn_profile_authority_material_digests = EmptyMap,
+            spawn_profile_authority_tool_config_digests = EmptyMap,
+            spawn_profile_authority_skills_digests = EmptyMap,
+            spawn_profile_authority_provider_params_digests = EmptyMap,
+            spawn_profile_authority_output_schema_digests = EmptyMap,
+            spawn_profile_authority_external_addressable = EmptyMap,
             topology_epoch = 0,
         }
 
@@ -356,8 +376,8 @@ macro_rules! mob_catalog_machine_dsl {
             },
             CancelFlow { run_id: RunId },
             FlowStatus,
-            Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, bridge_session_id: SessionId, replacing: Option<SessionId> },
-            AuthorizeSpawnProfile { agent_identity: AgentIdentity, profile_name: String, model: String, provider_params_digest: Option<String>, external_addressable: bool },
+            Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: bool, bridge_session_id: SessionId, replacing: Option<SessionId> },
+            AuthorizeSpawnProfile { agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: bool },
             EnsureMember { agent_identity: AgentIdentity },
             Reconcile { desired: Set<AgentIdentity>, retire_stale: bool },
             Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: SessionId },
@@ -487,7 +507,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         effect MobMachineEffect {
             RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
-            SpawnProfileAuthorized { agent_identity: AgentIdentity, profile_name: String, model: String, provider_params_digest: Option<String>, external_addressable: bool },
+            SpawnProfileAuthorized { agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: bool },
             RequestRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
             SubmitWorkRejected { agent_runtime_id: AgentRuntimeId, origin: Enum<WorkOrigin>, reason: Enum<SubmitWorkRejectReasonKind>, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken> },
             CancelAllWorkRejected { agent_runtime_id: AgentRuntimeId, reason: Enum<CancelAllWorkRejectReasonKind>, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken> },
@@ -657,11 +677,13 @@ macro_rules! mob_catalog_machine_dsl {
         // loudly with "no transition matched" rather than silently picking a
         // wrong branch.
         transition SpawnRunningFresh {
-            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing }
+            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, bridge_session_id, replacing }
             guard { self.lifecycle_phase == Phase::Running }
             guard "coordinator_bound" { self.coordinator_bound == true }
             guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
             guard "replacing_absent" { replacing == None }
+            guard "spawn_profile_authorized" { self.spawn_profile_authority_material_digests.get_cloned(agent_identity) == Some(profile_material_digest) }
+            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
             update {
                 // Spawn is the "member joined live_runtime_ids" fact. The
                 // pending_spawn_count lifecycle is owned by StageSpawn (+1)
@@ -688,6 +710,14 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_session_bindings.insert(agent_identity, bridge_session_id);
                 self.member_restore_failures.remove(agent_identity);
+                self.spawn_profile_authority_profile_names.remove(agent_identity);
+                self.spawn_profile_authority_models.remove(agent_identity);
+                self.spawn_profile_authority_material_digests.remove(agent_identity);
+                self.spawn_profile_authority_tool_config_digests.remove(agent_identity);
+                self.spawn_profile_authority_skills_digests.remove(agent_identity);
+                self.spawn_profile_authority_provider_params_digests.remove(agent_identity);
+                self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
+                self.spawn_profile_authority_external_addressable.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -705,12 +735,14 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition SpawnRunningReplacing {
-            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing }
+            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, bridge_session_id, replacing }
             guard { self.lifecycle_phase == Phase::Running }
             guard "coordinator_bound" { self.coordinator_bound == true }
             guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "replacing_present" { replacing != None }
             guard "replacing_matches_current" { self.member_session_bindings.get_cloned(agent_identity) == Some(replacing.get("value")) }
+            guard "spawn_profile_authorized" { self.spawn_profile_authority_material_digests.get_cloned(agent_identity) == Some(profile_material_digest) }
+            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
             update {
                 self.live_runtime_ids.insert(agent_runtime_id);
                 if external_addressable {
@@ -727,6 +759,14 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_session_bindings.insert(agent_identity, bridge_session_id);
                 self.member_restore_failures.remove(agent_identity);
+                self.spawn_profile_authority_profile_names.remove(agent_identity);
+                self.spawn_profile_authority_models.remove(agent_identity);
+                self.spawn_profile_authority_material_digests.remove(agent_identity);
+                self.spawn_profile_authority_tool_config_digests.remove(agent_identity);
+                self.spawn_profile_authority_skills_digests.remove(agent_identity);
+                self.spawn_profile_authority_provider_params_digests.remove(agent_identity);
+                self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
+                self.spawn_profile_authority_external_addressable.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -744,16 +784,29 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeSpawnProfileRunning {
-            on input AuthorizeSpawnProfile { agent_identity, profile_name, model, provider_params_digest, external_addressable }
+            on input AuthorizeSpawnProfile { agent_identity, profile_name, model, profile_material_digest, tool_config_digest, skills_digest, provider_params_digest, output_schema_digest, external_addressable }
             guard { self.lifecycle_phase == Phase::Running }
             guard "coordinator_bound" { self.coordinator_bound == true }
-            update {}
+            update {
+                self.spawn_profile_authority_profile_names.insert(agent_identity, profile_name);
+                self.spawn_profile_authority_models.insert(agent_identity, model);
+                self.spawn_profile_authority_material_digests.insert(agent_identity, profile_material_digest);
+                self.spawn_profile_authority_tool_config_digests.insert(agent_identity, tool_config_digest);
+                self.spawn_profile_authority_skills_digests.insert(agent_identity, skills_digest);
+                self.spawn_profile_authority_provider_params_digests.insert(agent_identity, provider_params_digest);
+                self.spawn_profile_authority_output_schema_digests.insert(agent_identity, output_schema_digest);
+                self.spawn_profile_authority_external_addressable.insert(agent_identity, external_addressable);
+            }
             to Running
             emit SpawnProfileAuthorized {
                 agent_identity: agent_identity,
                 profile_name: profile_name,
                 model: model,
+                profile_material_digest: profile_material_digest,
+                tool_config_digest: tool_config_digest,
+                skills_digest: skills_digest,
                 provider_params_digest: provider_params_digest,
+                output_schema_digest: output_schema_digest,
                 external_addressable: external_addressable
             }
         }

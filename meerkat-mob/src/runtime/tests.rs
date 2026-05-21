@@ -27684,6 +27684,21 @@ async fn test_stale_external_peer_trust_obligation_cannot_readd_trust_when_machi
     .expect("valid local trusted spec");
     crate::machines::mob_machine::MobMachineMutator::apply(
         &mut stale_authority,
+        crate::machines::mob_machine::MobMachineInput::AuthorizeSpawnProfile {
+            agent_identity: stale_edge.local.clone(),
+            profile_name: "lead".to_string(),
+            model: "test-model".to_string(),
+            profile_material_digest: "stale-profile-digest".to_string(),
+            tool_config_digest: "stale-tool-config-digest".to_string(),
+            skills_digest: "stale-skills-digest".to_string(),
+            provider_params_digest: None,
+            output_schema_digest: None,
+            external_addressable: true,
+        },
+    )
+    .expect("authorize stale local member");
+    crate::machines::mob_machine::MobMachineMutator::apply(
+        &mut stale_authority,
         crate::machines::mob_machine::MobMachineInput::Spawn {
             agent_identity: stale_edge.local.clone(),
             agent_runtime_id: crate::machines::mob_machine::AgentRuntimeId(
@@ -27691,6 +27706,7 @@ async fn test_stale_external_peer_trust_obligation_cannot_readd_trust_when_machi
             ),
             fence_token: crate::machines::mob_machine::FenceToken(1),
             generation: crate::machines::mob_machine::Generation(1),
+            profile_material_digest: "stale-profile-digest".to_string(),
             external_addressable: true,
             bridge_session_id: crate::machines::mob_machine::SessionId(
                 "stale-l-1-session".to_string(),

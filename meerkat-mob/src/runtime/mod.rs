@@ -136,7 +136,10 @@ pub use recovery::RestoreIncompatible;
 use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::MobSessionService;
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
-use spawn_profile_authority::authorize_spawn_profile_material;
+use spawn_profile_authority::{
+    AuthorizedSpawnProfileMaterial, authorize_spawn_profile_input,
+    authorize_spawn_profile_material, require_authorized_effect,
+};
 #[cfg(test)]
 pub(crate) use state::MobDslT2Snapshot;
 #[cfg(test)]

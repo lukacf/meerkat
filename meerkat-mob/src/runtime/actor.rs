@@ -538,6 +538,7 @@ pub(super) struct PendingSpawn {
     /// Effective profile override from `SpawnTooling::Profile` resolution.
     /// Persisted in the roster so respawn/restore can use it.
     pub(super) effective_profile_override: Option<crate::profile::Profile>,
+    pub(super) authorized_profile_material: AuthorizedSpawnProfileMaterial,
     pub(super) continuity_intent: super::handle::SpawnContinuityIntent,
     pub(super) progress: Arc<std::sync::Mutex<PendingSpawnProgress>>,
     pub(super) reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
@@ -3728,7 +3729,7 @@ impl MobActor {
     fn preview_spawn_admission(
         &self,
         agent_identity: &MeerkatId,
-        external_addressable: bool,
+        authorized_profile_material: &AuthorizedSpawnProfileMaterial,
         bridge_session_id: &SessionId,
     ) -> Result<(), MobError> {
         let domain_identity = AgentIdentity::from(agent_identity.as_str());
@@ -3748,7 +3749,10 @@ impl MobActor {
                 ),
                 fence_token: mob_dsl::FenceToken::from_domain(self.next_fence_token_preview()),
                 generation: mob_dsl::Generation::from_domain(crate::ids::Generation::INITIAL),
-                external_addressable,
+                profile_material_digest: authorized_profile_material
+                    .profile_material_digest
+                    .clone(),
+                external_addressable: authorized_profile_material.external_addressable,
                 bridge_session_id: mob_dsl::SessionId::from_domain(bridge_session_id),
                 replacing,
             },
@@ -3759,10 +3763,22 @@ impl MobActor {
     }
 
     fn preview_spawn_command_admission(&self, agent_identity: &MeerkatId) -> Result<(), MobError> {
-        // This is only the command-admission barrier; the real spawn payload is
-        // previewed again after profile resolution and before provisioning.
-        let placeholder_bridge_session_id = SessionId::new();
-        self.preview_spawn_admission(agent_identity, false, &placeholder_bridge_session_id)
+        let _ = agent_identity;
+        self.require_state(&[MobState::Running])
+    }
+
+    fn authorize_spawn_profile_material(
+        &mut self,
+        agent_identity: &MeerkatId,
+        profile_name: &ProfileName,
+        profile: &crate::profile::Profile,
+        context: &str,
+    ) -> Result<AuthorizedSpawnProfileMaterial, MobError> {
+        let (input, expected) =
+            authorize_spawn_profile_input(agent_identity, profile_name, profile)?;
+        let transition = self.apply_dsl_input_collect_transition(input, context)?;
+        require_authorized_effect(&transition, &expected, context)?;
+        Ok(expected)
     }
 
     fn preview_run_flow_command_admission(&self, run_id: &RunId) -> Result<(), MobError> {
@@ -4096,7 +4112,7 @@ impl MobActor {
     fn preview_policy_spawn_submit_work_admission(
         &self,
         agent_identity: &MeerkatId,
-        external_addressable: bool,
+        authorized_profile_material: &AuthorizedSpawnProfileMaterial,
         work_ref: &WorkRef,
         origin: WorkOrigin,
     ) -> Result<(), MobError> {
@@ -4124,7 +4140,8 @@ impl MobActor {
             agent_runtime_id: dsl_runtime_id.clone(),
             fence_token: dsl_fence_token,
             generation: mob_dsl::Generation::from_domain(crate::ids::Generation::INITIAL),
-            external_addressable,
+            profile_material_digest: authorized_profile_material.profile_material_digest.clone(),
+            external_addressable: authorized_profile_material.external_addressable,
             bridge_session_id: mob_dsl::SessionId::default(),
             replacing,
         };
@@ -5812,8 +5829,7 @@ impl MobActor {
             if inherited_tool_filter.is_some() && effective_profile_override.is_none() {
                 build::open_profile_tool_categories_for_inherited_filter(&mut profile);
             }
-            authorize_spawn_profile_material(
-                self.dsl_authority.state(),
+            let authorized_profile_material = self.authorize_spawn_profile_material(
                 &agent_identity,
                 &profile_name,
                 &profile,
@@ -5821,7 +5837,7 @@ impl MobActor {
             )?;
 
             let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
-            let profile_external_addressable = profile.external_addressable;
+            let profile_external_addressable = authorized_profile_material.external_addressable;
 
             // ---------- Resume bridge-session fast-path ----------
             // When resume_bridge_session_id is set, skip provisioning and go
@@ -5886,6 +5902,7 @@ impl MobActor {
                         owner_bridge_session_id.clone(),
                         auto_wire_parent,
                         effective_profile_override.clone(),
+                        authorized_profile_material.clone(),
                         continuity_intent.clone(),
                     ));
                 }
@@ -5968,6 +5985,7 @@ impl MobActor {
                         owner_bridge_session_id.clone(),
                         auto_wire_parent,
                         effective_profile_override.clone(),
+                        authorized_profile_material.clone(),
                         continuity_intent.clone(),
                     ));
                 }
@@ -6113,6 +6131,7 @@ impl MobActor {
                 owner_bridge_session_id.clone(),
                 auto_wire_parent,
                 effective_profile_override,
+                authorized_profile_material,
                 continuity_intent,
             ))
         }
@@ -6124,13 +6143,14 @@ impl MobActor {
             prompt,
             initial_turn_prompt,
             selected_runtime_mode,
-            external_addressable,
+            _external_addressable,
             resolved_labels,
             resume_member_ref,
             maybe_provision_request,
             spawn_owner_bridge_session_id,
             auto_wire_parent,
             effective_profile_override,
+            authorized_profile_material,
             continuity_intent,
         ) = match prepare_result {
             Ok(prepared) => prepared,
@@ -6150,7 +6170,7 @@ impl MobActor {
             };
             if let Err(error) = self.preview_spawn_admission(
                 &agent_identity,
-                external_addressable,
+                &authorized_profile_material,
                 &bridge_session_id,
             ) {
                 let _ = reply_tx.send(Err(error));
@@ -6202,6 +6222,7 @@ impl MobActor {
                     auto_wire_parent,
                     None,
                     effective_profile_override,
+                    authorized_profile_material,
                     continuity_intent,
                 )
                 .await
@@ -6222,7 +6243,7 @@ impl MobActor {
 
         if let Err(error) = self.preview_spawn_admission(
             &agent_identity,
-            external_addressable,
+            &authorized_profile_material,
             &admitted_bridge_session_id,
         ) {
             let _ = reply_tx.send(Err(error));
@@ -6255,6 +6276,7 @@ impl MobActor {
             auto_wire_parent,
             restore_wiring: None,
             effective_profile_override,
+            authorized_profile_material,
             continuity_intent,
             progress: pending_progress.clone(),
             reply_tx,
@@ -6406,6 +6428,7 @@ impl MobActor {
                 auto_wire_parent,
                 restore_wiring,
                 effective_profile_override,
+                authorized_profile_material,
                 continuity_intent,
                 progress: _,
                 reply_tx,
@@ -6442,6 +6465,7 @@ impl MobActor {
                             auto_wire_parent,
                             restore_wiring,
                             effective_profile_override,
+                            authorized_profile_material,
                             continuity_intent,
                         )
                         .await
@@ -6541,8 +6565,7 @@ impl MobActor {
         if inherited_tool_filter.is_some() && override_profile.is_none() {
             build::open_profile_tool_categories_for_inherited_filter(&mut profile);
         }
-        authorize_spawn_profile_material(
-            self.dsl_authority.state(),
+        let authorized_profile_material = self.authorize_spawn_profile_material(
             agent_identity,
             &profile_name,
             &profile,
@@ -6550,7 +6573,7 @@ impl MobActor {
         )?;
         self.preview_policy_spawn_submit_work_admission(
             &requested_identity,
-            profile.external_addressable,
+            &authorized_profile_material,
             work_ref,
             origin,
         )?;
@@ -6621,6 +6644,7 @@ impl MobActor {
             auto_wire_parent: false,
             restore_wiring: None,
             effective_profile_override: override_profile.clone(),
+            authorized_profile_material: authorized_profile_material.clone(),
             continuity_intent: continuity_intent.clone(),
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
             reply_tx: pending_reply_tx,
@@ -6695,6 +6719,7 @@ impl MobActor {
                 false,
                 None,
                 override_profile, // policy spawns usually use definition profiles; customizers may supply an override
+                authorized_profile_material,
                 continuity_intent,
             )
             .await
@@ -6742,26 +6767,14 @@ impl MobActor {
         auto_wire_parent: bool,
         restore_wiring: Option<RestoreWiringPlan>,
         effective_profile_override: Option<crate::profile::Profile>,
+        authorized_profile_material: AuthorizedSpawnProfileMaterial,
         continuity_intent: super::handle::SpawnContinuityIntent,
     ) -> Result<FinalizeSpawnOutcome, MobError> {
         let identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
         let agent_runtime_id = crate::ids::AgentRuntimeId::new(identity.clone(), generation);
         let overlay_record =
             self.external_binding_overlay_record(&identity, generation, provision.member_ref());
-
-        // Resolve `external_addressable` from the effective profile so we
-        // can inform the DSL (see the `MobMachineInput::Spawn` dispatch
-        // below). Honours any override previously applied via
-        // `SpawnTooling::Profile` resolution.
-        let external_addressable = if let Some(profile) = effective_profile_override.as_ref() {
-            profile.external_addressable
-        } else {
-            self.definition
-                .resolve_profile(profile_name, self.realm_profile_store.as_ref())
-                .await
-                .map(|profile| profile.external_addressable)
-                .unwrap_or(false)
-        };
+        let external_addressable = authorized_profile_material.external_addressable;
 
         // Feed `Spawn` into the MobMachine DSL so it populates
         // `live_runtime_ids` + `externally_addressable_runtime_ids` and
@@ -6784,6 +6797,7 @@ impl MobActor {
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
                 fence_token: mob_dsl::FenceToken::from_domain(fence_token),
                 generation: mob_dsl::Generation::from_domain(generation),
+                profile_material_digest: authorized_profile_material.profile_material_digest,
                 external_addressable,
                 bridge_session_id: bridge_session_id.clone(),
                 replacing,
@@ -10391,14 +10405,14 @@ impl MobActor {
         if replacement_inherited_tool_filter.is_some() && replacement_profile_override.is_none() {
             build::open_profile_tool_categories_for_inherited_filter(&mut profile);
         }
-        authorize_spawn_profile_material(
-            self.dsl_authority.state(),
-            &agent_identity,
-            &snapshot.profile_name,
-            &profile,
-            "respawn_profile_authority",
-        )
-        .map_err(MobRespawnError::from)?;
+        let replacement_authorized_profile_material = self
+            .authorize_spawn_profile_material(
+                &agent_identity,
+                &snapshot.profile_name,
+                &profile,
+                "respawn_profile_authority",
+            )
+            .map_err(MobRespawnError::from)?;
         let external_tools =
             self.external_tools_for_profile(&profile, replacement_external_tools)?;
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
@@ -10461,6 +10475,7 @@ impl MobActor {
                 || !snapshot.restore_wiring.external_peers.is_empty())
             .then_some(snapshot.restore_wiring.clone()),
             effective_profile_override: replacement_profile_override.clone(),
+            authorized_profile_material: replacement_authorized_profile_material.clone(),
             continuity_intent: replacement_continuity_intent.clone(),
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
             reply_tx: respawn_inline_reply_tx,
@@ -10574,6 +10589,7 @@ impl MobActor {
                         || !snapshot.restore_wiring.external_peers.is_empty())
                     .then_some(snapshot.restore_wiring.clone()),
                     replacement_profile_override,
+                    replacement_authorized_profile_material,
                     replacement_continuity_intent,
                 )
                 .await
@@ -15257,11 +15273,27 @@ mod runtime_observation_tests {
         let runtime_id = mob_dsl::AgentRuntimeId("member:0".to_string());
         mob_dsl::MobMachineMutator::apply(
             &mut authority,
+            mob_dsl::MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: identity.clone(),
+                profile_name: "test".to_string(),
+                model: "test-model".to_string(),
+                profile_material_digest: "test-profile-digest".to_string(),
+                tool_config_digest: "test-tool-config-digest".to_string(),
+                skills_digest: "test-skills-digest".to_string(),
+                provider_params_digest: None,
+                output_schema_digest: None,
+                external_addressable: true,
+            },
+        )
+        .expect("AuthorizeSpawnProfile should seed live runtime ownership");
+        mob_dsl::MobMachineMutator::apply(
+            &mut authority,
             mob_dsl::MobMachineInput::Spawn {
                 agent_identity: identity,
                 agent_runtime_id: runtime_id.clone(),
                 fence_token: mob_dsl::FenceToken(1),
                 generation: mob_dsl::Generation(0),
+                profile_material_digest: "test-profile-digest".to_string(),
                 external_addressable: true,
                 bridge_session_id: mob_dsl::SessionId("member-session".to_string()),
                 replacing: None,

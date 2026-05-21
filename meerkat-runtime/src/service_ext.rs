@@ -172,6 +172,20 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         ))
     }
 
+    async fn classify_image_operation_terminal(
+        &self,
+        _session_id: &SessionId,
+        _operation_id: meerkat_core::image_generation::ImageOperationId,
+        _observation: meerkat_core::image_generation::ImageProviderTerminalObservation,
+        _provider_text: meerkat_core::image_generation::ProviderTextDisposition,
+    ) -> Result<meerkat_core::image_generation::ImageOperationTerminalClass, RuntimeDriverError>
+    {
+        Err(RuntimeDriverError::Internal(
+            "image operation terminal classification is not supported by this runtime adapter"
+                .into(),
+        ))
+    }
+
     async fn complete_image_operation(
         &self,
         _session_id: &SessionId,

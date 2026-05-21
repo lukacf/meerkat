@@ -13,8 +13,9 @@ use meerkat_core::RuntimeEpochId;
 use meerkat_core::agent::CommsRuntime;
 use meerkat_core::image_generation::{
     ImageOperationApprovalReason, ImageOperationDenialReason, ImageOperationId,
-    ImageOperationPhase, ImageOperationTerminalClass, SessionModelRoutingStatus,
-    SwitchTurnApprovalReason, SwitchTurnControlResult, SwitchTurnIntent, SwitchTurnRequestId,
+    ImageOperationPhase, ImageOperationTerminalClass, ImageProviderTerminalObservation,
+    ProviderTextDisposition, SessionModelRoutingStatus, SwitchTurnApprovalReason,
+    SwitchTurnControlResult, SwitchTurnIntent, SwitchTurnRequestId,
 };
 use meerkat_core::lifecycle::WaitRequestId;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
@@ -408,6 +409,12 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         operation_id: ImageOperationId,
     },
+    ClassifyImageOperationTerminal {
+        session_id: SessionId,
+        operation_id: ImageOperationId,
+        observation: ImageProviderTerminalObservation,
+        provider_text: ProviderTextDisposition,
+    },
     CompleteImageOperation {
         session_id: SessionId,
         operation_id: ImageOperationId,
@@ -517,6 +524,7 @@ pub(crate) enum MeerkatMachineCommandResult {
     SwitchTurnControlResult(SwitchTurnControlResult),
     ImageOperationRoutingResult(ImageOperationRoutingResult),
     ImageOperationPhase(ImageOperationPhase),
+    ImageOperationTerminalClass(ImageOperationTerminalClass),
     BoundaryReceipt(Option<RunBoundaryReceipt>),
     Prepared(MeerkatMachineRunPrepared),
 }
@@ -985,6 +993,7 @@ pub enum MeerkatMachineCatalogInput {
     BeginImageOperation,
     DenyImageOperationPlan,
     ActivateImageOperationOverride,
+    ClassifyImageOperationTerminal,
     CompleteImageOperation,
     RestoreImageOperationOverride,
     LoadBoundaryReceipt,
@@ -1036,6 +1045,7 @@ impl MeerkatMachineCatalogInput {
         Self::BeginImageOperation,
         Self::DenyImageOperationPlan,
         Self::ActivateImageOperationOverride,
+        Self::ClassifyImageOperationTerminal,
         Self::CompleteImageOperation,
         Self::RestoreImageOperationOverride,
         Self::LoadBoundaryReceipt,
@@ -1100,6 +1110,9 @@ impl MeerkatMachineCatalogInput {
             Self::ActivateImageOperationOverride => {
                 MeerkatMachineInputVariant::ActivateImageOperationOverride
             }
+            Self::ClassifyImageOperationTerminal => {
+                MeerkatMachineInputVariant::ClassifyImageOperationTerminal
+            }
             Self::CompleteImageOperation => MeerkatMachineInputVariant::CompleteImageOperation,
             Self::RestoreImageOperationOverride => {
                 MeerkatMachineInputVariant::RestoreImageOperationOverride
@@ -1155,6 +1168,7 @@ impl MeerkatMachineCatalogInput {
             Self::BeginImageOperation => "BeginImageOperation",
             Self::DenyImageOperationPlan => "DenyImageOperationPlan",
             Self::ActivateImageOperationOverride => "ActivateImageOperationOverride",
+            Self::ClassifyImageOperationTerminal => "ClassifyImageOperationTerminal",
             Self::CompleteImageOperation => "CompleteImageOperation",
             Self::RestoreImageOperationOverride => "RestoreImageOperationOverride",
             Self::LoadBoundaryReceipt => "LoadBoundaryReceipt",
@@ -1224,6 +1238,9 @@ impl MeerkatMachineCommandVariant {
             }
             Self::ActivateImageOperationOverride => {
                 Some(MeerkatMachineCatalogInput::ActivateImageOperationOverride)
+            }
+            Self::ClassifyImageOperationTerminal => {
+                Some(MeerkatMachineCatalogInput::ClassifyImageOperationTerminal)
             }
             Self::CompleteImageOperation => {
                 Some(MeerkatMachineCatalogInput::CompleteImageOperation)
@@ -1455,6 +1472,11 @@ const fn meerkat_machine_command_classification(
         MeerkatMachineCommandVariant::ActivateImageOperationOverride => {
             MeerkatMachineCommandClassification::CatalogInput(
                 MeerkatMachineCatalogInput::ActivateImageOperationOverride,
+            )
+        }
+        MeerkatMachineCommandVariant::ClassifyImageOperationTerminal => {
+            MeerkatMachineCommandClassification::CatalogInput(
+                MeerkatMachineCatalogInput::ClassifyImageOperationTerminal,
             )
         }
         MeerkatMachineCommandVariant::CompleteImageOperation => {

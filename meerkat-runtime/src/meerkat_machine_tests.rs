@@ -2294,13 +2294,25 @@ async fn model_routing_status_proves_finite_turn_and_operation_precedence() {
         "operation override takes precedence over the active turn override"
     );
 
-    let empty_terminal = meerkat_core::image_generation::ImageOperationTerminalClass::EmptyResult {
-        provider_text: meerkat_core::image_generation::ProviderTextDisposition::Captured {
-            text_artifact_ref: meerkat_core::image_generation::TextArtifactRef::new(
-                "provider-text-artifact",
-            ),
-        },
+    let provider_text = meerkat_core::image_generation::ProviderTextDisposition::Captured {
+        text_artifact_ref: meerkat_core::image_generation::TextArtifactRef::new(
+            "provider-text-artifact",
+        ),
     };
+    let empty_terminal =
+        <MeerkatMachine as SessionServiceRuntimeExt>::classify_image_operation_terminal(
+            &adapter,
+            &session_id,
+            operation_id,
+            meerkat_core::image_generation::ImageProviderTerminalObservation::EmptyResult,
+            provider_text,
+        )
+        .await
+        .expect("image terminal should classify through machine authority");
+    assert!(matches!(
+        empty_terminal,
+        meerkat_core::image_generation::ImageOperationTerminalClass::EmptyResult { .. }
+    ));
     <MeerkatMachine as SessionServiceRuntimeExt>::complete_image_operation(
         &adapter,
         &session_id,
@@ -20825,6 +20837,9 @@ fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult)
         }
         MeerkatMachineCommandResult::ImageOperationPhase(phase) => {
             format!("image_operation_phase:{phase:?}")
+        }
+        MeerkatMachineCommandResult::ImageOperationTerminalClass(terminal) => {
+            format!("image_operation_terminal_class:{terminal:?}")
         }
         MeerkatMachineCommandResult::Prepared(_) => "prepared".to_string(),
     }

@@ -368,6 +368,34 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         }
     }
 
+    async fn classify_image_operation_terminal(
+        &self,
+        session_id: &SessionId,
+        operation_id: meerkat_core::image_generation::ImageOperationId,
+        observation: meerkat_core::image_generation::ImageProviderTerminalObservation,
+        provider_text: meerkat_core::image_generation::ProviderTextDisposition,
+    ) -> Result<meerkat_core::image_generation::ImageOperationTerminalClass, RuntimeDriverError>
+    {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::ClassifyImageOperationTerminal {
+                    session_id: session_id.clone(),
+                    operation_id,
+                    observation,
+                    provider_text,
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::ImageOperationTerminalClass(terminal) => Ok(terminal),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::classify_image_operation_terminal: {other:?}"
+            ))),
+        }
+    }
+
     async fn restore_image_operation_override(
         &self,
         session_id: &SessionId,

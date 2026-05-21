@@ -1543,6 +1543,36 @@ pub enum RoutingImageTerminal {
     ScopedRestoreFailed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageTerminalObservation {
+    #[default]
+    Generated,
+    EmptyResult,
+    ProviderHttpError,
+    ProviderNativeError,
+    ExecutionFailed,
+    BlobCommitFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageProviderErrorCode {
+    #[default]
+    Unknown,
+    OpenAiContentFilter,
+    OpenAiModelRefusal,
+    GeminiSafety,
+    GeminiModelRefusal,
+    GeminiDeadlineExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingProviderTextDisposition {
+    #[default]
+    NotEmitted,
+    Captured,
+    EmittedButNotStored,
+}
+
 // Track-B (R5): declarative peer endpoint descriptor for the runtime
 // DSL. Shape mirrors `meerkat_core::comms::TrustedPeerDescriptor`.
 // The catalog DSL holds an identical type; the two are structurally
@@ -1769,6 +1799,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             model_routing_image_operation_target_models: Map<String, String>,
             model_routing_image_operation_realtime: Map<String, bool>,
             model_routing_image_operation_requires_scoped_override: Map<String, bool>,
+            model_routing_image_classified_terminals: Map<String, Enum<RoutingImageTerminal>>,
+            model_routing_image_classified_provider_text: Map<String, Enum<RoutingProviderTextDisposition>>,
             model_routing_image_terminals: Map<String, Enum<RoutingImageTerminal>>,
             model_routing_image_terminal_payloads: Map<String, String>,
             model_routing_image_denials: Map<String, Enum<RoutingDenialReason>>,
@@ -2129,6 +2161,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             model_routing_image_operation_target_models = EmptyMap,
             model_routing_image_operation_realtime = EmptyMap,
             model_routing_image_operation_requires_scoped_override = EmptyMap,
+            model_routing_image_classified_terminals = EmptyMap,
+            model_routing_image_classified_provider_text = EmptyMap,
             model_routing_image_terminals = EmptyMap,
             model_routing_image_terminal_payloads = EmptyMap,
             model_routing_image_denials = EmptyMap,
@@ -2404,6 +2438,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 terminal_payload: String,
             },
             ActivateImageOperationOverride { operation_id: String, target_model: String, target_realtime_capable: bool },
+            ClassifyImageOperationTerminal {
+                operation_id: String,
+                observation: Enum<RoutingImageTerminalObservation>,
+                http_status_code: Option<u64>,
+                error_code: Enum<RoutingImageProviderErrorCode>,
+                provider_text: Enum<RoutingProviderTextDisposition>,
+            },
             CompleteImageOperation { operation_id: String, terminal: Enum<RoutingImageTerminal>, terminal_payload: String },
             RestoreImageOperationOverride { operation_id: String },
             LoadBoundaryReceipt { runtime_id: String, sequence: u64 },
@@ -2948,6 +2989,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             SwitchTurnFiniteOverrideActivated { request_id: String, target_model: String, turns_remaining: u64 },
             SwitchTurnFiniteOverrideRestored { request_id: String },
             ImageOperationPhaseChanged { operation_id: String, phase: Enum<RoutingImageOperationPhase> },
+            ImageOperationTerminalClassified {
+                operation_id: String,
+                terminal: Enum<RoutingImageTerminal>,
+                provider_text: Enum<RoutingProviderTextDisposition>,
+            },
             ImageOperationDenied { operation_id: String, reason: Enum<RoutingDenialReason> },
             ModelRoutingApprovalTerminalized { approval_id: String, phase: Enum<RoutingApprovalPhase> },
             // Absorbed effects
@@ -3262,6 +3308,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition SwitchTurnFiniteOverrideRestored => local,
         disposition ImageOperationPhaseChanged => external,
         disposition ImageOperationDenied => external,
+        disposition ImageOperationTerminalClassified => local,
         disposition ModelRoutingApprovalTerminalized => external,
         // Absorbed effect dispositions
         disposition ResolveAdmission => local,
@@ -4022,6 +4069,185 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit ModelRoutingStatusChanged { topology_epoch: self.model_routing_topology_epoch }
         }
 
+        transition ClassifyImageOperationTerminalGenerated {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "generated_observation" { observation == RoutingImageTerminalObservation::Generated }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::Generated);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::Generated,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalEmpty {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "empty_observation" { observation == RoutingImageTerminalObservation::EmptyResult }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::EmptyResult);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::EmptyResult,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalMechanicalFailure {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "mechanical_failure" {
+                observation == RoutingImageTerminalObservation::ExecutionFailed
+                || observation == RoutingImageTerminalObservation::BlobCommitFailed
+            }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::Failed);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::Failed,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalTimeout {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "provider_error_observation" {
+                observation == RoutingImageTerminalObservation::ProviderHttpError
+                || observation == RoutingImageTerminalObservation::ProviderNativeError
+            }
+            guard "timeout_evidence" {
+                http_status_code == Some(408)
+                || http_status_code == Some(504)
+                || error_code == RoutingImageProviderErrorCode::GeminiDeadlineExceeded
+            }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::Timeout);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::Timeout,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalCancelled {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "provider_http_error" { observation == RoutingImageTerminalObservation::ProviderHttpError }
+            guard "cancelled_status" { http_status_code == Some(499) }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::Cancelled);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::Cancelled,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalSafetyFiltered {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "provider_error_observation" {
+                observation == RoutingImageTerminalObservation::ProviderHttpError
+                || observation == RoutingImageTerminalObservation::ProviderNativeError
+            }
+            guard "safety_code" {
+                error_code == RoutingImageProviderErrorCode::OpenAiContentFilter
+                || error_code == RoutingImageProviderErrorCode::GeminiSafety
+            }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::SafetyFiltered);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::SafetyFiltered,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalRefused {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "provider_error_observation" {
+                observation == RoutingImageTerminalObservation::ProviderHttpError
+                || observation == RoutingImageTerminalObservation::ProviderNativeError
+            }
+            guard "refusal_code" {
+                error_code == RoutingImageProviderErrorCode::OpenAiModelRefusal
+                || error_code == RoutingImageProviderErrorCode::GeminiModelRefusal
+            }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::RefusedByProvider);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::RefusedByProvider,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalProviderFailed {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "provider_error_observation" {
+                observation == RoutingImageTerminalObservation::ProviderHttpError
+                || observation == RoutingImageTerminalObservation::ProviderNativeError
+            }
+            guard "not_timeout" {
+                http_status_code != Some(408)
+                && http_status_code != Some(504)
+                && error_code != RoutingImageProviderErrorCode::GeminiDeadlineExceeded
+            }
+            guard "not_cancelled" { http_status_code != Some(499) }
+            guard "not_safety" {
+                error_code != RoutingImageProviderErrorCode::OpenAiContentFilter
+                && error_code != RoutingImageProviderErrorCode::GeminiSafety
+            }
+            guard "not_refusal" {
+                error_code != RoutingImageProviderErrorCode::OpenAiModelRefusal
+                && error_code != RoutingImageProviderErrorCode::GeminiModelRefusal
+            }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::Failed);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::Failed,
+                provider_text: provider_text
+            }
+        }
+
         transition CompleteImageOperation {
             per_phase [Idle, Attached, Running]
             on input CompleteImageOperation { operation_id, terminal, terminal_payload }
@@ -4029,10 +4255,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "operation_requires_scoped_override" {
                 self.model_routing_image_operation_requires_scoped_override.contains_key(operation_id)
             }
+            guard "terminal_classified" {
+                self.model_routing_image_classified_terminals.get_cloned(operation_id) == Some(terminal)
+            }
             update {
                 self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::RestoringScopedOverride);
                 self.model_routing_image_terminals.insert(operation_id, terminal);
                 self.model_routing_image_terminal_payloads.insert(operation_id, terminal_payload);
+                self.model_routing_image_classified_terminals.remove(operation_id);
+                self.model_routing_image_classified_provider_text.remove(operation_id);
             }
             to Idle
             emit ImageOperationPhaseChanged { operation_id: operation_id, phase: RoutingImageOperationPhase::RestoringScopedOverride }
@@ -4046,6 +4277,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 !self.model_routing_image_operation_requires_scoped_override.contains_key(operation_id)
             }
             guard "no_operation_override_active" { self.model_routing_operation_override_id == None }
+            guard "terminal_classified" {
+                self.model_routing_image_classified_terminals.get_cloned(operation_id) == Some(terminal)
+            }
             update {
                 self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::Terminal);
                 self.model_routing_image_terminals.insert(operation_id, terminal);
@@ -4053,6 +4287,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.model_routing_image_operation_target_models.remove(operation_id);
                 self.model_routing_image_operation_realtime.remove(operation_id);
                 self.model_routing_image_operation_requires_scoped_override.remove(operation_id);
+                self.model_routing_image_classified_terminals.remove(operation_id);
+                self.model_routing_image_classified_provider_text.remove(operation_id);
             }
             to Idle
             emit ImageOperationPhaseChanged { operation_id: operation_id, phase: RoutingImageOperationPhase::Terminal }

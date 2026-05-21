@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use futures::Stream;
 use meerkat_core::image_generation::{
     GenerateImageExecutionPlan, GenerateImageRequest, ImageFormatPreference,
-    ImageGenerationToolResult, ImageOperationTerminalClass, ImageSizePreference,
-    ProviderImageMetadata, ProviderTextDisposition, RevisedPromptDisposition,
+    ImageGenerationToolResult, ImageOperationTerminalClass, ImageProviderTerminalObservation,
+    ImageSizePreference, ProviderImageMetadata, ProviderTextDisposition, RevisedPromptDisposition,
 };
 use meerkat_core::lifecycle::run_primitive::ProviderTag;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
@@ -123,7 +123,7 @@ pub struct ProviderGeneratedImage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderImageGenerationOutput {
     pub operation_id: meerkat_core::ImageOperationId,
-    pub terminal: ImageOperationTerminalClass,
+    pub terminal_observation: ImageProviderTerminalObservation,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ProviderGeneratedImage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,12 +137,13 @@ pub struct ProviderImageGenerationOutput {
 impl ProviderImageGenerationOutput {
     pub fn to_tool_result(
         &self,
+        terminal: ImageOperationTerminalClass,
         committed_images: Vec<AssistantImageRef>,
         provider_text: ProviderTextDisposition,
     ) -> ImageGenerationToolResult {
         ImageGenerationToolResult {
             operation_id: self.operation_id,
-            terminal: self.terminal.clone(),
+            terminal,
             images: committed_images,
             provider_text,
             revised_prompt: self.revised_prompt.clone(),

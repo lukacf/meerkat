@@ -794,6 +794,32 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "RoutingImageTerminalObservation",
+                &[
+                    "Generated",
+                    "EmptyResult",
+                    "ProviderHttpError",
+                    "ProviderNativeError",
+                    "ExecutionFailed",
+                    "BlobCommitFailed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RoutingImageProviderErrorCode",
+                &[
+                    "Unknown",
+                    "OpenAiContentFilter",
+                    "OpenAiModelRefusal",
+                    "GeminiSafety",
+                    "GeminiModelRefusal",
+                    "GeminiDeadlineExceeded",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RoutingProviderTextDisposition",
+                &["NotEmitted", "Captured", "EmittedButNotStored"],
+            ),
+            NamedTypeBinding::string_enum(
                 "RoutingSwitchTurnPhase",
                 &[
                     "Requested",

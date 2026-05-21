@@ -59,6 +59,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `model_routing_image_operation_target_models`: `Map<String, String>`
 - `model_routing_image_operation_realtime`: `Map<String, Bool>`
 - `model_routing_image_operation_requires_scoped_override`: `Map<String, Bool>`
+- `model_routing_image_classified_terminals`: `Map<String, RoutingImageTerminal>`
+- `model_routing_image_classified_provider_text`: `Map<String, RoutingProviderTextDisposition>`
 - `model_routing_image_terminals`: `Map<String, RoutingImageTerminal>`
 - `model_routing_image_terminal_payloads`: `Map<String, String>`
 - `model_routing_image_denials`: `Map<String, RoutingDenialReason>`
@@ -236,6 +238,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `BeginImageOperation`(operation_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingImageApprovalReason>, realtime_detach_allowed: Bool, requires_scoped_override: Bool)
 - `DenyImageOperationPlan`(operation_id: String, reason: RoutingImagePlanDenialReason, terminal_payload: String)
 - `ActivateImageOperationOverride`(operation_id: String, target_model: String, target_realtime_capable: Bool)
+- `ClassifyImageOperationTerminal`(operation_id: String, observation: RoutingImageTerminalObservation, http_status_code: Option<u64>, error_code: RoutingImageProviderErrorCode, provider_text: RoutingProviderTextDisposition)
 - `CompleteImageOperation`(operation_id: String, terminal: RoutingImageTerminal, terminal_payload: String)
 - `RestoreImageOperationOverride`(operation_id: String)
 - `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
@@ -446,6 +449,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SwitchTurnFiniteOverrideActivated`(request_id: String, target_model: String, turns_remaining: u64)
 - `SwitchTurnFiniteOverrideRestored`(request_id: String)
 - `ImageOperationPhaseChanged`(operation_id: String, phase: RoutingImageOperationPhase)
+- `ImageOperationTerminalClassified`(operation_id: String, terminal: RoutingImageTerminal, provider_text: RoutingProviderTextDisposition)
 - `ImageOperationDenied`(operation_id: String, reason: RoutingDenialReason)
 - `ModelRoutingApprovalTerminalized`(approval_id: String, phase: RoutingApprovalPhase)
 - `ResolveAdmission`
@@ -1124,12 +1128,253 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `ImageOperationPhaseChanged`, `ModelRoutingStatusChanged`
 - To: `Running`
 
+### `ClassifyImageOperationTerminalGeneratedIdle`
+- From: `Idle`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `generated_observation`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Idle`
+
+### `ClassifyImageOperationTerminalGeneratedAttached`
+- From: `Attached`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `generated_observation`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Attached`
+
+### `ClassifyImageOperationTerminalGeneratedRunning`
+- From: `Running`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `generated_observation`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Running`
+
+### `ClassifyImageOperationTerminalEmptyIdle`
+- From: `Idle`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `empty_observation`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Idle`
+
+### `ClassifyImageOperationTerminalEmptyAttached`
+- From: `Attached`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `empty_observation`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Attached`
+
+### `ClassifyImageOperationTerminalEmptyRunning`
+- From: `Running`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `empty_observation`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Running`
+
+### `ClassifyImageOperationTerminalMechanicalFailureIdle`
+- From: `Idle`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `mechanical_failure`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Idle`
+
+### `ClassifyImageOperationTerminalMechanicalFailureAttached`
+- From: `Attached`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `mechanical_failure`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Attached`
+
+### `ClassifyImageOperationTerminalMechanicalFailureRunning`
+- From: `Running`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `mechanical_failure`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Running`
+
+### `ClassifyImageOperationTerminalTimeoutIdle`
+- From: `Idle`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_error_observation`
+  - `timeout_evidence`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Idle`
+
+### `ClassifyImageOperationTerminalTimeoutAttached`
+- From: `Attached`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_error_observation`
+  - `timeout_evidence`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Attached`
+
+### `ClassifyImageOperationTerminalTimeoutRunning`
+- From: `Running`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_error_observation`
+  - `timeout_evidence`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Running`
+
+### `ClassifyImageOperationTerminalCancelledIdle`
+- From: `Idle`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_http_error`
+  - `cancelled_status`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Idle`
+
+### `ClassifyImageOperationTerminalCancelledAttached`
+- From: `Attached`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_http_error`
+  - `cancelled_status`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Attached`
+
+### `ClassifyImageOperationTerminalCancelledRunning`
+- From: `Running`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_http_error`
+  - `cancelled_status`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Running`
+
+### `ClassifyImageOperationTerminalSafetyFilteredIdle`
+- From: `Idle`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_error_observation`
+  - `safety_code`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Idle`
+
+### `ClassifyImageOperationTerminalSafetyFilteredAttached`
+- From: `Attached`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_error_observation`
+  - `safety_code`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Attached`
+
+### `ClassifyImageOperationTerminalSafetyFilteredRunning`
+- From: `Running`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_error_observation`
+  - `safety_code`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Running`
+
+### `ClassifyImageOperationTerminalRefusedIdle`
+- From: `Idle`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_error_observation`
+  - `refusal_code`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Idle`
+
+### `ClassifyImageOperationTerminalRefusedAttached`
+- From: `Attached`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_error_observation`
+  - `refusal_code`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Attached`
+
+### `ClassifyImageOperationTerminalRefusedRunning`
+- From: `Running`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_error_observation`
+  - `refusal_code`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Running`
+
+### `ClassifyImageOperationTerminalProviderFailedIdle`
+- From: `Idle`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_error_observation`
+  - `not_timeout`
+  - `not_cancelled`
+  - `not_safety`
+  - `not_refusal`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Idle`
+
+### `ClassifyImageOperationTerminalProviderFailedAttached`
+- From: `Attached`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_error_observation`
+  - `not_timeout`
+  - `not_cancelled`
+  - `not_safety`
+  - `not_refusal`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Attached`
+
+### `ClassifyImageOperationTerminalProviderFailedRunning`
+- From: `Running`
+- On: `ClassifyImageOperationTerminal`(operation_id, observation, http_status_code, error_code, provider_text)
+- Guards:
+  - `operation_recorded`
+  - `provider_error_observation`
+  - `not_timeout`
+  - `not_cancelled`
+  - `not_safety`
+  - `not_refusal`
+- Emits: `ImageOperationTerminalClassified`
+- To: `Running`
+
 ### `CompleteImageOperationIdle`
 - From: `Idle`
 - On: `CompleteImageOperation`(operation_id, terminal, terminal_payload)
 - Guards:
   - `operation_active`
   - `operation_requires_scoped_override`
+  - `terminal_classified`
 - Emits: `ImageOperationPhaseChanged`
 - To: `Idle`
 
@@ -1139,6 +1384,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `operation_active`
   - `operation_requires_scoped_override`
+  - `terminal_classified`
 - Emits: `ImageOperationPhaseChanged`
 - To: `Attached`
 
@@ -1148,6 +1394,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `operation_active`
   - `operation_requires_scoped_override`
+  - `terminal_classified`
 - Emits: `ImageOperationPhaseChanged`
 - To: `Running`
 
@@ -1158,6 +1405,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_plan_resolved`
   - `operation_does_not_require_scoped_override`
   - `no_operation_override_active`
+  - `terminal_classified`
 - Emits: `ImageOperationPhaseChanged`
 - To: `Idle`
 
@@ -1168,6 +1416,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_plan_resolved`
   - `operation_does_not_require_scoped_override`
   - `no_operation_override_active`
+  - `terminal_classified`
 - Emits: `ImageOperationPhaseChanged`
 - To: `Attached`
 
@@ -1178,6 +1427,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_plan_resolved`
   - `operation_does_not_require_scoped_override`
   - `no_operation_override_active`
+  - `terminal_classified`
 - Emits: `ImageOperationPhaseChanged`
 - To: `Running`
 

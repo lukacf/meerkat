@@ -7,10 +7,10 @@ use meerkat_core::image_generation::{
     AssistantImageId, AssistantImageRef, GenerateImageRequest, ImageFormatPreference,
     ImageGenerationIntent, ImageGenerationPlanner, ImageGenerationResolvedPlan,
     ImageGenerationTargetPreference, ImageGenerationToolResult, ImageOperationDenialReason,
-    ImageOperationId, ImageOperationPhase, ImageOperationTerminalClass, ImageQualityPreference,
-    ImageSizePreference, ImageSourceRef, PostActivationImageDenialReason,
-    PostActivationImageTerminal, PromptSource, PromptText, ProviderId, ProviderTextDisposition,
-    TextArtifactRef, ToolCallId,
+    ImageOperationId, ImageOperationPhase, ImageOperationTerminalClass,
+    ImageProviderTerminalObservation, ImageQualityPreference, ImageSizePreference, ImageSourceRef,
+    PostActivationImageDenialReason, PostActivationImageTerminal, PromptSource, PromptText,
+    ProviderId, ProviderTextDisposition, TextArtifactRef, ToolCallId,
 };
 use meerkat_core::lifecycle::run_primitive::ModelId;
 use meerkat_core::ops::SessionEffect;
@@ -57,6 +57,14 @@ pub trait ImageGenerationMachine: Send + Sync {
         session_id: &SessionId,
         operation_id: ImageOperationId,
     ) -> Result<ImageOperationPhase, RuntimeDriverError>;
+
+    async fn classify_image_operation_terminal(
+        &self,
+        session_id: &SessionId,
+        operation_id: ImageOperationId,
+        observation: ImageProviderTerminalObservation,
+        provider_text: ProviderTextDisposition,
+    ) -> Result<ImageOperationTerminalClass, RuntimeDriverError>;
 
     async fn complete_image_operation(
         &self,
@@ -110,6 +118,23 @@ where
     ) -> Result<ImageOperationPhase, RuntimeDriverError> {
         SessionServiceRuntimeExt::activate_image_operation_override(self, session_id, operation_id)
             .await
+    }
+
+    async fn classify_image_operation_terminal(
+        &self,
+        session_id: &SessionId,
+        operation_id: ImageOperationId,
+        observation: ImageProviderTerminalObservation,
+        provider_text: ProviderTextDisposition,
+    ) -> Result<ImageOperationTerminalClass, RuntimeDriverError> {
+        SessionServiceRuntimeExt::classify_image_operation_terminal(
+            self,
+            session_id,
+            operation_id,
+            observation,
+            provider_text,
+        )
+        .await
     }
 
     async fn complete_image_operation(
@@ -400,25 +425,25 @@ impl BuiltinTool for GenerateImageTool {
             })
             .await;
 
-        let (provider_output, committed_images, terminal) = match provider_output {
+        let (mut provider_output, committed_images) = match provider_output {
             Ok(output) => {
                 let commit = commit_images(&*self.runtime.blob_store, &output).await;
                 match commit {
-                    Ok(images) => {
-                        let terminal = output.terminal.clone();
-                        (output, images, terminal)
-                    }
+                    Ok(images) => (output, images),
                     Err(err) => {
                         warn!(
                             ?operation_id,
                             error = %err,
                             "failed to commit generated image blobs"
                         );
-                        let mut failed = failed_provider_output(operation_id);
+                        let mut failed = failed_provider_output(
+                            operation_id,
+                            ImageProviderTerminalObservation::BlobCommitFailed,
+                        );
                         failed.warnings.push(
                             meerkat_core::ImageGenerationWarning::BlobCommitFailed { message: err },
                         );
-                        (failed, Vec::new(), ImageOperationTerminalClass::Failed)
+                        (failed, Vec::new())
                     }
                 }
             }
@@ -428,20 +453,62 @@ impl BuiltinTool for GenerateImageTool {
                     error = %err,
                     "image generation provider execution failed"
                 );
-                let mut failed = failed_provider_output(operation_id);
+                let mut failed = failed_provider_output(
+                    operation_id,
+                    ImageProviderTerminalObservation::ExecutionFailed,
+                );
                 failed.warnings.push(
                     meerkat_core::ImageGenerationWarning::ProviderExecutionFailed {
                         message: err.to_string(),
                     },
                 );
-                (failed, Vec::new(), ImageOperationTerminalClass::Failed)
+                (failed, Vec::new())
+            }
+        };
+
+        let (provider_text, provider_text_warning) = capture_provider_text(
+            &*self.runtime.blob_store,
+            provider_output.provider_text.as_deref(),
+        )
+        .await;
+        if let Some(warning) = provider_text_warning {
+            provider_output.warnings.push(warning);
+        }
+
+        let classified_terminal = match self
+            .runtime
+            .machine
+            .classify_image_operation_terminal(
+                &self.runtime.session_id,
+                operation_id,
+                provider_output.terminal_observation.clone(),
+                provider_text.clone(),
+            )
+            .await
+        {
+            Ok(terminal) => terminal,
+            Err(err) => {
+                if requires_scoped_override
+                    && let Err(restore_err) = self
+                        .runtime
+                        .machine
+                        .restore_image_operation_override(&self.runtime.session_id, operation_id)
+                        .await
+                {
+                    warn!(
+                        ?operation_id,
+                        error = %restore_err,
+                        "failed to restore image operation override after classification error"
+                    );
+                }
+                return Err(BuiltinToolError::execution_failed(err.to_string()));
             }
         };
 
         let completed = match self
             .runtime
             .machine
-            .complete_image_operation(&self.runtime.session_id, operation_id, terminal)
+            .complete_image_operation(&self.runtime.session_id, operation_id, classified_terminal)
             .await
         {
             Ok(phase) => phase,
@@ -489,16 +556,8 @@ impl BuiltinTool for GenerateImageTool {
             }
         };
 
-        let (provider_text, provider_text_warning) = capture_provider_text(
-            &*self.runtime.blob_store,
-            provider_output.provider_text.as_deref(),
-        )
-        .await;
-        let mut result = provider_output.to_tool_result(committed_images.clone(), provider_text);
-        if let Some(warning) = provider_text_warning {
-            result.warnings.push(warning);
-        }
-        let result = ImageGenerationToolResult { terminal, ..result };
+        let result =
+            provider_output.to_tool_result(terminal, committed_images.clone(), provider_text);
         let blocks = committed_images
             .into_iter()
             .map(|image| AssistantBlock::Image {
@@ -787,7 +846,7 @@ async fn commit_images(
     blob_store: &dyn BlobStore,
     output: &ProviderImageGenerationOutput,
 ) -> Result<Vec<AssistantImageRef>, String> {
-    if !matches!(output.terminal, ImageOperationTerminalClass::Generated) {
+    if output.images.is_empty() {
         return Ok(Vec::new());
     }
     let mut committed = Vec::with_capacity(output.images.len());
@@ -858,10 +917,13 @@ async fn capture_provider_text(
     }
 }
 
-fn failed_provider_output(operation_id: ImageOperationId) -> ProviderImageGenerationOutput {
+fn failed_provider_output(
+    operation_id: ImageOperationId,
+    terminal_observation: ImageProviderTerminalObservation,
+) -> ProviderImageGenerationOutput {
     ProviderImageGenerationOutput {
         operation_id,
-        terminal: ImageOperationTerminalClass::Failed,
+        terminal_observation,
         images: Vec::new(),
         provider_text: None,
         revised_prompt: meerkat_core::image_generation::RevisedPromptDisposition::NotRequested,
@@ -1076,6 +1138,45 @@ mod tests {
             Ok(ImageOperationPhase::ScopedOverrideActive)
         }
 
+        async fn classify_image_operation_terminal(
+            &self,
+            _session_id: &SessionId,
+            _operation_id: ImageOperationId,
+            observation: ImageProviderTerminalObservation,
+            provider_text: ProviderTextDisposition,
+        ) -> Result<ImageOperationTerminalClass, RuntimeDriverError> {
+            self.calls.lock().unwrap().push("classify");
+            Ok(match observation {
+                ImageProviderTerminalObservation::Generated => {
+                    ImageOperationTerminalClass::Generated
+                }
+                ImageProviderTerminalObservation::EmptyResult => {
+                    ImageOperationTerminalClass::EmptyResult { provider_text }
+                }
+                ImageProviderTerminalObservation::ProviderHttpError { code, .. }
+                | ImageProviderTerminalObservation::ProviderNativeError { code } => match code {
+                    meerkat_core::image_generation::ImageProviderErrorCode::OpenAiContentFilter
+                    | meerkat_core::image_generation::ImageProviderErrorCode::GeminiSafety => {
+                        ImageOperationTerminalClass::SafetyFiltered
+                    }
+                    meerkat_core::image_generation::ImageProviderErrorCode::OpenAiModelRefusal
+                    | meerkat_core::image_generation::ImageProviderErrorCode::GeminiModelRefusal => {
+                        ImageOperationTerminalClass::RefusedByProvider
+                    }
+                    meerkat_core::image_generation::ImageProviderErrorCode::GeminiDeadlineExceeded => {
+                        ImageOperationTerminalClass::Timeout
+                    }
+                    meerkat_core::image_generation::ImageProviderErrorCode::Unknown => {
+                        ImageOperationTerminalClass::Failed
+                    }
+                },
+                ImageProviderTerminalObservation::ExecutionFailed
+                | ImageProviderTerminalObservation::BlobCommitFailed => {
+                    ImageOperationTerminalClass::Failed
+                }
+            })
+        }
+
         async fn complete_image_operation(
             &self,
             _session_id: &SessionId,
@@ -1159,7 +1260,7 @@ mod tests {
             ));
             Ok(ProviderImageGenerationOutput {
                 operation_id: request.operation_id,
-                terminal: ImageOperationTerminalClass::Generated,
+                terminal_observation: ImageProviderTerminalObservation::Generated,
                 images: vec![ProviderGeneratedImage {
                     media_type: meerkat_core::MediaType::new("image/png"),
                     base64_data: "iVBORw0KGgo=".to_string(),
@@ -1427,7 +1528,7 @@ mod tests {
 
         assert_eq!(
             machine.calls.lock().unwrap().as_slice(),
-            ["begin", "complete"]
+            ["begin", "classify", "complete"]
         );
         assert_eq!(
             blob_store.writes.lock().unwrap().as_slice(),
@@ -1569,7 +1670,7 @@ mod tests {
         ));
         assert_eq!(
             machine.calls.lock().unwrap().as_slice(),
-            ["begin", "activate", "complete", "restore"]
+            ["begin", "activate", "classify", "complete", "restore"]
         );
     }
 

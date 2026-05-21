@@ -233,6 +233,78 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ActivateImageOperationOverrideRunning`
   - anchors: `meerkat_machine`
   - scenarios: `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalGeneratedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalGeneratedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalGeneratedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalEmptyIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalEmptyAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalEmptyRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalMechanicalFailureIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalMechanicalFailureAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalMechanicalFailureRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalTimeoutIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalTimeoutAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalTimeoutRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalCancelledIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalCancelledAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalCancelledRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalSafetyFilteredIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalSafetyFilteredAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalSafetyFilteredRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalRefusedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalRefusedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalRefusedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalProviderFailedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalProviderFailedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `ClassifyImageOperationTerminalProviderFailedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
 - `CompleteImageOperationIdle`
   - anchors: `meerkat_machine`
   - scenarios: `model_routing_and_image_operation`
@@ -3359,6 +3431,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `model_routing_and_image_operation`
 - `ImageOperationPhaseChanged`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `ImageOperationTerminalClassified`
   - anchors: `meerkat_machine`
   - scenarios: `model_routing_and_image_operation`
 - `ImageOperationDenied`

@@ -4868,6 +4868,74 @@ impl std::fmt::Display for RoutingImagePlanDenialReason {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RoutingImageProviderErrorCode {
+    #[default]
+    #[serde(rename = "Unknown")]
+    Unknown,
+    #[serde(rename = "OpenAiContentFilter")]
+    OpenAiContentFilter,
+    #[serde(rename = "OpenAiModelRefusal")]
+    OpenAiModelRefusal,
+    #[serde(rename = "GeminiSafety")]
+    GeminiSafety,
+    #[serde(rename = "GeminiModelRefusal")]
+    GeminiModelRefusal,
+    #[serde(rename = "GeminiDeadlineExceeded")]
+    GeminiDeadlineExceeded,
+}
+impl RoutingImageProviderErrorCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::OpenAiContentFilter => "OpenAiContentFilter",
+            Self::OpenAiModelRefusal => "OpenAiModelRefusal",
+            Self::GeminiSafety => "GeminiSafety",
+            Self::GeminiModelRefusal => "GeminiModelRefusal",
+            Self::GeminiDeadlineExceeded => "GeminiDeadlineExceeded",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingImageProviderErrorCode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unknown" => Ok(Self::Unknown),
+            "OpenAiContentFilter" => Ok(Self::OpenAiContentFilter),
+            "OpenAiModelRefusal" => Ok(Self::OpenAiModelRefusal),
+            "GeminiSafety" => Ok(Self::GeminiSafety),
+            "GeminiModelRefusal" => Ok(Self::GeminiModelRefusal),
+            "GeminiDeadlineExceeded" => Ok(Self::GeminiDeadlineExceeded),
+            other => Err(format!(
+                "invalid RoutingImageProviderErrorCode value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingImageProviderErrorCode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingImageProviderErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RoutingImageTerminal {
     #[default]
     #[serde(rename = "Generated")]
@@ -4928,6 +4996,130 @@ impl std::convert::TryFrom<String> for RoutingImageTerminal {
     }
 }
 impl std::fmt::Display for RoutingImageTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingImageTerminalObservation {
+    #[default]
+    #[serde(rename = "Generated")]
+    Generated,
+    #[serde(rename = "EmptyResult")]
+    EmptyResult,
+    #[serde(rename = "ProviderHttpError")]
+    ProviderHttpError,
+    #[serde(rename = "ProviderNativeError")]
+    ProviderNativeError,
+    #[serde(rename = "ExecutionFailed")]
+    ExecutionFailed,
+    #[serde(rename = "BlobCommitFailed")]
+    BlobCommitFailed,
+}
+impl RoutingImageTerminalObservation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Generated => "Generated",
+            Self::EmptyResult => "EmptyResult",
+            Self::ProviderHttpError => "ProviderHttpError",
+            Self::ProviderNativeError => "ProviderNativeError",
+            Self::ExecutionFailed => "ExecutionFailed",
+            Self::BlobCommitFailed => "BlobCommitFailed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingImageTerminalObservation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Generated" => Ok(Self::Generated),
+            "EmptyResult" => Ok(Self::EmptyResult),
+            "ProviderHttpError" => Ok(Self::ProviderHttpError),
+            "ProviderNativeError" => Ok(Self::ProviderNativeError),
+            "ExecutionFailed" => Ok(Self::ExecutionFailed),
+            "BlobCommitFailed" => Ok(Self::BlobCommitFailed),
+            other => Err(format!(
+                "invalid RoutingImageTerminalObservation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingImageTerminalObservation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingImageTerminalObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingProviderTextDisposition {
+    #[default]
+    #[serde(rename = "NotEmitted")]
+    NotEmitted,
+    #[serde(rename = "Captured")]
+    Captured,
+    #[serde(rename = "EmittedButNotStored")]
+    EmittedButNotStored,
+}
+impl RoutingProviderTextDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotEmitted => "NotEmitted",
+            Self::Captured => "Captured",
+            Self::EmittedButNotStored => "EmittedButNotStored",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingProviderTextDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotEmitted" => Ok(Self::NotEmitted),
+            "Captured" => Ok(Self::Captured),
+            "EmittedButNotStored" => Ok(Self::EmittedButNotStored),
+            other => Err(format!(
+                "invalid RoutingProviderTextDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingProviderTextDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingProviderTextDisposition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -7039,6 +7231,10 @@ pub struct State {
     pub model_routing_image_operation_realtime: std::collections::BTreeMap<String, bool>,
     pub model_routing_image_operation_requires_scoped_override:
         std::collections::BTreeMap<String, bool>,
+    pub model_routing_image_classified_terminals:
+        std::collections::BTreeMap<String, RoutingImageTerminal>,
+    pub model_routing_image_classified_provider_text:
+        std::collections::BTreeMap<String, RoutingProviderTextDisposition>,
     pub model_routing_image_terminals: std::collections::BTreeMap<String, RoutingImageTerminal>,
     pub model_routing_image_terminal_payloads: std::collections::BTreeMap<String, String>,
     pub model_routing_image_denials: std::collections::BTreeMap<String, RoutingDenialReason>,
@@ -7415,6 +7611,14 @@ pub mod inputs {
         pub operation_id: String,
         pub target_model: String,
         pub target_realtime_capable: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyImageOperationTerminal {
+        pub operation_id: String,
+        pub observation: RoutingImageTerminalObservation,
+        pub http_status_code: Option<u64>,
+        pub error_code: RoutingImageProviderErrorCode,
+        pub provider_text: RoutingProviderTextDisposition,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CompleteImageOperation {
@@ -8279,6 +8483,7 @@ pub enum Input {
     BeginImageOperation(inputs::BeginImageOperation),
     DenyImageOperationPlan(inputs::DenyImageOperationPlan),
     ActivateImageOperationOverride(inputs::ActivateImageOperationOverride),
+    ClassifyImageOperationTerminal(inputs::ClassifyImageOperationTerminal),
     CompleteImageOperation(inputs::CompleteImageOperation),
     RestoreImageOperationOverride(inputs::RestoreImageOperationOverride),
     LoadBoundaryReceipt(inputs::LoadBoundaryReceipt),
@@ -8496,6 +8701,7 @@ impl Input {
             Self::BeginImageOperation(_) => InputKind::BeginImageOperation,
             Self::DenyImageOperationPlan(_) => InputKind::DenyImageOperationPlan,
             Self::ActivateImageOperationOverride(_) => InputKind::ActivateImageOperationOverride,
+            Self::ClassifyImageOperationTerminal(_) => InputKind::ClassifyImageOperationTerminal,
             Self::CompleteImageOperation(_) => InputKind::CompleteImageOperation,
             Self::RestoreImageOperationOverride(_) => InputKind::RestoreImageOperationOverride,
             Self::LoadBoundaryReceipt(_) => InputKind::LoadBoundaryReceipt,
@@ -8736,6 +8942,7 @@ pub enum InputKind {
     BeginImageOperation,
     DenyImageOperationPlan,
     ActivateImageOperationOverride,
+    ClassifyImageOperationTerminal,
     CompleteImageOperation,
     RestoreImageOperationOverride,
     LoadBoundaryReceipt,
@@ -9067,6 +9274,12 @@ pub mod effects {
     pub struct ImageOperationPhaseChanged {
         pub operation_id: String,
         pub phase: RoutingImageOperationPhase,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ImageOperationTerminalClassified {
+        pub operation_id: String,
+        pub terminal: RoutingImageTerminal,
+        pub provider_text: RoutingProviderTextDisposition,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ImageOperationDenied {
@@ -9557,6 +9770,7 @@ pub enum Effect {
     SwitchTurnFiniteOverrideActivated(effects::SwitchTurnFiniteOverrideActivated),
     SwitchTurnFiniteOverrideRestored(effects::SwitchTurnFiniteOverrideRestored),
     ImageOperationPhaseChanged(effects::ImageOperationPhaseChanged),
+    ImageOperationTerminalClassified(effects::ImageOperationTerminalClassified),
     ImageOperationDenied(effects::ImageOperationDenied),
     ModelRoutingApprovalTerminalized(effects::ModelRoutingApprovalTerminalized),
     ResolveAdmission(effects::ResolveAdmission),
@@ -9677,6 +9891,7 @@ pub enum EffectKind {
     SwitchTurnFiniteOverrideActivated,
     SwitchTurnFiniteOverrideRestored,
     ImageOperationPhaseChanged,
+    ImageOperationTerminalClassified,
     ImageOperationDenied,
     ModelRoutingApprovalTerminalized,
     ResolveAdmission,
@@ -9846,6 +10061,30 @@ pub enum TransitionId {
     ActivateImageOperationOverrideIdle,
     ActivateImageOperationOverrideAttached,
     ActivateImageOperationOverrideRunning,
+    ClassifyImageOperationTerminalGeneratedIdle,
+    ClassifyImageOperationTerminalGeneratedAttached,
+    ClassifyImageOperationTerminalGeneratedRunning,
+    ClassifyImageOperationTerminalEmptyIdle,
+    ClassifyImageOperationTerminalEmptyAttached,
+    ClassifyImageOperationTerminalEmptyRunning,
+    ClassifyImageOperationTerminalMechanicalFailureIdle,
+    ClassifyImageOperationTerminalMechanicalFailureAttached,
+    ClassifyImageOperationTerminalMechanicalFailureRunning,
+    ClassifyImageOperationTerminalTimeoutIdle,
+    ClassifyImageOperationTerminalTimeoutAttached,
+    ClassifyImageOperationTerminalTimeoutRunning,
+    ClassifyImageOperationTerminalCancelledIdle,
+    ClassifyImageOperationTerminalCancelledAttached,
+    ClassifyImageOperationTerminalCancelledRunning,
+    ClassifyImageOperationTerminalSafetyFilteredIdle,
+    ClassifyImageOperationTerminalSafetyFilteredAttached,
+    ClassifyImageOperationTerminalSafetyFilteredRunning,
+    ClassifyImageOperationTerminalRefusedIdle,
+    ClassifyImageOperationTerminalRefusedAttached,
+    ClassifyImageOperationTerminalRefusedRunning,
+    ClassifyImageOperationTerminalProviderFailedIdle,
+    ClassifyImageOperationTerminalProviderFailedAttached,
+    ClassifyImageOperationTerminalProviderFailedRunning,
     CompleteImageOperationIdle,
     CompleteImageOperationAttached,
     CompleteImageOperationRunning,
@@ -10993,6 +11232,8 @@ pub fn initial_state() -> State {
         model_routing_image_operation_target_models: Default::default(),
         model_routing_image_operation_realtime: Default::default(),
         model_routing_image_operation_requires_scoped_override: Default::default(),
+        model_routing_image_classified_terminals: Default::default(),
+        model_routing_image_classified_provider_text: Default::default(),
         model_routing_image_terminals: Default::default(),
         model_routing_image_terminal_payloads: Default::default(),
         model_routing_image_denials: Default::default(),

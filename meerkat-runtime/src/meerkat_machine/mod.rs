@@ -1896,6 +1896,7 @@ impl MeerkatMachine {
                 | MeerkatMachineCommand::BeginImageOperation { .. }
                 | MeerkatMachineCommand::DenyImageOperationPlan { .. }
                 | MeerkatMachineCommand::ActivateImageOperationOverride { .. }
+                | MeerkatMachineCommand::ClassifyImageOperationTerminal { .. }
                 | MeerkatMachineCommand::CompleteImageOperation { .. }
                 | MeerkatMachineCommand::RestoreImageOperationOverride { .. }
                 | MeerkatMachineCommand::LoadBoundaryReceipt { .. } => self

@@ -856,6 +856,58 @@ impl MeerkatMachine {
                     meerkat_core::image_generation::ImageOperationPhase::ScopedOverrideActive,
                 ))
             }
+            MeerkatMachineCommand::ClassifyImageOperationTerminal {
+                session_id,
+                operation_id,
+                observation,
+                provider_text,
+            } => {
+                let operation_key = image_operation_key(operation_id);
+                let (observation, http_status_code, error_code) =
+                    routing_image_terminal_observation(&observation);
+                let provider_text_disposition = routing_provider_text_disposition(&provider_text)
+                    .map_err(RuntimeControlPlaneError::Internal)?;
+                let (_, effects) = self
+                    .apply_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::ClassifyImageOperationTerminal {
+                            operation_id: operation_key.clone(),
+                            observation,
+                            http_status_code,
+                            error_code,
+                            provider_text: provider_text_disposition,
+                        },
+                        "ClassifyImageOperationTerminal",
+                    )
+                    .await
+                    .map_err(RuntimeControlPlaneError::Internal)?;
+                let (terminal, effect_provider_text) = effects
+                    .as_slice()
+                    .iter()
+                    .find_map(|effect| match effect {
+                        crate::meerkat_machine::dsl::MeerkatMachineEffect::ImageOperationTerminalClassified {
+                            operation_id: effect_operation_id,
+                            terminal,
+                            provider_text,
+                        } if effect_operation_id == &operation_key => Some((*terminal, *provider_text)),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        RuntimeControlPlaneError::Internal(format!(
+                            "image operation terminal classification emitted no authority effect for {operation_key}"
+                        ))
+                    })?;
+                if effect_provider_text != provider_text_disposition {
+                    return Err(RuntimeControlPlaneError::Internal(format!(
+                        "image operation terminal classification provider-text drift for {operation_key}: input={provider_text_disposition:?}, effect={effect_provider_text:?}"
+                    )));
+                }
+                let terminal = image_terminal_from_classification(terminal, &provider_text)
+                    .map_err(RuntimeControlPlaneError::Internal)?;
+                Ok(MeerkatMachineCommandResult::ImageOperationTerminalClass(
+                    terminal,
+                ))
+            }
             MeerkatMachineCommand::CompleteImageOperation {
                 session_id,
                 operation_id,
@@ -1217,6 +1269,120 @@ fn routing_image_terminal(
         ImageOperationTerminalClass::ScopedRestoreFailed { .. } => {
             super::dsl::RoutingImageTerminal::ScopedRestoreFailed
         }
+    }
+}
+
+fn routing_image_terminal_observation(
+    observation: &meerkat_core::image_generation::ImageProviderTerminalObservation,
+) -> (
+    super::dsl::RoutingImageTerminalObservation,
+    Option<u64>,
+    super::dsl::RoutingImageProviderErrorCode,
+) {
+    use meerkat_core::image_generation::ImageProviderTerminalObservation;
+    match observation {
+        ImageProviderTerminalObservation::Generated => (
+            super::dsl::RoutingImageTerminalObservation::Generated,
+            None,
+            super::dsl::RoutingImageProviderErrorCode::Unknown,
+        ),
+        ImageProviderTerminalObservation::EmptyResult => (
+            super::dsl::RoutingImageTerminalObservation::EmptyResult,
+            None,
+            super::dsl::RoutingImageProviderErrorCode::Unknown,
+        ),
+        ImageProviderTerminalObservation::ProviderHttpError { status_code, code } => (
+            super::dsl::RoutingImageTerminalObservation::ProviderHttpError,
+            status_code.map(u64::from),
+            routing_image_provider_error_code(*code),
+        ),
+        ImageProviderTerminalObservation::ProviderNativeError { code } => (
+            super::dsl::RoutingImageTerminalObservation::ProviderNativeError,
+            None,
+            routing_image_provider_error_code(*code),
+        ),
+        ImageProviderTerminalObservation::ExecutionFailed => (
+            super::dsl::RoutingImageTerminalObservation::ExecutionFailed,
+            None,
+            super::dsl::RoutingImageProviderErrorCode::Unknown,
+        ),
+        ImageProviderTerminalObservation::BlobCommitFailed => (
+            super::dsl::RoutingImageTerminalObservation::BlobCommitFailed,
+            None,
+            super::dsl::RoutingImageProviderErrorCode::Unknown,
+        ),
+    }
+}
+
+fn routing_image_provider_error_code(
+    code: meerkat_core::image_generation::ImageProviderErrorCode,
+) -> super::dsl::RoutingImageProviderErrorCode {
+    use meerkat_core::image_generation::ImageProviderErrorCode;
+    match code {
+        ImageProviderErrorCode::Unknown => super::dsl::RoutingImageProviderErrorCode::Unknown,
+        ImageProviderErrorCode::OpenAiContentFilter => {
+            super::dsl::RoutingImageProviderErrorCode::OpenAiContentFilter
+        }
+        ImageProviderErrorCode::OpenAiModelRefusal => {
+            super::dsl::RoutingImageProviderErrorCode::OpenAiModelRefusal
+        }
+        ImageProviderErrorCode::GeminiSafety => {
+            super::dsl::RoutingImageProviderErrorCode::GeminiSafety
+        }
+        ImageProviderErrorCode::GeminiModelRefusal => {
+            super::dsl::RoutingImageProviderErrorCode::GeminiModelRefusal
+        }
+        ImageProviderErrorCode::GeminiDeadlineExceeded => {
+            super::dsl::RoutingImageProviderErrorCode::GeminiDeadlineExceeded
+        }
+    }
+}
+
+fn routing_provider_text_disposition(
+    provider_text: &meerkat_core::image_generation::ProviderTextDisposition,
+) -> Result<super::dsl::RoutingProviderTextDisposition, String> {
+    use meerkat_core::image_generation::ProviderTextDisposition;
+    match provider_text {
+        ProviderTextDisposition::NotEmitted => {
+            Ok(super::dsl::RoutingProviderTextDisposition::NotEmitted)
+        }
+        ProviderTextDisposition::Captured { .. } => {
+            Ok(super::dsl::RoutingProviderTextDisposition::Captured)
+        }
+        ProviderTextDisposition::EmittedButNotStored => {
+            Ok(super::dsl::RoutingProviderTextDisposition::EmittedButNotStored)
+        }
+        ProviderTextDisposition::UnsupportedByBackend => {
+            Err("image operation terminal classification does not accept unsupported provider text disposition".into())
+        }
+    }
+}
+
+fn image_terminal_from_classification(
+    terminal: super::dsl::RoutingImageTerminal,
+    provider_text: &meerkat_core::image_generation::ProviderTextDisposition,
+) -> Result<meerkat_core::image_generation::ImageOperationTerminalClass, String> {
+    use meerkat_core::image_generation::ImageOperationTerminalClass;
+    match terminal {
+        super::dsl::RoutingImageTerminal::Generated => Ok(ImageOperationTerminalClass::Generated),
+        super::dsl::RoutingImageTerminal::EmptyResult => {
+            Ok(ImageOperationTerminalClass::EmptyResult {
+                provider_text: provider_text.clone(),
+            })
+        }
+        super::dsl::RoutingImageTerminal::RefusedByProvider => {
+            Ok(ImageOperationTerminalClass::RefusedByProvider)
+        }
+        super::dsl::RoutingImageTerminal::SafetyFiltered => {
+            Ok(ImageOperationTerminalClass::SafetyFiltered)
+        }
+        super::dsl::RoutingImageTerminal::Failed => Ok(ImageOperationTerminalClass::Failed),
+        super::dsl::RoutingImageTerminal::Cancelled => Ok(ImageOperationTerminalClass::Cancelled),
+        super::dsl::RoutingImageTerminal::Timeout => Ok(ImageOperationTerminalClass::Timeout),
+        super::dsl::RoutingImageTerminal::Denied
+        | super::dsl::RoutingImageTerminal::ScopedRestoreFailed => Err(format!(
+            "generated image terminal classification returned invalid provider terminal {terminal:?}"
+        )),
     }
 }
 

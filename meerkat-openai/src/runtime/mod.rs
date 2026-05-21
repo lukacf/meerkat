@@ -555,7 +555,7 @@ mod tests {
         Json, Router, extract::State, http::HeaderMap, response::IntoResponse, routing::post,
     };
     use meerkat_core::{
-        AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, ImageOperationTerminalClass,
+        AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, ImageProviderTerminalObservation,
         OpenAiAuthMetadata, ProviderAuthMetadata,
     };
     use meerkat_llm_core::{
@@ -955,8 +955,8 @@ mod tests {
             .await?;
 
         assert!(matches!(
-            output.terminal,
-            ImageOperationTerminalClass::Generated
+            output.terminal_observation,
+            ImageProviderTerminalObservation::Generated
         ));
         let headers = seen.lock().expect("seen headers");
         let first = headers.first().expect("captured image request headers");

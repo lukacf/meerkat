@@ -2849,6 +2849,36 @@ pub enum RoutingImageTerminal {
     ScopedRestoreFailed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageTerminalObservation {
+    #[default]
+    Generated,
+    EmptyResult,
+    ProviderHttpError,
+    ProviderNativeError,
+    ExecutionFailed,
+    BlobCommitFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageProviderErrorCode {
+    #[default]
+    Unknown,
+    OpenAiContentFilter,
+    OpenAiModelRefusal,
+    GeminiSafety,
+    GeminiModelRefusal,
+    GeminiDeadlineExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingProviderTextDisposition {
+    #[default]
+    NotEmitted,
+    Captured,
+    EmittedButNotStored,
+}
+
 // Track-B (R5): declarative peer endpoint descriptor for the runtime
 // DSL. Shape mirrors `meerkat_core::comms::TrustedPeerDescriptor`.
 // The catalog DSL holds an identical type; the two are structurally

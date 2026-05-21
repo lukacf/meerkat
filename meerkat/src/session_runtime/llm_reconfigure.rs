@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::LlmClient;
 use meerkat_core::error::AgentError;
-use meerkat_core::handles::AuthLeaseHandle;
+use meerkat_core::handles::GeneratedAuthLeaseHandle;
 use meerkat_core::service::{SessionError, SessionService};
 use meerkat_core::types::SessionId;
 use meerkat_core::{
@@ -97,7 +97,7 @@ pub struct SessionRuntimeLlmReconfigureHost {
     /// Agent factory used to build LLM clients/adapters.
     pub factory: AgentFactory,
     /// Auth lease handle threaded into freshly-built clients.
-    pub auth_lease: Arc<dyn AuthLeaseHandle>,
+    pub auth_lease: GeneratedAuthLeaseHandle,
     /// Override LLM client (test injection slot).
     pub default_llm_client: Arc<std::sync::RwLock<Option<Arc<dyn LlmClient>>>>,
     /// Default decorator applied to every freshly-built client.
@@ -194,7 +194,7 @@ impl SessionRuntimeLlmReconfigureHost {
                 .build_llm_client_for_identity_with_auth_lease(
                     &config,
                     identity,
-                    Some(Arc::clone(&self.auth_lease)),
+                    Some(self.auth_lease.clone()),
                 )
                 .await
                 .map_err(|e| {

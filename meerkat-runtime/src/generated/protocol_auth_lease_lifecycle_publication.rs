@@ -142,6 +142,25 @@ impl AuthLeaseLifecyclePublicationObligation {
     }
 }
 
+#[allow(unsafe_code)]
+pub fn generated_auth_lease_handle(
+    handle: std::sync::Arc<crate::handles::RuntimeAuthLeaseHandle>,
+) -> Result<meerkat_core::handles::GeneratedAuthLeaseHandle, String> {
+    #[allow(improper_ctypes_definitions, unsafe_code)]
+    unsafe extern "Rust" {
+        #[link_name = concat!("__meerkat_core_runtime_generated_auth_lease_handle_build_v1_", env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX"))]
+        fn core_runtime_generated_auth_lease_handle_build(
+            token: &'static (dyn std::any::Any + Send + Sync),
+            handle: std::sync::Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+        ) -> Result<meerkat_core::handles::GeneratedAuthLeaseHandle, String>;
+    }
+    let handle: std::sync::Arc<dyn meerkat_core::handles::AuthLeaseHandle> = handle;
+    #[allow(unsafe_code)]
+    unsafe {
+        core_runtime_generated_auth_lease_handle_build(generated_authority_bridge_token(), handle)
+    }
+}
+
 pub fn extract_obligations(
     transition: &AuthMachineTransition,
 ) -> Vec<AuthLeaseLifecyclePublicationObligation> {

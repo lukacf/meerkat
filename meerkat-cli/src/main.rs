@@ -3099,7 +3099,7 @@ struct RuntimeScope {
     origin_hint: RealmOrigin,
     context_root: Option<PathBuf>,
     user_config_root: Option<PathBuf>,
-    auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+    auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     oauth_flow_authority: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
 }
@@ -3112,10 +3112,15 @@ impl RuntimeScope {
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn new_cli_auth_handles() -> (
-    Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+    meerkat_core::handles::GeneratedAuthLeaseHandle,
     Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
 ) {
     let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    let generated_auth_lease =
+        meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+            Arc::clone(&auth_lease),
+        )
+        .expect("CLI RuntimeAuthLeaseHandle must be certified by generated AuthMachine authority");
     let oauth_flow_authority = Arc::new(
         meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
             std::time::Duration::from_secs(10 * 60),
@@ -3123,14 +3128,18 @@ fn new_cli_auth_handles() -> (
         ),
     );
     (
-        auth_lease as Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+        generated_auth_lease,
         oauth_flow_authority as Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
     )
 }
 
 #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
-fn new_cli_auth_lease() -> Arc<dyn meerkat_core::handles::AuthLeaseHandle> {
-    Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new())
+fn new_cli_auth_lease() -> meerkat_core::handles::GeneratedAuthLeaseHandle {
+    let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+        auth_lease,
+    )
+    .expect("CLI RuntimeAuthLeaseHandle must be certified by generated AuthMachine authority")
 }
 
 fn resolve_runtime_scope(cli: &Cli) -> anyhow::Result<RuntimeScope> {
@@ -3532,7 +3541,7 @@ async fn handle_auth_command(
             let env = meerkat_providers::ResolverEnvironment::with_process_env()
                 .with_token_store(store)
                 .with_refresh_coordinator(Arc::new(InMemoryCoordinator::default()))
-                .with_auth_lease_handle(Arc::clone(&scope.auth_lease));
+                .with_auth_lease_handle(scope.auth_lease.clone());
             let auth_binding = meerkat_core::AuthBindingRef {
                 realm: meerkat_core::RealmId::parse(realm.clone())
                     .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
@@ -3870,7 +3879,7 @@ async fn refresh_auth_profile(
     let env = ResolverEnvironment::with_process_env()
         .with_token_store(store.clone())
         .with_refresh_coordinator(coord)
-        .with_auth_lease_handle(Arc::clone(&scope.auth_lease))
+        .with_auth_lease_handle(scope.auth_lease.clone())
         .with_force_refresh(true);
     let registry = cli_provider_registry();
     let auth_binding = meerkat_core::AuthBindingRef {

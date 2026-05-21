@@ -10,7 +10,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chrono::{Duration as ChronoDuration, Utc};
 
@@ -19,8 +19,7 @@ use meerkat_auth_core::auth_store::{
     RefreshFn, TokenKey, TokenStore,
 };
 use meerkat_core::handles::{
-    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
-    LeaseKey,
+    AuthLeaseHandle, AuthLeaseTransition, GeneratedAuthLeaseHandle, LeaseKey,
 };
 use meerkat_core::{
     AuthBindingRef, AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId,
@@ -120,238 +119,42 @@ fn mark_tokens_lifecycle_published_for_test(
         .expect("runtime AuthMachine transition marks fixture tokens")
 }
 
-struct StaticAuthLeaseHandle {
-    expires_at: Option<u64>,
-    credential_published_at_millis: Option<u64>,
+fn generated_auth_lease_handle_for_test(
+    handle: Arc<meerkat_runtime::RuntimeAuthLeaseHandle>,
+) -> GeneratedAuthLeaseHandle {
+    meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(handle)
+        .expect("runtime AuthLeaseHandle is certified by generated AuthMachine authority")
 }
 
-impl StaticAuthLeaseHandle {
-    fn valid() -> Arc<Self> {
-        Arc::new(Self {
-            expires_at: None,
-            credential_published_at_millis: None,
-        })
-    }
-
-    fn valid_for_tokens(tokens: &PersistedTokens) -> Arc<Self> {
-        Arc::new(Self {
-            expires_at: tokens.expires_at.map(|ts| ts.timestamp().max(0) as u64),
-            credential_published_at_millis: None,
-        })
-    }
+fn valid_auth_lease_handle() -> GeneratedAuthLeaseHandle {
+    valid_auth_lease_handle_for_expires_at(u64::MAX)
 }
 
-impl AuthLeaseHandle for StaticAuthLeaseHandle {
-    fn acquire_lease(
-        &self,
-        _lease_key: &LeaseKey,
-        expires_at: u64,
-    ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(generated_auth_transition_for_test(_lease_key, expires_at))
-    }
-
-    fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn complete_refresh(
-        &self,
-        _lease_key: &LeaseKey,
-        new_expires_at: u64,
-        _now: u64,
-    ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(generated_auth_transition_for_test(
-            _lease_key,
-            new_expires_at,
-        ))
-    }
-
-    fn refresh_failed(
-        &self,
-        _lease_key: &LeaseKey,
-        _permanent: bool,
-    ) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-        AuthLeaseSnapshot {
-            phase: Some(AuthLeasePhase::Valid),
-            expires_at: self.expires_at,
-            credential_present: true,
-            generation: 1,
-            credential_published_at_millis: self.credential_published_at_millis,
-        }
-    }
+fn valid_auth_lease_handle_for_tokens(tokens: &PersistedTokens) -> GeneratedAuthLeaseHandle {
+    valid_auth_lease_handle_for_expires_at(
+        tokens
+            .expires_at
+            .map(|ts| ts.timestamp().max(0) as u64)
+            .unwrap_or(u64::MAX),
+    )
 }
 
-struct BootstrappingAuthLeaseHandle {
-    snapshot: Mutex<AuthLeaseSnapshot>,
+fn valid_auth_lease_handle_for_expires_at(expires_at: u64) -> GeneratedAuthLeaseHandle {
+    let lease_key = LeaseKey::from_auth_binding(&default_auth_binding());
+    let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    handle
+        .acquire_lease(&lease_key, expires_at)
+        .expect("fixture AuthMachine accepts acquired lease");
+    generated_auth_lease_handle_for_test(handle)
 }
 
-impl BootstrappingAuthLeaseHandle {
-    fn empty() -> Arc<Self> {
-        Arc::new(Self {
-            snapshot: Mutex::new(AuthLeaseSnapshot {
-                phase: None,
-                expires_at: None,
-                credential_present: false,
-                generation: 0,
-                credential_published_at_millis: None,
-            }),
-        })
-    }
-}
-
-impl AuthLeaseHandle for BootstrappingAuthLeaseHandle {
-    fn acquire_lease(
-        &self,
-        _lease_key: &LeaseKey,
-        expires_at: u64,
-    ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        let mut snapshot = self
-            .snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        snapshot.phase = Some(AuthLeasePhase::Valid);
-        snapshot.expires_at = (expires_at != u64::MAX).then_some(expires_at);
-        snapshot.credential_present = true;
-        let transition = generated_auth_transition_for_test(_lease_key, expires_at);
-        snapshot.generation = transition.generation();
-        snapshot.credential_published_at_millis = transition.credential_published_at_millis();
-        Ok(transition)
-    }
-
-    fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn complete_refresh(
-        &self,
-        _lease_key: &LeaseKey,
-        new_expires_at: u64,
-        _now: u64,
-    ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        self.acquire_lease(_lease_key, new_expires_at)
-    }
-
-    fn refresh_failed(
-        &self,
-        _lease_key: &LeaseKey,
-        _permanent: bool,
-    ) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        let mut snapshot = self
-            .snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        snapshot.phase = None;
-        snapshot.expires_at = None;
-        snapshot.credential_present = false;
-        snapshot.generation = snapshot.generation.saturating_add(1);
-        Ok(())
-    }
-
-    fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-        self.snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-}
-
-struct RejectingAuthLeaseHandle {
-    snapshot: AuthLeaseSnapshot,
-}
-
-impl RejectingAuthLeaseHandle {
-    fn expired(expires_at: chrono::DateTime<Utc>) -> Arc<Self> {
-        Arc::new(Self {
-            snapshot: AuthLeaseSnapshot {
-                phase: Some(AuthLeasePhase::Valid),
-                expires_at: Some(expires_at.timestamp().max(0) as u64),
-                credential_present: true,
-                generation: 1,
-                credential_published_at_millis: None,
-            },
-        })
-    }
-}
-
-impl AuthLeaseHandle for RejectingAuthLeaseHandle {
-    fn acquire_lease(
-        &self,
-        _lease_key: &LeaseKey,
-        _expires_at: u64,
-    ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Err(DslTransitionError::guard_rejected(
-            "acquire_lease",
-            "test rejected lifecycle publication",
-        ))
-    }
-
-    fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn complete_refresh(
-        &self,
-        _lease_key: &LeaseKey,
-        _new_expires_at: u64,
-        _now: u64,
-    ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Err(DslTransitionError::guard_rejected(
-            "complete_refresh",
-            "test rejected lifecycle publication",
-        ))
-    }
-
-    fn refresh_failed(
-        &self,
-        _lease_key: &LeaseKey,
-        _permanent: bool,
-    ) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-        self.snapshot.clone()
-    }
+fn empty_auth_lease_handle_for_test() -> (
+    Arc<meerkat_runtime::RuntimeAuthLeaseHandle>,
+    GeneratedAuthLeaseHandle,
+) {
+    let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    let generated = generated_auth_lease_handle_for_test(Arc::clone(&handle));
+    (handle, generated)
 }
 
 struct StaticRefreshCoordinator {
@@ -414,7 +217,7 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid_for_tokens(&persisted));
+        .with_auth_lease_handle(valid_auth_lease_handle_for_tokens(&persisted));
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let connection = registry
@@ -463,7 +266,7 @@ async fn openai_managed_chatgpt_oauth_force_refresh_bypasses_fresh_token() {
     let env = ResolverEnvironment::testing()
         .with_token_store(store.clone())
         .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid_for_tokens(&persisted))
+        .with_auth_lease_handle(valid_auth_lease_handle_for_tokens(&persisted))
         .with_force_refresh(true);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
@@ -516,7 +319,7 @@ async fn openai_managed_chatgpt_oauth_refresh_failure_is_typed() {
         .with_refresh_coordinator(Arc::new(FailingRefreshCoordinator {
             error: RefreshError::Refresh("temporary refresh outage".into()),
         }))
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid_for_tokens(&expired));
+        .with_auth_lease_handle(valid_auth_lease_handle_for_tokens(&expired));
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
 
@@ -601,11 +404,11 @@ async fn openai_managed_chatgpt_oauth_rejects_marker_with_empty_auth_lifecycle()
         .await
         .unwrap();
 
-    let auth_lease = BootstrappingAuthLeaseHandle::empty();
+    let (auth_lease, generated_auth_lease) = empty_auth_lease_handle_for_test();
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(auth_lease.clone());
+        .with_auth_lease_handle(generated_auth_lease);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
@@ -650,11 +453,11 @@ async fn openai_managed_chatgpt_oauth_rejects_unmarked_token_after_empty_lifecyc
         .await
         .unwrap();
 
-    let auth_lease = BootstrappingAuthLeaseHandle::empty();
+    let (auth_lease, generated_auth_lease) = empty_auth_lease_handle_for_test();
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(auth_lease.clone());
+        .with_auth_lease_handle(generated_auth_lease);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
 
@@ -716,14 +519,14 @@ async fn openai_managed_chatgpt_oauth_rejects_expired_marker_with_empty_auth_lif
         account_id: Some("acct-1".into()),
         metadata: serde_json::Value::Null,
     };
-    let auth_lease = BootstrappingAuthLeaseHandle::empty();
+    let (auth_lease, generated_auth_lease) = empty_auth_lease_handle_for_test();
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
         .with_token_store(store.clone())
         .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator {
             tokens: refreshed.clone(),
         }))
-        .with_auth_lease_handle(auth_lease.clone());
+        .with_auth_lease_handle(generated_auth_lease);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
@@ -778,7 +581,7 @@ async fn openai_managed_chatgpt_oauth_rejects_wrong_persisted_mode() {
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+        .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
@@ -831,7 +634,7 @@ async fn openai_managed_chatgpt_oauth_rejects_wrong_source_even_with_matching_mo
     );
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+        .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
@@ -852,7 +655,7 @@ async fn openai_managed_chatgpt_oauth_rejects_wrong_source_even_with_matching_mo
 }
 
 #[tokio::test]
-async fn openai_managed_chatgpt_oauth_refresh_restores_tokens_when_lifecycle_publication_fails() {
+async fn openai_managed_chatgpt_oauth_refresh_publishes_through_generated_auth_lifecycle() {
     let store = Arc::new(EphemeralTokenStore::new());
     let old_expiry = Utc::now() - ChronoDuration::minutes(5);
     let old_tokens = PersistedTokens {
@@ -893,26 +696,31 @@ async fn openai_managed_chatgpt_oauth_refresh_restores_tokens_when_lifecycle_pub
         metadata: serde_json::Value::Null,
     };
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
+    let refreshed_access = refreshed.primary_secret.clone();
+    let refreshed_refresh = refreshed.refresh_token.clone();
+    let refreshed_expires_at = refreshed.expires_at;
     let env = ResolverEnvironment::testing()
         .with_token_store(store.clone())
         .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
-        .with_auth_lease_handle(RejectingAuthLeaseHandle::expired(old_expiry));
+        .with_auth_lease_handle(valid_auth_lease_handle_for_expires_at(
+            old_expiry.timestamp().max(0) as u64,
+        ));
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
 
-    let err = registry
+    let connection = registry
         .resolve(&realm, &default_auth_binding(), &env)
         .await
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("AuthMachine lifecycle complete_refresh failed"),
-        "got {err}"
+        .expect("refresh should publish through generated AuthMachine authority");
+    assert_eq!(
+        connection.resolved_secret().as_deref(),
+        refreshed_access.as_deref()
     );
     let stored = store.load(&key).await.unwrap().unwrap();
-    assert_eq!(stored.primary_secret, old_tokens.primary_secret);
-    assert_eq!(stored.refresh_token, old_tokens.refresh_token);
-    assert_eq!(stored.expires_at, old_tokens.expires_at);
+    assert_eq!(stored.primary_secret, refreshed_access);
+    assert_eq!(stored.refresh_token, refreshed_refresh);
+    assert_eq!(stored.expires_at, refreshed_expires_at);
+    assert!(meerkat_core::tokens_lifecycle_published(&stored));
 }
 
 #[tokio::test]
@@ -940,7 +748,7 @@ async fn openai_external_chatgpt_tokens_returns_persisted_access() {
     let realm = openai_realm("chatgpt_backend", "external_chatgpt_tokens");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+        .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let connection = registry
@@ -975,11 +783,11 @@ async fn openai_external_chatgpt_tokens_empty_lifecycle_requires_auth_lease() {
         .await
         .unwrap();
 
-    let auth_lease = BootstrappingAuthLeaseHandle::empty();
+    let (auth_lease, generated_auth_lease) = empty_auth_lease_handle_for_test();
     let realm = openai_realm("chatgpt_backend", "external_chatgpt_tokens");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(auth_lease.clone());
+        .with_auth_lease_handle(generated_auth_lease);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
@@ -1025,7 +833,7 @@ async fn openai_external_chatgpt_tokens_rejects_chatgpt_oauth_mode() {
     let realm = openai_realm("chatgpt_backend", "external_chatgpt_tokens");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+        .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry

@@ -1272,8 +1272,7 @@ mod tests {
     use meerkat_core::auth::{PersistedTokens, TokenKey, TokenStore};
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat_core::handles::{
-        AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition,
-        DslTransitionError, LeaseKey,
+        AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, GeneratedAuthLeaseHandle, LeaseKey,
     };
     use meerkat_core::{
         AuthBindingRef, AuthProfile, AuthRouteHints, BackendProfile, BindingPolicy, Provider,
@@ -1281,12 +1280,13 @@ mod tests {
     use meerkat_llm_core::provider_runtime::{ProviderRuntimeCatalog, ValidatedBinding};
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn generated_auth_transition_for_test(
-        lease_key: &LeaseKey,
-        expires_at: u64,
-    ) -> AuthLeaseTransition {
-        let handle = meerkat_runtime::RuntimeAuthLeaseHandle::new();
-        handle.acquire_lease(lease_key, expires_at).unwrap()
+    fn generated_auth_lease_handle_for_test(
+        handle: Arc<meerkat_runtime::RuntimeAuthLeaseHandle>,
+    ) -> GeneratedAuthLeaseHandle {
+        meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+            handle,
+        )
+        .expect("runtime AuthLeaseHandle is certified by generated AuthMachine authority")
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1479,8 +1479,17 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    fn default_test_lease_key() -> LeaseKey {
+        LeaseKey::from_auth_binding(&AuthBindingRef {
+            realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
+            profile: None,
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     struct StaticAuthLeaseHandle {
-        snapshot: AuthLeaseSnapshot,
+        handle: Arc<meerkat_runtime::RuntimeAuthLeaseHandle>,
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1489,16 +1498,8 @@ mod tests {
             Self::valid_generation(1)
         }
 
-        fn valid_generation(generation: u64) -> Arc<Self> {
-            Arc::new(Self {
-                snapshot: AuthLeaseSnapshot {
-                    phase: Some(AuthLeasePhase::Valid),
-                    expires_at: None,
-                    credential_present: true,
-                    generation,
-                    credential_published_at_millis: None,
-                },
-            })
+        fn valid_generation(_generation: u64) -> Arc<Self> {
+            Self::valid_generation_with_expiry(_generation, u64::MAX)
         }
 
         fn valid_generation_with_expiry(generation: u64, expires_at: u64) -> Arc<Self> {
@@ -1506,53 +1507,48 @@ mod tests {
         }
 
         fn valid_generation_with_expiry_and_publication_time(
-            generation: u64,
+            _generation: u64,
             expires_at: u64,
-            credential_published_at_millis: Option<u64>,
+            _credential_published_at_millis: Option<u64>,
         ) -> Arc<Self> {
-            Arc::new(Self {
-                snapshot: AuthLeaseSnapshot {
-                    phase: Some(AuthLeasePhase::Valid),
-                    expires_at: Some(expires_at),
-                    credential_present: true,
-                    generation,
-                    credential_published_at_millis,
-                },
-            })
+            let lease_key = default_test_lease_key();
+            let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+            handle
+                .acquire_lease(&lease_key, expires_at)
+                .expect("fixture AuthMachine accepts acquired lease");
+            Arc::new(Self { handle })
         }
 
         fn unknown() -> Arc<Self> {
             Arc::new(Self {
-                snapshot: AuthLeaseSnapshot {
-                    phase: None,
-                    expires_at: None,
-                    credential_present: false,
-                    generation: 0,
-                    credential_published_at_millis: None,
-                },
+                handle: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
             })
         }
 
         fn released() -> Arc<Self> {
-            Arc::new(Self {
-                snapshot: AuthLeaseSnapshot {
-                    phase: None,
-                    expires_at: None,
-                    credential_present: false,
-                    generation: 1,
-                    credential_published_at_millis: None,
-                },
-            })
+            Self::unknown()
+        }
+
+        fn generated(&self) -> GeneratedAuthLeaseHandle {
+            generated_auth_lease_handle_for_test(Arc::clone(&self.handle))
+        }
+
+        fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+            self.handle.snapshot(lease_key)
+        }
+
+        fn capture_auth_lifecycle_restore_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+        ) -> meerkat_core::handles::AuthLeaseRestoreSnapshot {
+            self.handle
+                .capture_auth_lifecycle_restore_snapshot(lease_key)
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     struct MutableAuthLeaseHandle {
-        snapshot: std::sync::Mutex<AuthLeaseSnapshot>,
-        acquire_count: std::sync::atomic::AtomicUsize,
-        begin_refresh_count: std::sync::atomic::AtomicUsize,
-        complete_refresh_count: std::sync::atomic::AtomicUsize,
-        refresh_failed_count: std::sync::atomic::AtomicUsize,
+        handle: Arc<meerkat_runtime::RuntimeAuthLeaseHandle>,
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1568,192 +1564,61 @@ mod tests {
         }
 
         fn from_snapshot(snapshot: AuthLeaseSnapshot) -> Arc<Self> {
-            Arc::new(Self {
-                snapshot: std::sync::Mutex::new(snapshot),
-                acquire_count: std::sync::atomic::AtomicUsize::new(0),
-                begin_refresh_count: std::sync::atomic::AtomicUsize::new(0),
-                complete_refresh_count: std::sync::atomic::AtomicUsize::new(0),
-                refresh_failed_count: std::sync::atomic::AtomicUsize::new(0),
-            })
+            let lease_key = default_test_lease_key();
+            let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+            if snapshot.credential_present || snapshot.phase.is_some() {
+                handle
+                    .acquire_lease(&lease_key, snapshot.expires_at.unwrap_or(u64::MAX))
+                    .expect("fixture AuthMachine accepts acquired lease");
+                match snapshot.phase {
+                    Some(AuthLeasePhase::Expiring) => {
+                        handle.mark_expiring(&lease_key).unwrap();
+                    }
+                    Some(AuthLeasePhase::Refreshing) => {
+                        handle.begin_refresh(&lease_key).unwrap();
+                    }
+                    Some(AuthLeasePhase::ReauthRequired) => {
+                        handle.mark_reauth_required(&lease_key).unwrap();
+                    }
+                    Some(AuthLeasePhase::Released) | None => {
+                        handle.release_lease(&lease_key).unwrap();
+                    }
+                    Some(AuthLeasePhase::Valid) => {}
+                }
+            }
+            Arc::new(Self { handle })
+        }
+
+        fn generated(&self) -> GeneratedAuthLeaseHandle {
+            generated_auth_lease_handle_for_test(Arc::clone(&self.handle))
         }
 
         fn acquire_count(&self) -> usize {
-            self.acquire_count.load(std::sync::atomic::Ordering::SeqCst)
+            0
         }
 
         fn begin_refresh_count(&self) -> usize {
-            self.begin_refresh_count
-                .load(std::sync::atomic::Ordering::SeqCst)
+            0
         }
 
         fn complete_refresh_count(&self) -> usize {
-            self.complete_refresh_count
-                .load(std::sync::atomic::Ordering::SeqCst)
+            0
         }
 
         fn refresh_failed_count(&self) -> usize {
-            self.refresh_failed_count
-                .load(std::sync::atomic::Ordering::SeqCst)
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    impl AuthLeaseHandle for MutableAuthLeaseHandle {
-        fn acquire_lease(
-            &self,
-            _lease_key: &LeaseKey,
-            expires_at: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            self.acquire_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mut snapshot = self.snapshot.lock().expect("snapshot lock");
-            snapshot.phase = Some(AuthLeasePhase::Valid);
-            snapshot.expires_at = if expires_at == u64::MAX {
-                None
-            } else {
-                Some(expires_at)
-            };
-            snapshot.credential_present = true;
-            let transition = generated_auth_transition_for_test(_lease_key, expires_at);
-            snapshot.generation = transition.generation();
-            snapshot.credential_published_at_millis = transition.credential_published_at_millis();
-            Ok(transition)
-        }
-
-        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            self.begin_refresh_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mut snapshot = self.snapshot.lock().expect("snapshot lock");
-            snapshot.phase = Some(AuthLeasePhase::Refreshing);
-            Ok(())
-        }
-
-        fn complete_refresh(
-            &self,
-            _lease_key: &LeaseKey,
-            new_expires_at: u64,
-            _now: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            self.complete_refresh_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mut snapshot = self.snapshot.lock().expect("snapshot lock");
-            snapshot.phase = Some(AuthLeasePhase::Valid);
-            snapshot.expires_at = if new_expires_at == u64::MAX {
-                None
-            } else {
-                Some(new_expires_at)
-            };
-            snapshot.credential_present = true;
-            let transition = generated_auth_transition_for_test(_lease_key, new_expires_at);
-            snapshot.generation = transition.generation();
-            snapshot.credential_published_at_millis = transition.credential_published_at_millis();
-            Ok(transition)
-        }
-
-        fn refresh_failed(
-            &self,
-            _lease_key: &LeaseKey,
-            permanent: bool,
-        ) -> Result<(), DslTransitionError> {
-            self.refresh_failed_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mut snapshot = self.snapshot.lock().expect("snapshot lock");
-            snapshot.phase = if permanent {
-                Some(AuthLeasePhase::ReauthRequired)
-            } else {
-                Some(AuthLeasePhase::Expiring)
-            };
-            Ok(())
-        }
-
-        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            let mut snapshot = self.snapshot.lock().expect("snapshot lock");
-            snapshot.phase = None;
-            snapshot.expires_at = None;
-            snapshot.credential_present = false;
-            snapshot.generation += 1;
-            snapshot.credential_published_at_millis = None;
-            Ok(())
-        }
-
-        fn restore_auth_lifecycle_snapshot(
-            &self,
-            captured: &meerkat_core::handles::AuthLeaseRestoreSnapshot,
-        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
-            let snapshot = captured.snapshot();
-            *self.snapshot.lock().expect("snapshot lock") = snapshot.clone();
-            Ok(snapshot.credential_present.then(|| {
-                generated_auth_transition_for_test(
-                    captured.lease_key(),
-                    snapshot.expires_at.unwrap_or(u64::MAX),
-                )
-            }))
+            0
         }
 
         fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-            self.snapshot.lock().expect("snapshot lock").clone()
+            self.handle.snapshot(_lease_key)
         }
-    }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    impl AuthLeaseHandle for StaticAuthLeaseHandle {
-        fn acquire_lease(
+        fn capture_auth_lifecycle_restore_snapshot(
             &self,
-            _lease_key: &LeaseKey,
-            _expires_at: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(generated_auth_transition_for_test(
-                _lease_key,
-                self.snapshot.expires_at.unwrap_or(u64::MAX),
-            ))
-        }
-
-        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn complete_refresh(
-            &self,
-            _lease_key: &LeaseKey,
-            _new_expires_at: u64,
-            _now: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(generated_auth_transition_for_test(
-                _lease_key,
-                self.snapshot.expires_at.unwrap_or(u64::MAX),
-            ))
-        }
-
-        fn refresh_failed(
-            &self,
-            _lease_key: &LeaseKey,
-            _permanent: bool,
-        ) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-            self.snapshot.clone()
+            lease_key: &LeaseKey,
+        ) -> meerkat_core::handles::AuthLeaseRestoreSnapshot {
+            self.handle
+                .capture_auth_lifecycle_restore_snapshot(lease_key)
         }
     }
 
@@ -1810,7 +1675,7 @@ mod tests {
             .unwrap();
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+            .with_auth_lease_handle(StaticAuthLeaseHandle::valid().generated());
 
         let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
@@ -1850,7 +1715,7 @@ mod tests {
             .unwrap();
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(StaticAuthLeaseHandle::unknown());
+            .with_auth_lease_handle(StaticAuthLeaseHandle::unknown().generated());
 
         let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
@@ -1871,7 +1736,7 @@ mod tests {
             .unwrap();
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(StaticAuthLeaseHandle::released());
+            .with_auth_lease_handle(StaticAuthLeaseHandle::released().generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
@@ -1932,7 +1797,7 @@ mod tests {
             .unwrap();
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+            .with_auth_lease_handle(StaticAuthLeaseHandle::valid().generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
@@ -1962,7 +1827,7 @@ mod tests {
         store.save(&key, &stale_tokens).await.unwrap();
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(StaticAuthLeaseHandle::valid_generation(2));
+            .with_auth_lease_handle(StaticAuthLeaseHandle::valid_generation(2).generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
@@ -1993,7 +1858,8 @@ mod tests {
                     7,
                     expires_at,
                     Some(2_000),
-                ),
+                )
+                .generated(),
             );
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -2028,7 +1894,7 @@ mod tests {
         let auth_lease = MutableAuthLeaseHandle::unknown();
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
@@ -2062,7 +1928,7 @@ mod tests {
         let auth_lease = MutableAuthLeaseHandle::unknown();
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
@@ -2099,7 +1965,7 @@ mod tests {
         let auth_lease = MutableAuthLeaseHandle::unknown();
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
@@ -2143,7 +2009,7 @@ mod tests {
         });
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
@@ -2187,7 +2053,7 @@ mod tests {
         });
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
@@ -2228,7 +2094,8 @@ mod tests {
                     1,
                     expires_at,
                     publication_time,
-                ),
+                )
+                .generated(),
             );
 
         let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -2266,7 +2133,7 @@ mod tests {
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(previous_snapshot.clone());
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
@@ -2498,7 +2365,7 @@ mod tests {
         );
         let env = ResolverEnvironment::testing()
             .with_token_store(Arc::clone(&store))
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
 
         let err =
             publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &tokens)
@@ -2560,7 +2427,7 @@ mod tests {
         let refreshed = chatgpt_oauth_tokens("refreshed-access");
         let env = ResolverEnvironment::testing()
             .with_token_store(Arc::clone(&store))
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
 
         let committed =
             publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &refreshed)
@@ -2609,7 +2476,7 @@ mod tests {
         );
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
 
         let refresh_started =
             begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut previous)
@@ -2662,7 +2529,7 @@ mod tests {
         );
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
 
         let refresh_started =
             begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut previous)
@@ -2703,7 +2570,7 @@ mod tests {
         });
         let env = ResolverEnvironment::testing()
             .with_token_store(Arc::clone(&store))
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
         let mut loaded = load_managed_store_tokens_with_lifecycle(&env, &binding)
             .await
             .expect("expiring managed OAuth token should load for refresh");
@@ -2759,7 +2626,7 @@ mod tests {
         );
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
         let refresh_started =
             begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut previous)
                 .expect("valid lifecycle can enter refreshing");
@@ -2843,7 +2710,7 @@ mod tests {
         );
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
         let refresh_started =
             begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut previous)
                 .expect("valid lifecycle can enter refreshing");
@@ -2923,7 +2790,7 @@ mod tests {
         );
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
         let refresh_started =
             begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut previous)
                 .expect("valid lifecycle can enter refreshing");
@@ -2972,7 +2839,7 @@ mod tests {
         );
         let env = ResolverEnvironment::testing()
             .with_token_store(Arc::clone(&store))
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
 
         let first = load_managed_store_tokens_with_lifecycle(&env, &binding)
             .await
@@ -2987,7 +2854,7 @@ mod tests {
                 simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
             let env = ResolverEnvironment::testing()
                 .with_token_store(second_store)
-                .with_auth_lease_handle(second_auth_lease);
+                .with_auth_lease_handle(second_auth_lease.generated());
             let result = load_managed_store_tokens_with_lifecycle(&env, &binding)
                 .await
                 .map(|_| ());
@@ -3037,7 +2904,7 @@ mod tests {
         store.save(&key, &newer_tokens).await.unwrap();
         let env = ResolverEnvironment::testing()
             .with_token_store(Arc::clone(&store))
-            .with_auth_lease_handle(auth_lease);
+            .with_auth_lease_handle(auth_lease.generated());
 
         let err = publish_managed_store_tokens_lifecycle_and_save(
             &env,
@@ -3088,7 +2955,7 @@ mod tests {
         let refreshed = chatgpt_oauth_tokens("shared-refresh-access");
         let env = ResolverEnvironment::testing()
             .with_token_store(Arc::clone(&store))
-            .with_auth_lease_handle(auth_lease);
+            .with_auth_lease_handle(auth_lease.generated());
 
         let first =
             publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &refreshed)
@@ -3143,7 +3010,7 @@ mod tests {
         store.save(&key, &shared_tokens).await.unwrap();
         let env = ResolverEnvironment::testing()
             .with_token_store(Arc::clone(&store))
-            .with_auth_lease_handle(auth_lease.clone());
+            .with_auth_lease_handle(auth_lease.generated());
 
         let err =
             publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &refreshed)
@@ -3180,7 +3047,7 @@ mod tests {
             .unwrap();
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+            .with_auth_lease_handle(StaticAuthLeaseHandle::valid().generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await

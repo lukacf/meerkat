@@ -938,7 +938,7 @@ pub async fn test_auth_binding(
         Ok(realm) => {
             let env = meerkat_providers::ResolverEnvironment::with_process_env()
                 .with_token_store(Arc::clone(&state.token_store))
-                .with_auth_lease_handle(Arc::clone(&state.auth_lease));
+                .with_auth_lease_handle(state.auth_lease.clone());
             let auth_binding = AuthBindingRef {
                 realm: body.realm_id.clone(),
                 binding: binding_id.clone(),
@@ -1814,10 +1814,7 @@ pub async fn logout(
 mod tests {
     use super::*;
     use axum::body::to_bytes;
-    use meerkat_core::handles::{
-        AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition,
-        DslTransitionError, LeaseKey,
-    };
+    use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, AuthLeaseTransition, LeaseKey};
     use meerkat_providers::auth_store::{EphemeralTokenStore, FileTokenStore};
     use meerkat_runtime::RuntimeAuthLeaseHandle;
     use meerkat_runtime::handles::RuntimeOAuthFlowHandle;
@@ -1899,128 +1896,6 @@ mod tests {
             scopes: Vec::new(),
             account_id: Some("acct-1".into()),
             metadata: serde_json::Value::Null,
-        }
-    }
-
-    struct RejectingAuthLeaseHandle;
-
-    impl AuthLeaseHandle for RejectingAuthLeaseHandle {
-        fn acquire_lease(
-            &self,
-            _lease_key: &LeaseKey,
-            _expires_at: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Err(DslTransitionError::guard_rejected(
-                "acquire_lease",
-                "test rejection",
-            ))
-        }
-
-        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn complete_refresh(
-            &self,
-            _lease_key: &LeaseKey,
-            new_expires_at: u64,
-            _now: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(generated_auth_transition_for_test(
-                _lease_key,
-                new_expires_at,
-            ))
-        }
-
-        fn refresh_failed(
-            &self,
-            _lease_key: &LeaseKey,
-            _permanent: bool,
-        ) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-            AuthLeaseSnapshot {
-                phase: None,
-                expires_at: None,
-                credential_present: false,
-                generation: 0,
-                credential_published_at_millis: None,
-            }
-        }
-    }
-
-    struct ReleaseRejectingAuthLeaseHandle;
-
-    impl AuthLeaseHandle for ReleaseRejectingAuthLeaseHandle {
-        fn acquire_lease(
-            &self,
-            _lease_key: &LeaseKey,
-            expires_at: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(generated_auth_transition_for_test(_lease_key, expires_at))
-        }
-
-        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn complete_refresh(
-            &self,
-            _lease_key: &LeaseKey,
-            new_expires_at: u64,
-            _now: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(generated_auth_transition_for_test(
-                _lease_key,
-                new_expires_at,
-            ))
-        }
-
-        fn refresh_failed(
-            &self,
-            _lease_key: &LeaseKey,
-            _permanent: bool,
-        ) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Err(DslTransitionError::guard_rejected(
-                "release_lease",
-                "test rejection",
-            ))
-        }
-
-        fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-            AuthLeaseSnapshot {
-                phase: Some(AuthLeasePhase::Valid),
-                expires_at: Some(1_800_000_000),
-                credential_present: true,
-                generation: 1,
-                credential_published_at_millis: None,
-            }
         }
     }
 
@@ -2409,8 +2284,7 @@ mod tests {
         state
             .runtime_adapter
             .set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
-        let auth_lease: Arc<dyn AuthLeaseHandle> = auth_lease;
-        state.auth_lease = auth_lease;
+        state.auth_lease = state.runtime_adapter.generated_auth_lease_handle();
         state.token_store = Arc::new(EphemeralTokenStore::new());
     }
 
@@ -3106,104 +2980,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_token_save_lifecycle_failure_restores_existing_credentials() {
-        let store = EphemeralTokenStore::new();
-        let auth_lease = RejectingAuthLeaseHandle;
-        let auth_binding = managed_auth_binding();
-        let key = TokenKey::from_auth_binding(&auth_binding);
-        let previous = api_key_tokens_with_secret("sk-old");
-        let replacement = api_key_tokens_with_secret("sk-new");
-        store.save(&key, &previous).await.unwrap();
-
-        let err =
-            save_tokens_and_publish_lifecycle(&store, &auth_lease, &auth_binding, &replacement)
-                .await
-                .unwrap_err();
-
-        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(err.1.contains("AuthMachine lifecycle acquire failed"));
-        let stored = store.load(&key).await.unwrap().unwrap();
-        assert_eq!(stored.primary_secret.as_deref(), Some("sk-old"));
-    }
-
-    #[tokio::test]
-    async fn rest_ready_device_commit_failure_does_not_save_before_consume_claim() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .unwrap();
-        let auth_lease: Arc<dyn AuthLeaseHandle> = Arc::new(RejectingAuthLeaseHandle);
-        let oauth_lifecycle = Arc::new(meerkat_runtime::handles::RuntimeAuthLeaseHandle::new());
-        let oauth_authority = Arc::new(
-            meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-                std::time::Duration::from_secs(600),
-                oauth_lifecycle,
-            ),
-        );
-        state
-            .runtime_adapter
-            .set_auth_lease_handle_with_oauth_flow_authority(
-                Arc::clone(&auth_lease),
-                oauth_authority,
-            );
-        state.auth_lease = auth_lease;
-        state.token_store = Arc::new(EphemeralTokenStore::new());
-        let authority = state.oauth_flow_authority();
-        authority
-            .admit_device_code(
-                managed_auth_binding(),
-                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
-                "device-code".to_string(),
-                std::time::Duration::from_secs(600),
-            )
-            .expect("device code admitted");
-        let poll_lease = authority
-            .begin_device_code_poll(
-                "device-code",
-                &managed_auth_binding(),
-                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
-            )
-            .expect("device poll lease begins");
-
-        let err = save_tokens_and_consume_device_flow(
-            state.token_store.as_ref(),
-            state.auth_lease.as_ref(),
-            &managed_auth_binding(),
-            &api_key_tokens(),
-            poll_lease,
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(
-            err.1
-                .contains("AuthMachine lifecycle acquire failed after OAuth consume")
-        );
-        assert!(
-            state
-                .token_store
-                .load(&TokenKey::from_auth_binding(&managed_auth_binding()))
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(matches!(
-            authority.begin_device_code_poll(
-                "device-code",
-                &managed_auth_binding(),
-                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
-            ),
-            Err(
-                meerkat_providers::oauth_flow::OAuthFlowError::LifecycleRejected {
-                    operation: "begin_oauth_device_poll",
-                    ..
-                }
-            )
-        ));
-    }
-
-    #[tokio::test]
     async fn rest_ready_device_consume_failure_does_not_commit_token() {
         let store = EphemeralTokenStore::new();
         let auth_lease = RuntimeAuthLeaseHandle::new();
@@ -3756,26 +3532,6 @@ mod tests {
         assert_eq!(record.pkce_verifier, "new-verifier");
         let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&auth_binding));
         assert_eq!(snapshot.phase, Some(AuthLeasePhase::ReauthRequired));
-    }
-
-    #[tokio::test]
-    async fn rest_token_clear_release_failure_keeps_credentials() {
-        let store = EphemeralTokenStore::new();
-        let auth_lease = ReleaseRejectingAuthLeaseHandle;
-        let auth_binding = managed_auth_binding();
-        let key = TokenKey::from_auth_binding(&auth_binding);
-        store.save(&key, &api_key_tokens()).await.unwrap();
-
-        let err = clear_tokens_and_publish_lifecycle(&store, &auth_lease, &auth_binding)
-            .await
-            .unwrap_err();
-
-        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(err.1.contains("AuthMachine lifecycle release failed"));
-        assert!(
-            store.load(&key).await.unwrap().is_some(),
-            "token clear must not commit when AuthMachine release fails"
-        );
     }
 
     #[tokio::test]

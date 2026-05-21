@@ -1164,6 +1164,53 @@ impl AuthLeaseTransition {
     }
 }
 
+/// Auth lease lifecycle handle certified by the generated AuthMachine
+/// publication authority.
+///
+/// The wrapped trait object remains the mechanical dispatch surface, but
+/// production resolver/factory seams accept this type so callers cannot install
+/// an arbitrary handwritten reducer as lifecycle authority.
+#[derive(Clone)]
+pub struct GeneratedAuthLeaseHandle {
+    inner: Arc<dyn AuthLeaseHandle>,
+}
+
+impl GeneratedAuthLeaseHandle {
+    pub fn as_handle(&self) -> &dyn AuthLeaseHandle {
+        self.inner.as_ref()
+    }
+
+    pub fn clone_handle(&self) -> Arc<dyn AuthLeaseHandle> {
+        Arc::clone(&self.inner)
+    }
+
+    #[cfg_attr(not(meerkat_internal_generated_authority_bridge), allow(dead_code))]
+    fn from_generated_authority(inner: Arc<dyn AuthLeaseHandle>) -> Self {
+        Self { inner }
+    }
+}
+
+impl std::fmt::Debug for GeneratedAuthLeaseHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneratedAuthLeaseHandle")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::ops::Deref for GeneratedAuthLeaseHandle {
+    type Target = dyn AuthLeaseHandle;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_ref()
+    }
+}
+
+impl AsRef<dyn AuthLeaseHandle> for GeneratedAuthLeaseHandle {
+    fn as_ref(&self) -> &dyn AuthLeaseHandle {
+        self.inner.as_ref()
+    }
+}
+
 #[cfg(meerkat_internal_generated_authority_bridge)]
 #[allow(improper_ctypes_definitions, unsafe_code)]
 unsafe extern "Rust" {
@@ -1199,6 +1246,21 @@ pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
             credential_published_at_millis,
         ),
     )
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_core_runtime_generated_auth_lease_handle_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn runtime_generated_auth_lease_handle_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    handle: Arc<dyn AuthLeaseHandle>,
+) -> Result<GeneratedAuthLeaseHandle, String> {
+    validate_runtime_generated_authority_bridge_token(token)?;
+    Ok(GeneratedAuthLeaseHandle::from_generated_authority(handle))
 }
 
 #[cfg(meerkat_internal_generated_authority_bridge)]

@@ -497,7 +497,7 @@ async fn public_facade_rejects_forged_session_runtime_binding_authority() {
         Arc::clone(prepared.peer_comms()),
         Arc::clone(prepared.session_admission()),
         Arc::clone(prepared.model_routing()),
-        Arc::clone(prepared.auth_lease()),
+        prepared.auth_lease().clone(),
         Arc::clone(prepared.mcp_server_lifecycle()),
         Arc::clone(prepared.peer_interaction()),
         Arc::clone(prepared.session_context()),

@@ -1650,7 +1650,7 @@ impl SessionRuntime {
                 persistence,
             );
         let service = Arc::new(service);
-        let reconfigure_auth_lease = runtime_adapter.auth_lease_handle();
+        let reconfigure_auth_lease = runtime_adapter.generated_auth_lease_handle();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
                 service: Arc::clone(&service),
@@ -1785,7 +1785,7 @@ impl SessionRuntime {
                 persistence,
             );
         let service = Arc::new(service);
-        let reconfigure_auth_lease = runtime_adapter.auth_lease_handle();
+        let reconfigure_auth_lease = runtime_adapter.generated_auth_lease_handle();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
                 service: Arc::clone(&service),
@@ -2651,6 +2651,10 @@ impl SessionRuntime {
         self.runtime_adapter.auth_lease_handle()
     }
 
+    pub fn generated_auth_lease_handle(&self) -> meerkat_core::handles::GeneratedAuthLeaseHandle {
+        self.runtime_adapter.generated_auth_lease_handle()
+    }
+
     pub fn oauth_flow_authority(
         &self,
     ) -> Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority> {
@@ -3320,7 +3324,7 @@ impl SessionRuntime {
             service: Arc::clone(&self.service),
             staged_sessions: Arc::clone(&self.staged_sessions),
             factory: self.factory.clone(),
-            auth_lease: self.runtime_adapter.auth_lease_handle(),
+            auth_lease: self.runtime_adapter.generated_auth_lease_handle(),
             default_llm_client: Arc::clone(&self.default_llm_client),
             agent_llm_client_decorator: Arc::clone(&self.agent_llm_client_decorator),
             config_runtime: Arc::clone(&self.config_runtime),

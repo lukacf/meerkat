@@ -628,6 +628,53 @@ fn emit_auth_lease_transition_authority_helper(
     writeln!(out, "    }}")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
+    writeln!(out, "#[allow(unsafe_code)]")?;
+    writeln!(out, "pub fn generated_auth_lease_handle(")?;
+    writeln!(
+        out,
+        "    handle: std::sync::Arc<crate::handles::RuntimeAuthLeaseHandle>,"
+    )?;
+    writeln!(
+        out,
+        ") -> Result<meerkat_core::handles::GeneratedAuthLeaseHandle, String> {{"
+    )?;
+    writeln!(
+        out,
+        "    #[allow(improper_ctypes_definitions, unsafe_code)]"
+    )?;
+    writeln!(out, "    unsafe extern \"Rust\" {{")?;
+    writeln!(
+        out,
+        "        #[link_name = concat!(\"__meerkat_core_runtime_generated_auth_lease_handle_build_v1_\", env!(\"MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX\"))]"
+    )?;
+    writeln!(
+        out,
+        "        fn core_runtime_generated_auth_lease_handle_build("
+    )?;
+    writeln!(
+        out,
+        "            token: &'static (dyn std::any::Any + Send + Sync),"
+    )?;
+    writeln!(
+        out,
+        "            handle: std::sync::Arc<dyn meerkat_core::handles::AuthLeaseHandle>,"
+    )?;
+    writeln!(
+        out,
+        "        ) -> Result<meerkat_core::handles::GeneratedAuthLeaseHandle, String>;"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(
+        out,
+        "    let handle: std::sync::Arc<dyn meerkat_core::handles::AuthLeaseHandle> = handle;"
+    )?;
+    writeln!(out, "    #[allow(unsafe_code)]")?;
+    writeln!(
+        out,
+        "    unsafe {{ core_runtime_generated_auth_lease_handle_build(generated_authority_bridge_token(), handle) }}"
+    )?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
     Ok(())
 }
 

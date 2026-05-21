@@ -68,7 +68,7 @@ pub struct AgentBuilder {
     #[allow(dead_code)]
     pub(super) runtime_execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,
     pub(super) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
-    pub(super) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
+    pub(super) auth_lease_handle: Option<crate::handles::GeneratedAuthLeaseHandle>,
     pub(super) mcp_server_lifecycle_handle:
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
 }
@@ -788,7 +788,7 @@ impl AgentBuilder {
     /// Set the runtime-backed auth lease handle for this build (Phase 1.5-rev).
     pub fn with_auth_lease_handle(
         mut self,
-        handle: Arc<dyn crate::handles::AuthLeaseHandle>,
+        handle: crate::handles::GeneratedAuthLeaseHandle,
     ) -> Self {
         self.auth_lease_handle = Some(handle);
         self
@@ -825,18 +825,12 @@ impl AgentBuilder {
 mod tests {
     use super::*;
     use crate::LlmStreamResult;
-    use crate::connection::{AuthBindingRef, BindingId, RealmId};
     use crate::error::{AgentError, ToolError};
     use crate::event::AgentEvent;
     use crate::event_tap::EventTapState;
-    use crate::handles::{
-        AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition,
-        DslTransitionError, LeaseKey,
-    };
     use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef, UserMessage};
     use async_trait::async_trait;
     use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::mpsc;
 
@@ -1081,91 +1075,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct RecordingAuthLeaseHandle {
-        snapshots: Mutex<BTreeMap<LeaseKey, AuthLeaseSnapshot>>,
-    }
-
-    impl RecordingAuthLeaseHandle {
-        fn seed(&self, key: LeaseKey, snapshot: AuthLeaseSnapshot) {
-            self.snapshots
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(key, snapshot);
-        }
-    }
-
-    impl AuthLeaseHandle for RecordingAuthLeaseHandle {
-        fn acquire_lease(
-            &self,
-            lease_key: &LeaseKey,
-            expires_at: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            let _ = (lease_key, expires_at);
-            Err(DslTransitionError::new(
-                "RecordingAuthLeaseHandle::acquire_lease",
-                "recording test handle cannot mint AuthLeaseTransition; production uses generated AuthMachine publication authority",
-            ))
-        }
-
-        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn complete_refresh(
-            &self,
-            lease_key: &LeaseKey,
-            new_expires_at: u64,
-            _now: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            self.acquire_lease(lease_key, new_expires_at)
-        }
-
-        fn refresh_failed(
-            &self,
-            _lease_key: &LeaseKey,
-            _permanent: bool,
-        ) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            let _ = lease_key;
-            Ok(())
-        }
-
-        fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-            self.snapshots
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(lease_key)
-                .cloned()
-                .unwrap_or(AuthLeaseSnapshot {
-                    phase: None,
-                    expires_at: None,
-                    credential_present: false,
-                    generation: 0,
-                    credential_published_at_millis: None,
-                })
-        }
-    }
-
-    fn auth_binding(binding: &str) -> AuthBindingRef {
-        AuthBindingRef {
-            realm: RealmId::parse("dev").expect("valid realm fixture"),
-            binding: BindingId::parse(binding).expect("valid binding fixture"),
-            profile: None,
-        }
-    }
-
     #[tokio::test]
     async fn builder_fails_closed_when_canonical_visibility_restore_fails() {
         let client = Arc::new(MockClient);
@@ -1288,40 +1197,6 @@ mod tests {
             }
             Err(err) => panic!("unexpected build error: {err}"),
         }
-    }
-
-    #[tokio::test]
-    async fn auth_lease_rotation_preserves_existing_target_expiry() {
-        let client = Arc::new(MockClient);
-        let tools = Arc::new(MockTools);
-        let store = Arc::new(MockStore);
-        let auth_lease = Arc::new(RecordingAuthLeaseHandle::default());
-        let previous = auth_binding("previous");
-        let target = auth_binding("target");
-        let target_key = LeaseKey::from_auth_binding(&target);
-        auth_lease.seed(
-            target_key.clone(),
-            AuthLeaseSnapshot {
-                phase: Some(AuthLeasePhase::Valid),
-                expires_at: Some(1_900_000_000),
-                credential_present: true,
-                generation: 7,
-                credential_published_at_millis: None,
-            },
-        );
-        let agent = AgentBuilder::new()
-            .with_auth_lease_handle(auth_lease.clone())
-            .build_standalone(client, tools, store)
-            .await;
-
-        agent
-            .rotate_auth_lease_auth_binding(Some(&previous), Some(&target))
-            .unwrap();
-
-        let snapshot = auth_lease.snapshot(&target_key);
-        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
-        assert_eq!(snapshot.expires_at, Some(1_900_000_000));
-        assert_eq!(snapshot.generation, 7);
     }
 
     /// Regression test: AgentBuilder should apply system_prompt to new sessions

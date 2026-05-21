@@ -5552,6 +5552,8 @@ impl<'a> CompositionTlaCompiler<'a> {
             &transition.updates,
         );
         let effect_id_expr = "(model_step_count + 1)".to_string();
+        let current_phase_symbol = compiler.phase_symbol.clone();
+        compiler.phase_symbol = Some(tla_string(&transition.to));
         let effect_packets = transition
             .emit
             .iter()
@@ -5585,6 +5587,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 )
             })
             .collect::<Vec<_>>();
+        compiler.phase_symbol = current_phase_symbol;
 
         let mut queued_route_packets = Vec::new();
         let mut immediate_route_packets = Vec::new();

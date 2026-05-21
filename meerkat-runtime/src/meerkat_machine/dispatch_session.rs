@@ -191,7 +191,7 @@ impl MeerkatMachine {
         let shared_handle_authority = Arc::new(crate::handles::HandleDslAuthority::from_shared(
             dsl_authority_shared,
         ));
-        let auth_lease = self.auth_lease_handle();
+        let auth_lease = self.generated_auth_lease_handle();
         let runtime_authority = match preparation {
             SessionBindingPreparation::AuthoritativeRuntimeBinding => {
                 crate::session_runtime_bindings_authority()

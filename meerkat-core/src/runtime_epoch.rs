@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::completion_feed::CompletionSeq;
 use crate::handles::{
-    AuthLeaseHandle, CommsDrainHandle, ExternalToolSurfaceHandle, InteractionStreamHandle,
+    CommsDrainHandle, ExternalToolSurfaceHandle, GeneratedAuthLeaseHandle, InteractionStreamHandle,
     McpServerLifecycleHandle, ModelRoutingHandle, PeerCommsHandle, PeerInteractionHandle,
     SessionAdmissionHandle, SessionClaimHandle, SessionContextHandle, TurnStateHandle,
 };
@@ -186,7 +186,7 @@ pub struct SessionRuntimeBindings {
     /// runtime-backed tool resolution observes a machine-owned baseline.
     model_routing: Arc<dyn ModelRoutingHandle>,
     /// Auth lease lifecycle DSL handle (Phase 1.5-rev addition).
-    auth_lease: Arc<dyn AuthLeaseHandle>,
+    auth_lease: GeneratedAuthLeaseHandle,
     /// MCP server lifecycle DSL handle (Phase 5G / T5g addition).
     ///
     /// Routes per-server MCP handshake events into the session's MeerkatMachine
@@ -244,7 +244,7 @@ impl SessionRuntimeBindings {
         peer_comms: Arc<dyn PeerCommsHandle>,
         session_admission: Arc<dyn SessionAdmissionHandle>,
         model_routing: Arc<dyn ModelRoutingHandle>,
-        auth_lease: Arc<dyn AuthLeaseHandle>,
+        auth_lease: GeneratedAuthLeaseHandle,
         mcp_server_lifecycle: Arc<dyn McpServerLifecycleHandle>,
         peer_interaction: Arc<dyn PeerInteractionHandle>,
         session_context: Arc<dyn SessionContextHandle>,
@@ -318,7 +318,7 @@ impl SessionRuntimeBindings {
         &self.model_routing
     }
 
-    pub fn auth_lease(&self) -> &Arc<dyn AuthLeaseHandle> {
+    pub fn auth_lease(&self) -> &GeneratedAuthLeaseHandle {
         &self.auth_lease
     }
 
@@ -362,7 +362,7 @@ impl Clone for SessionRuntimeBindings {
             peer_comms: Arc::clone(&self.peer_comms),
             session_admission: Arc::clone(&self.session_admission),
             model_routing: Arc::clone(&self.model_routing),
-            auth_lease: Arc::clone(&self.auth_lease),
+            auth_lease: self.auth_lease.clone(),
             mcp_server_lifecycle: Arc::clone(&self.mcp_server_lifecycle),
             peer_interaction: Arc::clone(&self.peer_interaction),
             session_context: Arc::clone(&self.session_context),

@@ -175,7 +175,7 @@ pub struct AppState {
     /// logout) see the same credentials.
     pub token_store: Arc<dyn meerkat_providers::auth_store::TokenStore>,
     /// Process-local AuthMachine lifecycle registry for auth endpoints.
-    pub auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+    pub auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
     /// Provider-runtime registry shared with the AgentFactory's auth
     /// resolution path.
     pub provider_registry: Arc<meerkat_providers::ProviderRuntimeRegistry>,
@@ -516,7 +516,7 @@ impl AppState {
         );
         let (session_service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
-        let auth_lease = runtime_adapter.auth_lease_handle();
+        let auth_lease = runtime_adapter.generated_auth_lease_handle();
         let session_service = Arc::new(session_service);
         #[cfg(feature = "mob")]
         let mob_session_service = session_service.clone();

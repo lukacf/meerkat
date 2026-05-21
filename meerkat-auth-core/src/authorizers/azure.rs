@@ -26,7 +26,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use super::{LeaseFreshnessObserver, oauth_endpoint_failure_is_permanent};
-use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
+use meerkat_core::handles::{GeneratedAuthLeaseHandle, LeaseKey};
 use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
 
 const DEFAULT_AUTHORITY: &str = "https://login.microsoftonline.com";
@@ -137,7 +137,7 @@ impl AzureAdAuthorizer {
 
     pub fn with_auth_lease_observer(
         mut self,
-        handle: Arc<dyn AuthLeaseHandle>,
+        handle: GeneratedAuthLeaseHandle,
         lease_key: LeaseKey,
     ) -> Self {
         self.lease_observer = Some(LeaseFreshnessObserver::new(handle, lease_key));

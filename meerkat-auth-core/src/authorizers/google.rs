@@ -28,7 +28,7 @@ use super::{
     EnvLookup, LeaseFreshnessObserver, endpoint_failure_is_transient,
     oauth_endpoint_failure_is_permanent,
 };
-use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
+use meerkat_core::handles::{GeneratedAuthLeaseHandle, LeaseKey};
 use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
 
 const DEFAULT_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
@@ -197,7 +197,7 @@ impl GoogleAuthAuthorizer {
 
     pub fn with_auth_lease_observer(
         mut self,
-        handle: Arc<dyn AuthLeaseHandle>,
+        handle: GeneratedAuthLeaseHandle,
         lease_key: LeaseKey,
     ) -> Self {
         self.lease_observer = Some(LeaseFreshnessObserver::new(handle, lease_key));

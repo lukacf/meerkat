@@ -14,8 +14,8 @@ use chrono::{DateTime, Utc};
 use meerkat_core::AuthError;
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 use meerkat_core::handles::{
-    AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeaseHandle, AuthLeasePhase, DslTransitionError,
-    LeaseKey,
+    AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeasePhase, DslTransitionError,
+    GeneratedAuthLeaseHandle, LeaseKey,
 };
 
 /// Shared closure type for env-variable lookup. Used by authorizers that
@@ -27,7 +27,7 @@ pub type EnvLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 #[derive(Clone)]
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 pub(crate) struct LeaseFreshnessObserver {
-    handle: Arc<dyn AuthLeaseHandle>,
+    handle: GeneratedAuthLeaseHandle,
     lease_key: LeaseKey,
 }
 
@@ -38,7 +38,7 @@ const AUTH_LEASE_REFRESH_WAIT_TIMEOUT_SECS: u64 = 30;
 
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 impl LeaseFreshnessObserver {
-    pub(crate) fn new(handle: Arc<dyn AuthLeaseHandle>, lease_key: LeaseKey) -> Self {
+    pub(crate) fn new(handle: GeneratedAuthLeaseHandle, lease_key: LeaseKey) -> Self {
         Self { handle, lease_key }
     }
 
@@ -289,116 +289,15 @@ fn epoch_secs(ts: DateTime<Utc>) -> u64 {
 mod tests {
     use super::*;
     use meerkat_core::connection::{BindingId, RealmId};
-    use meerkat_core::handles::{AuthLeaseSnapshot, AuthLeaseTransition};
-    use std::sync::Mutex;
+    use meerkat_core::handles::{AuthLeaseHandle, GeneratedAuthLeaseHandle};
 
-    fn generated_auth_transition_for_test(
-        lease_key: &LeaseKey,
-        expires_at: u64,
-    ) -> AuthLeaseTransition {
-        let handle = meerkat_runtime::RuntimeAuthLeaseHandle::new();
-        handle.acquire_lease(lease_key, expires_at).unwrap()
-    }
-
-    struct SnapshotRaceAuthLeaseHandle {
-        snapshot: Mutex<AuthLeaseSnapshot>,
-        generation: Mutex<u64>,
-        accepted_generations: Mutex<Vec<u64>>,
-    }
-
-    impl Default for SnapshotRaceAuthLeaseHandle {
-        fn default() -> Self {
-            Self {
-                snapshot: Mutex::new(AuthLeaseSnapshot {
-                    phase: None,
-                    expires_at: None,
-                    credential_present: false,
-                    generation: 0,
-                    credential_published_at_millis: None,
-                }),
-                generation: Mutex::new(0),
-                accepted_generations: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl SnapshotRaceAuthLeaseHandle {
-        fn accept_valid_transition(
-            &self,
-            lease_key: &LeaseKey,
-            expires_at: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            let accepted_generation = {
-                let mut generation = self.generation.lock().unwrap();
-                *generation += 1;
-                *generation
-            };
-            self.accepted_generations
-                .lock()
-                .unwrap()
-                .push(accepted_generation);
-            *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
-                phase: Some(AuthLeasePhase::Valid),
-                expires_at: Some(expires_at),
-                credential_present: true,
-                generation: accepted_generation + 1,
-                credential_published_at_millis: None,
-            };
-            let transition = generated_auth_transition_for_test(lease_key, expires_at);
-            assert_eq!(transition.generation(), accepted_generation);
-            Ok(transition)
-        }
-
-        fn accepted_generations(&self) -> Vec<u64> {
-            self.accepted_generations.lock().unwrap().clone()
-        }
-    }
-
-    impl AuthLeaseHandle for SnapshotRaceAuthLeaseHandle {
-        fn acquire_lease(
-            &self,
-            _lease_key: &LeaseKey,
-            expires_at: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            self.accept_valid_transition(_lease_key, expires_at)
-        }
-
-        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn complete_refresh(
-            &self,
-            _lease_key: &LeaseKey,
-            new_expires_at: u64,
-            _now: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            self.accept_valid_transition(_lease_key, new_expires_at)
-        }
-
-        fn refresh_failed(
-            &self,
-            _lease_key: &LeaseKey,
-            _permanent: bool,
-        ) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-            self.snapshot.lock().unwrap().clone()
-        }
+    fn generated_auth_lease_handle_for_test(
+        handle: Arc<meerkat_runtime::RuntimeAuthLeaseHandle>,
+    ) -> GeneratedAuthLeaseHandle {
+        meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+            handle,
+        )
+        .expect("runtime AuthLeaseHandle is certified by generated AuthMachine authority")
     }
 
     fn lease_key() -> LeaseKey {
@@ -411,9 +310,12 @@ mod tests {
 
     #[test]
     fn initial_acquire_returns_generation_from_accepted_transition() {
-        let handle = Arc::new(SnapshotRaceAuthLeaseHandle::default());
+        let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let lease_key = lease_key();
-        let observer = LeaseFreshnessObserver::new(handle.clone(), lease_key);
+        let observer = LeaseFreshnessObserver::new(
+            generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+            lease_key,
+        );
         let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
         let now = DateTime::<Utc>::from_timestamp(1_799_999_000, 0).unwrap();
 
@@ -426,15 +328,19 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(handle.accepted_generations(), vec![1]);
         assert_eq!(generation, 1);
     }
 
     #[test]
     fn refresh_returns_generation_from_accepted_transition() {
-        let handle = Arc::new(SnapshotRaceAuthLeaseHandle::default());
+        let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let lease_key = lease_key();
-        let observer = LeaseFreshnessObserver::new(handle.clone(), lease_key);
+        handle.acquire_lease(&lease_key, 1_799_999_500).unwrap();
+        handle.begin_refresh(&lease_key).unwrap();
+        let observer = LeaseFreshnessObserver::new(
+            generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+            lease_key,
+        );
         let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
         let now = DateTime::<Utc>::from_timestamp(1_799_999_000, 0).unwrap();
 
@@ -442,8 +348,7 @@ mod tests {
             .complete_refresh("race-test", LeaseRefreshLifecycle::Refresh, expires_at, now)
             .unwrap();
 
-        assert_eq!(handle.accepted_generations(), vec![1]);
-        assert_eq!(generation, 1);
+        assert_eq!(generation, 2);
     }
 }
 

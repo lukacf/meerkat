@@ -237,98 +237,6 @@ fn persistent_auth_authority_test_guard() -> std::sync::MutexGuard<'static, ()> 
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-struct DelegatingCustomAuthLeaseHandle(crate::handles::RuntimeAuthLeaseHandle);
-
-#[cfg(not(target_arch = "wasm32"))]
-impl meerkat_core::handles::AuthLeaseHandle for DelegatingCustomAuthLeaseHandle {
-    fn acquire_lease(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-        expires_at: u64,
-    ) -> Result<meerkat_core::handles::AuthLeaseTransition, meerkat_core::handles::DslTransitionError>
-    {
-        self.0.acquire_lease(lease_key, expires_at)
-    }
-
-    fn mark_expiring(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.0.mark_expiring(lease_key)
-    }
-
-    fn begin_refresh(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.0.begin_refresh(lease_key)
-    }
-
-    fn complete_refresh(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-        new_expires_at: u64,
-        now: u64,
-    ) -> Result<meerkat_core::handles::AuthLeaseTransition, meerkat_core::handles::DslTransitionError>
-    {
-        self.0.complete_refresh(lease_key, new_expires_at, now)
-    }
-
-    fn refresh_failed(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-        permanent: bool,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.0.refresh_failed(lease_key, permanent)
-    }
-
-    fn mark_reauth_required(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.0.mark_reauth_required(lease_key)
-    }
-
-    fn release_lease(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.0.release_lease(lease_key)
-    }
-
-    fn release_credential_lifecycle(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.0.release_credential_lifecycle(lease_key)
-    }
-
-    fn capture_auth_lifecycle_restore_snapshot(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> meerkat_core::handles::AuthLeaseRestoreSnapshot {
-        self.0.capture_auth_lifecycle_restore_snapshot(lease_key)
-    }
-
-    fn restore_auth_lifecycle_snapshot(
-        &self,
-        snapshot: &meerkat_core::handles::AuthLeaseRestoreSnapshot,
-    ) -> Result<
-        Option<meerkat_core::handles::AuthLeaseTransition>,
-        meerkat_core::handles::DslTransitionError,
-    > {
-        self.0.restore_auth_lifecycle_snapshot(snapshot)
-    }
-
-    fn snapshot(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> meerkat_core::handles::AuthLeaseSnapshot {
-        self.0.snapshot(lease_key)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn oauth_flow_authority_is_owned_by_meerkat_machine() {
     let machine = MeerkatMachine::ephemeral();
@@ -763,10 +671,9 @@ fn oauth_lifecycle_shares_auth_machine_release_authority() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn oauth_lifecycle_release_stays_paired_after_custom_auth_handle_install() {
+fn oauth_lifecycle_release_stays_paired_after_runtime_auth_handle_install() {
     let machine = MeerkatMachine::ephemeral();
-    let external_auth = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new())
-        as Arc<dyn meerkat_core::handles::AuthLeaseHandle>;
+    let external_auth = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
     machine.set_auth_lease_handle(external_auth);
     let target = oauth_target();
     let redirect_uri = "http://127.0.0.1/callback";
@@ -783,7 +690,7 @@ fn oauth_lifecycle_release_stays_paired_after_custom_auth_handle_install() {
     machine
         .auth_lease_handle()
         .release_lease(&meerkat_core::handles::LeaseKey::from_auth_binding(&target))
-        .expect("custom auth handle release clears paired OAuth lifecycle");
+        .expect("runtime auth handle release clears paired OAuth lifecycle");
 
     assert!(matches!(
         machine.oauth_flow_authority().consume(
@@ -798,31 +705,6 @@ fn oauth_lifecycle_release_stays_paired_after_custom_auth_handle_install() {
                 ..
             }
         )
-    ));
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn custom_auth_handle_install_does_not_create_separate_oauth_lifecycle_authority() {
-    let machine = MeerkatMachine::ephemeral();
-    let custom_auth = Arc::new(DelegatingCustomAuthLeaseHandle(
-        crate::handles::RuntimeAuthLeaseHandle::new(),
-    )) as Arc<dyn meerkat_core::handles::AuthLeaseHandle>;
-    machine.set_auth_lease_handle(custom_auth);
-
-    let err = machine
-        .oauth_flow_authority()
-        .start(
-            oauth_target(),
-            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-            "http://127.0.0.1/callback".to_string(),
-            "verifier".to_string(),
-        )
-        .expect_err("custom auth handles without an OAuth lifecycle seam must not get a hidden runtime flow authority");
-
-    assert!(matches!(
-        err,
-        meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected { .. }
     ));
 }
 

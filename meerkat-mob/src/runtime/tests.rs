@@ -11522,6 +11522,39 @@ async fn test_spawn_member_tool_dispatches_backend_selection() {
 }
 
 #[tokio::test]
+async fn test_spawn_member_profile_scope_allows_auto_wire_parent() {
+    let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let sid = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    service
+        .dispatch_external_tool_outcome(
+            &sid,
+            "spawn_member",
+            serde_json::json!({
+                "profile": "worker",
+                "member_id": "w-auto-wire",
+                "auto_wire_parent": true
+            }),
+        )
+        .await
+        .expect("profile-scoped spawn should allow auto_wire_parent");
+
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from("w-auto-wire"))
+            .await
+            .is_some(),
+        "profile-scoped auto-wired spawn should provision the requested member"
+    );
+}
+
+#[tokio::test]
 async fn test_tool_flag_enforcement_blocks_mob_tools() {
     let (handle, service) = create_test_mob(sample_definition_without_mob_flags()).await;
     let sid = handle
@@ -26312,6 +26345,87 @@ async fn test_mob_session_service_subscribe_session_events_available() {
         stream_result.is_ok(),
         "expected session-wide event stream contract from mob session service"
     );
+}
+
+#[tokio::test]
+async fn test_observation_member_reads_bypass_saturated_actor_command_queue() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("w-observe");
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from(identity.as_str()),
+            None,
+        )
+        .await
+        .expect("spawn observable worker");
+    let session_id = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("session-backed worker");
+
+    let (blocked_tx, _blocked_rx) = tokio::sync::mpsc::channel(1);
+    let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+    blocked_tx
+        .try_send(super::state::MobCommand::Retire {
+            agent_identity: MeerkatId::from("queued-command"),
+            reply_tx,
+        })
+        .expect("test command channel should accept first command");
+    let blocked_handle = MobHandle {
+        command_tx: blocked_tx,
+        ..handle.clone()
+    };
+
+    let actor_routed = tokio::time::timeout(Duration::from_millis(50), handle.list_members()).await;
+    assert!(
+        actor_routed.is_ok(),
+        "control handle should remain healthy before swapping in blocked command queue"
+    );
+
+    let actor_routed =
+        tokio::time::timeout(Duration::from_millis(50), blocked_handle.list_members()).await;
+    assert!(
+        actor_routed.is_err(),
+        "actor-routed list_members should queue behind a saturated command channel"
+    );
+
+    assert_eq!(
+        blocked_handle.status_observation_snapshot(),
+        MobState::Running,
+        "observation phase snapshot must not wait for the actor queue"
+    );
+
+    let observed = tokio::time::timeout(
+        Duration::from_millis(50),
+        blocked_handle.list_members_observation_snapshot(),
+    )
+    .await
+    .expect("observation snapshot must not wait for the actor queue");
+    let observed_member = observed
+        .iter()
+        .find(|member| member.agent_identity == identity)
+        .expect("observation snapshot should include the active member");
+    assert_eq!(
+        observed_member.current_bridge_session_id.as_ref(),
+        Some(&session_id)
+    );
+
+    let observed_session = tokio::time::timeout(
+        Duration::from_millis(50),
+        blocked_handle.resolve_bridge_session_id_observation(&identity),
+    )
+    .await
+    .expect("observation session lookup must not wait for the actor queue");
+    assert_eq!(observed_session.as_ref(), Some(&session_id));
+
+    let _stream = tokio::time::timeout(
+        Duration::from_millis(50),
+        blocked_handle.subscribe_agent_events_observation(&identity),
+    )
+    .await
+    .expect("observation event subscription must not wait for the actor queue")
+    .expect("session-backed member should expose an event stream");
 }
 
 static REAL_COMMS_TEST_LOCK: Mutex<()> = Mutex::new(());

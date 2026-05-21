@@ -1836,6 +1836,15 @@ impl MobHandle {
         }
     }
 
+    /// Last actor-published mob lifecycle phase.
+    ///
+    /// Observation-only surfaces use this when they must remain live while the
+    /// mob actor is awaiting an in-flight member turn. Control paths that need
+    /// the authoritative current phase must keep using [`Self::status`].
+    pub fn status_observation_snapshot(&self) -> MobState {
+        *self.phase_watch_rx.borrow()
+    }
+
     /// Access the mob definition.
     pub fn definition(&self) -> &MobDefinition {
         &self.definition
@@ -1986,6 +1995,24 @@ impl MobHandle {
             }
             Err(_) => Vec::new(),
         }
+    }
+
+    /// Observation-only member projection that never enters the mob actor queue.
+    ///
+    /// Source truth is the shared roster projection plus the actor-published
+    /// MobMachine state watch. The actor is the sole writer for the machine
+    /// watch; this handle only reads the last published value, so the status
+    /// fields can be stale until the actor publishes the next transition.
+    ///
+    /// Use boundary: console/event observation and backfill discovery only.
+    /// This includes retiring rows so observers can keep showing in-flight
+    /// teardown. Control paths that decide routability, mutation legality, or
+    /// active-membership policy must keep using the identity-native command
+    /// APIs; this projection must not become a parallel authority.
+    pub async fn list_members_observation_snapshot(&self) -> Vec<MobMemberListEntry> {
+        let entries = self.roster.read().await.list_all().cloned().collect();
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        self.project_member_list_entries_from_machine_state(entries, &machine_state)
     }
 
     async fn inflight_retiring_member_list(&self) -> Option<Vec<MobMemberListEntry>> {
@@ -2156,6 +2183,23 @@ impl MobHandle {
             .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
     }
 
+    /// Observation-only bridge-session lookup that never enters the actor queue.
+    ///
+    /// This reads the roster's current member binding as a projection for
+    /// observers that need to attach to session event/history streams. It is
+    /// not a control admission seam and must not be used to decide membership
+    /// legality.
+    pub async fn resolve_bridge_session_id_observation(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<SessionId> {
+        self.roster
+            .read()
+            .await
+            .get_by_identity(identity)
+            .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
+    }
+
     /// Acquire a capability-bearing handle for a specific active member.
     pub async fn member(&self, identity: &AgentIdentity) -> Result<MemberHandle, MobError> {
         let meerkat_id = MeerkatId::from(identity);
@@ -2227,6 +2271,43 @@ impl MobHandle {
                 "unexpected command result variant".into(),
             )),
         }
+    }
+
+    /// Observation-only event subscription that reads the session binding from
+    /// the roster directly instead of sending a command through the mob actor.
+    ///
+    /// The subscription authority remains the session service for the resolved
+    /// bridge session. This helper only projects the identity-to-session
+    /// binding for observation surfaces that cannot queue behind the mob actor.
+    pub async fn subscribe_agent_events_observation(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<EventStream, MobError> {
+        let session_id = {
+            let roster = self.roster.read().await;
+            let entry = roster
+                .get_by_identity(identity)
+                .ok_or_else(|| MobError::MemberNotFound(MeerkatId::from(identity)))?;
+            entry
+                .member_ref
+                .bridge_session_id()
+                .cloned()
+                .ok_or_else(|| MobError::UnsupportedForMode {
+                    mode: entry.runtime_mode,
+                    reason: "agent event subscriptions are not supported for peer-only members"
+                        .to_string(),
+                })?
+        };
+        crate::runtime::session_service::MobSessionService::subscribe_session_events(
+            self.session_service.as_ref(),
+            &session_id,
+        )
+        .await
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "failed to subscribe to agent events for '{identity}': {error}"
+            ))
+        })
     }
 
     /// Subscribe to agent events for all active members (point-in-time snapshot).
@@ -3104,12 +3185,30 @@ impl MobHandle {
         work_ref: WorkRef,
         spec: WorkSpec,
     ) -> Result<WorkDeliveryReceipt, MobError> {
+        self.submit_work_with_mode(runtime_id, fence_token, work_ref, spec, HandlingMode::Queue)
+            .await
+    }
+
+    /// Submit a unit of work to a mob member with an explicit turn handling mode.
+    ///
+    /// This is the ingress-acknowledged work-lane counterpart to member send.
+    /// The caller supplies the already-authorized runtime binding and fence
+    /// token; the mob machine still owns work-origin legality and stale-fence
+    /// rejection.
+    pub async fn submit_work_with_mode(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        work_ref: WorkRef,
+        spec: WorkSpec,
+        handling_mode: HandlingMode,
+    ) -> Result<WorkDeliveryReceipt, MobError> {
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
             runtime_id: runtime_id.clone(),
             fence_token,
             work_ref: work_ref.clone(),
             spec,
-            handling_mode: HandlingMode::Queue,
+            handling_mode,
             render_metadata: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
         });

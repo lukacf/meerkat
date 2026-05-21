@@ -555,7 +555,6 @@ impl MobOperatorToolDispatcher {
             || args.launch_mode.is_some()
             || args.tool_access_policy.is_some()
             || args.budget_split_policy.is_some()
-            || args.auto_wire_parent.is_some()
         {
             return Err(ToolError::access_denied(tool_name));
         }

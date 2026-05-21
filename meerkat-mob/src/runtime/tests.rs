@@ -16279,7 +16279,10 @@ async fn test_wire_members_batch_materializes_300_by_150_dense_topology_in_secon
         .collect::<Vec<_>>();
 
     let spawn_started = std::time::Instant::now();
-    let spawned = handle.spawn_many(specs).await;
+    let spawned = handle
+        .spawn_many(specs)
+        .await
+        .expect("spawn_many dense topology authority");
     let spawn_elapsed = spawn_started.elapsed();
     assert_eq!(spawned.len(), AGENTS);
     for result in spawned {
@@ -16369,7 +16372,10 @@ async fn test_retire_fanout_notifies_150_peers_with_bounded_parallelism() {
         .iter()
         .map(|identity| SpawnMemberSpec::new("worker", identity.as_str()))
         .collect::<Vec<_>>();
-    let spawned = handle.spawn_many(specs).await;
+    let spawned = handle
+        .spawn_many(specs)
+        .await
+        .expect("spawn_many peer authority");
     for result in spawned {
         result.expect("spawn peer");
     }
@@ -20304,7 +20310,10 @@ async fn test_spawn_many_member_refs_returns_results_in_input_order() {
         SpawnMemberSpec::new("worker", "w-c"),
     ];
 
-    let results = handle.spawn_many(specs).await;
+    let results = handle
+        .spawn_many(specs)
+        .await
+        .expect("spawn_many result authority");
     assert_eq!(results.len(), 3);
     for (idx, result) in results.into_iter().enumerate() {
         let member = result.expect("spawn_many result");
@@ -20329,7 +20338,10 @@ async fn test_spawn_many_parallel_finalize_deduplicates_worker_pair_wiring() {
         SpawnMemberSpec::new("worker", "w-b"),
     ];
 
-    let results = handle.spawn_many(specs).await;
+    let results = handle
+        .spawn_many(specs)
+        .await
+        .expect("spawn_many member ref authority");
     for result in results {
         result.expect("spawn_many member ref");
     }
@@ -20367,7 +20379,10 @@ async fn test_spawn_many_parallel_finalize_tolerates_overlapping_role_wiring_tar
         SpawnMemberSpec::new("worker", "w-a"),
     ];
 
-    let results = handle.spawn_many(specs).await;
+    let results = handle
+        .spawn_many(specs)
+        .await
+        .expect("spawn_many overlapping wiring authority");
     for result in results {
         result.expect("spawn_many member ref");
     }
@@ -30170,7 +30185,8 @@ async fn test_spawn_member_customizer_fires_with_source_and_spawner_provenance()
             SpawnMemberSpec::new("worker", "batch-a"),
             SpawnMemberSpec::new("worker", "batch-b"),
         ])
-        .await;
+        .await
+        .expect("spawn_many batch customizer authority");
     assert!(batch.drain(..).all(|result| result.is_ok()));
 
     handle

@@ -1483,6 +1483,378 @@ impl std::fmt::Display for MobMemberState {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobSpawnManyFailureCauseKind {
+    #[default]
+    #[serde(rename = "ProfileNotFound")]
+    ProfileNotFound,
+    #[serde(rename = "MemberNotFound")]
+    MemberNotFound,
+    #[serde(rename = "MemberAlreadyExists")]
+    MemberAlreadyExists,
+    #[serde(rename = "NotExternallyAddressable")]
+    NotExternallyAddressable,
+    #[serde(rename = "InvalidTransition")]
+    InvalidTransition,
+    #[serde(rename = "WiringError")]
+    WiringError,
+    #[serde(rename = "BridgeCommandRejected")]
+    BridgeCommandRejected,
+    #[serde(rename = "MemberRestoreFailed")]
+    MemberRestoreFailed,
+    #[serde(rename = "KickoffWaitTimedOut")]
+    KickoffWaitTimedOut,
+    #[serde(rename = "ReadyWaitTimedOut")]
+    ReadyWaitTimedOut,
+    #[serde(rename = "DefinitionError")]
+    DefinitionError,
+    #[serde(rename = "FlowNotFound")]
+    FlowNotFound,
+    #[serde(rename = "FlowFailed")]
+    FlowFailed,
+    #[serde(rename = "RunNotFound")]
+    RunNotFound,
+    #[serde(rename = "RunCanceled")]
+    RunCanceled,
+    #[serde(rename = "FlowTurnTimedOut")]
+    FlowTurnTimedOut,
+    #[serde(rename = "FrameDepthLimitExceeded")]
+    FrameDepthLimitExceeded,
+    #[serde(rename = "FrameAtomicPersistenceUnavailable")]
+    FrameAtomicPersistenceUnavailable,
+    #[serde(rename = "SpecRevisionConflict")]
+    SpecRevisionConflict,
+    #[serde(rename = "SchemaValidation")]
+    SchemaValidation,
+    #[serde(rename = "InsufficientTargets")]
+    InsufficientTargets,
+    #[serde(rename = "TopologyViolation")]
+    TopologyViolation,
+    #[serde(rename = "BridgeDeliveryRejected")]
+    BridgeDeliveryRejected,
+    #[serde(rename = "SupervisorEscalation")]
+    SupervisorEscalation,
+    #[serde(rename = "UnsupportedForMode")]
+    UnsupportedForMode,
+    #[serde(rename = "MissingMemberCapability")]
+    MissingMemberCapability,
+    #[serde(rename = "ResetBarrier")]
+    ResetBarrier,
+    #[serde(rename = "StorageError")]
+    StorageError,
+    #[serde(rename = "SessionError")]
+    SessionError,
+    #[serde(rename = "CommsError")]
+    CommsError,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "StaleFenceToken")]
+    StaleFenceToken,
+    #[serde(rename = "StaleEventCursor")]
+    StaleEventCursor,
+    #[serde(rename = "WorkNotFound")]
+    WorkNotFound,
+    #[serde(rename = "Internal")]
+    Internal,
+}
+impl MobSpawnManyFailureCauseKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ProfileNotFound => "ProfileNotFound",
+            Self::MemberNotFound => "MemberNotFound",
+            Self::MemberAlreadyExists => "MemberAlreadyExists",
+            Self::NotExternallyAddressable => "NotExternallyAddressable",
+            Self::InvalidTransition => "InvalidTransition",
+            Self::WiringError => "WiringError",
+            Self::BridgeCommandRejected => "BridgeCommandRejected",
+            Self::MemberRestoreFailed => "MemberRestoreFailed",
+            Self::KickoffWaitTimedOut => "KickoffWaitTimedOut",
+            Self::ReadyWaitTimedOut => "ReadyWaitTimedOut",
+            Self::DefinitionError => "DefinitionError",
+            Self::FlowNotFound => "FlowNotFound",
+            Self::FlowFailed => "FlowFailed",
+            Self::RunNotFound => "RunNotFound",
+            Self::RunCanceled => "RunCanceled",
+            Self::FlowTurnTimedOut => "FlowTurnTimedOut",
+            Self::FrameDepthLimitExceeded => "FrameDepthLimitExceeded",
+            Self::FrameAtomicPersistenceUnavailable => "FrameAtomicPersistenceUnavailable",
+            Self::SpecRevisionConflict => "SpecRevisionConflict",
+            Self::SchemaValidation => "SchemaValidation",
+            Self::InsufficientTargets => "InsufficientTargets",
+            Self::TopologyViolation => "TopologyViolation",
+            Self::BridgeDeliveryRejected => "BridgeDeliveryRejected",
+            Self::SupervisorEscalation => "SupervisorEscalation",
+            Self::UnsupportedForMode => "UnsupportedForMode",
+            Self::MissingMemberCapability => "MissingMemberCapability",
+            Self::ResetBarrier => "ResetBarrier",
+            Self::StorageError => "StorageError",
+            Self::SessionError => "SessionError",
+            Self::CommsError => "CommsError",
+            Self::CallbackPending => "CallbackPending",
+            Self::StaleFenceToken => "StaleFenceToken",
+            Self::StaleEventCursor => "StaleEventCursor",
+            Self::WorkNotFound => "WorkNotFound",
+            Self::Internal => "Internal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobSpawnManyFailureCauseKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ProfileNotFound" => Ok(Self::ProfileNotFound),
+            "MemberNotFound" => Ok(Self::MemberNotFound),
+            "MemberAlreadyExists" => Ok(Self::MemberAlreadyExists),
+            "NotExternallyAddressable" => Ok(Self::NotExternallyAddressable),
+            "InvalidTransition" => Ok(Self::InvalidTransition),
+            "WiringError" => Ok(Self::WiringError),
+            "BridgeCommandRejected" => Ok(Self::BridgeCommandRejected),
+            "MemberRestoreFailed" => Ok(Self::MemberRestoreFailed),
+            "KickoffWaitTimedOut" => Ok(Self::KickoffWaitTimedOut),
+            "ReadyWaitTimedOut" => Ok(Self::ReadyWaitTimedOut),
+            "DefinitionError" => Ok(Self::DefinitionError),
+            "FlowNotFound" => Ok(Self::FlowNotFound),
+            "FlowFailed" => Ok(Self::FlowFailed),
+            "RunNotFound" => Ok(Self::RunNotFound),
+            "RunCanceled" => Ok(Self::RunCanceled),
+            "FlowTurnTimedOut" => Ok(Self::FlowTurnTimedOut),
+            "FrameDepthLimitExceeded" => Ok(Self::FrameDepthLimitExceeded),
+            "FrameAtomicPersistenceUnavailable" => Ok(Self::FrameAtomicPersistenceUnavailable),
+            "SpecRevisionConflict" => Ok(Self::SpecRevisionConflict),
+            "SchemaValidation" => Ok(Self::SchemaValidation),
+            "InsufficientTargets" => Ok(Self::InsufficientTargets),
+            "TopologyViolation" => Ok(Self::TopologyViolation),
+            "BridgeDeliveryRejected" => Ok(Self::BridgeDeliveryRejected),
+            "SupervisorEscalation" => Ok(Self::SupervisorEscalation),
+            "UnsupportedForMode" => Ok(Self::UnsupportedForMode),
+            "MissingMemberCapability" => Ok(Self::MissingMemberCapability),
+            "ResetBarrier" => Ok(Self::ResetBarrier),
+            "StorageError" => Ok(Self::StorageError),
+            "SessionError" => Ok(Self::SessionError),
+            "CommsError" => Ok(Self::CommsError),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "StaleFenceToken" => Ok(Self::StaleFenceToken),
+            "StaleEventCursor" => Ok(Self::StaleEventCursor),
+            "WorkNotFound" => Ok(Self::WorkNotFound),
+            "Internal" => Ok(Self::Internal),
+            other => Err(format!(
+                "invalid MobSpawnManyFailureCauseKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobSpawnManyFailureCauseKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobSpawnManyFailureCauseKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobSpawnManyFailureObservationKind {
+    #[default]
+    #[serde(rename = "ProfileNotFound")]
+    ProfileNotFound,
+    #[serde(rename = "MemberNotFound")]
+    MemberNotFound,
+    #[serde(rename = "MemberAlreadyExists")]
+    MemberAlreadyExists,
+    #[serde(rename = "NotExternallyAddressable")]
+    NotExternallyAddressable,
+    #[serde(rename = "InvalidTransition")]
+    InvalidTransition,
+    #[serde(rename = "WiringError")]
+    WiringError,
+    #[serde(rename = "SupervisorRotationIncomplete")]
+    SupervisorRotationIncomplete,
+    #[serde(rename = "BridgeCommandRejected")]
+    BridgeCommandRejected,
+    #[serde(rename = "MemberRestoreFailed")]
+    MemberRestoreFailed,
+    #[serde(rename = "KickoffWaitTimedOut")]
+    KickoffWaitTimedOut,
+    #[serde(rename = "ReadyWaitTimedOut")]
+    ReadyWaitTimedOut,
+    #[serde(rename = "DefinitionError")]
+    DefinitionError,
+    #[serde(rename = "FlowNotFound")]
+    FlowNotFound,
+    #[serde(rename = "FlowFailed")]
+    FlowFailed,
+    #[serde(rename = "RunNotFound")]
+    RunNotFound,
+    #[serde(rename = "RunCanceled")]
+    RunCanceled,
+    #[serde(rename = "FlowTurnTimedOut")]
+    FlowTurnTimedOut,
+    #[serde(rename = "FrameDepthLimitExceeded")]
+    FrameDepthLimitExceeded,
+    #[serde(rename = "FrameAtomicPersistenceUnavailable")]
+    FrameAtomicPersistenceUnavailable,
+    #[serde(rename = "SpecRevisionConflict")]
+    SpecRevisionConflict,
+    #[serde(rename = "SchemaValidation")]
+    SchemaValidation,
+    #[serde(rename = "InsufficientTargets")]
+    InsufficientTargets,
+    #[serde(rename = "TopologyViolation")]
+    TopologyViolation,
+    #[serde(rename = "BridgeDeliveryRejected")]
+    BridgeDeliveryRejected,
+    #[serde(rename = "SupervisorEscalation")]
+    SupervisorEscalation,
+    #[serde(rename = "UnsupportedForMode")]
+    UnsupportedForMode,
+    #[serde(rename = "MissingMemberCapability")]
+    MissingMemberCapability,
+    #[serde(rename = "ResetBarrier")]
+    ResetBarrier,
+    #[serde(rename = "StorageError")]
+    StorageError,
+    #[serde(rename = "SessionError")]
+    SessionError,
+    #[serde(rename = "CommsError")]
+    CommsError,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "StaleFenceToken")]
+    StaleFenceToken,
+    #[serde(rename = "StaleEventCursor")]
+    StaleEventCursor,
+    #[serde(rename = "WorkNotFound")]
+    WorkNotFound,
+    #[serde(rename = "Internal")]
+    Internal,
+}
+impl MobSpawnManyFailureObservationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ProfileNotFound => "ProfileNotFound",
+            Self::MemberNotFound => "MemberNotFound",
+            Self::MemberAlreadyExists => "MemberAlreadyExists",
+            Self::NotExternallyAddressable => "NotExternallyAddressable",
+            Self::InvalidTransition => "InvalidTransition",
+            Self::WiringError => "WiringError",
+            Self::SupervisorRotationIncomplete => "SupervisorRotationIncomplete",
+            Self::BridgeCommandRejected => "BridgeCommandRejected",
+            Self::MemberRestoreFailed => "MemberRestoreFailed",
+            Self::KickoffWaitTimedOut => "KickoffWaitTimedOut",
+            Self::ReadyWaitTimedOut => "ReadyWaitTimedOut",
+            Self::DefinitionError => "DefinitionError",
+            Self::FlowNotFound => "FlowNotFound",
+            Self::FlowFailed => "FlowFailed",
+            Self::RunNotFound => "RunNotFound",
+            Self::RunCanceled => "RunCanceled",
+            Self::FlowTurnTimedOut => "FlowTurnTimedOut",
+            Self::FrameDepthLimitExceeded => "FrameDepthLimitExceeded",
+            Self::FrameAtomicPersistenceUnavailable => "FrameAtomicPersistenceUnavailable",
+            Self::SpecRevisionConflict => "SpecRevisionConflict",
+            Self::SchemaValidation => "SchemaValidation",
+            Self::InsufficientTargets => "InsufficientTargets",
+            Self::TopologyViolation => "TopologyViolation",
+            Self::BridgeDeliveryRejected => "BridgeDeliveryRejected",
+            Self::SupervisorEscalation => "SupervisorEscalation",
+            Self::UnsupportedForMode => "UnsupportedForMode",
+            Self::MissingMemberCapability => "MissingMemberCapability",
+            Self::ResetBarrier => "ResetBarrier",
+            Self::StorageError => "StorageError",
+            Self::SessionError => "SessionError",
+            Self::CommsError => "CommsError",
+            Self::CallbackPending => "CallbackPending",
+            Self::StaleFenceToken => "StaleFenceToken",
+            Self::StaleEventCursor => "StaleEventCursor",
+            Self::WorkNotFound => "WorkNotFound",
+            Self::Internal => "Internal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobSpawnManyFailureObservationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ProfileNotFound" => Ok(Self::ProfileNotFound),
+            "MemberNotFound" => Ok(Self::MemberNotFound),
+            "MemberAlreadyExists" => Ok(Self::MemberAlreadyExists),
+            "NotExternallyAddressable" => Ok(Self::NotExternallyAddressable),
+            "InvalidTransition" => Ok(Self::InvalidTransition),
+            "WiringError" => Ok(Self::WiringError),
+            "SupervisorRotationIncomplete" => Ok(Self::SupervisorRotationIncomplete),
+            "BridgeCommandRejected" => Ok(Self::BridgeCommandRejected),
+            "MemberRestoreFailed" => Ok(Self::MemberRestoreFailed),
+            "KickoffWaitTimedOut" => Ok(Self::KickoffWaitTimedOut),
+            "ReadyWaitTimedOut" => Ok(Self::ReadyWaitTimedOut),
+            "DefinitionError" => Ok(Self::DefinitionError),
+            "FlowNotFound" => Ok(Self::FlowNotFound),
+            "FlowFailed" => Ok(Self::FlowFailed),
+            "RunNotFound" => Ok(Self::RunNotFound),
+            "RunCanceled" => Ok(Self::RunCanceled),
+            "FlowTurnTimedOut" => Ok(Self::FlowTurnTimedOut),
+            "FrameDepthLimitExceeded" => Ok(Self::FrameDepthLimitExceeded),
+            "FrameAtomicPersistenceUnavailable" => Ok(Self::FrameAtomicPersistenceUnavailable),
+            "SpecRevisionConflict" => Ok(Self::SpecRevisionConflict),
+            "SchemaValidation" => Ok(Self::SchemaValidation),
+            "InsufficientTargets" => Ok(Self::InsufficientTargets),
+            "TopologyViolation" => Ok(Self::TopologyViolation),
+            "BridgeDeliveryRejected" => Ok(Self::BridgeDeliveryRejected),
+            "SupervisorEscalation" => Ok(Self::SupervisorEscalation),
+            "UnsupportedForMode" => Ok(Self::UnsupportedForMode),
+            "MissingMemberCapability" => Ok(Self::MissingMemberCapability),
+            "ResetBarrier" => Ok(Self::ResetBarrier),
+            "StorageError" => Ok(Self::StorageError),
+            "SessionError" => Ok(Self::SessionError),
+            "CommsError" => Ok(Self::CommsError),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "StaleFenceToken" => Ok(Self::StaleFenceToken),
+            "StaleEventCursor" => Ok(Self::StaleEventCursor),
+            "WorkNotFound" => Ok(Self::WorkNotFound),
+            "Internal" => Ok(Self::Internal),
+            other => Err(format!(
+                "invalid MobSpawnManyFailureObservationKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobSpawnManyFailureObservationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobSpawnManyFailureObservationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
 #[allow(non_camel_case_types)]
 #[derive(
@@ -2392,6 +2764,10 @@ pub mod inputs {
         pub external_addressable: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifySpawnManyFailure {
+        pub observation: MobSpawnManyFailureObservationKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnsureMember {
         pub agent_identity: AgentIdentity,
     }
@@ -2661,6 +3037,7 @@ pub enum Input {
     FlowStatus(inputs::FlowStatus),
     Spawn(inputs::Spawn),
     AuthorizeSpawnProfile(inputs::AuthorizeSpawnProfile),
+    ClassifySpawnManyFailure(inputs::ClassifySpawnManyFailure),
     EnsureMember(inputs::EnsureMember),
     Reconcile(inputs::Reconcile),
     Retire(inputs::Retire),
@@ -2742,6 +3119,7 @@ impl Input {
             Self::FlowStatus(_) => InputKind::FlowStatus,
             Self::Spawn(_) => InputKind::Spawn,
             Self::AuthorizeSpawnProfile(_) => InputKind::AuthorizeSpawnProfile,
+            Self::ClassifySpawnManyFailure(_) => InputKind::ClassifySpawnManyFailure,
             Self::EnsureMember(_) => InputKind::EnsureMember,
             Self::Reconcile(_) => InputKind::Reconcile,
             Self::Retire(_) => InputKind::Retire,
@@ -2832,6 +3210,7 @@ pub enum InputKind {
     FlowStatus,
     Spawn,
     AuthorizeSpawnProfile,
+    ClassifySpawnManyFailure,
     EnsureMember,
     Reconcile,
     Retire,
@@ -3346,6 +3725,11 @@ pub mod effects {
         pub failed_peer_ids: Vec<RespawnTopologyPeerId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SpawnManyFailureClassified {
+        pub observation: MobSpawnManyFailureObservationKind,
+        pub cause: MobSpawnManyFailureCauseKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WiringGraphChanged {
         pub epoch: u64,
     }
@@ -3508,6 +3892,7 @@ pub enum Effect {
     EmitKickoffLifecycleNotice(effects::EmitKickoffLifecycleNotice),
     SpawnPolicyResolutionRecorded(effects::SpawnPolicyResolutionRecorded),
     RespawnTopologyRestoreResolved(effects::RespawnTopologyRestoreResolved),
+    SpawnManyFailureClassified(effects::SpawnManyFailureClassified),
     WiringGraphChanged(effects::WiringGraphChanged),
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
     MemberTrustWiringRequested(effects::MemberTrustWiringRequested),
@@ -3560,6 +3945,7 @@ pub enum EffectKind {
     EmitKickoffLifecycleNotice,
     SpawnPolicyResolutionRecorded,
     RespawnTopologyRestoreResolved,
+    SpawnManyFailureClassified,
     WiringGraphChanged,
     MemberSessionBindingChanged,
     MemberTrustWiringRequested,
@@ -3588,6 +3974,146 @@ pub enum EffectKind {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
+    ClassifySpawnManyFailureProfileNotFoundRunning,
+    ClassifySpawnManyFailureProfileNotFoundStopped,
+    ClassifySpawnManyFailureProfileNotFoundCompleted,
+    ClassifySpawnManyFailureProfileNotFoundDestroyed,
+    ClassifySpawnManyFailureMemberNotFoundRunning,
+    ClassifySpawnManyFailureMemberNotFoundStopped,
+    ClassifySpawnManyFailureMemberNotFoundCompleted,
+    ClassifySpawnManyFailureMemberNotFoundDestroyed,
+    ClassifySpawnManyFailureMemberAlreadyExistsRunning,
+    ClassifySpawnManyFailureMemberAlreadyExistsStopped,
+    ClassifySpawnManyFailureMemberAlreadyExistsCompleted,
+    ClassifySpawnManyFailureMemberAlreadyExistsDestroyed,
+    ClassifySpawnManyFailureNotExternallyAddressableRunning,
+    ClassifySpawnManyFailureNotExternallyAddressableStopped,
+    ClassifySpawnManyFailureNotExternallyAddressableCompleted,
+    ClassifySpawnManyFailureNotExternallyAddressableDestroyed,
+    ClassifySpawnManyFailureInvalidTransitionRunning,
+    ClassifySpawnManyFailureInvalidTransitionStopped,
+    ClassifySpawnManyFailureInvalidTransitionCompleted,
+    ClassifySpawnManyFailureInvalidTransitionDestroyed,
+    ClassifySpawnManyFailureWiringErrorRunning,
+    ClassifySpawnManyFailureWiringErrorStopped,
+    ClassifySpawnManyFailureWiringErrorCompleted,
+    ClassifySpawnManyFailureWiringErrorDestroyed,
+    ClassifySpawnManyFailureBridgeCommandRejectedRunning,
+    ClassifySpawnManyFailureBridgeCommandRejectedStopped,
+    ClassifySpawnManyFailureBridgeCommandRejectedCompleted,
+    ClassifySpawnManyFailureBridgeCommandRejectedDestroyed,
+    ClassifySpawnManyFailureMemberRestoreFailedRunning,
+    ClassifySpawnManyFailureMemberRestoreFailedStopped,
+    ClassifySpawnManyFailureMemberRestoreFailedCompleted,
+    ClassifySpawnManyFailureMemberRestoreFailedDestroyed,
+    ClassifySpawnManyFailureKickoffWaitTimedOutRunning,
+    ClassifySpawnManyFailureKickoffWaitTimedOutStopped,
+    ClassifySpawnManyFailureKickoffWaitTimedOutCompleted,
+    ClassifySpawnManyFailureKickoffWaitTimedOutDestroyed,
+    ClassifySpawnManyFailureReadyWaitTimedOutRunning,
+    ClassifySpawnManyFailureReadyWaitTimedOutStopped,
+    ClassifySpawnManyFailureReadyWaitTimedOutCompleted,
+    ClassifySpawnManyFailureReadyWaitTimedOutDestroyed,
+    ClassifySpawnManyFailureDefinitionErrorRunning,
+    ClassifySpawnManyFailureDefinitionErrorStopped,
+    ClassifySpawnManyFailureDefinitionErrorCompleted,
+    ClassifySpawnManyFailureDefinitionErrorDestroyed,
+    ClassifySpawnManyFailureFlowNotFoundRunning,
+    ClassifySpawnManyFailureFlowNotFoundStopped,
+    ClassifySpawnManyFailureFlowNotFoundCompleted,
+    ClassifySpawnManyFailureFlowNotFoundDestroyed,
+    ClassifySpawnManyFailureFlowFailedRunning,
+    ClassifySpawnManyFailureFlowFailedStopped,
+    ClassifySpawnManyFailureFlowFailedCompleted,
+    ClassifySpawnManyFailureFlowFailedDestroyed,
+    ClassifySpawnManyFailureRunNotFoundRunning,
+    ClassifySpawnManyFailureRunNotFoundStopped,
+    ClassifySpawnManyFailureRunNotFoundCompleted,
+    ClassifySpawnManyFailureRunNotFoundDestroyed,
+    ClassifySpawnManyFailureRunCanceledRunning,
+    ClassifySpawnManyFailureRunCanceledStopped,
+    ClassifySpawnManyFailureRunCanceledCompleted,
+    ClassifySpawnManyFailureRunCanceledDestroyed,
+    ClassifySpawnManyFailureFlowTurnTimedOutRunning,
+    ClassifySpawnManyFailureFlowTurnTimedOutStopped,
+    ClassifySpawnManyFailureFlowTurnTimedOutCompleted,
+    ClassifySpawnManyFailureFlowTurnTimedOutDestroyed,
+    ClassifySpawnManyFailureFrameDepthLimitExceededRunning,
+    ClassifySpawnManyFailureFrameDepthLimitExceededStopped,
+    ClassifySpawnManyFailureFrameDepthLimitExceededCompleted,
+    ClassifySpawnManyFailureFrameDepthLimitExceededDestroyed,
+    ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableRunning,
+    ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableStopped,
+    ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableCompleted,
+    ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableDestroyed,
+    ClassifySpawnManyFailureSpecRevisionConflictRunning,
+    ClassifySpawnManyFailureSpecRevisionConflictStopped,
+    ClassifySpawnManyFailureSpecRevisionConflictCompleted,
+    ClassifySpawnManyFailureSpecRevisionConflictDestroyed,
+    ClassifySpawnManyFailureSchemaValidationRunning,
+    ClassifySpawnManyFailureSchemaValidationStopped,
+    ClassifySpawnManyFailureSchemaValidationCompleted,
+    ClassifySpawnManyFailureSchemaValidationDestroyed,
+    ClassifySpawnManyFailureInsufficientTargetsRunning,
+    ClassifySpawnManyFailureInsufficientTargetsStopped,
+    ClassifySpawnManyFailureInsufficientTargetsCompleted,
+    ClassifySpawnManyFailureInsufficientTargetsDestroyed,
+    ClassifySpawnManyFailureTopologyViolationRunning,
+    ClassifySpawnManyFailureTopologyViolationStopped,
+    ClassifySpawnManyFailureTopologyViolationCompleted,
+    ClassifySpawnManyFailureTopologyViolationDestroyed,
+    ClassifySpawnManyFailureBridgeDeliveryRejectedRunning,
+    ClassifySpawnManyFailureBridgeDeliveryRejectedStopped,
+    ClassifySpawnManyFailureBridgeDeliveryRejectedCompleted,
+    ClassifySpawnManyFailureBridgeDeliveryRejectedDestroyed,
+    ClassifySpawnManyFailureSupervisorEscalationRunning,
+    ClassifySpawnManyFailureSupervisorEscalationStopped,
+    ClassifySpawnManyFailureSupervisorEscalationCompleted,
+    ClassifySpawnManyFailureSupervisorEscalationDestroyed,
+    ClassifySpawnManyFailureUnsupportedForModeRunning,
+    ClassifySpawnManyFailureUnsupportedForModeStopped,
+    ClassifySpawnManyFailureUnsupportedForModeCompleted,
+    ClassifySpawnManyFailureUnsupportedForModeDestroyed,
+    ClassifySpawnManyFailureMissingMemberCapabilityRunning,
+    ClassifySpawnManyFailureMissingMemberCapabilityStopped,
+    ClassifySpawnManyFailureMissingMemberCapabilityCompleted,
+    ClassifySpawnManyFailureMissingMemberCapabilityDestroyed,
+    ClassifySpawnManyFailureResetBarrierRunning,
+    ClassifySpawnManyFailureResetBarrierStopped,
+    ClassifySpawnManyFailureResetBarrierCompleted,
+    ClassifySpawnManyFailureResetBarrierDestroyed,
+    ClassifySpawnManyFailureStorageErrorRunning,
+    ClassifySpawnManyFailureStorageErrorStopped,
+    ClassifySpawnManyFailureStorageErrorCompleted,
+    ClassifySpawnManyFailureStorageErrorDestroyed,
+    ClassifySpawnManyFailureSessionErrorRunning,
+    ClassifySpawnManyFailureSessionErrorStopped,
+    ClassifySpawnManyFailureSessionErrorCompleted,
+    ClassifySpawnManyFailureSessionErrorDestroyed,
+    ClassifySpawnManyFailureCommsErrorRunning,
+    ClassifySpawnManyFailureCommsErrorStopped,
+    ClassifySpawnManyFailureCommsErrorCompleted,
+    ClassifySpawnManyFailureCommsErrorDestroyed,
+    ClassifySpawnManyFailureCallbackPendingRunning,
+    ClassifySpawnManyFailureCallbackPendingStopped,
+    ClassifySpawnManyFailureCallbackPendingCompleted,
+    ClassifySpawnManyFailureCallbackPendingDestroyed,
+    ClassifySpawnManyFailureStaleFenceTokenRunning,
+    ClassifySpawnManyFailureStaleFenceTokenStopped,
+    ClassifySpawnManyFailureStaleFenceTokenCompleted,
+    ClassifySpawnManyFailureStaleFenceTokenDestroyed,
+    ClassifySpawnManyFailureStaleEventCursorRunning,
+    ClassifySpawnManyFailureStaleEventCursorStopped,
+    ClassifySpawnManyFailureStaleEventCursorCompleted,
+    ClassifySpawnManyFailureStaleEventCursorDestroyed,
+    ClassifySpawnManyFailureWorkNotFoundRunning,
+    ClassifySpawnManyFailureWorkNotFoundStopped,
+    ClassifySpawnManyFailureWorkNotFoundCompleted,
+    ClassifySpawnManyFailureWorkNotFoundDestroyed,
+    ClassifySpawnManyFailureInternalRunning,
+    ClassifySpawnManyFailureInternalStopped,
+    ClassifySpawnManyFailureInternalCompleted,
+    ClassifySpawnManyFailureInternalDestroyed,
     SpawnRunningFresh,
     SpawnRunningReplacing,
     AuthorizeSpawnProfileRunning,

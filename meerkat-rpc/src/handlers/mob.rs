@@ -567,10 +567,7 @@ pub async fn handle_spawn_many(
                             WireMemberRef::encode(mob_id.as_str(), &identity_str),
                         )
                     }
-                    Err(err) => MobSpawnManyResultEntry::failed(
-                        err.spawn_many_failure_cause(),
-                        err.to_string(),
-                    ),
+                    Err(err) => MobSpawnManyResultEntry::failed(err.cause(), err.to_string()),
                 })
                 .collect();
             RpcResponse::success(

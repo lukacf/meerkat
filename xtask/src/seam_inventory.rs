@@ -954,6 +954,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MobMachine",
+            "SpawnManyFailureClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "Spawn-many public failure cause must align with generated MobMachine error-observation classification",
+        ),
+        (
+            "MobMachine",
             "AuthorizeAgentEventSubscription",
             SeamClassification::SurfaceResultAlignment,
             "Agent event subscription authorization result must align with generated MobMachine target/session truth",

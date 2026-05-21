@@ -560,6 +560,238 @@ impl SpawnResult {
     }
 }
 
+/// Per-row failure returned by `mob/spawn_many` after MobMachine has classified
+/// the public failure cause.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct MobSpawnManyFailure {
+    cause: meerkat_contracts::MobSpawnManyFailureCause,
+    error: MobError,
+}
+
+impl MobSpawnManyFailure {
+    #[must_use]
+    pub fn cause(&self) -> meerkat_contracts::MobSpawnManyFailureCause {
+        self.cause
+    }
+
+    #[must_use]
+    pub fn error(&self) -> &MobError {
+        &self.error
+    }
+}
+
+impl std::fmt::Display for MobSpawnManyFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for MobSpawnManyFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFailureObservationKind {
+    match error {
+        MobError::ProfileNotFound(_) => {
+            mob_dsl::MobSpawnManyFailureObservationKind::ProfileNotFound
+        }
+        MobError::MemberNotFound(_) => mob_dsl::MobSpawnManyFailureObservationKind::MemberNotFound,
+        MobError::MemberAlreadyExists(_) => {
+            mob_dsl::MobSpawnManyFailureObservationKind::MemberAlreadyExists
+        }
+        MobError::NotExternallyAddressable(_) => {
+            mob_dsl::MobSpawnManyFailureObservationKind::NotExternallyAddressable
+        }
+        MobError::InvalidTransition { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
+        }
+        MobError::WiringError(_) => mob_dsl::MobSpawnManyFailureObservationKind::WiringError,
+        MobError::SupervisorRotationIncomplete { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::SupervisorRotationIncomplete
+        }
+        MobError::BridgeCommandRejected { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::BridgeCommandRejected
+        }
+        MobError::MemberRestoreFailed { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::MemberRestoreFailed
+        }
+        MobError::KickoffWaitTimedOut { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::KickoffWaitTimedOut
+        }
+        MobError::ReadyWaitTimedOut { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::ReadyWaitTimedOut
+        }
+        MobError::DefinitionError(_) => {
+            mob_dsl::MobSpawnManyFailureObservationKind::DefinitionError
+        }
+        MobError::FlowNotFound(_) => mob_dsl::MobSpawnManyFailureObservationKind::FlowNotFound,
+        MobError::FlowFailed { .. } => mob_dsl::MobSpawnManyFailureObservationKind::FlowFailed,
+        MobError::RunNotFound(_) => mob_dsl::MobSpawnManyFailureObservationKind::RunNotFound,
+        MobError::RunCanceled(_) => mob_dsl::MobSpawnManyFailureObservationKind::RunCanceled,
+        MobError::FlowTurnTimedOut => mob_dsl::MobSpawnManyFailureObservationKind::FlowTurnTimedOut,
+        MobError::FrameDepthLimitExceeded { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::FrameDepthLimitExceeded
+        }
+        MobError::FrameAtomicPersistenceUnavailable { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::FrameAtomicPersistenceUnavailable
+        }
+        MobError::SpecRevisionConflict { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::SpecRevisionConflict
+        }
+        MobError::SchemaValidation { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::SchemaValidation
+        }
+        MobError::InsufficientTargets { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::InsufficientTargets
+        }
+        MobError::TopologyViolation { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::TopologyViolation
+        }
+        MobError::BridgeDeliveryRejected { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::BridgeDeliveryRejected
+        }
+        MobError::SupervisorEscalation(_) => {
+            mob_dsl::MobSpawnManyFailureObservationKind::SupervisorEscalation
+        }
+        MobError::UnsupportedForMode { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::UnsupportedForMode
+        }
+        MobError::MissingMemberCapability { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::MissingMemberCapability
+        }
+        MobError::ResetBarrier => mob_dsl::MobSpawnManyFailureObservationKind::ResetBarrier,
+        MobError::StorageError(_) => mob_dsl::MobSpawnManyFailureObservationKind::StorageError,
+        MobError::SessionError(_) => mob_dsl::MobSpawnManyFailureObservationKind::SessionError,
+        MobError::CommsError(_) => mob_dsl::MobSpawnManyFailureObservationKind::CommsError,
+        MobError::CallbackPending { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::CallbackPending
+        }
+        MobError::StaleFenceToken { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::StaleFenceToken
+        }
+        MobError::StaleEventCursor { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::StaleEventCursor
+        }
+        MobError::WorkNotFound(_) => mob_dsl::MobSpawnManyFailureObservationKind::WorkNotFound,
+        MobError::Internal(_) => mob_dsl::MobSpawnManyFailureObservationKind::Internal,
+    }
+}
+
+fn spawn_many_failure_cause_from_dsl(
+    cause: mob_dsl::MobSpawnManyFailureCauseKind,
+) -> meerkat_contracts::MobSpawnManyFailureCause {
+    match cause {
+        mob_dsl::MobSpawnManyFailureCauseKind::ProfileNotFound => {
+            meerkat_contracts::MobSpawnManyFailureCause::ProfileNotFound
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::MemberNotFound => {
+            meerkat_contracts::MobSpawnManyFailureCause::MemberNotFound
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::MemberAlreadyExists => {
+            meerkat_contracts::MobSpawnManyFailureCause::MemberAlreadyExists
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::NotExternallyAddressable => {
+            meerkat_contracts::MobSpawnManyFailureCause::NotExternallyAddressable
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::InvalidTransition => {
+            meerkat_contracts::MobSpawnManyFailureCause::InvalidTransition
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::WiringError => {
+            meerkat_contracts::MobSpawnManyFailureCause::WiringError
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::BridgeCommandRejected => {
+            meerkat_contracts::MobSpawnManyFailureCause::BridgeCommandRejected
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::MemberRestoreFailed => {
+            meerkat_contracts::MobSpawnManyFailureCause::MemberRestoreFailed
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::KickoffWaitTimedOut => {
+            meerkat_contracts::MobSpawnManyFailureCause::KickoffWaitTimedOut
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::ReadyWaitTimedOut => {
+            meerkat_contracts::MobSpawnManyFailureCause::ReadyWaitTimedOut
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::DefinitionError => {
+            meerkat_contracts::MobSpawnManyFailureCause::DefinitionError
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::FlowNotFound => {
+            meerkat_contracts::MobSpawnManyFailureCause::FlowNotFound
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::FlowFailed => {
+            meerkat_contracts::MobSpawnManyFailureCause::FlowFailed
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::RunNotFound => {
+            meerkat_contracts::MobSpawnManyFailureCause::RunNotFound
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::RunCanceled => {
+            meerkat_contracts::MobSpawnManyFailureCause::RunCanceled
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::FlowTurnTimedOut => {
+            meerkat_contracts::MobSpawnManyFailureCause::FlowTurnTimedOut
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::FrameDepthLimitExceeded => {
+            meerkat_contracts::MobSpawnManyFailureCause::FrameDepthLimitExceeded
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::FrameAtomicPersistenceUnavailable => {
+            meerkat_contracts::MobSpawnManyFailureCause::FrameAtomicPersistenceUnavailable
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::SpecRevisionConflict => {
+            meerkat_contracts::MobSpawnManyFailureCause::SpecRevisionConflict
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::SchemaValidation => {
+            meerkat_contracts::MobSpawnManyFailureCause::SchemaValidation
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::InsufficientTargets => {
+            meerkat_contracts::MobSpawnManyFailureCause::InsufficientTargets
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::TopologyViolation => {
+            meerkat_contracts::MobSpawnManyFailureCause::TopologyViolation
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::BridgeDeliveryRejected => {
+            meerkat_contracts::MobSpawnManyFailureCause::BridgeDeliveryRejected
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::SupervisorEscalation => {
+            meerkat_contracts::MobSpawnManyFailureCause::SupervisorEscalation
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::UnsupportedForMode => {
+            meerkat_contracts::MobSpawnManyFailureCause::UnsupportedForMode
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::MissingMemberCapability => {
+            meerkat_contracts::MobSpawnManyFailureCause::MissingMemberCapability
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::ResetBarrier => {
+            meerkat_contracts::MobSpawnManyFailureCause::ResetBarrier
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::StorageError => {
+            meerkat_contracts::MobSpawnManyFailureCause::StorageError
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::SessionError => {
+            meerkat_contracts::MobSpawnManyFailureCause::SessionError
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::CommsError => {
+            meerkat_contracts::MobSpawnManyFailureCause::CommsError
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::CallbackPending => {
+            meerkat_contracts::MobSpawnManyFailureCause::CallbackPending
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::StaleFenceToken => {
+            meerkat_contracts::MobSpawnManyFailureCause::StaleFenceToken
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::StaleEventCursor => {
+            meerkat_contracts::MobSpawnManyFailureCause::StaleEventCursor
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::WorkNotFound => {
+            meerkat_contracts::MobSpawnManyFailureCause::WorkNotFound
+        }
+        mob_dsl::MobSpawnManyFailureCauseKind::Internal => {
+            meerkat_contracts::MobSpawnManyFailureCause::Internal
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CanonicalOpsOwnerContext {
     pub(crate) owner_bridge_session_id: SessionId,
@@ -2974,14 +3206,63 @@ impl MobHandle {
         }
     }
 
+    async fn classify_spawn_many_failure(
+        &self,
+        error: MobError,
+    ) -> Result<MobSpawnManyFailure, MobError> {
+        let observation = spawn_many_failure_observation(&error);
+        let effects = self
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ClassifySpawnManyFailure {
+                observation,
+            })
+            .await?;
+        let (effect_observation, cause) = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::SpawnManyFailureClassified { observation, cause } => {
+                    Some((observation, cause))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted spawn_many failure observation but emitted no typed cause"
+                        .into(),
+                )
+            })?;
+        if effect_observation != observation {
+            return Err(MobError::Internal(format!(
+                "MobMachine spawn_many failure classification drift: input={observation:?}, effect={effect_observation:?}"
+            )));
+        }
+        Ok(MobSpawnManyFailure {
+            cause: spawn_many_failure_cause_from_dsl(cause),
+            error,
+        })
+    }
+
+    async fn classify_spawn_many_results<T>(
+        &self,
+        results: Vec<Result<T, MobError>>,
+    ) -> Result<Vec<Result<T, MobSpawnManyFailure>>, MobError> {
+        let mut classified = Vec::with_capacity(results.len());
+        for result in results {
+            match result {
+                Ok(value) => classified.push(Ok(value)),
+                Err(error) => classified.push(Err(self.classify_spawn_many_failure(error).await?)),
+            }
+        }
+        Ok(classified)
+    }
+
     /// Spawn multiple members in parallel.
     ///
     /// Results preserve input order.
     pub async fn spawn_many(
         &self,
         specs: Vec<SpawnMemberSpec>,
-    ) -> Vec<Result<SpawnResult, MobError>> {
-        futures::future::join_all(specs.into_iter().map(|spec| async move {
+    ) -> Result<Vec<Result<SpawnResult, MobSpawnManyFailure>>, MobError> {
+        let results = futures::future::join_all(specs.into_iter().map(|spec| async move {
             let identity = spec.identity.clone();
             self.spawn_spec_internal_with_source(spec, SpawnSource::BatchItem)
                 .await?;
@@ -2996,22 +3277,24 @@ impl MobHandle {
                 fence_token: entry.fence_token,
             })
         }))
-        .await
+        .await;
+        self.classify_spawn_many_results(results).await
     }
 
     pub(super) async fn spawn_many_receipts_with_owner_context(
         &self,
         specs: Vec<SpawnMemberSpec>,
         owner_context: CanonicalOpsOwnerContext,
-    ) -> Vec<Result<MemberSpawnReceipt, MobError>> {
-        futures::future::join_all(specs.into_iter().map(|spec| {
+    ) -> Result<Vec<Result<MemberSpawnReceipt, MobSpawnManyFailure>>, MobError> {
+        let results = futures::future::join_all(specs.into_iter().map(|spec| {
             self.spawn_spec_receipt_with_owner_context_and_source(
                 spec,
                 owner_context.clone(),
                 SpawnSource::BatchItem,
             )
         }))
-        .await
+        .await;
+        self.classify_spawn_many_results(results).await
     }
 
     /// Retire a member, archiving its session and removing trust.

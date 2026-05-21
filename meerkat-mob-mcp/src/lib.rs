@@ -758,8 +758,9 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
         specs: Vec<SpawnMemberSpec>,
-    ) -> Result<Vec<Result<meerkat_mob::SpawnResult, MobError>>, MobError> {
-        Ok(self.handle_for(mob_id).await?.spawn_many(specs).await)
+    ) -> Result<Vec<Result<meerkat_mob::SpawnResult, meerkat_mob::MobSpawnManyFailure>>, MobError>
+    {
+        self.handle_for(mob_id).await?.spawn_many(specs).await
     }
 
     pub async fn mob_retire(
@@ -3131,7 +3132,10 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let results = results
                     .into_iter()
                     .map(
-                        |result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>| {
+                        |result: Result<
+                            meerkat_mob::SpawnResult,
+                            meerkat_mob::MobSpawnManyFailure,
+                        >| {
                             match result {
                                 Ok(spawn_result) => {
                                     let identity = spawn_result.agent_identity.to_string();
@@ -3141,7 +3145,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                                     ))
                                 }
                                 Err(error) => json!(MobSpawnManyResultEntry::failed(
-                                    error.spawn_many_failure_cause(),
+                                    error.cause(),
                                     error.to_string(),
                                 )),
                             }

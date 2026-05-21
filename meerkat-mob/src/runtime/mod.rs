@@ -122,10 +122,10 @@ pub use handle::{
     HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt, MobDestroyError,
     MobDestroyReport, MobEventsSubscription, MobEventsSubscriptionConfig, MobEventsView, MobHandle,
     MobMemberListEntry, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
-    MobRespawnError, MobUnreachablePeer, MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget,
-    PreviousMemberCleanupReport, SpawnContinuityIntent, SpawnCustomizationContext,
-    SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult, SpawnSource, SpawnSystemPromptOverride,
-    SupervisorRotationReport, WorkDeliveryReceipt,
+    MobRespawnError, MobSpawnManyFailure, MobUnreachablePeer, MobWireMembersBatchReport,
+    PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport, SpawnContinuityIntent,
+    SpawnCustomizationContext, SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult, SpawnSource,
+    SpawnSystemPromptOverride, SupervisorRotationReport, WorkDeliveryReceipt,
 };
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use reconcile::{

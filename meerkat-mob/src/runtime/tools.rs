@@ -933,7 +933,8 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                                     ops_registry: Arc::clone(ops_registry),
                                 },
                             )
-                            .await;
+                            .await
+                            .map_err(|error| Self::map_mob_error(call, error))?;
                         let async_ops = receipts
                             .iter()
                             .filter_map(|result| result.as_ref().ok())
@@ -952,7 +953,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                                 Err(error) => {
                                     results.push(json!(
                                         meerkat_contracts::MobSpawnManyResultEntry::failed(
-                                            error.spawn_many_failure_cause(),
+                                            error.cause(),
                                             error.to_string()
                                         )
                                     ));
@@ -966,6 +967,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             .handle
                             .spawn_many(specs)
                             .await
+                            .map_err(|error| Self::map_mob_error(call, error))?
                             .into_iter()
                             .map(|result| match result {
                                 Ok(spawn_result) => {
@@ -980,7 +982,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                                 }
                                 Err(error) => {
                                     json!(meerkat_contracts::MobSpawnManyResultEntry::failed(
-                                        error.spawn_many_failure_cause(),
+                                        error.cause(),
                                         error.to_string()
                                     ))
                                 }

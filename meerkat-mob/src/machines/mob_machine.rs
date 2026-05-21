@@ -707,6 +707,91 @@ pub enum RespawnTopologyRestoreResultKind {
     TopologyRestoreFailed,
 }
 
+/// Typed shell observation for a per-row `mob/spawn_many` failure.
+/// MobMachine maps this observation to the public failure cause before any
+/// surface can serialize the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobSpawnManyFailureObservationKind {
+    #[default]
+    ProfileNotFound,
+    MemberNotFound,
+    MemberAlreadyExists,
+    NotExternallyAddressable,
+    InvalidTransition,
+    WiringError,
+    SupervisorRotationIncomplete,
+    BridgeCommandRejected,
+    MemberRestoreFailed,
+    KickoffWaitTimedOut,
+    ReadyWaitTimedOut,
+    DefinitionError,
+    FlowNotFound,
+    FlowFailed,
+    RunNotFound,
+    RunCanceled,
+    FlowTurnTimedOut,
+    FrameDepthLimitExceeded,
+    FrameAtomicPersistenceUnavailable,
+    SpecRevisionConflict,
+    SchemaValidation,
+    InsufficientTargets,
+    TopologyViolation,
+    BridgeDeliveryRejected,
+    SupervisorEscalation,
+    UnsupportedForMode,
+    MissingMemberCapability,
+    ResetBarrier,
+    StorageError,
+    SessionError,
+    CommsError,
+    CallbackPending,
+    StaleFenceToken,
+    StaleEventCursor,
+    WorkNotFound,
+    Internal,
+}
+
+/// Typed public result class for per-row `mob/spawn_many` failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobSpawnManyFailureCauseKind {
+    #[default]
+    ProfileNotFound,
+    MemberNotFound,
+    MemberAlreadyExists,
+    NotExternallyAddressable,
+    InvalidTransition,
+    WiringError,
+    BridgeCommandRejected,
+    MemberRestoreFailed,
+    KickoffWaitTimedOut,
+    ReadyWaitTimedOut,
+    DefinitionError,
+    FlowNotFound,
+    FlowFailed,
+    RunNotFound,
+    RunCanceled,
+    FlowTurnTimedOut,
+    FrameDepthLimitExceeded,
+    FrameAtomicPersistenceUnavailable,
+    SpecRevisionConflict,
+    SchemaValidation,
+    InsufficientTargets,
+    TopologyViolation,
+    BridgeDeliveryRejected,
+    SupervisorEscalation,
+    UnsupportedForMode,
+    MissingMemberCapability,
+    ResetBarrier,
+    StorageError,
+    SessionError,
+    CommsError,
+    CallbackPending,
+    StaleFenceToken,
+    StaleEventCursor,
+    WorkNotFound,
+    Internal,
+}
+
 impl From<crate::ids::WorkOrigin> for WorkOrigin {
     fn from(origin: crate::ids::WorkOrigin) -> Self {
         match origin {
@@ -1306,6 +1391,44 @@ mod tests {
         )
         .expect("Spawn should seed a live member through machine authority");
         bridge_session_id
+    }
+
+    #[test]
+    fn spawn_many_failure_cause_is_generated_from_observation() {
+        let mut authority = MobMachineAuthority::new();
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ClassifySpawnManyFailure {
+                observation: MobSpawnManyFailureObservationKind::SupervisorRotationIncomplete,
+            },
+        )
+        .expect("spawn_many failure observation should be classified");
+        assert!(transition.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                MobMachineEffect::SpawnManyFailureClassified {
+                    observation: MobSpawnManyFailureObservationKind::SupervisorRotationIncomplete,
+                    cause: MobSpawnManyFailureCauseKind::WiringError,
+                }
+            )
+        }));
+
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ClassifySpawnManyFailure {
+                observation: MobSpawnManyFailureObservationKind::ProfileNotFound,
+            },
+        )
+        .expect("spawn_many profile observation should be classified");
+        assert!(transition.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                MobMachineEffect::SpawnManyFailureClassified {
+                    observation: MobSpawnManyFailureObservationKind::ProfileNotFound,
+                    cause: MobSpawnManyFailureCauseKind::ProfileNotFound,
+                }
+            )
+        }));
     }
 
     fn seed_root_frame(

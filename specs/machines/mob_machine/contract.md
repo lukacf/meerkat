@@ -137,6 +137,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FlowStatus`
 - `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: Bool, bridge_session_id: SessionId, replacing: Option<SessionId>)
 - `AuthorizeSpawnProfile`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool)
+- `ClassifySpawnManyFailure`(observation: MobSpawnManyFailureObservationKind)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: SessionId)
@@ -280,6 +281,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitKickoffLifecycleNotice`(member_id: String, intent: KickoffIntent)
 - `SpawnPolicyResolutionRecorded`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
 - `RespawnTopologyRestoreResolved`(agent_identity: AgentIdentity, result: RespawnTopologyRestoreResultKind, failed_peer_ids: Seq<RespawnTopologyPeerId>)
+- `SpawnManyFailureClassified`(observation: MobSpawnManyFailureObservationKind, cause: MobSpawnManyFailureCauseKind)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
 - `MemberTrustWiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, a_endpoint: MemberPeerEndpoint, b_endpoint: MemberPeerEndpoint, epoch: u64)
@@ -310,6 +312,1126 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `external_peer_edges_are_keyed_coherently`
 
 ## Transitions
+### `ClassifySpawnManyFailureProfileNotFoundRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `profile_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureProfileNotFoundStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `profile_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureProfileNotFoundCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `profile_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureProfileNotFoundDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `profile_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureMemberNotFoundRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureMemberNotFoundStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureMemberNotFoundCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureMemberNotFoundDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureMemberAlreadyExistsRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_already_exists`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureMemberAlreadyExistsStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_already_exists`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureMemberAlreadyExistsCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_already_exists`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureMemberAlreadyExistsDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_already_exists`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureNotExternallyAddressableRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `not_externally_addressable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureNotExternallyAddressableStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `not_externally_addressable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureNotExternallyAddressableCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `not_externally_addressable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureNotExternallyAddressableDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `not_externally_addressable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureInvalidTransitionRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `invalid_transition`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureInvalidTransitionStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `invalid_transition`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureInvalidTransitionCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `invalid_transition`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureInvalidTransitionDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `invalid_transition`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureWiringErrorRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `wiring_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureWiringErrorStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `wiring_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureWiringErrorCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `wiring_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureWiringErrorDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `wiring_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureBridgeCommandRejectedRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_command_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureBridgeCommandRejectedStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_command_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureBridgeCommandRejectedCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_command_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureBridgeCommandRejectedDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_command_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureMemberRestoreFailedRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_restore_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureMemberRestoreFailedStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_restore_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureMemberRestoreFailedCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_restore_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureMemberRestoreFailedDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_restore_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureKickoffWaitTimedOutRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `kickoff_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureKickoffWaitTimedOutStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `kickoff_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureKickoffWaitTimedOutCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `kickoff_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureKickoffWaitTimedOutDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `kickoff_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureReadyWaitTimedOutRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `ready_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureReadyWaitTimedOutStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `ready_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureReadyWaitTimedOutCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `ready_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureReadyWaitTimedOutDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `ready_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureDefinitionErrorRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `definition_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureDefinitionErrorStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `definition_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureDefinitionErrorCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `definition_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureDefinitionErrorDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `definition_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureFlowNotFoundRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureFlowNotFoundStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureFlowNotFoundCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureFlowNotFoundDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureFlowFailedRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureFlowFailedStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureFlowFailedCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureFlowFailedDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureRunNotFoundRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureRunNotFoundStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureRunNotFoundCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureRunNotFoundDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureRunCanceledRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_canceled`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureRunCanceledStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_canceled`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureRunCanceledCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_canceled`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureRunCanceledDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_canceled`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureFlowTurnTimedOutRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_turn_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureFlowTurnTimedOutStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_turn_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureFlowTurnTimedOutCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_turn_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureFlowTurnTimedOutDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_turn_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureFrameDepthLimitExceededRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_depth_limit_exceeded`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureFrameDepthLimitExceededStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_depth_limit_exceeded`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureFrameDepthLimitExceededCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_depth_limit_exceeded`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureFrameDepthLimitExceededDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_depth_limit_exceeded`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_atomic_persistence_unavailable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_atomic_persistence_unavailable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_atomic_persistence_unavailable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_atomic_persistence_unavailable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureSpecRevisionConflictRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `spec_revision_conflict`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureSpecRevisionConflictStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `spec_revision_conflict`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureSpecRevisionConflictCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `spec_revision_conflict`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureSpecRevisionConflictDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `spec_revision_conflict`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureSchemaValidationRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `schema_validation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureSchemaValidationStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `schema_validation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureSchemaValidationCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `schema_validation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureSchemaValidationDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `schema_validation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureInsufficientTargetsRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `insufficient_targets`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureInsufficientTargetsStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `insufficient_targets`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureInsufficientTargetsCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `insufficient_targets`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureInsufficientTargetsDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `insufficient_targets`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureTopologyViolationRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `topology_violation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureTopologyViolationStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `topology_violation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureTopologyViolationCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `topology_violation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureTopologyViolationDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `topology_violation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureBridgeDeliveryRejectedRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_delivery_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureBridgeDeliveryRejectedStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_delivery_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureBridgeDeliveryRejectedCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_delivery_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureBridgeDeliveryRejectedDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_delivery_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureSupervisorEscalationRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `supervisor_escalation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureSupervisorEscalationStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `supervisor_escalation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureSupervisorEscalationCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `supervisor_escalation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureSupervisorEscalationDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `supervisor_escalation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureUnsupportedForModeRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `unsupported_for_mode`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureUnsupportedForModeStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `unsupported_for_mode`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureUnsupportedForModeCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `unsupported_for_mode`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureUnsupportedForModeDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `unsupported_for_mode`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureMissingMemberCapabilityRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `missing_member_capability`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureMissingMemberCapabilityStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `missing_member_capability`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureMissingMemberCapabilityCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `missing_member_capability`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureMissingMemberCapabilityDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `missing_member_capability`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureResetBarrierRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `reset_barrier`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureResetBarrierStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `reset_barrier`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureResetBarrierCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `reset_barrier`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureResetBarrierDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `reset_barrier`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureStorageErrorRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `storage_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureStorageErrorStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `storage_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureStorageErrorCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `storage_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureStorageErrorDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `storage_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureSessionErrorRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `session_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureSessionErrorStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `session_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureSessionErrorCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `session_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureSessionErrorDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `session_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureCommsErrorRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `comms_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureCommsErrorStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `comms_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureCommsErrorCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `comms_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureCommsErrorDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `comms_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureCallbackPendingRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `callback_pending`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureCallbackPendingStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `callback_pending`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureCallbackPendingCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `callback_pending`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureCallbackPendingDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `callback_pending`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureStaleFenceTokenRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_fence_token`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureStaleFenceTokenStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_fence_token`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureStaleFenceTokenCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_fence_token`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureStaleFenceTokenDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_fence_token`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureStaleEventCursorRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_event_cursor`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureStaleEventCursorStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_event_cursor`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureStaleEventCursorCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_event_cursor`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureStaleEventCursorDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_event_cursor`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureWorkNotFoundRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `work_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureWorkNotFoundStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `work_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureWorkNotFoundCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `work_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureWorkNotFoundDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `work_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureInternalRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `internal`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureInternalStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `internal`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureInternalCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `internal`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureInternalDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `internal`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
 ### `SpawnRunningFresh`
 - From: `Running`
 - On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, bridge_session_id, replacing)

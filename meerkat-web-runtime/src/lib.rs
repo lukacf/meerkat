@@ -1749,10 +1749,7 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
         .into_iter()
         .map(|r| match r {
             Ok(spawn_result) => spawn_member_result_payload(&id, &spawn_result),
-            Err(e) => meerkat_contracts::MobSpawnManyResultEntry::failed(
-                e.spawn_many_failure_cause(),
-                e.to_string(),
-            ),
+            Err(e) => meerkat_contracts::MobSpawnManyResultEntry::failed(e.cause(), e.to_string()),
         })
         .collect();
 

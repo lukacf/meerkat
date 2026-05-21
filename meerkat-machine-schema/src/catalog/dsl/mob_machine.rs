@@ -378,6 +378,7 @@ macro_rules! mob_catalog_machine_dsl {
             FlowStatus,
             Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: bool, bridge_session_id: SessionId, replacing: Option<SessionId> },
             AuthorizeSpawnProfile { agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: bool },
+            ClassifySpawnManyFailure { observation: Enum<MobSpawnManyFailureObservationKind> },
             EnsureMember { agent_identity: AgentIdentity },
             Reconcile { desired: Set<AgentIdentity>, retire_stale: bool },
             Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: SessionId },
@@ -532,6 +533,7 @@ macro_rules! mob_catalog_machine_dsl {
             EmitKickoffLifecycleNotice { member_id: String, intent: Enum<KickoffIntent> },
             SpawnPolicyResolutionRecorded { agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<Enum<SpawnPolicyRuntimeMode>> },
             RespawnTopologyRestoreResolved { agent_identity: AgentIdentity, result: Enum<RespawnTopologyRestoreResultKind>, failed_peer_ids: Seq<RespawnTopologyPeerId> },
+            SpawnManyFailureClassified { observation: Enum<MobSpawnManyFailureObservationKind>, cause: Enum<MobSpawnManyFailureCauseKind> },
             // Track-B (R5): canonical topology-change signals consumed by
             // the `RecomputeMobPeerOverlay` composition driver.
             //
@@ -610,6 +612,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition EmitKickoffLifecycleNotice => external,
         disposition SpawnPolicyResolutionRecorded => local,
         disposition RespawnTopologyRestoreResolved => local,
+        disposition SpawnManyFailureClassified => local,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
         disposition MemberTrustWiringRequested => external handoff mob_member_trust_wiring,
@@ -666,6 +669,324 @@ macro_rules! mob_catalog_machine_dsl {
         // =====================================================================
         // Direct transitions
         // =====================================================================
+
+        transition ClassifySpawnManyFailureProfileNotFound {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "profile_not_found" { observation == MobSpawnManyFailureObservationKind::ProfileNotFound }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::ProfileNotFound }
+        }
+
+        transition ClassifySpawnManyFailureMemberNotFound {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "member_not_found" { observation == MobSpawnManyFailureObservationKind::MemberNotFound }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::MemberNotFound }
+        }
+
+        transition ClassifySpawnManyFailureMemberAlreadyExists {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "member_already_exists" { observation == MobSpawnManyFailureObservationKind::MemberAlreadyExists }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::MemberAlreadyExists }
+        }
+
+        transition ClassifySpawnManyFailureNotExternallyAddressable {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "not_externally_addressable" { observation == MobSpawnManyFailureObservationKind::NotExternallyAddressable }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::NotExternallyAddressable }
+        }
+
+        transition ClassifySpawnManyFailureInvalidTransition {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "invalid_transition" { observation == MobSpawnManyFailureObservationKind::InvalidTransition }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::InvalidTransition }
+        }
+
+        transition ClassifySpawnManyFailureWiringError {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "wiring_error" {
+                observation == MobSpawnManyFailureObservationKind::WiringError
+                || observation == MobSpawnManyFailureObservationKind::SupervisorRotationIncomplete
+            }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::WiringError }
+        }
+
+        transition ClassifySpawnManyFailureBridgeCommandRejected {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "bridge_command_rejected" { observation == MobSpawnManyFailureObservationKind::BridgeCommandRejected }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::BridgeCommandRejected }
+        }
+
+        transition ClassifySpawnManyFailureMemberRestoreFailed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "member_restore_failed" { observation == MobSpawnManyFailureObservationKind::MemberRestoreFailed }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::MemberRestoreFailed }
+        }
+
+        transition ClassifySpawnManyFailureKickoffWaitTimedOut {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "kickoff_wait_timed_out" { observation == MobSpawnManyFailureObservationKind::KickoffWaitTimedOut }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::KickoffWaitTimedOut }
+        }
+
+        transition ClassifySpawnManyFailureReadyWaitTimedOut {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "ready_wait_timed_out" { observation == MobSpawnManyFailureObservationKind::ReadyWaitTimedOut }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::ReadyWaitTimedOut }
+        }
+
+        transition ClassifySpawnManyFailureDefinitionError {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "definition_error" { observation == MobSpawnManyFailureObservationKind::DefinitionError }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::DefinitionError }
+        }
+
+        transition ClassifySpawnManyFailureFlowNotFound {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "flow_not_found" { observation == MobSpawnManyFailureObservationKind::FlowNotFound }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::FlowNotFound }
+        }
+
+        transition ClassifySpawnManyFailureFlowFailed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "flow_failed" { observation == MobSpawnManyFailureObservationKind::FlowFailed }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::FlowFailed }
+        }
+
+        transition ClassifySpawnManyFailureRunNotFound {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "run_not_found" { observation == MobSpawnManyFailureObservationKind::RunNotFound }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::RunNotFound }
+        }
+
+        transition ClassifySpawnManyFailureRunCanceled {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "run_canceled" { observation == MobSpawnManyFailureObservationKind::RunCanceled }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::RunCanceled }
+        }
+
+        transition ClassifySpawnManyFailureFlowTurnTimedOut {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "flow_turn_timed_out" { observation == MobSpawnManyFailureObservationKind::FlowTurnTimedOut }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::FlowTurnTimedOut }
+        }
+
+        transition ClassifySpawnManyFailureFrameDepthLimitExceeded {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "frame_depth_limit_exceeded" { observation == MobSpawnManyFailureObservationKind::FrameDepthLimitExceeded }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::FrameDepthLimitExceeded }
+        }
+
+        transition ClassifySpawnManyFailureFrameAtomicPersistenceUnavailable {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "frame_atomic_persistence_unavailable" { observation == MobSpawnManyFailureObservationKind::FrameAtomicPersistenceUnavailable }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::FrameAtomicPersistenceUnavailable }
+        }
+
+        transition ClassifySpawnManyFailureSpecRevisionConflict {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "spec_revision_conflict" { observation == MobSpawnManyFailureObservationKind::SpecRevisionConflict }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::SpecRevisionConflict }
+        }
+
+        transition ClassifySpawnManyFailureSchemaValidation {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "schema_validation" { observation == MobSpawnManyFailureObservationKind::SchemaValidation }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::SchemaValidation }
+        }
+
+        transition ClassifySpawnManyFailureInsufficientTargets {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "insufficient_targets" { observation == MobSpawnManyFailureObservationKind::InsufficientTargets }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::InsufficientTargets }
+        }
+
+        transition ClassifySpawnManyFailureTopologyViolation {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "topology_violation" { observation == MobSpawnManyFailureObservationKind::TopologyViolation }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::TopologyViolation }
+        }
+
+        transition ClassifySpawnManyFailureBridgeDeliveryRejected {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "bridge_delivery_rejected" { observation == MobSpawnManyFailureObservationKind::BridgeDeliveryRejected }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::BridgeDeliveryRejected }
+        }
+
+        transition ClassifySpawnManyFailureSupervisorEscalation {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "supervisor_escalation" { observation == MobSpawnManyFailureObservationKind::SupervisorEscalation }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::SupervisorEscalation }
+        }
+
+        transition ClassifySpawnManyFailureUnsupportedForMode {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "unsupported_for_mode" { observation == MobSpawnManyFailureObservationKind::UnsupportedForMode }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::UnsupportedForMode }
+        }
+
+        transition ClassifySpawnManyFailureMissingMemberCapability {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "missing_member_capability" { observation == MobSpawnManyFailureObservationKind::MissingMemberCapability }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::MissingMemberCapability }
+        }
+
+        transition ClassifySpawnManyFailureResetBarrier {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "reset_barrier" { observation == MobSpawnManyFailureObservationKind::ResetBarrier }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::ResetBarrier }
+        }
+
+        transition ClassifySpawnManyFailureStorageError {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "storage_error" { observation == MobSpawnManyFailureObservationKind::StorageError }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::StorageError }
+        }
+
+        transition ClassifySpawnManyFailureSessionError {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "session_error" { observation == MobSpawnManyFailureObservationKind::SessionError }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::SessionError }
+        }
+
+        transition ClassifySpawnManyFailureCommsError {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "comms_error" { observation == MobSpawnManyFailureObservationKind::CommsError }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::CommsError }
+        }
+
+        transition ClassifySpawnManyFailureCallbackPending {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "callback_pending" { observation == MobSpawnManyFailureObservationKind::CallbackPending }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::CallbackPending }
+        }
+
+        transition ClassifySpawnManyFailureStaleFenceToken {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "stale_fence_token" { observation == MobSpawnManyFailureObservationKind::StaleFenceToken }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::StaleFenceToken }
+        }
+
+        transition ClassifySpawnManyFailureStaleEventCursor {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "stale_event_cursor" { observation == MobSpawnManyFailureObservationKind::StaleEventCursor }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::StaleEventCursor }
+        }
+
+        transition ClassifySpawnManyFailureWorkNotFound {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "work_not_found" { observation == MobSpawnManyFailureObservationKind::WorkNotFound }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::WorkNotFound }
+        }
+
+        transition ClassifySpawnManyFailureInternal {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifySpawnManyFailure { observation }
+            guard "internal" { observation == MobSpawnManyFailureObservationKind::Internal }
+            update {}
+            to Running
+            emit SpawnManyFailureClassified { observation: observation, cause: MobSpawnManyFailureCauseKind::Internal }
+        }
 
         // W3-H: Spawn splits into two guarded variants — Fresh (no prior
         // realtime binding for the identity) and Replacing (identity already
@@ -5732,6 +6053,91 @@ pub enum RespawnTopologyRestoreResultKind {
     #[default]
     Completed,
     TopologyRestoreFailed,
+}
+
+/// Typed shell observation for a per-row `mob/spawn_many` failure.
+/// MobMachine maps this observation to the public failure cause before any
+/// surface can serialize the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobSpawnManyFailureObservationKind {
+    #[default]
+    ProfileNotFound,
+    MemberNotFound,
+    MemberAlreadyExists,
+    NotExternallyAddressable,
+    InvalidTransition,
+    WiringError,
+    SupervisorRotationIncomplete,
+    BridgeCommandRejected,
+    MemberRestoreFailed,
+    KickoffWaitTimedOut,
+    ReadyWaitTimedOut,
+    DefinitionError,
+    FlowNotFound,
+    FlowFailed,
+    RunNotFound,
+    RunCanceled,
+    FlowTurnTimedOut,
+    FrameDepthLimitExceeded,
+    FrameAtomicPersistenceUnavailable,
+    SpecRevisionConflict,
+    SchemaValidation,
+    InsufficientTargets,
+    TopologyViolation,
+    BridgeDeliveryRejected,
+    SupervisorEscalation,
+    UnsupportedForMode,
+    MissingMemberCapability,
+    ResetBarrier,
+    StorageError,
+    SessionError,
+    CommsError,
+    CallbackPending,
+    StaleFenceToken,
+    StaleEventCursor,
+    WorkNotFound,
+    Internal,
+}
+
+/// Typed public result class for per-row `mob/spawn_many` failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobSpawnManyFailureCauseKind {
+    #[default]
+    ProfileNotFound,
+    MemberNotFound,
+    MemberAlreadyExists,
+    NotExternallyAddressable,
+    InvalidTransition,
+    WiringError,
+    BridgeCommandRejected,
+    MemberRestoreFailed,
+    KickoffWaitTimedOut,
+    ReadyWaitTimedOut,
+    DefinitionError,
+    FlowNotFound,
+    FlowFailed,
+    RunNotFound,
+    RunCanceled,
+    FlowTurnTimedOut,
+    FrameDepthLimitExceeded,
+    FrameAtomicPersistenceUnavailable,
+    SpecRevisionConflict,
+    SchemaValidation,
+    InsufficientTargets,
+    TopologyViolation,
+    BridgeDeliveryRejected,
+    SupervisorEscalation,
+    UnsupportedForMode,
+    MissingMemberCapability,
+    ResetBarrier,
+    StorageError,
+    SessionError,
+    CommsError,
+    CallbackPending,
+    StaleFenceToken,
+    StaleEventCursor,
+    WorkNotFound,
+    Internal,
 }
 
 /// Fallible reverse mapping: the `Ingest` variant has no counterpart in the

@@ -1116,6 +1116,13 @@ pub struct MobMemberLifecycleMaterial {
     pub error: Option<String>,
 }
 
+/// Machine-owned kickoff lifecycle projection for a mob member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobMemberKickoffMaterial {
+    pub phase: KickoffPhase,
+    pub error: Option<String>,
+}
+
 impl MobMemberLifecycleStatus {
     pub const fn terminal_class(self) -> MobMemberTerminalClass {
         match self {
@@ -1173,6 +1180,56 @@ impl MobMachineState {
             terminal_class: status.terminal_class(),
             error: restore_failure,
         }
+    }
+
+    /// Project kickoff truth for a member from the generated phase sets.
+    pub fn kickoff_material_for_member_id(
+        &self,
+        member_id: &str,
+    ) -> Option<MobMemberKickoffMaterial> {
+        let mut phase = None;
+        for (contains, candidate) in [
+            (
+                self.member_kickoff_pending.contains(member_id),
+                KickoffPhase::Pending,
+            ),
+            (
+                self.member_kickoff_starting.contains(member_id),
+                KickoffPhase::Starting,
+            ),
+            (
+                self.member_kickoff_callback_pending.contains(member_id),
+                KickoffPhase::CallbackPending,
+            ),
+            (
+                self.member_kickoff_started.contains(member_id),
+                KickoffPhase::Started,
+            ),
+            (
+                self.member_kickoff_failed.contains(member_id),
+                KickoffPhase::Failed,
+            ),
+            (
+                self.member_kickoff_cancelled.contains(member_id),
+                KickoffPhase::Cancelled,
+            ),
+        ] {
+            if contains {
+                if phase.replace(candidate).is_some() {
+                    return None;
+                }
+            }
+        }
+        let phase = phase?;
+        let error = match phase {
+            KickoffPhase::Failed => Some(self.member_kickoff_error.get(member_id)?.clone()),
+            KickoffPhase::Pending
+            | KickoffPhase::Starting
+            | KickoffPhase::CallbackPending
+            | KickoffPhase::Started
+            | KickoffPhase::Cancelled => None,
+        };
+        Some(MobMemberKickoffMaterial { phase, error })
     }
 }
 
@@ -2076,6 +2133,48 @@ mod tests {
                 .state()
                 .member_kickoff_error
                 .contains_key(&member_id)
+        );
+    }
+
+    #[test]
+    fn recovered_kickoff_lifecycle_is_machine_owned() {
+        let mut authority = MobMachineAuthority::new();
+        let member_id = "worker".to_string();
+
+        authority
+            .apply_signal(MobMachineSignal::RecoverMemberKickoff {
+                member_id: member_id.clone(),
+                phase: KickoffPhase::Starting,
+                error: None,
+            })
+            .expect("recovered starting kickoff should be accepted");
+        assert_eq!(
+            authority.state().kickoff_material_for_member_id(&member_id),
+            Some(MobMemberKickoffMaterial {
+                phase: KickoffPhase::Starting,
+                error: None,
+            })
+        );
+
+        authority
+            .apply_signal(MobMachineSignal::RecoverMemberKickoff {
+                member_id: member_id.clone(),
+                phase: KickoffPhase::Failed,
+                error: Some("runtime failed".to_string()),
+            })
+            .expect("recovered failed kickoff should be accepted");
+        assert_eq!(
+            authority.state().kickoff_material_for_member_id(&member_id),
+            Some(MobMemberKickoffMaterial {
+                phase: KickoffPhase::Failed,
+                error: Some("runtime failed".to_string()),
+            })
+        );
+        assert!(
+            !authority
+                .state()
+                .member_kickoff_starting
+                .contains(&member_id)
         );
     }
 

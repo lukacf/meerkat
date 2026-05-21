@@ -5,6 +5,7 @@ use super::disposal::{
 use super::flow_frame_engine::FlowFrameLoopStorePlan;
 use super::mob_member_lifecycle_projection::{
     CanonicalMemberSnapshotMaterial, MobMemberLifecycleInput, MobMemberLifecycleProjection,
+    kickoff_snapshot_from_machine_state,
 };
 use super::mob_runtime_bridge_authority::{MobRuntimeBridgeAuthority, MobRuntimeBridgeEffect};
 use super::provision_guard::PendingProvision;
@@ -2925,6 +2926,13 @@ impl MobActor {
             .dsl_authority
             .state()
             .member_lifecycle_for_identity(&dsl_identity);
+        let kickoff = kickoff_snapshot_from_machine_state(
+            agent_identity.as_str(),
+            self.dsl_authority.state(),
+            roster_entry
+                .as_ref()
+                .and_then(|entry| entry.kickoff.as_ref()),
+        );
 
         Ok(MobMemberLifecycleProjection::materialize(
             MobMemberLifecycleInput {
@@ -2936,7 +2944,7 @@ impl MobActor {
                 fence_token: machine_runtime.1,
                 current_bridge_session_id,
                 peer_connectivity: None,
-                kickoff: roster_entry.and_then(|entry| entry.kickoff),
+                kickoff,
             },
         ))
     }
@@ -3127,30 +3135,6 @@ impl MobActor {
             .await
             .set_kickoff(agent_identity, Some(kickoff));
         Ok(())
-    }
-
-    async fn kickoff_phase_for(
-        &self,
-        agent_identity: &MeerkatId,
-    ) -> Option<crate::roster::MobMemberKickoffPhase> {
-        self.roster
-            .read()
-            .await
-            .get(agent_identity)
-            .and_then(|entry| entry.kickoff.as_ref().map(|snapshot| snapshot.phase))
-    }
-
-    fn kickoff_phase_to_dsl(phase: crate::roster::MobMemberKickoffPhase) -> mob_dsl::KickoffPhase {
-        match phase {
-            crate::roster::MobMemberKickoffPhase::Pending => mob_dsl::KickoffPhase::Pending,
-            crate::roster::MobMemberKickoffPhase::Starting => mob_dsl::KickoffPhase::Starting,
-            crate::roster::MobMemberKickoffPhase::Started => mob_dsl::KickoffPhase::Started,
-            crate::roster::MobMemberKickoffPhase::CallbackPending => {
-                mob_dsl::KickoffPhase::CallbackPending
-            }
-            crate::roster::MobMemberKickoffPhase::Failed => mob_dsl::KickoffPhase::Failed,
-            crate::roster::MobMemberKickoffPhase::Cancelled => mob_dsl::KickoffPhase::Cancelled,
-        }
     }
 
     fn kickoff_phase_from_dsl(

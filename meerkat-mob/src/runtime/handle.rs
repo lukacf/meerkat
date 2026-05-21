@@ -12,7 +12,7 @@ use crate::runtime::mob_member_lifecycle_projection::{
     CanonicalMemberSnapshotMaterial, CanonicalMemberStatus,
 };
 use crate::runtime::mob_member_lifecycle_projection::{
-    MobMemberLifecycleInput, MobMemberLifecycleProjection,
+    MobMemberLifecycleInput, MobMemberLifecycleProjection, kickoff_snapshot_from_machine_state,
 };
 use crate::runtime::reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,
@@ -1983,7 +1983,11 @@ impl MobHandle {
                     fence_token: machine_runtime.1,
                     current_bridge_session_id,
                     peer_connectivity: None,
-                    kickoff: entry.kickoff.clone(),
+                    kickoff: kickoff_snapshot_from_machine_state(
+                        entry.agent_identity.as_str(),
+                        machine_state,
+                        entry.kickoff.as_ref(),
+                    ),
                 });
                 let state = material.roster_state();
                 let snapshot = material.to_snapshot();
@@ -2066,6 +2070,11 @@ impl MobHandle {
         entry.member_ref =
             Self::project_member_ref_session_binding(&entry.member_ref, current_bridge_session_id);
         entry.wired_to = Self::machine_wired_to_for_identity(&entry.agent_identity, machine_state);
+        entry.kickoff = kickoff_snapshot_from_machine_state(
+            entry.agent_identity.as_str(),
+            machine_state,
+            entry.kickoff.as_ref(),
+        );
         entry
     }
 
@@ -2120,6 +2129,13 @@ impl MobHandle {
             let roster = self.roster.read().await;
             roster.get(&MeerkatId::from(identity)).cloned()
         };
+        let kickoff = entry.as_ref().and_then(|entry| {
+            kickoff_snapshot_from_machine_state(
+                entry.agent_identity.as_str(),
+                &machine_state,
+                entry.kickoff.as_ref(),
+            )
+        });
         let current_bridge_session_id =
             Self::machine_bridge_session_id_for_identity(identity, &machine_state);
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
@@ -2137,7 +2153,7 @@ impl MobHandle {
                 fence_token: machine_runtime.1,
                 current_bridge_session_id,
                 peer_connectivity: None,
-                kickoff: entry.and_then(|entry| entry.kickoff),
+                kickoff,
             })
             .to_snapshot(),
         )

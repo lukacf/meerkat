@@ -551,6 +551,31 @@ fn dsl_wiring_edge(
     crate::machines::mob_machine::WiringEdge::new(dsl_a, dsl_b)
 }
 
+fn dsl_kickoff_phase(
+    phase: crate::roster::MobMemberKickoffPhase,
+) -> crate::machines::mob_machine::KickoffPhase {
+    match phase {
+        crate::roster::MobMemberKickoffPhase::Pending => {
+            crate::machines::mob_machine::KickoffPhase::Pending
+        }
+        crate::roster::MobMemberKickoffPhase::Starting => {
+            crate::machines::mob_machine::KickoffPhase::Starting
+        }
+        crate::roster::MobMemberKickoffPhase::Started => {
+            crate::machines::mob_machine::KickoffPhase::Started
+        }
+        crate::roster::MobMemberKickoffPhase::CallbackPending => {
+            crate::machines::mob_machine::KickoffPhase::CallbackPending
+        }
+        crate::roster::MobMemberKickoffPhase::Failed => {
+            crate::machines::mob_machine::KickoffPhase::Failed
+        }
+        crate::roster::MobMemberKickoffPhase::Cancelled => {
+            crate::machines::mob_machine::KickoffPhase::Cancelled
+        }
+    }
+}
+
 fn trusted_peer_descriptor_from_dsl_external_endpoint(
     endpoint: &crate::machines::mob_machine::ExternalPeerEndpoint,
 ) -> Result<TrustedPeerDescriptor, MobError> {
@@ -682,7 +707,17 @@ fn seed_mob_authority_sync_from_events(
                     "recover_member_retired",
                 )?;
             }
-            MobEventKind::MemberKickoffUpdated { .. } => {}
+            MobEventKind::MemberKickoffUpdated { member, kickoff } => {
+                apply_seeded_mob_signal(
+                    authority,
+                    mob_dsl::MobMachineSignal::RecoverMemberKickoff {
+                        member_id: member.as_str().to_owned(),
+                        phase: dsl_kickoff_phase(kickoff.phase),
+                        error: kickoff.error.clone(),
+                    },
+                    "recover_member_kickoff",
+                )?;
+            }
             MobEventKind::MembersWired { a, b } => {
                 apply_seeded_mob_signal(
                     authority,
@@ -1029,6 +1064,61 @@ fn seed_mob_authority_restore_failures(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::{MemberSpawnedEvent, MobEvent, MobEventKind};
+    use crate::ids::Generation;
+    use crate::roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
+    use chrono::Utc;
+    use meerkat_core::time_compat::UNIX_EPOCH;
+
+    #[test]
+    fn seeded_authority_recovers_kickoff_lifecycle() {
+        let definition = MobDefinition::explicit("test-mob");
+        let identity = AgentIdentity::from("worker");
+        let runtime_id = AgentRuntimeId::initial(identity.clone());
+        let events = vec![
+            MobEvent {
+                cursor: 1,
+                timestamp: Utc::now(),
+                mob_id: definition.id.clone(),
+                kind: MobEventKind::MemberSpawned(MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(1),
+                    runtime_id,
+                    ProfileName::from("worker"),
+                )),
+            },
+            MobEvent {
+                cursor: 2,
+                timestamp: Utc::now(),
+                mob_id: definition.id.clone(),
+                kind: MobEventKind::MemberKickoffUpdated {
+                    member: identity.clone(),
+                    kickoff: MobMemberKickoffSnapshot {
+                        phase: MobMemberKickoffPhase::Pending,
+                        error: None,
+                        updated_at: UNIX_EPOCH,
+                    },
+                },
+            },
+        ];
+        let mut authority = seed_mob_authority();
+
+        seed_mob_authority_sync_from_events(&mut authority, &events, &definition)
+            .expect("durable kickoff replay should seed MobMachine");
+
+        assert!(
+            authority
+                .state()
+                .member_kickoff_pending
+                .contains(identity.as_str())
+        );
+    }
 }
 
 struct RuntimeWiring {

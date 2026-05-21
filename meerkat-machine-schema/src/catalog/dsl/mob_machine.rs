@@ -447,6 +447,7 @@ macro_rules! mob_catalog_machine_dsl {
             RecoverMemberSessionBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, replacing: Option<SessionId> },
             RecoverRosterMemberReset { agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             RecoverRosterMemberRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
+            RecoverMemberKickoff { member_id: String, phase: KickoffPhase, error: Option<String> },
             RecoverRosterWiring { edge: WiringEdge },
             RecoverRosterUnwire { edge: WiringEdge },
             RecoverExternalPeerWiring { key: ExternalPeerKey, edge: ExternalPeerEdge },
@@ -878,6 +879,108 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+            }
+            to Running
+        }
+
+        transition RecoverMemberKickoffPending {
+            on signal RecoverMemberKickoff { member_id, phase, error }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "recover_pending_phase" { phase == KickoffPhase::Pending }
+            guard "recover_pending_without_error" { error == None }
+            update {
+                self.member_kickoff_pending.insert(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Running
+        }
+
+        transition RecoverMemberKickoffStarting {
+            on signal RecoverMemberKickoff { member_id, phase, error }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "recover_starting_phase" { phase == KickoffPhase::Starting }
+            guard "recover_starting_without_error" { error == None }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.insert(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Running
+        }
+
+        transition RecoverMemberKickoffCallbackPending {
+            on signal RecoverMemberKickoff { member_id, phase, error }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "recover_callback_pending_phase" { phase == KickoffPhase::CallbackPending }
+            guard "recover_callback_pending_without_error" { error == None }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.insert(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Running
+        }
+
+        transition RecoverMemberKickoffStarted {
+            on signal RecoverMemberKickoff { member_id, phase, error }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "recover_started_phase" { phase == KickoffPhase::Started }
+            guard "recover_started_without_error" { error == None }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.insert(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Running
+        }
+
+        transition RecoverMemberKickoffFailed {
+            on signal RecoverMemberKickoff { member_id, phase, error }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "recover_failed_phase" { phase == KickoffPhase::Failed }
+            guard "recover_failed_has_error" { error != None }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.insert(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.insert(member_id, error.get("value"));
+            }
+            to Running
+        }
+
+        transition RecoverMemberKickoffCancelled {
+            on signal RecoverMemberKickoff { member_id, phase, error }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "recover_cancelled_phase" { phase == KickoffPhase::Cancelled }
+            guard "recover_cancelled_without_error" { error == None }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.insert(member_id);
+                self.member_kickoff_error.remove(member_id);
             }
             to Running
         }

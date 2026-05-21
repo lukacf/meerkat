@@ -57,6 +57,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverRosterMemberRetiredAlreadyAbsent`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `RecoverMemberKickoffPending`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `RecoverMemberKickoffStarting`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `RecoverMemberKickoffCallbackPending`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `RecoverMemberKickoffStarted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `RecoverMemberKickoffFailed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `RecoverMemberKickoffCancelled`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `ReconcileRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `flow-and-run-lifecycle`

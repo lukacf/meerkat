@@ -10,6 +10,8 @@
 //! - `Roster` stores the event/projected peer graph used for read surfaces and
 //!   consistency checks.
 //! - `wire`/`unwire`/`remove` are projection mutations only.
+//! - `kickoff` preserves durable event timestamps for display; runtime read
+//!   surfaces project kickoff phase/error from `MobMachineState`.
 
 use crate::event::{MemberRef, MemberWireEdge, MobEvent, MobEventKind};
 use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, Generation, ProfileName};
@@ -101,7 +103,11 @@ pub struct RosterEntry {
     /// Application-defined labels for this member.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
-    /// Projected kickoff state for autonomous initial turn resolution.
+    /// Projected kickoff event metadata for autonomous initial turn display.
+    ///
+    /// `MobMachineState` owns kickoff phase/error truth. Runtime public reads
+    /// use this field only as a timestamp hint when the machine has the
+    /// matching phase/error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<MobMemberKickoffSnapshot>,
 

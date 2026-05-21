@@ -208,6 +208,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverMemberSessionBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, replacing: Option<SessionId>)
 - `RecoverRosterMemberReset`(agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `RecoverRosterMemberRetired`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
+- `RecoverMemberKickoff`(member_id: String, phase: KickoffPhase, error: Option<String>)
 - `RecoverRosterWiring`(edge: WiringEdge)
 - `RecoverRosterUnwire`(edge: WiringEdge)
 - `RecoverExternalPeerWiring`(key: ExternalPeerKey, edge: ExternalPeerEdge)
@@ -392,6 +393,54 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverRosterMemberRetired`(agent_identity, agent_runtime_id)
 - Guards:
   - `runtime_not_recovered`
+- To: `Running`
+
+### `RecoverMemberKickoffPending`
+- From: `Running`
+- On: `RecoverMemberKickoff`(member_id, phase, error)
+- Guards:
+  - `recover_pending_phase`
+  - `recover_pending_without_error`
+- To: `Running`
+
+### `RecoverMemberKickoffStarting`
+- From: `Running`
+- On: `RecoverMemberKickoff`(member_id, phase, error)
+- Guards:
+  - `recover_starting_phase`
+  - `recover_starting_without_error`
+- To: `Running`
+
+### `RecoverMemberKickoffCallbackPending`
+- From: `Running`
+- On: `RecoverMemberKickoff`(member_id, phase, error)
+- Guards:
+  - `recover_callback_pending_phase`
+  - `recover_callback_pending_without_error`
+- To: `Running`
+
+### `RecoverMemberKickoffStarted`
+- From: `Running`
+- On: `RecoverMemberKickoff`(member_id, phase, error)
+- Guards:
+  - `recover_started_phase`
+  - `recover_started_without_error`
+- To: `Running`
+
+### `RecoverMemberKickoffFailed`
+- From: `Running`
+- On: `RecoverMemberKickoff`(member_id, phase, error)
+- Guards:
+  - `recover_failed_phase`
+  - `recover_failed_has_error`
+- To: `Running`
+
+### `RecoverMemberKickoffCancelled`
+- From: `Running`
+- On: `RecoverMemberKickoff`(member_id, phase, error)
+- Guards:
+  - `recover_cancelled_phase`
+  - `recover_cancelled_without_error`
 - To: `Running`
 
 ### `ReconcileRunning`

@@ -2848,6 +2848,12 @@ pub mod signals {
         pub agent_runtime_id: AgentRuntimeId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverMemberKickoff {
+        pub member_id: String,
+        pub phase: KickoffPhase,
+        pub error: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverRosterWiring {
         pub edge: WiringEdge,
     }
@@ -2937,6 +2943,7 @@ pub enum Signal {
     RecoverMemberSessionBinding(signals::RecoverMemberSessionBinding),
     RecoverRosterMemberReset(signals::RecoverRosterMemberReset),
     RecoverRosterMemberRetired(signals::RecoverRosterMemberRetired),
+    RecoverMemberKickoff(signals::RecoverMemberKickoff),
     RecoverRosterWiring(signals::RecoverRosterWiring),
     RecoverRosterUnwire(signals::RecoverRosterUnwire),
     RecoverExternalPeerWiring(signals::RecoverExternalPeerWiring),
@@ -2982,6 +2989,7 @@ impl Signal {
             Self::RecoverMemberSessionBinding(_) => SignalKind::RecoverMemberSessionBinding,
             Self::RecoverRosterMemberReset(_) => SignalKind::RecoverRosterMemberReset,
             Self::RecoverRosterMemberRetired(_) => SignalKind::RecoverRosterMemberRetired,
+            Self::RecoverMemberKickoff(_) => SignalKind::RecoverMemberKickoff,
             Self::RecoverRosterWiring(_) => SignalKind::RecoverRosterWiring,
             Self::RecoverRosterUnwire(_) => SignalKind::RecoverRosterUnwire,
             Self::RecoverExternalPeerWiring(_) => SignalKind::RecoverExternalPeerWiring,
@@ -3028,6 +3036,7 @@ pub enum SignalKind {
     RecoverMemberSessionBinding,
     RecoverRosterMemberReset,
     RecoverRosterMemberRetired,
+    RecoverMemberKickoff,
     RecoverRosterWiring,
     RecoverRosterUnwire,
     RecoverExternalPeerWiring,
@@ -3346,6 +3355,12 @@ pub enum TransitionId {
     RecoverRosterMemberResetRunning,
     RecoverRosterMemberRetiredRunning,
     RecoverRosterMemberRetiredAlreadyAbsent,
+    RecoverMemberKickoffPending,
+    RecoverMemberKickoffStarting,
+    RecoverMemberKickoffCallbackPending,
+    RecoverMemberKickoffStarted,
+    RecoverMemberKickoffFailed,
+    RecoverMemberKickoffCancelled,
     ReconcileRunning,
     ReconcileStopped,
     ReconcileCompleted,

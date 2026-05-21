@@ -481,6 +481,16 @@ impl CoreExecutorBoundaryHandle for PersistentRuntimeBoundaryHandle {
             })
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
+
+    async fn stage_system_context_at_boundary(
+        &self,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+    ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
+        self.service
+            .stage_live_system_context_boundary_snapshot(&self.session_id, appends)
+            .await
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
 }
 
 struct PersistentRuntimeInterruptHandle {

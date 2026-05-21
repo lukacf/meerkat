@@ -48,7 +48,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.20"
+version = "0.6.21"
 edition = "2024"
 rust-version = "1.94.0"
 license = "MIT OR Apache-2.0"
@@ -131,44 +131,44 @@ subtle = "2.6"
 tempfile = "3.14"
 
 # Internal crates
-meerkat-models = { version = "0.6.20", path = "meerkat-models" }
-meerkat-agent-build-authority = { version = "0.6.20", path = "meerkat-agent-build-authority" }
-meerkat-core = { version = "0.6.20", path = "meerkat-core" }
-meerkat-capabilities = { version = "0.6.20", path = "meerkat-capabilities" }
-meerkat-llm-core = { version = "0.6.20", path = "meerkat-llm-core" }
-meerkat-auth-core = { version = "0.6.20", path = "meerkat-auth-core", default-features = false }
-meerkat-client = { version = "0.6.20", path = "meerkat-client", default-features = false }
-meerkat-providers = { version = "0.6.20", path = "meerkat-providers", default-features = false }
-meerkat-anthropic = { version = "0.6.20", path = "meerkat-anthropic", default-features = false }
-meerkat-openai = { version = "0.6.20", path = "meerkat-openai", default-features = false }
-meerkat-gemini = { version = "0.6.20", path = "meerkat-gemini", default-features = false }
-meerkat-schedule = { version = "0.6.20", path = "meerkat-schedule" }
-meerkat-workgraph = { version = "0.6.20", path = "meerkat-workgraph" }
-meerkat-tools = { version = "0.6.20", path = "meerkat-tools", default-features = false }
-meerkat-mcp = { version = "0.6.20", path = "meerkat-mcp" }
-meerkat-mcp-server = { version = "0.6.20", path = "meerkat-mcp-server" }
-meerkat-cli = { version = "0.6.20", path = "meerkat-cli" }
-meerkat-rest = { version = "0.6.20", path = "meerkat-rest" }
-meerkat = { version = "0.6.20", path = "meerkat", default-features = false }
-meerkat-comms = { version = "0.6.20", path = "meerkat-comms" }
-meerkat-hooks = { version = "0.6.20", path = "meerkat-hooks" }
-meerkat-rpc = { version = "0.6.20", path = "meerkat-rpc" }
-meerkat-live = { version = "0.6.20", path = "meerkat-live" }
-meerkat-runtime = { version = "0.6.20", path = "meerkat-runtime", default-features = false }
-meerkat-session = { version = "0.6.20", path = "meerkat-session", default-features = false }
-meerkat-memory = { version = "0.6.20", path = "meerkat-memory", default-features = false }
-meerkat-contracts = { version = "0.6.20", path = "meerkat-contracts", default-features = false }
-meerkat-skills = { version = "0.6.20", path = "meerkat-skills" }
-meerkat-mob = { version = "0.6.20", path = "meerkat-mob" }
-meerkat-mob-pack = { version = "0.6.20", path = "meerkat-mob-pack" }
-meerkat-mob-mcp = { version = "0.6.20", path = "meerkat-mob-mcp" }
-meerkat-machine-schema = { version = "0.6.20", path = "meerkat-machine-schema" }
-meerkat-machine-codegen = { version = "0.6.20", path = "meerkat-machine-codegen" }
-meerkat-machine-kernels = { version = "0.6.20", path = "meerkat-machine-kernels" }
-meerkat-machine-derive = { version = "0.6.20", path = "meerkat-machine-derive" }
-meerkat-machine-dsl = { version = "0.6.20", path = "meerkat-machine-dsl" }
-meerkat-machine-dsl-core = { version = "0.6.20", path = "meerkat-machine-dsl-core" }
-meerkat-store = { version = "0.6.20", path = "meerkat-store", default-features = false }
+meerkat-models = { version = "0.6.21", path = "meerkat-models" }
+meerkat-agent-build-authority = { version = "0.6.21", path = "meerkat-agent-build-authority" }
+meerkat-core = { version = "0.6.21", path = "meerkat-core" }
+meerkat-capabilities = { version = "0.6.21", path = "meerkat-capabilities" }
+meerkat-llm-core = { version = "0.6.21", path = "meerkat-llm-core" }
+meerkat-auth-core = { version = "0.6.21", path = "meerkat-auth-core", default-features = false }
+meerkat-client = { version = "0.6.21", path = "meerkat-client", default-features = false }
+meerkat-providers = { version = "0.6.21", path = "meerkat-providers", default-features = false }
+meerkat-anthropic = { version = "0.6.21", path = "meerkat-anthropic", default-features = false }
+meerkat-openai = { version = "0.6.21", path = "meerkat-openai", default-features = false }
+meerkat-gemini = { version = "0.6.21", path = "meerkat-gemini", default-features = false }
+meerkat-schedule = { version = "0.6.21", path = "meerkat-schedule" }
+meerkat-workgraph = { version = "0.6.21", path = "meerkat-workgraph" }
+meerkat-tools = { version = "0.6.21", path = "meerkat-tools", default-features = false }
+meerkat-mcp = { version = "0.6.21", path = "meerkat-mcp" }
+meerkat-mcp-server = { version = "0.6.21", path = "meerkat-mcp-server" }
+meerkat-cli = { version = "0.6.21", path = "meerkat-cli" }
+meerkat-rest = { version = "0.6.21", path = "meerkat-rest" }
+meerkat = { version = "0.6.21", path = "meerkat", default-features = false }
+meerkat-comms = { version = "0.6.21", path = "meerkat-comms" }
+meerkat-hooks = { version = "0.6.21", path = "meerkat-hooks" }
+meerkat-rpc = { version = "0.6.21", path = "meerkat-rpc" }
+meerkat-live = { version = "0.6.21", path = "meerkat-live" }
+meerkat-runtime = { version = "0.6.21", path = "meerkat-runtime", default-features = false }
+meerkat-session = { version = "0.6.21", path = "meerkat-session", default-features = false }
+meerkat-memory = { version = "0.6.21", path = "meerkat-memory", default-features = false }
+meerkat-contracts = { version = "0.6.21", path = "meerkat-contracts", default-features = false }
+meerkat-skills = { version = "0.6.21", path = "meerkat-skills" }
+meerkat-mob = { version = "0.6.21", path = "meerkat-mob" }
+meerkat-mob-pack = { version = "0.6.21", path = "meerkat-mob-pack" }
+meerkat-mob-mcp = { version = "0.6.21", path = "meerkat-mob-mcp" }
+meerkat-machine-schema = { version = "0.6.21", path = "meerkat-machine-schema" }
+meerkat-machine-codegen = { version = "0.6.21", path = "meerkat-machine-codegen" }
+meerkat-machine-kernels = { version = "0.6.21", path = "meerkat-machine-kernels" }
+meerkat-machine-derive = { version = "0.6.21", path = "meerkat-machine-derive" }
+meerkat-machine-dsl = { version = "0.6.21", path = "meerkat-machine-dsl" }
+meerkat-machine-dsl-core = { version = "0.6.21", path = "meerkat-machine-dsl-core" }
+meerkat-store = { version = "0.6.21", path = "meerkat-store", default-features = false }
 oai-rt-rs = "0.4.0"
 
 [profile.dev]

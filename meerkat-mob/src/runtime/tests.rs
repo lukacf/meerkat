@@ -26102,7 +26102,7 @@ async fn test_peer_messages_reach_all_ready_autonomous_members_before_kickoff_se
 }
 
 #[tokio::test]
-async fn test_running_peer_message_to_autonomous_member_drains_after_current_apply() {
+async fn test_running_peer_message_to_autonomous_member_live_injects_during_current_apply() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let (handle, service) =
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
@@ -26160,6 +26160,10 @@ async fn test_running_peer_message_to_autonomous_member_drains_after_current_app
         .expect("kickoff should resolve before we switch into blocked-turn mode");
 
     let baseline_prompts = service.applied_runtime_prompts(&sid_worker).await.len();
+    let baseline_context_appends = service
+        .applied_runtime_context_appends(&sid_worker)
+        .await
+        .len();
     service.set_keep_alive_turns_complete_immediately(false);
 
     let artist_comms = service.real_comms(&sid_artist).await.expect("artist comms");
@@ -26214,34 +26218,55 @@ async fn test_running_peer_message_to_autonomous_member_drains_after_current_app
     .await
     .expect("second peer message should succeed");
 
-    service
-        .interrupt(&sid_worker)
-        .await
-        .expect("interrupt should release blocked worker apply");
-
-    let delivered_second = tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let prompts = service.applied_runtime_prompts(&sid_worker).await;
-            if prompts.iter().skip(baseline_prompts + 1).any(|prompt| {
-                prompt
-                    .text_content()
-                    .contains("body: second peer message while running")
-            }) {
+            let context_appends = service.applied_runtime_context_appends(&sid_worker).await;
+            if context_appends
+                .iter()
+                .skip(baseline_context_appends)
+                .any(|append| {
+                    append
+                        .text
+                        .contains("body: second peer message while running")
+                })
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
-    .await;
+    .await
+    .expect("second steer peer message should live-inject while the active turn is still blocked");
+
+    service
+        .interrupt(&sid_worker)
+        .await
+        .expect("interrupt should release blocked worker apply");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&sid_worker).await;
+            if prompts.len() == baseline_prompts + 1 {
+                break;
+            }
+            assert!(
+                !prompts.iter().skip(baseline_prompts + 1).any(|prompt| {
+                    prompt
+                        .text_content()
+                        .contains("body: second peer message while running")
+                }),
+                "live-injected steer must not replay as a later runtime turn"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("live-injected steer should not schedule a second apply after release");
 
     tokio::time::timeout(Duration::from_secs(2), handle.stop())
         .await
         .expect("stop timeout after running peer message assertion")
         .expect("stop after running peer message assertion");
-
-    delivered_second.expect(
-        "second steer peer message should drain onto the next apply after the active turn completes",
-    );
 }
 
 #[tokio::test]

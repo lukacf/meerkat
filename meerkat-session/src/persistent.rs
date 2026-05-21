@@ -1868,6 +1868,93 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(())
     }
 
+    pub async fn stage_live_system_context_boundary_snapshot(
+        &self,
+        id: &SessionId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<Option<Vec<u8>>, SessionError> {
+        if appends.is_empty() {
+            return Ok(None);
+        }
+
+        let state_arc = self
+            .inner
+            .system_context_state(id)
+            .await
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+
+        let (snapshot_state, staged_state) = {
+            let mut guard = match state_arc.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::warn!(
+                        session_id = %id,
+                        "system-context state lock poisoned while staging live boundary context"
+                    );
+                    poisoned.into_inner()
+                }
+            };
+            let snapshot_state = guard.clone();
+            let mut candidate = snapshot_state.clone();
+            for append in appends {
+                let req = AppendSystemContextRequest {
+                    text: append.text,
+                    source: append.source,
+                    idempotency_key: append.idempotency_key,
+                };
+                candidate
+                    .stage_append(&req, append.accepted_at)
+                    .map_err(|err| control_error_into_session_error(err.into_control_error(id)))?;
+            }
+            *guard = candidate.clone();
+            (snapshot_state, candidate)
+        };
+
+        let snapshot = async {
+            let mut session = self
+                .load_authoritative_session_base(id)
+                .await?
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            self.reject_if_archived_session(id, &session)
+                .await
+                .map_err(control_error_into_session_error)?;
+            write_system_context_state(&mut session, staged_state.clone())
+                .map_err(control_error_into_session_error)?;
+            let session = self.normalized_session_for_persistence(session).await?;
+            serde_json::to_vec(&session).map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to serialize live boundary context session snapshot: {err}"
+                )))
+            })
+        }
+        .await;
+
+        match snapshot {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(error) => {
+                let mut guard = match state_arc.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        tracing::warn!(
+                            session_id = %id,
+                            "system-context state lock poisoned while rolling back live boundary context"
+                        );
+                        poisoned.into_inner()
+                    }
+                };
+                if *guard == staged_state {
+                    *guard = snapshot_state;
+                } else {
+                    tracing::warn!(
+                        session_id = %id,
+                        "live system-context state diverged after failed boundary snapshot; leaving newer live state intact"
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
     async fn fail_closed_runtime_projection_update(
         &self,
         id: &SessionId,

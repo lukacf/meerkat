@@ -1850,6 +1850,37 @@ impl EphemeralRuntimeDriver {
         Ok(())
     }
 
+    pub(crate) fn next_live_boundary_context_sequence(&self, run_id: &RunId) -> u64 {
+        self.ledger
+            .iter()
+            .filter_map(|(input_id, _)| {
+                (self.input_last_run_id(input_id).as_ref() == Some(run_id))
+                    .then(|| self.input_last_boundary_sequence(input_id))
+                    .flatten()
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    pub(crate) fn machine_realize_live_boundary_context_injected(
+        &mut self,
+        run_id: &RunId,
+        input_ids: &[InputId],
+        receipt: &RunBoundaryReceipt,
+    ) -> Result<(), RuntimeDriverError> {
+        let checkpoint = self.rollback_snapshot();
+        if let Err(err) = self
+            .machine_realize_stage_batch(input_ids, run_id)
+            .and_then(|()| self.machine_realize_boundary_applied(run_id, receipt))
+            .and_then(|()| self.machine_realize_run_completed(run_id, input_ids))
+        {
+            self.restore_rollback_snapshot(checkpoint);
+            return Err(err);
+        }
+        Ok(())
+    }
+
     pub fn rollback_staged(&mut self, input_ids: &[InputId]) -> Result<(), RuntimeDriverError> {
         for input_id in input_ids {
             // Skip inputs that are no longer in Staged (terminal or never-staged).

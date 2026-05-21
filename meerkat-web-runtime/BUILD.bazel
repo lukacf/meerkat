@@ -41,7 +41,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.20",
+        "CARGO_PKG_VERSION": "0.6.21",
         "CARGO_MANIFEST_DIR": "./meerkat-web-runtime",
     },
     proc_macro_deps = all_crate_deps(
@@ -87,7 +87,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.20",
+        "CARGO_PKG_VERSION": "0.6.21",
         "CARGO_MANIFEST_DIR": "./meerkat-web-runtime",
     },
     tags = [
@@ -148,7 +148,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.20",
+        "CARGO_PKG_VERSION": "0.6.21",
         "CARGO_BIN_NAME": "browser_contract",
         "CARGO_MANIFEST_DIR": "./meerkat-web-runtime",
     },
@@ -207,7 +207,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.20",
+        "CARGO_PKG_VERSION": "0.6.21",
         "CARGO_BIN_NAME": "release_targets",
         "CARGO_MANIFEST_DIR": "./meerkat-web-runtime",
     },
@@ -266,7 +266,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.20",
+        "CARGO_PKG_VERSION": "0.6.21",
         "CARGO_BIN_NAME": "wasm_external_resolver",
         "CARGO_MANIFEST_DIR": "./meerkat-web-runtime",
     },

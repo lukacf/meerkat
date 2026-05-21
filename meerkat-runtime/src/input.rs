@@ -963,6 +963,68 @@ pub(crate) fn runtime_input_projection_for_machine_batch(
     projection
 }
 
+pub(crate) fn context_append_to_pending_system_context_append(
+    append: &ConversationContextAppend,
+) -> meerkat_core::PendingSystemContextAppend {
+    let text = render_core_context_for_pending_system_context(&append.content);
+    meerkat_core::PendingSystemContextAppend {
+        text,
+        source: Some(append.key.clone()),
+        idempotency_key: Some(append.key.clone()),
+        accepted_at: meerkat_core::time_compat::SystemTime::now(),
+    }
+}
+
+pub(crate) fn projection_to_pending_system_context_appends(
+    input_id: &InputId,
+    projection: &crate::ingress_types::RuntimeInputProjection,
+) -> Vec<meerkat_core::PendingSystemContextAppend> {
+    if let Some(append) = projection.context_append.as_ref() {
+        return std::iter::once(context_append_to_pending_system_context_append(append))
+            .filter(|append| !append.text.trim().is_empty())
+            .collect();
+    }
+
+    projection
+        .append
+        .as_ref()
+        .map(|append| {
+            let key = format!("runtime:steer:{input_id}");
+            meerkat_core::PendingSystemContextAppend {
+                text: render_core_context_for_pending_system_context(&append.content),
+                source: Some(key.clone()),
+                idempotency_key: Some(key),
+                accepted_at: meerkat_core::time_compat::SystemTime::now(),
+            }
+        })
+        .into_iter()
+        .filter(|append| !append.text.trim().is_empty())
+        .collect()
+}
+
+fn render_core_context_for_pending_system_context(content: &CoreRenderable) -> String {
+    match content {
+        CoreRenderable::Text { text } => text.clone(),
+        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
+        CoreRenderable::Json { value } => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
+        CoreRenderable::Reference { uri, label } => match label {
+            Some(label) => format!("{label}: {uri}"),
+            None => uri.clone(),
+        },
+        CoreRenderable::SystemNotice { kind, body, blocks } => {
+            meerkat_core::types::SystemNoticeMessage::with_blocks(
+                *kind,
+                body.clone(),
+                blocks.clone(),
+            )
+            .model_projection_text()
+        }
+        _ => String::new(),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -1175,6 +1237,106 @@ mod tests {
             Some("display-agent")
         );
         assert_eq!(peer.as_ref().map(|peer| peer.id.as_str()), Some(route_id));
+    }
+
+    #[test]
+    fn steer_projection_uses_context_append_as_pending_system_context() {
+        let input_id = InputId::new();
+        let projection = crate::ingress_types::RuntimeInputProjection {
+            append: Some(ConversationAppend {
+                role: ConversationAppendRole::SystemNotice,
+                content: CoreRenderable::Text {
+                    text: "ordinary append must lose to context append".into(),
+                },
+            }),
+            additional_appends: Vec::new(),
+            context_append: Some(ConversationContextAppend {
+                key: "peer_response_terminal:peer:req".into(),
+                content: CoreRenderable::Text {
+                    text: "terminal response is ready".into(),
+                },
+            }),
+        };
+
+        let appends = projection_to_pending_system_context_appends(&input_id, &projection);
+
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].text, "terminal response is ready");
+        assert_eq!(
+            appends[0].source.as_deref(),
+            Some("peer_response_terminal:peer:req")
+        );
+        assert_eq!(
+            appends[0].idempotency_key.as_deref(),
+            Some("peer_response_terminal:peer:req")
+        );
+    }
+
+    #[test]
+    fn steer_projection_falls_back_to_ordinary_peer_append() {
+        let mut header = make_header();
+        header.source = InputOrigin::Peer {
+            peer_id: "peer-a".into(),
+            display_identity: Some("Peer A".into()),
+            runtime_id: None,
+        };
+        let input = Input::Peer(PeerInput {
+            header,
+            convention: Some(PeerConvention::Message),
+            body: "please look at this while you work".into(),
+            payload: None,
+            blocks: None,
+            handling_mode: Some(HandlingMode::Steer),
+        });
+        let input_id = input.id().clone();
+        let projection = runtime_input_projection(&input);
+
+        let appends = projection_to_pending_system_context_appends(&input_id, &projection);
+
+        assert_eq!(appends.len(), 1);
+        assert!(
+            appends[0]
+                .text
+                .contains("please look at this while you work"),
+            "peer message append should be renderable as live system context: {:?}",
+            appends[0].text
+        );
+        assert_eq!(
+            appends[0].source.as_deref(),
+            Some(format!("runtime:steer:{input_id}").as_str())
+        );
+        assert_eq!(
+            appends[0].idempotency_key.as_deref(),
+            Some(format!("runtime:steer:{input_id}").as_str())
+        );
+    }
+
+    #[test]
+    fn steer_projection_filters_empty_context_and_empty_append() {
+        let input_id = InputId::new();
+        let context_projection = crate::ingress_types::RuntimeInputProjection {
+            append: None,
+            additional_appends: Vec::new(),
+            context_append: Some(ConversationContextAppend {
+                key: "empty-context".into(),
+                content: CoreRenderable::Text { text: "  ".into() },
+            }),
+        };
+        assert!(
+            projection_to_pending_system_context_appends(&input_id, &context_projection).is_empty()
+        );
+
+        let append_projection = crate::ingress_types::RuntimeInputProjection {
+            append: Some(ConversationAppend {
+                role: ConversationAppendRole::SystemNotice,
+                content: CoreRenderable::Text { text: "\n".into() },
+            }),
+            additional_appends: Vec::new(),
+            context_append: None,
+        };
+        assert!(
+            projection_to_pending_system_context_appends(&input_id, &append_projection).is_empty()
+        );
     }
 
     #[test]

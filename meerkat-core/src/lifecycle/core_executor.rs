@@ -9,6 +9,7 @@ use super::run_primitive::RunPrimitive;
 use super::run_receipt::RunBoundaryReceipt;
 use crate::error::AgentError;
 use crate::service::SessionError;
+use crate::session::PendingSystemContextAppend;
 use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
 use crate::types::RunResult;
 use serde_json::Value;
@@ -371,8 +372,7 @@ impl CoreApplyOutput {
     }
 }
 
-/// Cloneable live endpoint for asking an executor to stop at the next
-/// cooperative turn boundary.
+/// Cloneable live endpoint for cooperative in-flight turn boundaries.
 ///
 /// ```compile_fail
 /// use meerkat_core::lifecycle::CoreExecutorBoundaryHandle;
@@ -388,6 +388,22 @@ impl CoreApplyOutput {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait CoreExecutorBoundaryHandle: Send + Sync {
     async fn cancel_after_boundary(&self, reason: String) -> Result<(), CoreExecutorError>;
+
+    /// Stage runtime-owned system context for the next cooperative LLM
+    /// boundary of the active turn.
+    ///
+    /// Implementations that can serialize the staged session snapshot return
+    /// it so the runtime control plane can commit the snapshot atomically with
+    /// the consumed input state. Implementations without durable session
+    /// authority may return `None`.
+    async fn stage_system_context_at_boundary(
+        &self,
+        _appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
+        Err(CoreExecutorError::Internal(
+            "live boundary system-context staging is unsupported by this executor".to_string(),
+        ))
+    }
 }
 
 /// Cloneable live endpoint for hard-cancelling the active run immediately.

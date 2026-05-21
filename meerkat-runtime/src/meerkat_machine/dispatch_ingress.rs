@@ -229,8 +229,9 @@ impl MeerkatMachine {
                         }
                     }
                 };
+                let accepted_input_id_for_live_boundary = accepted_input_id.clone();
                 let (signal, runtime_effect, effect_previous_dsl_state) = if let Some(input_id) =
-                    accepted_input_id
+                    accepted_input_id.clone()
                 {
                     let flags = resolved.coarse_flags();
                     let (previous_dsl_state, effects) = self
@@ -281,7 +282,7 @@ impl MeerkatMachine {
                         .dispatch_cancel_after_boundary_runtime_effect(
                             &session_id,
                             effect_tx,
-                            boundary_handle,
+                            boundary_handle.clone(),
                             projected_effect,
                             "AcceptWithCompletion",
                         )
@@ -292,6 +293,72 @@ impl MeerkatMachine {
                             .await;
                     }
                     return Err(err);
+                }
+
+                if state == RuntimeState::Running
+                    && signal.should_interrupt_yielding()
+                    && resolved.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
+                    && let (Some(input_id), Some(boundary_handle)) =
+                        (accepted_input_id_for_live_boundary, boundary_handle)
+                {
+                    let live_boundary_plan = {
+                        let driver = driver.lock().await;
+                        let run_id = driver.current_run_id();
+                        let projection = driver.driver_ingress().primitive_projection(&input_id);
+                        run_id.and_then(|run_id| {
+                            let projection = projection?;
+                            let appends =
+                                crate::input::projection_to_pending_system_context_appends(
+                                    &input_id,
+                                    &projection,
+                                );
+                            if appends.is_empty() {
+                                return None;
+                            }
+                            let sequence = driver.next_live_boundary_context_sequence(&run_id);
+                            Some((run_id, appends, sequence))
+                        })
+                    };
+
+                    if let Some((run_id, appends, sequence)) = live_boundary_plan {
+                        match boundary_handle
+                            .stage_system_context_at_boundary(appends)
+                            .await
+                        {
+                            Ok(session_snapshot) => {
+                                let receipt = meerkat_core::lifecycle::RunBoundaryReceipt {
+                                    run_id: run_id.clone(),
+                                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                                    contributing_input_ids: vec![input_id.clone()],
+                                    conversation_digest: None,
+                                    message_count: 0,
+                                    sequence,
+                                };
+                                {
+                                    let mut driver = driver.lock().await;
+                                    driver
+                                        .machine_realize_live_boundary_context_injected(
+                                            &run_id,
+                                            std::slice::from_ref(&input_id),
+                                            &receipt,
+                                            session_snapshot,
+                                        )
+                                        .await?;
+                                }
+                                let mut completions = completions.lock().await;
+                                completions.resolve_without_result(&input_id);
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    run_id = %run_id,
+                                    input_id = %input_id,
+                                    error = %error,
+                                    "live boundary context staging failed; leaving steer input queued for ordinary post-turn drain"
+                                );
+                            }
+                        }
+                    }
                 }
 
                 Ok(MeerkatMachineCommandResult::AcceptWithCompletion {

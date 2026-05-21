@@ -41,7 +41,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.20",
+        "CARGO_PKG_VERSION": "0.6.21",
         "CARGO_BIN_NAME": "mcp-test-server",
         "CARGO_MANIFEST_DIR": "test-fixtures/mcp-test-server",
     },

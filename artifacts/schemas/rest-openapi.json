@@ -8049,7 +8049,7 @@
   },
   "info": {
     "title": "Meerkat REST API",
-    "version": "0.6.20"
+    "version": "0.6.21"
   },
   "openapi": "3.1.0",
   "paths": {

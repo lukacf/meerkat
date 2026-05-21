@@ -548,6 +548,54 @@ impl PersistentRuntimeDriver {
             .machine_realize_run_completed(run_id, consumed_input_ids)
     }
 
+    pub(crate) fn next_live_boundary_context_sequence(&self, run_id: &RunId) -> u64 {
+        self.inner.next_live_boundary_context_sequence(run_id)
+    }
+
+    pub(crate) async fn machine_realize_live_boundary_context_injected(
+        &mut self,
+        run_id: &RunId,
+        input_ids: &[InputId],
+        receipt: &RunBoundaryReceipt,
+        session_snapshot: Option<Vec<u8>>,
+    ) -> Result<(), RuntimeDriverError> {
+        let checkpoint = self.inner.rollback_snapshot();
+        if let Err(err) = self
+            .inner
+            .machine_realize_live_boundary_context_injected(run_id, input_ids, receipt)
+        {
+            self.inner.restore_rollback_snapshot(checkpoint);
+            return Err(err);
+        }
+        let input_updates = self.inner.stored_input_states_snapshot();
+        if let Err(err) = self
+            .store
+            .atomic_apply(
+                &self.runtime_id,
+                session_snapshot
+                    .as_ref()
+                    .map(|session_snapshot| crate::store::SessionDelta {
+                        session_snapshot: session_snapshot.clone(),
+                    }),
+                receipt.clone(),
+                input_updates,
+                session_snapshot
+                    .as_deref()
+                    .and_then(|snapshot| {
+                        serde_json::from_slice::<meerkat_core::Session>(snapshot).ok()
+                    })
+                    .map(|session| session.id().clone()),
+            )
+            .await
+        {
+            self.inner.restore_rollback_snapshot(checkpoint);
+            return Err(RuntimeDriverError::Internal(format!(
+                "runtime live-boundary context commit failed: {err}"
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn machine_commit_completed_boundary_snapshot(
         &mut self,
         receipt: &RunBoundaryReceipt,

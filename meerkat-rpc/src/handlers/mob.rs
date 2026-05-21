@@ -1547,7 +1547,9 @@ async fn resolve_member_ref(
         .into_iter()
         .find(|entry| entry.agent_identity == identity)
         .ok_or_else(|| format!("member {identity} not found in mob {mob_id}"))?;
-    let (agent_runtime_id, fence_token) = entry.binding_atoms();
+    let (agent_runtime_id, fence_token) = entry
+        .binding_atoms()
+        .ok_or_else(|| format!("member {identity} has no MobMachine runtime binding"))?;
     Ok((mob_id, identity, agent_runtime_id, fence_token))
 }
 

@@ -2898,12 +2898,7 @@ impl MobActor {
             .map(|material| material.to_domain_for_identity(&domain_identity))
         {
             Some(material) => Some(material),
-            None if machine_lifecycle.status == mob_dsl::MobMemberLifecycleStatus::Unknown => None,
-            None => {
-                return Err(MobError::Internal(format!(
-                    "MobMachine runtime material is absent for '{domain_identity}'"
-                )));
-            }
+            None => None,
         };
         let member_present = roster_entry.is_some();
 
@@ -3067,18 +3062,11 @@ impl MobActor {
             let snapshot = material.to_snapshot();
             let current_bridge_session_id = snapshot.current_bridge_session_id().cloned();
             let wired_to = self.machine_wired_peer_identities_for(&entry.agent_identity);
-            let Some((agent_runtime_id, fence_token)) = snapshot.runtime_identity_fields() else {
-                tracing::warn!(
-                    agent_identity = %entry.agent_identity,
-                    "skipping member list projection without MobMachine runtime binding"
-                );
-                continue;
-            };
             projected.push(
                 MobMemberListEntry {
                     agent_identity: entry.agent_identity,
-                    agent_runtime_id: agent_runtime_id.clone(),
-                    fence_token,
+                    agent_runtime_id: snapshot.agent_runtime_id.clone(),
+                    fence_token: snapshot.fence_token,
                     role: entry.role,
                     runtime_mode: entry.runtime_mode,
                     peer_id: entry.peer_id,

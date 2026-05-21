@@ -177,16 +177,14 @@ pub struct MobMemberListEntry {
     //
     // `agent_runtime_id` and `fence_token` are binding-era atoms used
     // by the bridge for wiring and stale-command rejection. They are
-    // `pub(crate)` and `#[serde(skip)]` so they do not leak to
-    // app-facing payloads (wire contract: app tools receive
-    // `agent_identity`; bridge session ids stay diagnostic/control
-    // projection data). External consumers that legitimately need these
-    // atoms (mob-mcp, mob-pack verify paths) route through a typed
-    // helper; they never reach into the field directly.
+    // optional because a public list projection may include a machine-known
+    // `Unknown` member after recovery without current runtime material.
+    // Control paths must route through `binding_atoms()` and fail closed
+    // when MobMachine has not supplied a current binding.
     #[serde(skip)]
-    pub(crate) agent_runtime_id: AgentRuntimeId,
+    pub(crate) agent_runtime_id: Option<AgentRuntimeId>,
     #[serde(skip)]
-    pub(crate) fence_token: FenceToken,
+    pub(crate) fence_token: Option<FenceToken>,
     /// Canonical comms routing ID for bridge-internal peer lookup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) peer_id: Option<PeerId>,
@@ -215,8 +213,25 @@ impl MobMemberListEntry {
     /// app-facing `WireMemberRef` into the current incarnation before it
     /// enters the work lane. Keeps the fields `pub(crate)` + `#[serde(skip)]`
     /// so they never leak through Serialize/Debug-derived paths.
-    pub fn binding_atoms(&self) -> (AgentRuntimeId, FenceToken) {
-        (self.agent_runtime_id.clone(), self.fence_token)
+    pub fn binding_atoms(&self) -> Option<(AgentRuntimeId, FenceToken)> {
+        match (&self.agent_runtime_id, self.fence_token) {
+            (Some(agent_runtime_id), Some(fence_token)) => {
+                Some((agent_runtime_id.clone(), fence_token))
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn require_binding_atoms(
+        &self,
+        context: &str,
+    ) -> Result<(AgentRuntimeId, FenceToken), MobError> {
+        self.binding_atoms().ok_or_else(|| {
+            MobError::Internal(format!(
+                "{context} requires MobMachine runtime binding for '{}'",
+                self.agent_identity
+            ))
+        })
     }
 }
 
@@ -1668,6 +1683,8 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::MemberStatus(snapshot))
             }
             MobMachineCommand::SubscribeAgentEvents { agent_identity } => {
+                self.project_machine_input(mob_dsl::MobMachineInput::SubscribeAgentEvents)
+                    .await?;
                 let stream = self
                     .send_actor_command(|reply_tx| MobCommand::SubscribeAgentEvents {
                         agent_identity,
@@ -1677,12 +1694,16 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::EventStream(stream))
             }
             MobMachineCommand::SubscribeAllAgentEvents => {
+                self.project_machine_input(mob_dsl::MobMachineInput::SubscribeAllAgentEvents)
+                    .await?;
                 let streams = self
                     .send_actor_command(|reply_tx| MobCommand::SubscribeAllAgentEvents { reply_tx })
                     .await??;
                 Ok(MobMachineCommandResult::AllAgentEventStreams(streams))
             }
             MobMachineCommand::SubscribeMobEvents { config } => {
+                self.project_machine_input(mob_dsl::MobMachineInput::SubscribeMobEvents)
+                    .await?;
                 Ok(MobMachineCommandResult::MobEventRouter(
                     super::event_router::spawn_event_router(self.clone(), config),
                 ))
@@ -1985,13 +2006,13 @@ impl MobHandle {
     ) -> Vec<MobMemberListEntry> {
         entries
             .into_iter()
-            .filter_map(|entry| {
+            .map(|entry| {
                 let domain_identity =
                     crate::ids::AgentIdentity::from(entry.agent_identity.as_str());
                 let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
                 let machine_runtime = machine_state
-                    .member_runtime_material_for_identity(&dsl_identity)?
-                    .to_domain_for_identity(&domain_identity);
+                    .member_runtime_material_for_identity(&dsl_identity)
+                    .map(|material| material.to_domain_for_identity(&domain_identity));
                 let current_bridge_session_id =
                     Self::machine_bridge_session_id_for_identity(&domain_identity, machine_state);
                 let wired_to = Self::machine_wired_to_for_identity(&domain_identity, machine_state);
@@ -2001,8 +2022,12 @@ impl MobHandle {
                     output_preview: None,
                     tokens_used: 0,
                     agent_identity: domain_identity,
-                    agent_runtime_id: Some(machine_runtime.0.clone()),
-                    fence_token: Some(machine_runtime.1),
+                    agent_runtime_id: machine_runtime
+                        .as_ref()
+                        .map(|(agent_runtime_id, _)| agent_runtime_id.clone()),
+                    fence_token: machine_runtime
+                        .as_ref()
+                        .map(|(_, fence_token)| *fence_token),
                     current_bridge_session_id,
                     peer_connectivity: None,
                     kickoff: kickoff_snapshot_from_machine_state(
@@ -2014,28 +2039,26 @@ impl MobHandle {
                 let state = material.roster_state();
                 let snapshot = material.to_snapshot();
                 let current_bridge_session_id = snapshot.current_bridge_session_id().cloned();
-                Some(
-                    MobMemberListEntry {
-                        agent_identity: entry.agent_identity,
-                        agent_runtime_id: machine_runtime.0,
-                        fence_token: machine_runtime.1,
-                        role: entry.role,
-                        runtime_mode: entry.runtime_mode,
-                        peer_id: entry.peer_id,
-                        transport_public_key: entry.transport_public_key,
-                        state,
-                        wired_to,
-                        external_peer_specs: entry.external_peer_specs,
-                        labels: entry.labels,
-                        status: snapshot.status,
-                        error: snapshot.error,
-                        is_final: snapshot.is_final,
-                        current_session_id: None,
-                        current_bridge_session_id: None,
-                        kickoff: snapshot.kickoff,
-                    }
-                    .with_current_bridge_session_id(current_bridge_session_id),
-                )
+                MobMemberListEntry {
+                    agent_identity: entry.agent_identity,
+                    agent_runtime_id: snapshot.agent_runtime_id,
+                    fence_token: snapshot.fence_token,
+                    role: entry.role,
+                    runtime_mode: entry.runtime_mode,
+                    peer_id: entry.peer_id,
+                    transport_public_key: entry.transport_public_key,
+                    state,
+                    wired_to,
+                    external_peer_specs: entry.external_peer_specs,
+                    labels: entry.labels,
+                    status: snapshot.status,
+                    error: snapshot.error,
+                    is_final: snapshot.is_final,
+                    current_session_id: None,
+                    current_bridge_session_id: None,
+                    kickoff: snapshot.kickoff,
+                }
+                .with_current_bridge_session_id(current_bridge_session_id)
             })
             .collect()
     }
@@ -2405,7 +2428,9 @@ impl MobHandle {
     /// tags each event with [`AttributedEvent`], and tracks roster changes
     /// (spawns/retires) automatically. Drop the returned handle to stop
     /// the router.
-    pub async fn subscribe_mob_events(&self) -> super::event_router::MobEventRouterHandle {
+    pub async fn subscribe_mob_events(
+        &self,
+    ) -> Result<super::event_router::MobEventRouterHandle, MobError> {
         self.subscribe_mob_events_with_config(super::event_router::MobEventRouterConfig::default())
             .await
     }
@@ -2414,17 +2439,19 @@ impl MobHandle {
     pub async fn subscribe_mob_events_with_config(
         &self,
         config: super::event_router::MobEventRouterConfig,
-    ) -> super::event_router::MobEventRouterHandle {
+    ) -> Result<super::event_router::MobEventRouterHandle, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::SubscribeMobEvents { config })
             .await
         {
-            Ok(MobMachineCommandResult::MobEventRouter(handle)) => handle,
+            Ok(MobMachineCommandResult::MobEventRouter(handle)) => Ok(handle),
             Ok(_) => {
                 tracing::error!("unexpected command result variant for subscribe_mob_events");
-                super::event_router::spawn_event_router(self.clone(), config)
+                Err(MobError::Internal(
+                    "unexpected command result variant for subscribe_mob_events".into(),
+                ))
             }
-            Err(_) => super::event_router::spawn_event_router(self.clone(), config),
+            Err(error) => Err(error),
         }
     }
 

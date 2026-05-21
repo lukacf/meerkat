@@ -3049,7 +3049,16 @@ impl MethodRouter {
             open_authority.opened
         } else {
             // Mob-wide stream: subscribe to all members' events (attributed).
-            let mut router_handle = handle.subscribe_mob_events().await;
+            let mut router_handle = match handle.subscribe_mob_events().await {
+                Ok(handle) => handle,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("Failed to subscribe to mob event stream: {error}"),
+                    );
+                }
+            };
 
             let open_authority =
                 match resolve_mob_stream_open_authority(&self.stream_authority, &stream_id).await {

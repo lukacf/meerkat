@@ -11097,8 +11097,8 @@ async fn test_list_members_returns_after_respawn_without_hanging() {
         .find(|entry| entry.agent_identity == member_id)
         .expect("respawned member remains listed");
 
-    assert_eq!(listed.agent_runtime_id, receipt.agent_runtime_id);
-    assert_eq!(listed.fence_token, receipt.fence_token);
+    assert_eq!(listed.agent_runtime_id, Some(receipt.agent_runtime_id));
+    assert_eq!(listed.fence_token, Some(receipt.fence_token));
     assert_eq!(listed.state, crate::roster::MemberState::Active);
     assert_eq!(
         listed.status,
@@ -28505,7 +28505,8 @@ async fn test_mob_event_router_stays_alive_across_machine_routed_spawn_tracking(
             poll_interval: Duration::from_millis(10),
             channel_capacity: 32,
         })
-        .await;
+        .await
+        .expect("subscribe mob events");
     handle
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
@@ -32469,12 +32470,15 @@ async fn test_identity_first_list_members_returns_identity_native_entries() {
 
     // Each member should have a valid agent_runtime_id and fence_token.
     for member in &members {
+        let (agent_runtime_id, fence_token) = member
+            .binding_atoms()
+            .expect("spawned list member should have MobMachine binding atoms");
         assert_eq!(
-            member.agent_runtime_id.identity, member.agent_identity,
+            agent_runtime_id.identity, member.agent_identity,
             "runtime_id identity should match agent_identity"
         );
         assert!(
-            member.fence_token.get() > 0,
+            fence_token.get() > 0,
             "fence_token should be non-zero after spawn"
         );
     }
@@ -33097,13 +33101,14 @@ async fn mob_runtime_parity_snapshot_summary(
     let representative_agent_identity = representative.map(|entry| {
         serde_json::to_string(&entry.agent_identity).unwrap_or_else(|_| "\"<agent>\"".into())
     });
-    let representative_runtime_id = representative.map(|entry| {
-        mob_modeled_normalize_formal_string(
-            &serde_json::to_string(&entry.agent_runtime_id)
-                .unwrap_or_else(|_| "\"<runtime-id>\"".into()),
-        )
+    let representative_runtime_id = representative.and_then(|entry| {
+        let (runtime_id, _) = entry.binding_atoms()?;
+        Some(mob_modeled_normalize_formal_string(
+            &serde_json::to_string(&runtime_id).unwrap_or_else(|_| "\"<runtime-id>\"".into()),
+        ))
     });
-    let representative_fence_token = representative.map(|entry| entry.fence_token.get());
+    let representative_fence_token =
+        representative.and_then(|entry| entry.binding_atoms().map(|(_, fence)| fence.get()));
     // Durable voice-intent was a separate domain kernel; it's now owned at the
     // transport layer via capability-driven realtime (Phase 5G), so the parity
     // snapshot reports an empty set for this projection.
@@ -33117,11 +33122,12 @@ async fn mob_runtime_parity_snapshot_summary(
         .collect::<Vec<_>>();
     let live_runtime_ids = active_members
         .iter()
-        .map(|entry| {
-            mob_modeled_normalize_formal_string(
-                &serde_json::to_string(&entry.agent_runtime_id)
+        .filter_map(|entry| {
+            let (runtime_id, _) = entry.binding_atoms()?;
+            Some(mob_modeled_normalize_formal_string(
+                &serde_json::to_string(&runtime_id)
                     .expect("serialize live runtime id for parity snapshot"),
-            )
+            ))
         })
         .collect::<BTreeSet<_>>();
     let live_runtime_id_values = live_runtime_ids
@@ -33133,14 +33139,15 @@ async fn mob_runtime_parity_snapshot_summary(
         .collect::<Vec<_>>();
     let runtime_fence_tokens = active_members
         .iter()
-        .map(|entry| {
-            (
+        .filter_map(|entry| {
+            let (runtime_id, fence_token) = entry.binding_atoms()?;
+            Some((
                 mob_modeled_normalize_formal_string(
-                    &serde_json::to_string(&entry.agent_runtime_id)
+                    &serde_json::to_string(&runtime_id)
                         .expect("serialize runtime id for fence parity snapshot"),
                 ),
-                entry.fence_token.get(),
-            )
+                fence_token.get(),
+            ))
         })
         .collect::<BTreeMap<_, _>>();
     let mut externally_addressable_runtime_ids = BTreeSet::new();
@@ -33153,9 +33160,10 @@ async fn mob_runtime_parity_snapshot_summary(
         if profile
             .as_ref()
             .is_some_and(|profile| profile.external_addressable)
+            && let Some((runtime_id, _)) = entry.binding_atoms()
         {
             externally_addressable_runtime_ids.insert(mob_modeled_normalize_formal_string(
-                &serde_json::to_string(&entry.agent_runtime_id)
+                &serde_json::to_string(&runtime_id)
                     .expect("serialize runtime id for external addressability parity snapshot"),
             ));
         }
@@ -34138,7 +34146,7 @@ async fn mob_runtime_parity_execute_probe(
                     poll_interval: Duration::from_millis(10),
                     channel_capacity: 32,
                 })
-                .await;
+                .await?;
             router.cancel();
             Ok(summarize_mob_runtime_success(probe, "mob_event_router"))
         }

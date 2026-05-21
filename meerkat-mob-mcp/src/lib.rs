@@ -1314,7 +1314,7 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
     ) -> Result<meerkat_mob::MobEventRouterHandle, MobError> {
-        Ok(self.handle_for(mob_id).await?.subscribe_mob_events().await)
+        self.handle_for(mob_id).await?.subscribe_mob_events().await
     }
 
     /// Subscribe to agent-level events for a specific member.

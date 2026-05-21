@@ -11,7 +11,7 @@
 //! Streams for retired members end naturally when sessions are archived.
 
 use crate::event::AttributedEvent;
-use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, Generation, MeerkatId, ProfileName};
+use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, MeerkatId, ProfileName};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 
@@ -94,11 +94,24 @@ async fn run_event_router(
             if tracked_ids.contains(&entry.agent_identity) {
                 continue;
             }
+            let Some((runtime_id, fence_token)) = entry.binding_atoms() else {
+                tracing::warn!(
+                    meerkat_id = %entry.agent_identity,
+                    "mob event router: skipping member without MobMachine runtime binding",
+                );
+                continue;
+            };
             // Only mark the member tracked once the subscription actually
             // succeeded. Otherwise a transient subscribe failure would
             // permanently exclude the member from the event stream.
-            if let Some(stream) =
-                subscribe_member(&handle, entry.agent_identity.clone(), entry.role.clone()).await
+            if let Some(stream) = subscribe_member(
+                &handle,
+                entry.agent_identity.clone(),
+                runtime_id,
+                fence_token,
+                entry.role.clone(),
+            )
+            .await
             {
                 tracked_ids.insert(entry.agent_identity.clone());
                 merged.push(stream);
@@ -120,18 +133,7 @@ async fn run_event_router(
             () = cancel.cancelled() => break,
 
             // Forward attributed events from member streams.
-            Some((meerkat_id, profile, envelope)) = merged.next() => {
-                let identity = AgentIdentity::from(meerkat_id.as_str());
-                let (runtime_id, fence) = {
-                    let roster = handle.roster().await;
-                    match roster.get_by_identity(&identity) {
-                        Some(entry) => (entry.agent_runtime_id.clone(), entry.fence_token),
-                        None => (
-                            AgentRuntimeId::new(identity, Generation::INITIAL),
-                            FenceToken::new(0),
-                        ),
-                    }
-                };
+            Some((runtime_id, fence, profile, envelope)) = merged.next() => {
                 let attributed = AttributedEvent {
                     source: runtime_id,
                     source_fence_token: fence,
@@ -164,6 +166,8 @@ async fn run_event_router(
                                 && let Some(stream) = subscribe_member(
                                     &handle,
                                     meerkat_id.clone(),
+                                    event.agent_runtime_id.clone(),
+                                    event.fence_token,
                                     event.role.clone(),
                                 )
                                 .await
@@ -188,9 +192,10 @@ async fn run_event_router(
     }
 }
 
-/// A tagged stream that yields (MeerkatId, ProfileName, EventEnvelope).
+/// A tagged stream that yields (AgentRuntimeId, FenceToken, ProfileName, EventEnvelope).
 type TaggedItem = (
-    MeerkatId,
+    AgentRuntimeId,
+    FenceToken,
     ProfileName,
     meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
 );
@@ -205,6 +210,8 @@ type TaggedStream = futures::stream::Map<
 async fn subscribe_member(
     handle: &MobHandle,
     agent_identity: MeerkatId,
+    runtime_id: AgentRuntimeId,
+    fence_token: FenceToken,
     profile: ProfileName,
 ) -> Option<TaggedStream> {
     let identity = AgentIdentity::from(agent_identity.as_str());
@@ -222,15 +229,21 @@ async fn subscribe_member(
             return None;
         }
     };
-    let mid = agent_identity;
     let prof = profile;
-    Some(stream.map(
-        Box::new(move |envelope| (mid.clone(), prof.clone(), envelope))
-            as Box<
-                dyn FnMut(
-                        meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
-                    ) -> TaggedItem
-                    + Send,
-            >,
-    ))
+    let source_runtime_id = runtime_id;
+    let source_fence_token = fence_token;
+    Some(stream.map(Box::new(move |envelope| {
+        (
+            source_runtime_id.clone(),
+            source_fence_token,
+            prof.clone(),
+            envelope,
+        )
+    })
+        as Box<
+            dyn FnMut(
+                    meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
+                ) -> TaggedItem
+                + Send,
+        >))
 }

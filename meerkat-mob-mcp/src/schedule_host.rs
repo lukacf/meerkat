@@ -427,12 +427,19 @@ fn helper_options_from_spec(
     });
     options.tool_access_policy = spec.tool_access_policy.clone();
     if let Some(snapshot) = &spec.resolved_spawn_snapshot {
+        meerkat_core::tool_scope::validate_witnessed_filter_authority(
+            &snapshot.tool_filter,
+            &snapshot.tool_filter_witnesses,
+        )
+        .map_err(|error| {
+            ScheduleDomainError::InvalidSchedule(format!(
+                "scheduled mob helper resolved spawn snapshot has invalid tool visibility authority: {error}"
+            ))
+        })?;
         options.inherited_tool_filter = Some(meerkat_core::WitnessedToolFilter::new(
             snapshot.tool_filter.clone(),
             snapshot.tool_filter_witnesses.clone(),
         ));
-        options.model_override = Some(snapshot.model.clone());
-        options.provider_params_override = snapshot.provider_params.clone();
     }
     Ok(options)
 }
@@ -890,8 +897,6 @@ mod tests {
                 resolved_spawn_snapshot: Some(ResolvedSpawnSnapshot {
                     tool_filter: filter.clone(),
                     tool_filter_witnesses: filter_witnesses.clone(),
-                    model: "claude-snapshot".to_string(),
-                    provider_params: Some(serde_json::json!({"thinking_budget": 1024})),
                 }),
                 ..HelperOptionsSpec::default()
             },
@@ -923,14 +928,38 @@ mod tests {
                 filter_witnesses
             ))
         );
-        assert_eq!(options.model_override.as_deref(), Some("claude-snapshot"));
-        assert_eq!(
-            options.provider_params_override,
-            Some(serde_json::json!({"thinking_budget": 1024}))
-        );
         assert!(
             options.override_profile.is_none(),
             "schedule snapshot should not fabricate a replacement role profile"
+        );
+    }
+
+    #[test]
+    fn helper_options_reject_invalid_resolved_snapshot_authority() {
+        let spec = HelperOptionsSpec {
+            resolved_spawn_snapshot: Some(ResolvedSpawnSnapshot {
+                tool_filter: ToolFilter::Allow(["send", "read_file"].into_iter().collect()),
+                tool_filter_witnesses: [(
+                    "send".to_string(),
+                    meerkat_core::ToolVisibilityWitness {
+                        stable_owner_key: Some("test-owner:send".to_string()),
+                        last_seen_provenance: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+            ..HelperOptionsSpec::default()
+        };
+
+        let error = helper_options_from_spec(&spec)
+            .expect_err("invalid snapshot witness set should fail closed");
+
+        assert!(
+            matches!(&error, ScheduleDomainError::InvalidSchedule(message)
+                if message.contains("invalid tool visibility authority")
+                    && message.contains("read_file")),
+            "unexpected error: {error:?}"
         );
     }
 

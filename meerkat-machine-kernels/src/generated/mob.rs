@@ -2367,6 +2367,14 @@ pub mod inputs {
         pub replacing: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeSpawnProfile {
+        pub agent_identity: AgentIdentity,
+        pub profile_name: String,
+        pub model: String,
+        pub provider_params_digest: Option<String>,
+        pub external_addressable: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnsureMember {
         pub agent_identity: AgentIdentity,
     }
@@ -2635,6 +2643,7 @@ pub enum Input {
     CancelFlow(inputs::CancelFlow),
     FlowStatus(inputs::FlowStatus),
     Spawn(inputs::Spawn),
+    AuthorizeSpawnProfile(inputs::AuthorizeSpawnProfile),
     EnsureMember(inputs::EnsureMember),
     Reconcile(inputs::Reconcile),
     Retire(inputs::Retire),
@@ -2715,6 +2724,7 @@ impl Input {
             Self::CancelFlow(_) => InputKind::CancelFlow,
             Self::FlowStatus(_) => InputKind::FlowStatus,
             Self::Spawn(_) => InputKind::Spawn,
+            Self::AuthorizeSpawnProfile(_) => InputKind::AuthorizeSpawnProfile,
             Self::EnsureMember(_) => InputKind::EnsureMember,
             Self::Reconcile(_) => InputKind::Reconcile,
             Self::Retire(_) => InputKind::Retire,
@@ -2804,6 +2814,7 @@ pub enum InputKind {
     CancelFlow,
     FlowStatus,
     Spawn,
+    AuthorizeSpawnProfile,
     EnsureMember,
     Reconcile,
     Retire,
@@ -3202,6 +3213,14 @@ pub mod effects {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SpawnProfileAuthorized {
+        pub agent_identity: AgentIdentity,
+        pub profile_name: String,
+        pub model: String,
+        pub provider_params_digest: Option<String>,
+        pub external_addressable: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestRuntimeIngress {
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
@@ -3443,6 +3462,7 @@ pub mod effects {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Effect {
     RequestRuntimeBinding(effects::RequestRuntimeBinding),
+    SpawnProfileAuthorized(effects::SpawnProfileAuthorized),
     RequestRuntimeIngress(effects::RequestRuntimeIngress),
     SubmitWorkRejected(effects::SubmitWorkRejected),
     CancelAllWorkRejected(effects::CancelAllWorkRejected),
@@ -3494,6 +3514,7 @@ pub enum Effect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
     RequestRuntimeBinding,
+    SpawnProfileAuthorized,
     RequestRuntimeIngress,
     SubmitWorkRejected,
     CancelAllWorkRejected,
@@ -3548,6 +3569,7 @@ pub enum EffectKind {
 pub enum TransitionId {
     SpawnRunningFresh,
     SpawnRunningReplacing,
+    AuthorizeSpawnProfileRunning,
     EnsureMemberRunningExisting,
     EnsureMemberRunningMissing,
     RecoverRosterMemberRunning,

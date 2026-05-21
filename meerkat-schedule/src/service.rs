@@ -970,8 +970,6 @@ mod tests {
                 "shell".to_string(),
             ])),
             tool_filter_witnesses: Default::default(),
-            model: "claude-sonnet-4-6".into(),
-            provider_params: None,
         }
     }
 

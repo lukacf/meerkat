@@ -27,6 +27,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SpawnRunningReplacing`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `AuthorizeSpawnProfileRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
 - `EnsureMemberRunningExisting`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
@@ -903,6 +906,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Effects
 - `RequestRuntimeBinding`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `SpawnProfileAuthorized`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
 - `RequestRuntimeIngress`

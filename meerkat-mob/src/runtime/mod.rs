@@ -85,6 +85,7 @@ pub mod recovery;
 mod roster_authority;
 mod session_service;
 mod spawn_policy;
+mod spawn_profile_authority;
 pub mod state;
 mod supervisor;
 mod supervisor_bridge;
@@ -135,6 +136,7 @@ pub use recovery::RestoreIncompatible;
 use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::MobSessionService;
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
+use spawn_profile_authority::authorize_spawn_profile_material;
 #[cfg(test)]
 pub(crate) use state::MobDslT2Snapshot;
 #[cfg(test)]

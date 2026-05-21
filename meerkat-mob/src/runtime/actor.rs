@@ -5737,8 +5737,6 @@ impl MobActor {
             shell_env,
             inherited_tool_filter,
             override_profile,
-            model_override,
-            provider_params_override,
             auth_binding,
             external_tools: per_spawn_external_tools,
             system_prompt_override,
@@ -5814,12 +5812,13 @@ impl MobActor {
             if inherited_tool_filter.is_some() && effective_profile_override.is_none() {
                 build::open_profile_tool_categories_for_inherited_filter(&mut profile);
             }
-            if let Some(model) = model_override {
-                profile.model = model;
-            }
-            if provider_params_override.is_some() {
-                profile.provider_params = provider_params_override;
-            }
+            authorize_spawn_profile_material(
+                self.dsl_authority.state(),
+                &agent_identity,
+                &profile_name,
+                &profile,
+                "enqueue_spawn_profile_authority",
+            )?;
 
             let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
             let profile_external_addressable = profile.external_addressable;
@@ -6500,8 +6499,6 @@ impl MobActor {
             shell_env,
             inherited_tool_filter,
             override_profile,
-            model_override,
-            provider_params_override,
             auth_binding,
             external_tools: per_spawn_external_tools,
             system_prompt_override,
@@ -6544,12 +6541,13 @@ impl MobActor {
         if inherited_tool_filter.is_some() && override_profile.is_none() {
             build::open_profile_tool_categories_for_inherited_filter(&mut profile);
         }
-        if let Some(model) = model_override {
-            profile.model = model;
-        }
-        if provider_params_override.is_some() {
-            profile.provider_params = provider_params_override;
-        }
+        authorize_spawn_profile_material(
+            self.dsl_authority.state(),
+            agent_identity,
+            &profile_name,
+            &profile,
+            "policy_spawn_profile_authority",
+        )?;
         self.preview_policy_spawn_submit_work_admission(
             &requested_identity,
             profile.external_addressable,
@@ -10275,8 +10273,6 @@ impl MobActor {
             shell_env: replacement_shell_env,
             inherited_tool_filter: replacement_inherited_tool_filter,
             override_profile: replacement_profile_override,
-            model_override: replacement_model_override,
-            provider_params_override: replacement_provider_params_override,
             auth_binding: replacement_auth_binding,
             external_tools: replacement_external_tools,
             system_prompt_override: replacement_system_prompt_override,
@@ -10395,12 +10391,14 @@ impl MobActor {
         if replacement_inherited_tool_filter.is_some() && replacement_profile_override.is_none() {
             build::open_profile_tool_categories_for_inherited_filter(&mut profile);
         }
-        if let Some(model) = replacement_model_override {
-            profile.model = model;
-        }
-        if replacement_provider_params_override.is_some() {
-            profile.provider_params = replacement_provider_params_override;
-        }
+        authorize_spawn_profile_material(
+            self.dsl_authority.state(),
+            &agent_identity,
+            &snapshot.profile_name,
+            &profile,
+            "respawn_profile_authority",
+        )
+        .map_err(MobRespawnError::from)?;
         let external_tools =
             self.external_tools_for_profile(&profile, replacement_external_tools)?;
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {

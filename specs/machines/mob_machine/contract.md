@@ -128,6 +128,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CancelFlow`(run_id: RunId)
 - `FlowStatus`
 - `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, bridge_session_id: SessionId, replacing: Option<SessionId>)
+- `AuthorizeSpawnProfile`(agent_identity: AgentIdentity, profile_name: String, model: String, provider_params_digest: Option<String>, external_addressable: Bool)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: SessionId)
@@ -246,6 +247,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Effects
 - `RequestRuntimeBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId)
+- `SpawnProfileAuthorized`(agent_identity: AgentIdentity, profile_name: String, model: String, provider_params_digest: Option<String>, external_addressable: Bool)
 - `RequestRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
 - `SubmitWorkRejected`(agent_runtime_id: AgentRuntimeId, origin: WorkOrigin, reason: SubmitWorkRejectReasonKind, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>)
 - `CancelAllWorkRejected`(agent_runtime_id: AgentRuntimeId, reason: CancelAllWorkRejectReasonKind, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>)
@@ -319,6 +321,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `replacing_present`
   - `replacing_matches_current`
 - Emits: `RequestRuntimeBinding`, `AppendLifecycleJournal`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
+- To: `Running`
+
+### `AuthorizeSpawnProfileRunning`
+- From: `Running`
+- On: `AuthorizeSpawnProfile`(agent_identity, profile_name, model, provider_params_digest, external_addressable)
+- Guards:
+  - `coordinator_bound`
+- Emits: `SpawnProfileAuthorized`
 - To: `Running`
 
 ### `EnsureMemberRunningExisting`

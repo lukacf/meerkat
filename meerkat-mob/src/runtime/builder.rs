@@ -1914,12 +1914,13 @@ impl MobBuilder {
                 {
                     build::open_profile_tool_categories_for_inherited_filter(&mut profile);
                 }
-                if let Some(model) = restore_spec.model_override.clone() {
-                    profile.model = model;
-                }
-                if restore_spec.provider_params_override.is_some() {
-                    profile.provider_params = restore_spec.provider_params_override.clone();
-                }
+                authorize_spawn_profile_material(
+                    dsl_authority.state(),
+                    &entry.agent_identity,
+                    &entry.role,
+                    &profile,
+                    "resume_existing_member_profile_authority",
+                )?;
                 let profile = &profile;
                 let default_ext = default_external_tools_provider.as_ref().and_then(|p| p());
                 let resumed_config =
@@ -2052,12 +2053,13 @@ impl MobBuilder {
             if restore_spec.inherited_tool_filter.is_some() && restore_profile_override.is_none() {
                 build::open_profile_tool_categories_for_inherited_filter(&mut profile);
             }
-            if let Some(model) = restore_spec.model_override.clone() {
-                profile.model = model;
-            }
-            if restore_spec.provider_params_override.is_some() {
-                profile.provider_params = restore_spec.provider_params_override.clone();
-            }
+            authorize_spawn_profile_material(
+                dsl_authority.state(),
+                &entry.agent_identity,
+                &entry.role,
+                &profile,
+                "resume_recreate_member_profile_authority",
+            )?;
             let default_ext_fresh = default_external_tools_provider.as_ref().and_then(|p| p());
             let mut config = build::build_agent_config(build::BuildAgentConfigParams {
                 mob_id: &definition.id,

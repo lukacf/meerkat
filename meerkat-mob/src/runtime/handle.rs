@@ -660,10 +660,6 @@ pub struct HelperOptions {
     pub inherited_tool_filter: Option<meerkat_core::WitnessedToolFilter>,
     /// Override profile resolved from scheduled or agent-owned tooling resolution.
     pub override_profile: Option<crate::profile::Profile>,
-    /// Model override resolved from scheduled helper tooling.
-    pub model_override: Option<String>,
-    /// Provider params override resolved from scheduled helper tooling.
-    pub provider_params_override: Option<serde_json::Value>,
 }
 
 /// Result from a helper spawn-and-wait operation.
@@ -1043,10 +1039,6 @@ pub struct SpawnMemberSpec {
     /// tooling to specify a different model/skills/tools via inline or
     /// realm-scoped profiles.
     pub override_profile: Option<crate::profile::Profile>,
-    /// Model override resolved outside the mob runtime while keeping the selected role profile.
-    pub model_override: Option<String>,
-    /// Provider params override resolved outside the mob runtime while keeping the selected role profile.
-    pub provider_params_override: Option<serde_json::Value>,
     /// Per-member auth binding. When set, this member's agent builds with
     /// `AgentBuildConfig.auth_binding = Some(this)`, scoping credential
     /// resolution to the named realm + binding. `None` means the caller did not
@@ -1080,8 +1072,6 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field("shell_env", &self.shell_env)
             .field("inherited_tool_filter", &self.inherited_tool_filter)
             .field("override_profile", &self.override_profile)
-            .field("model_override", &self.model_override)
-            .field("provider_params_override", &self.provider_params_override)
             .field("auth_binding", &self.auth_binding)
             .field("external_tools", &self.external_tools.is_some())
             .field("system_prompt_override", &self.system_prompt_override)
@@ -1109,8 +1099,6 @@ impl SpawnMemberSpec {
             shell_env: None,
             inherited_tool_filter: None,
             override_profile: None,
-            model_override: None,
-            provider_params_override: None,
             auth_binding: None,
             external_tools: None,
             system_prompt_override: None,
@@ -4326,8 +4314,6 @@ impl MobHandle {
         spec.auth_binding = options.auth_binding;
         spec.inherited_tool_filter = options.inherited_tool_filter;
         spec.override_profile = options.override_profile;
-        spec.model_override = options.model_override;
-        spec.provider_params_override = options.provider_params_override;
         spec.auto_wire_parent = true;
 
         self.spawn_spec_internal_with_source(spec, SpawnSource::HelperSpawn)
@@ -4381,8 +4367,6 @@ impl MobHandle {
         spec.auth_binding = options.auth_binding;
         spec.inherited_tool_filter = options.inherited_tool_filter;
         spec.override_profile = options.override_profile;
-        spec.model_override = options.model_override;
-        spec.provider_params_override = options.provider_params_override;
         spec.auto_wire_parent = true;
         spec.launch_mode = crate::launch::MemberLaunchMode::Fork {
             source_member_id,

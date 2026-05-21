@@ -1606,6 +1606,40 @@ mod tests {
     }
 
     #[test]
+    fn spawn_profile_material_emits_typed_authorization() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("profile-worker");
+
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: identity.clone(),
+                profile_name: "worker".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                provider_params_digest: Some("provider-digest".to_string()),
+                external_addressable: true,
+            },
+        )
+        .expect("running MobMachine should authorize effective spawn profile material");
+
+        assert!(transition.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                MobMachineEffect::SpawnProfileAuthorized {
+                    agent_identity,
+                    profile_name,
+                    model,
+                    provider_params_digest: Some(digest),
+                    external_addressable: true,
+                } if *agent_identity == identity
+                    && profile_name == "worker"
+                    && model == "claude-sonnet-4-5"
+                    && digest == "provider-digest"
+            )
+        }));
+    }
+
+    #[test]
     fn submit_work_rejects_retiring_runtime() {
         let mut authority = MobMachineAuthority::new();
         let identity = AgentIdentity::from("worker");

@@ -357,6 +357,7 @@ macro_rules! mob_catalog_machine_dsl {
             CancelFlow { run_id: RunId },
             FlowStatus,
             Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, bridge_session_id: SessionId, replacing: Option<SessionId> },
+            AuthorizeSpawnProfile { agent_identity: AgentIdentity, profile_name: String, model: String, provider_params_digest: Option<String>, external_addressable: bool },
             EnsureMember { agent_identity: AgentIdentity },
             Reconcile { desired: Set<AgentIdentity>, retire_stale: bool },
             Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: SessionId },
@@ -486,6 +487,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         effect MobMachineEffect {
             RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
+            SpawnProfileAuthorized { agent_identity: AgentIdentity, profile_name: String, model: String, provider_params_digest: Option<String>, external_addressable: bool },
             RequestRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
             SubmitWorkRejected { agent_runtime_id: AgentRuntimeId, origin: Enum<WorkOrigin>, reason: Enum<SubmitWorkRejectReasonKind>, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken> },
             CancelAllWorkRejected { agent_runtime_id: AgentRuntimeId, reason: Enum<CancelAllWorkRejectReasonKind>, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken> },
@@ -563,6 +565,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
+        disposition SpawnProfileAuthorized => local,
         disposition RequestRuntimeIngress => routed [MeerkatMachine],
         disposition SubmitWorkRejected => local,
         disposition CancelAllWorkRejected => local,
@@ -738,6 +741,21 @@ macro_rules! mob_catalog_machine_dsl {
             }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(replacing.get("value")), new_session_id: Some(bridge_session_id) }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+        }
+
+        transition AuthorizeSpawnProfileRunning {
+            on input AuthorizeSpawnProfile { agent_identity, profile_name, model, provider_params_digest, external_addressable }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "coordinator_bound" { self.coordinator_bound == true }
+            update {}
+            to Running
+            emit SpawnProfileAuthorized {
+                agent_identity: agent_identity,
+                profile_name: profile_name,
+                model: model,
+                provider_params_digest: provider_params_digest,
+                external_addressable: external_addressable
+            }
         }
 
         transition EnsureMemberRunningExisting {

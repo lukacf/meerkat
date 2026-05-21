@@ -1508,11 +1508,6 @@ pub struct ResolvedSpawnSnapshot {
     /// Witnesses for every named tool in `tool_filter`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tool_filter_witnesses: BTreeMap<String, ToolVisibilityWitness>,
-    /// The model to use for the child agent.
-    pub model: String,
-    /// Optional provider-specific parameters for the child agent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1536,7 +1531,7 @@ pub struct HelperOptionsSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(skip))]
     pub tooling: Option<ScheduleSpawnTooling>,
-    /// Pre-resolved tool/model snapshot, populated when `tooling` is consumed.
+    /// Pre-resolved tool-visibility snapshot, populated when `tooling` is consumed.
     ///
     /// At execution time, the schedule driver reads this field directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2632,8 +2627,6 @@ mod tests {
                 "read_file".to_string(),
             ])),
             tool_filter_witnesses: Default::default(),
-            model: "claude-opus-4-6".into(),
-            provider_params: Some(serde_json::json!({"thinking_budget": 8192})),
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let parsed: ResolvedSpawnSnapshot = serde_json::from_str(&json).unwrap();
@@ -2647,8 +2640,6 @@ mod tests {
                 "dangerous_tool".to_string(),
             ])),
             tool_filter_witnesses: Default::default(),
-            model: "gpt-5.4".into(),
-            provider_params: None,
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let parsed: ResolvedSpawnSnapshot = serde_json::from_str(&json).unwrap();
@@ -2660,8 +2651,6 @@ mod tests {
         let snapshot = ResolvedSpawnSnapshot {
             tool_filter: meerkat_core::tool_scope::ToolFilter::All,
             tool_filter_witnesses: Default::default(),
-            model: "gemini-3.1-pro-preview".into(),
-            provider_params: None,
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let parsed: ResolvedSpawnSnapshot = serde_json::from_str(&json).unwrap();
@@ -2695,8 +2684,6 @@ mod tests {
                     "shell".to_string(),
                 ])),
                 tool_filter_witnesses: Default::default(),
-                model: "claude-sonnet-4-6".into(),
-                provider_params: None,
             }),
             ..Default::default()
         };
@@ -2752,8 +2739,6 @@ mod tests {
                     "shell".to_string(),
                 ])),
                 tool_filter_witnesses: Default::default(),
-                model: "claude-sonnet-4-6".into(),
-                provider_params: None,
             }),
             ..Default::default()
         };

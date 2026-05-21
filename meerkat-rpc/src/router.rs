@@ -452,19 +452,19 @@ impl NotificationSink {
         let _ = self.tx.send(notification).await;
     }
 
-    /// Emit an explicit terminal notification for a standalone session stream.
-    pub async fn emit_session_stream_end(
+    /// Emit a machine-authorized terminal notification for a session stream.
+    async fn emit_session_stream_end(
         &self,
         stream_id: &Uuid,
         session_id: &SessionId,
-        outcome: &str,
+        outcome: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason,
         detail: Option<&str>,
     ) {
         let mut params = serde_json::json!({
             "stream_id": stream_id.to_string(),
             "session_id": session_id.to_string(),
             "ended": true,
-            "outcome": outcome,
+            "outcome": rpc_event_stream_terminal_reason_wire(outcome),
         });
         if let Some(detail) = detail {
             params["error"] = serde_json::json!({
@@ -501,11 +501,16 @@ impl NotificationSink {
     }
 
     #[cfg(feature = "mob")]
-    async fn emit_mob_stream_end(&self, stream_id: &Uuid, outcome: &str, detail: Option<&str>) {
+    async fn emit_mob_stream_end(
+        &self,
+        stream_id: &Uuid,
+        outcome: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason,
+        detail: Option<&str>,
+    ) {
         let mut params = serde_json::json!({
             "stream_id": stream_id.to_string(),
             "ended": true,
-            "outcome": outcome,
+            "outcome": rpc_event_stream_terminal_reason_wire(outcome),
         });
         if let Some(detail) = detail {
             params["error"] = serde_json::json!({
@@ -760,7 +765,7 @@ async fn emit_authorized_session_stream_terminal(
         .emit_session_stream_end(
             &stream_id,
             &terminal_session_id,
-            rpc_event_stream_terminal_reason_wire(terminal.reason),
+            terminal.reason,
             terminal.detail.as_deref(),
         )
         .await;
@@ -913,11 +918,7 @@ async fn emit_authorized_mob_stream_terminal(
         }
     };
     notification_sink
-        .emit_mob_stream_end(
-            &stream_id,
-            rpc_event_stream_terminal_reason_wire(terminal.reason),
-            terminal.detail.as_deref(),
-        )
+        .emit_mob_stream_end(&stream_id, terminal.reason, terminal.detail.as_deref())
         .await;
 }
 
@@ -2874,7 +2875,7 @@ impl MethodRouter {
                     .emit_session_stream_end(
                         &stream_id,
                         &terminal_session_id,
-                        rpc_event_stream_terminal_reason_wire(terminal.reason),
+                        terminal.reason,
                         terminal.detail.as_deref(),
                     )
                     .await;
@@ -3167,11 +3168,7 @@ impl MethodRouter {
         if let Some(terminal) = close_authority.terminal.as_ref() {
             if !close_authority.already_closed {
                 self.notification_sink
-                    .emit_mob_stream_end(
-                        &stream_id,
-                        rpc_event_stream_terminal_reason_wire(terminal.reason),
-                        terminal.detail.as_deref(),
-                    )
+                    .emit_mob_stream_end(&stream_id, terminal.reason, terminal.detail.as_deref())
                     .await;
             }
         }
@@ -6898,7 +6895,7 @@ args = [{}]
                 sink.emit_session_stream_end(
                     &stream_id,
                     &session_id,
-                    "terminal_error",
+                    meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
                     Some("transport stream notification queue overflow"),
                 )
                 .await;
@@ -7013,7 +7010,7 @@ args = [{}]
             async move {
                 sink.emit_mob_stream_end(
                     &stream_id,
-                    "terminal_error",
+                    meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
                     Some("transport stream notification queue overflow"),
                 )
                 .await;

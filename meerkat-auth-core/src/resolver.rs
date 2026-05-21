@@ -314,11 +314,13 @@ fn credential_phase_from_snapshot(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn restore_marked_token_lifecycle_if_absent(
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+async fn restore_marked_token_lifecycle_if_absent(
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
+    store: &dyn TokenStore,
     binding: &ValidatedBinding,
-    tokens: &PersistedTokens,
+    expected_mode: PersistedAuthMode,
     lease_key: &meerkat_core::handles::LeaseKey,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), ProviderAuthError> {
     let snapshot = auth_lease.snapshot(lease_key);
     if snapshot.phase.is_some()
@@ -328,13 +330,20 @@ fn restore_marked_token_lifecycle_if_absent(
     {
         return Ok(());
     }
-    meerkat_core::restore_marked_token_lifecycle(auth_lease, binding.auth_binding_ref(), tokens)
-        .map(|_| ())
-        .map_err(|error| {
-            ProviderAuthError::SourceResolutionFailed(format!(
-                "AuthMachine lifecycle restore failed: {error}"
-            ))
-        })
+    meerkat_core::rehydrate_marked_tokens_for_status(
+        store,
+        auth_lease.as_ref(),
+        binding.auth_binding_ref(),
+        expected_mode,
+        now,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| {
+        ProviderAuthError::SourceResolutionFailed(format!(
+            "AuthMachine lifecycle restore failed: {error}"
+        ))
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -374,7 +383,15 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         .as_ref()
         .ok_or_else(lease_absent_error)?;
     let now = (env.now)();
-    restore_marked_token_lifecycle_if_absent(auth_lease.as_ref(), binding, &tokens, &lease_key)?;
+    restore_marked_token_lifecycle_if_absent(
+        auth_lease,
+        store.as_ref(),
+        binding,
+        expected_mode,
+        &lease_key,
+        now,
+    )
+    .await?;
     observe_auth_lease_freshness_for_now(auth_lease.as_ref(), &lease_key, now)?;
     let restore_snapshot = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
     let snapshot = restore_snapshot.snapshot().clone();
@@ -1219,16 +1236,33 @@ mod tests {
         credential_published_at_millis: Option<u64>,
     ) -> PersistedTokens {
         let mut marked = tokens.clone();
-        marked.metadata =
-            meerkat_core::generated::auth_lease_durable_lifecycle_marker::metadata_with_marker(
-                &tokens.metadata,
-                meerkat_core::generated::auth_lease_durable_lifecycle_marker::DurableAuthLifecycleMarker {
-                    phase: AuthLeasePhase::Valid,
-                    expires_at: meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
-                    generation,
-                    credential_published_at_millis: credential_published_at_millis.unwrap_or(1),
-                },
-            );
+        let marker = serde_json::json!({
+            "published": true,
+            "version": 3,
+            "authority": "auth_machine",
+            "protocol": "auth_lease_lifecycle_publication",
+            "phase": "valid",
+            "expires_at": meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
+            "generation": generation,
+            "credential_published_at_millis": credential_published_at_millis.unwrap_or(1),
+        });
+        match &mut marked.metadata {
+            serde_json::Value::Object(map) => {
+                map.insert("meerkat_auth_lifecycle".to_string(), marker);
+            }
+            serde_json::Value::Null => {
+                let mut metadata = serde_json::Map::new();
+                metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
+                marked.metadata = serde_json::Value::Object(metadata);
+            }
+            _ => {
+                let previous = std::mem::replace(&mut marked.metadata, serde_json::Value::Null);
+                let mut metadata = serde_json::Map::new();
+                metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
+                metadata.insert("meerkat_previous_metadata".to_string(), previous);
+                marked.metadata = serde_json::Value::Object(metadata);
+            }
+        }
         marked
     }
 

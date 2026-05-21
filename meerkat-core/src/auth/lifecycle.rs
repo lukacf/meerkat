@@ -339,35 +339,21 @@ pub enum AuthStatusRehydrateError {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn restore_marked_token_lifecycle(
+pub(crate) fn restore_marked_token_lifecycle(
     auth_lease: &dyn AuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
 ) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
-    let Some(publication) = tokens_lifecycle_publication_with_explicit_expiry(tokens) else {
+    let Some(publication) = durable_marker::restore_publication_from_metadata(&tokens.metadata)
+    else {
         return Ok(None);
     };
-    if publication.expires_at != persisted_token_expires_at_epoch_secs(tokens) {
-        return Ok(None);
-    }
-    let Some(phase) = publication.phase else {
-        return Ok(None);
-    };
-    let Some(generation) = publication.generation else {
-        return Ok(None);
-    };
-    let Some(credential_published_at_millis) = publication.credential_published_at_millis else {
+    if publication.expires_at() != persisted_token_expires_at_epoch_secs(tokens) {
         return Ok(None);
     };
     let lease_key = LeaseKey::from_auth_binding(auth_binding);
     auth_lease
-        .restore_published_credential_lifecycle(
-            &lease_key,
-            phase,
-            publication.expires_at,
-            generation,
-            credential_published_at_millis,
-        )
+        .restore_published_credential_lifecycle(&lease_key, &publication)
         .map_err(AuthStatusRehydrateError::LifecycleRestore)?;
     Ok(Some(tokens.clone()))
 }

@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use meerkat_core::AuthBindingRef;
 use meerkat_core::RefreshFailureObservation;
 use meerkat_core::handles::{
-    AuthLeaseHandle, AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot,
-    AuthLeaseTransition, DslTransitionError, LeaseKey,
+    AuthLeaseDurableRestorePublication, AuthLeaseHandle, AuthLeasePhase, AuthLeaseRestoreSnapshot,
+    AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError, LeaseKey,
 };
 use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
 
@@ -1394,10 +1394,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
     fn restore_published_credential_lifecycle(
         &self,
         lease_key: &LeaseKey,
-        phase: AuthLeasePhase,
-        expires_at: u64,
-        generation: u64,
-        credential_published_at_millis: u64,
+        publication: &AuthLeaseDurableRestorePublication,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
         let context = "AuthLeaseHandle::restore_published_credential_lifecycle";
         let mut guard = self
@@ -1413,13 +1410,13 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             &mut guard,
             lease_key,
             restore_input_from_lifecycle(
-                restore_phase_to_dsl(phase),
-                (expires_at != u64::MAX).then_some(expires_at),
+                restore_phase_to_dsl(publication.phase()),
+                (publication.expires_at() != u64::MAX).then_some(publication.expires_at()),
                 None,
                 0,
-                phase != AuthLeasePhase::Released,
-                generation,
-                Some(credential_published_at_millis),
+                publication.phase() != AuthLeasePhase::Released,
+                publication.generation(),
+                Some(publication.credential_published_at_millis()),
             ),
             context,
         )?;
@@ -1890,8 +1887,52 @@ mod tests {
         assert_eq!(second.snapshot(&key).phase, None);
     }
 
-    #[test]
-    fn restore_published_credential_lifecycle_uses_generated_authority() {
+    #[tokio::test]
+    async fn restore_published_credential_lifecycle_uses_generated_authority() {
+        struct SingleTokenStore {
+            key: meerkat_core::auth::TokenKey,
+            tokens: meerkat_core::auth::PersistedTokens,
+        }
+
+        #[async_trait::async_trait]
+        impl meerkat_core::auth::TokenStore for SingleTokenStore {
+            async fn load(
+                &self,
+                key: &meerkat_core::auth::TokenKey,
+            ) -> Result<
+                Option<meerkat_core::auth::PersistedTokens>,
+                meerkat_core::auth::TokenStoreError,
+            > {
+                Ok((key == &self.key).then(|| self.tokens.clone()))
+            }
+
+            async fn save(
+                &self,
+                _key: &meerkat_core::auth::TokenKey,
+                _tokens: &meerkat_core::auth::PersistedTokens,
+            ) -> Result<(), meerkat_core::auth::TokenStoreError> {
+                Ok(())
+            }
+
+            async fn clear(
+                &self,
+                _key: &meerkat_core::auth::TokenKey,
+            ) -> Result<(), meerkat_core::auth::TokenStoreError> {
+                Ok(())
+            }
+
+            async fn list(
+                &self,
+            ) -> Result<Vec<meerkat_core::auth::TokenKey>, meerkat_core::auth::TokenStoreError>
+            {
+                Ok(vec![self.key.clone()])
+            }
+
+            fn backend_name(&self) -> &'static str {
+                "single-token-test"
+            }
+        }
+
         let source = RuntimeAuthLeaseHandle::new();
         let restored = RuntimeAuthLeaseHandle::new();
         let key = lease("dev", "shared");
@@ -1899,16 +1940,51 @@ mod tests {
         let published_at = transition
             .credential_published_at_millis()
             .expect("acquire transition carries publication time");
+        let key_for_tokens = meerkat_core::auth::TokenKey::new_with_profile(
+            key.realm.clone(),
+            key.binding.clone(),
+            key.profile.clone(),
+        );
+        let tokens = meerkat_core::auth::PersistedTokens {
+            auth_mode: meerkat_core::auth::PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("access-token".into()),
+            refresh_token: Some("refresh-token".into()),
+            id_token: None,
+            expires_at: Some(
+                chrono::DateTime::from_timestamp(transition.expires_at() as i64, 0)
+                    .expect("fixture expiry is representable"),
+            ),
+            last_refresh: None,
+            scopes: Vec::new(),
+            account_id: None,
+            metadata: serde_json::Value::Null,
+        };
+        let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            &key_for_tokens,
+            &tokens,
+            &transition,
+        )
+        .expect("generated transition marks durable publication");
 
-        restored
-            .restore_published_credential_lifecycle(
-                &key,
-                transition.phase(),
-                transition.expires_at(),
-                transition.generation(),
-                published_at,
-            )
-            .unwrap();
+        let auth_binding = AuthBindingRef {
+            realm: key.realm.clone(),
+            binding: key.binding.clone(),
+            profile: key.profile.clone(),
+        };
+        let store = SingleTokenStore {
+            key: key_for_tokens,
+            tokens: marked,
+        };
+        meerkat_core::rehydrate_marked_tokens_for_status(
+            &store,
+            &restored,
+            &auth_binding,
+            meerkat_core::auth::PersistedAuthMode::ChatgptOauth,
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("generated marker restores through AuthMachine")
+        .expect("marker is present");
 
         let snapshot = restored.snapshot(&key);
         assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));

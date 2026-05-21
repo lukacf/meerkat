@@ -167,18 +167,6 @@ pub enum ManagedStoreLifecycle {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn managed_store_lifecycle_from_phase(phase: AuthStatusPhase) -> ManagedStoreLifecycle {
-    match phase {
-        AuthStatusPhase::Valid => ManagedStoreLifecycle::Authorized,
-        AuthStatusPhase::Expiring
-        | AuthStatusPhase::Expired
-        | AuthStatusPhase::ReauthRequired
-        | AuthStatusPhase::RefreshFailed
-        | AuthStatusPhase::Unknown => ManagedStoreLifecycle::RefreshRequired,
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OAuthLifecycleMarkerRelation {
     Matches,
@@ -353,90 +341,56 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         return Err(stale_credential_error());
     }
 
+    let auth_lease = env
+        .auth_lease_handle
+        .as_ref()
+        .ok_or_else(lease_absent_error)?;
     let now = (env.now)();
-    let token_phase = AuthStatusPhase::from_lease_expires_at(
-        now,
-        Some(meerkat_core::persisted_token_expires_at_epoch_secs(&tokens)),
-    );
-    let lifecycle = managed_store_lifecycle_from_phase(token_phase);
-
-    if let Some(auth_lease) = env.auth_lease_handle.as_ref() {
-        observe_auth_lease_freshness_for_now(auth_lease.as_ref(), &lease_key, now)?;
-        let restore_snapshot = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
-        let snapshot = restore_snapshot.snapshot().clone();
-        if snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired) {
-            return Err(user_reauth_required_error());
-        }
-        let phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
-        if is_oauth_login
-            && matches!(
-                phase,
-                AuthStatusPhase::Valid | AuthStatusPhase::Expiring | AuthStatusPhase::Expired
-            )
-        {
-            match oauth_lifecycle_marker_relation(&tokens, &snapshot) {
-                OAuthLifecycleMarkerRelation::Matches => {}
-                OAuthLifecycleMarkerRelation::TokenNewer
-                | OAuthLifecycleMarkerRelation::TokenStale
-                | OAuthLifecycleMarkerRelation::Invalid => {
-                    return Err(stale_credential_error());
-                }
+    observe_auth_lease_freshness_for_now(auth_lease.as_ref(), &lease_key, now)?;
+    let restore_snapshot = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
+    let snapshot = restore_snapshot.snapshot().clone();
+    if snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired) {
+        return Err(user_reauth_required_error());
+    }
+    let phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
+    if is_oauth_login
+        && matches!(
+            phase,
+            AuthStatusPhase::Valid | AuthStatusPhase::Expiring | AuthStatusPhase::Expired
+        )
+    {
+        match oauth_lifecycle_marker_relation(&tokens, &snapshot) {
+            OAuthLifecycleMarkerRelation::Matches => {}
+            OAuthLifecycleMarkerRelation::TokenNewer
+            | OAuthLifecycleMarkerRelation::TokenStale
+            | OAuthLifecycleMarkerRelation::Invalid => {
+                return Err(stale_credential_error());
             }
         }
-        if !is_oauth_login
-            && phase == AuthStatusPhase::Unknown
-            && snapshot.generation == 0
-            && snapshot.phase.is_none()
-            && !snapshot.credential_present
-        {
-            return Ok(managed_store_tokens(
-                store,
-                key,
-                tokens,
-                Some(snapshot),
-                Some(restore_snapshot),
-                lifecycle,
-                lifecycle_guard,
-            ));
-        }
-
-        return match phase {
-            AuthStatusPhase::Valid => Ok(managed_store_tokens(
-                store,
-                key,
-                tokens,
-                Some(snapshot),
-                Some(restore_snapshot),
-                managed_store_lifecycle_from_phase(phase),
-                lifecycle_guard,
-            )),
-            AuthStatusPhase::Expiring | AuthStatusPhase::Expired => Ok(managed_store_tokens(
-                store,
-                key,
-                tokens,
-                Some(snapshot),
-                Some(restore_snapshot),
-                ManagedStoreLifecycle::RefreshRequired,
-                lifecycle_guard,
-            )),
-            AuthStatusPhase::ReauthRequired
-            | AuthStatusPhase::RefreshFailed
-            | AuthStatusPhase::Unknown => Err(auth_lease_phase_error(phase)),
-        };
     }
 
-    if is_oauth_login {
-        Err(lease_absent_error())
-    } else {
-        Ok(managed_store_tokens(
+    match phase {
+        AuthStatusPhase::Valid => Ok(managed_store_tokens(
             store,
             key,
             tokens,
-            None,
-            None,
-            lifecycle,
+            Some(snapshot),
+            Some(restore_snapshot),
+            ManagedStoreLifecycle::Authorized,
             lifecycle_guard,
-        ))
+        )),
+        AuthStatusPhase::Expiring | AuthStatusPhase::Expired => Ok(managed_store_tokens(
+            store,
+            key,
+            tokens,
+            Some(snapshot),
+            Some(restore_snapshot),
+            ManagedStoreLifecycle::RefreshRequired,
+            lifecycle_guard,
+        )),
+        AuthStatusPhase::ReauthRequired
+        | AuthStatusPhase::RefreshFailed
+        | AuthStatusPhase::Unknown => Err(auth_lease_phase_error(phase)),
     }
 }
 
@@ -1642,7 +1596,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn managed_store_non_oauth_source_reads_token_without_auth_lifecycle() {
+    async fn managed_store_non_oauth_source_rejects_token_without_auth_lifecycle() {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
@@ -1652,16 +1606,19 @@ mod tests {
             .unwrap();
         let env = ResolverEnvironment::testing().with_token_store(store);
 
-        let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(secret, "sk-standalone");
+        assert!(matches!(
+            err,
+            ProviderAuthError::Auth(AuthError::LeaseAbsent)
+        ));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn managed_store_non_oauth_source_ignores_empty_auth_lifecycle() {
+    async fn managed_store_non_oauth_source_rejects_empty_auth_lifecycle() {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
@@ -1673,11 +1630,14 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(StaticAuthLeaseHandle::unknown().generated());
 
-        let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(secret, "sk-runtime");
+        assert!(matches!(
+            err,
+            ProviderAuthError::Auth(AuthError::LeaseAbsent)
+        ));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

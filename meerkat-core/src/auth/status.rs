@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::error::AuthErrorKind;
-use crate::handles::{AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeasePhase, AuthLeaseSnapshot};
+use crate::handles::{AuthLeasePhase, AuthLeaseSnapshot};
 use crate::provider::Provider;
 
 /// Public auth status phase shared by REST, RPC, CLI, and generated SDK wire
@@ -67,23 +67,6 @@ impl AuthStatusPhase {
             Some(AuthLeasePhase::Released) | None => Self::Unknown,
         }
     }
-
-    pub fn from_lease_expires_at(now: DateTime<Utc>, expires_at: Option<u64>) -> Self {
-        match expires_at {
-            Some(expires_at)
-                if epoch_secs_until(now, expires_at)
-                    < AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64 =>
-            {
-                Self::Expiring
-            }
-            Some(_) | None => Self::Valid,
-        }
-    }
-}
-
-fn epoch_secs_until(now: DateTime<Utc>, expires_at: u64) -> i64 {
-    let expires_at = i64::try_from(expires_at).unwrap_or(i64::MAX);
-    expires_at.saturating_sub(now.timestamp())
 }
 
 /// Status snapshot of a resolved (or unresolved) auth profile.

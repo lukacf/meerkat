@@ -16,6 +16,7 @@ use meerkat_contracts::{
     LiveTruncateParams, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, RealtimeTurningMode,
     WireLiveAdapterStatus, WireLiveDegradationReason,
 };
+use meerkat_core::SessionLlmIdentity;
 use meerkat_core::live_adapter::{
     LiveAdapterCommand, LiveChannelCapabilities, LiveContinuityMode, LiveInputChunk,
     LiveProjectionSnapshot, LiveTransportBootstrap,
@@ -226,6 +227,31 @@ fn continuity_from_snapshot(snapshot: &LiveProjectionSnapshot) -> LiveContinuity
     }
 }
 
+async fn record_live_channel_identity_or_close(
+    host: &LiveAdapterHost,
+    channel_id: &LiveChannelId,
+    session_id: &SessionId,
+    identity: SessionLlmIdentity,
+) -> Result<(), String> {
+    match host.set_channel_llm_identity(channel_id, identity).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if let Err(close_err) = host.close_channel(channel_id).await {
+                tracing::warn!(
+                    target: "meerkat_rpc::handlers::live",
+                    ?channel_id,
+                    ?session_id,
+                    ?close_err,
+                    "failed to close live channel after identity recording failure"
+                );
+            }
+            Err(format!(
+                "failed to record bound llm identity for live channel {channel_id}: {err}"
+            ))
+        }
+    }
+}
+
 pub struct LiveOpenHandlerContext<'a> {
     pub host: &'a LiveAdapterHost,
     pub live_ws: Option<&'a LiveWsState>,
@@ -388,24 +414,19 @@ pub async fn handle_live_open(
                 // `config/patch` model/provider swap and route to a clean
                 // close instead of dispatching `Refresh` (which the OpenAI
                 // realtime adapter rejects via the R1 guard because
-                // `session.update` cannot change model). A failure here is
-                // logged but does not abort `live/open` — the worst-case
-                // fallthrough is the legacy Refresh-then-ConfigRejected path
-                // that R11 is designed to replace, not a correctness break
-                // on this open.
-                if let Err(err) = host
-                    .set_channel_llm_identity(&channel_id, open_config.llm_identity.clone())
-                    .await
+                // `session.update` cannot change model). New opens fail
+                // closed if this typed identity record is absent: succeeding
+                // would make later model-swap policy depend on missing host
+                // state rather than recorded authority.
+                if let Err(err) = record_live_channel_identity_or_close(
+                    host,
+                    &channel_id,
+                    &session_id,
+                    open_config.llm_identity.clone(),
+                )
+                .await
                 {
-                    tracing::warn!(
-                        target: "meerkat_rpc::handlers::live",
-                        ?channel_id,
-                        ?session_id,
-                        ?err,
-                        "failed to record bound llm identity for live channel; \
-                         model-swap detection on config/patch will fall back \
-                         to legacy Refresh routing"
-                    );
+                    return RpcResponse::error(id, error::INTERNAL_ERROR, err);
                 }
                 // R2: do NOT dispatch `LiveAdapterCommand::Open { snapshot }`
                 // here. `factory.open_live_adapter(&open_config)` above
@@ -1505,6 +1526,30 @@ mod tests {
         // today; pin it here so accidentally introducing a different
         // format string fails this regression.
         assert_eq!(LIVE_WS_DEFAULT_AUDIO_FORMAT, "pcm_24k_mono");
+    }
+
+    #[tokio::test]
+    async fn live_open_identity_recording_failure_is_fail_closed() {
+        let host = meerkat_live::LiveAdapterHost::new(std::sync::Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        ));
+        let session_id = SessionId::new();
+        let channel_id = meerkat_live::LiveChannelId::random_uuid();
+        let identity = SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+
+        let err = record_live_channel_identity_or_close(&host, &channel_id, &session_id, identity)
+            .await
+            .expect_err("missing identity record authority must fail live/open");
+        assert!(
+            err.contains("failed to record bound llm identity"),
+            "unexpected identity recording error: {err}"
+        );
     }
 
     // ---------------------------------------------------------------------

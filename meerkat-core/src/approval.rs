@@ -330,12 +330,6 @@ impl ApprovalServiceState {
     fn from_records(records: Vec<ApprovalRecord>) -> Result<Self, ApprovalError> {
         let mut state = Self::empty();
         for record in records {
-            if state.records.contains_key(&record.approval_id) {
-                return Err(ApprovalError::Store(format!(
-                    "duplicate approval id in store: {}",
-                    record.approval_id
-                )));
-            }
             restore_record_into_authority(&mut state.authority, &record)?;
             state.records.insert(record.approval_id.clone(), record);
         }
@@ -392,9 +386,15 @@ fn lifecycle_rejection_error(
         ApprovalLifecycleRejectionReason::Expired => ApprovalError::Expired {
             approval_id: approval_id.clone(),
         },
-        ApprovalLifecycleRejectionReason::InvalidDecision => ApprovalError::InvalidDecision {
-            decision: decision.unwrap_or(ApprovalDecision::Approve),
-        },
+        ApprovalLifecycleRejectionReason::InvalidDecision => {
+            let Some(decision) = decision else {
+                return ApprovalError::Store(format!(
+                    "generated approval lifecycle rejected {} with InvalidDecision but no decision context",
+                    approval_id
+                ));
+            };
+            ApprovalError::InvalidDecision { decision }
+        }
         ApprovalLifecycleRejectionReason::EmptyAllowedDecisions => {
             ApprovalError::EmptyAllowedDecisions
         }
@@ -466,6 +466,7 @@ fn restore_record_into_authority(
 pub struct ApprovalService {
     state: Arc<RwLock<ApprovalServiceState>>,
     store: Arc<dyn ApprovalStore>,
+    unavailable_reason: Option<Arc<str>>,
 }
 
 impl ApprovalService {
@@ -474,6 +475,7 @@ impl ApprovalService {
         Self {
             state: Arc::new(RwLock::new(ApprovalServiceState::empty())),
             store: Arc::new(InMemoryApprovalStore::new()),
+            unavailable_reason: None,
         }
     }
 
@@ -482,7 +484,17 @@ impl ApprovalService {
         Ok(Self {
             state: Arc::new(RwLock::new(state)),
             store,
+            unavailable_reason: None,
         })
+    }
+
+    #[must_use]
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(ApprovalServiceState::empty())),
+            store: Arc::new(InMemoryApprovalStore::new()),
+            unavailable_reason: Some(Arc::from(reason.into())),
+        }
     }
 
     #[must_use]
@@ -490,7 +502,17 @@ impl ApprovalService {
         self.store.is_persistent()
     }
 
+    fn ensure_available(&self) -> Result<(), ApprovalError> {
+        if let Some(reason) = &self.unavailable_reason {
+            return Err(ApprovalError::Store(format!(
+                "approval service unavailable: {reason}"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn request(&self, request: ApprovalRequest) -> Result<ApprovalRecord, ApprovalError> {
+        self.ensure_available()?;
         if request.requester.as_str().trim().is_empty() {
             return Err(ApprovalError::InvalidPrincipal);
         }
@@ -535,6 +557,7 @@ impl ApprovalService {
     }
 
     pub fn get(&self, approval_id: &ApprovalId) -> Result<ApprovalRecord, ApprovalError> {
+        self.ensure_available()?;
         self.refresh_expiry(approval_id)?;
         self.state
             .read()
@@ -547,6 +570,7 @@ impl ApprovalService {
     }
 
     pub fn list(&self, filter: ApprovalListFilter) -> Result<Vec<ApprovalRecord>, ApprovalError> {
+        self.ensure_available()?;
         self.refresh_all_expiry()?;
         Ok(self
             .state
@@ -566,6 +590,7 @@ impl ApprovalService {
         reason: Option<String>,
         provenance: Option<serde_json::Value>,
     ) -> Result<ApprovalRecord, ApprovalError> {
+        self.ensure_available()?;
         if actor.as_str().trim().is_empty() {
             return Err(ApprovalError::InvalidPrincipal);
         }
@@ -920,6 +945,25 @@ mod tests {
 
         let restored = ApprovalService::with_store(store);
         assert!(matches!(restored, Err(ApprovalError::Store(_))));
+    }
+
+    #[test]
+    fn unavailable_approval_service_fails_closed() {
+        let service = ApprovalService::unavailable("persistent approval restore failed");
+        let err = service
+            .list(ApprovalListFilter::default())
+            .expect_err("unavailable service should reject reads");
+        assert!(matches!(
+            err,
+            ApprovalError::Store(message) if message.contains("persistent approval restore failed")
+        ));
+        let err = service
+            .request(request())
+            .expect_err("unavailable service should reject writes");
+        assert!(matches!(
+            err,
+            ApprovalError::Store(message) if message.contains("persistent approval restore failed")
+        ));
     }
 
     #[test]

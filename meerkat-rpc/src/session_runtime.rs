@@ -1364,18 +1364,24 @@ fn approval_service_from_persistence(
                 tracing::warn!(
                     error = %err,
                     path = %path.display(),
-                    "failed to load approval records; falling back to process-local approvals"
+                    "failed to load approval records; approval service unavailable and failing closed"
                 );
-                meerkat_core::ApprovalService::new()
+                meerkat_core::ApprovalService::unavailable(format!(
+                    "failed to load approval records from {}: {err}",
+                    path.display()
+                ))
             }
         },
         Err(err) => {
             tracing::warn!(
                 error = %err,
                 path = %path.display(),
-                "failed to open approval store; falling back to process-local approvals"
+                "failed to open approval store; approval service unavailable and failing closed"
             );
-            meerkat_core::ApprovalService::new()
+            meerkat_core::ApprovalService::unavailable(format!(
+                "failed to open approval store {}: {err}",
+                path.display()
+            ))
         }
     }
 }

@@ -7322,7 +7322,7 @@ impl MobActor {
         roster
             .list()
             .find(|entry| {
-                entry.state == crate::roster::MemberState::Active
+                self.machine_roster_state_for_entry(entry) == crate::roster::MemberState::Active
                     && entry.member_ref.bridge_session_id() == Some(owner_bridge_session_id)
             })
             .map(|entry| (entry.agent_identity.clone(), entry.agent_runtime_id.clone()))

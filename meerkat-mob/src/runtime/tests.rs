@@ -4566,6 +4566,12 @@ impl SessionAgent for PersistentMockAgent {
 
     fn cancel(&mut self) {}
 
+    fn observed_session_tail(
+        &self,
+    ) -> meerkat_core::pending_continuation_admission::ObservedSessionTailKind {
+        meerkat_core::pending_continuation_admission::ObservedSessionTailKind::Empty
+    }
+
     fn hot_swap_llm_identity(
         &mut self,
         _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
@@ -5163,6 +5169,12 @@ impl SessionAgent for OverlayProbeSessionAgent {
     }
 
     fn cancel(&mut self) {}
+
+    fn observed_session_tail(
+        &self,
+    ) -> meerkat_core::pending_continuation_admission::ObservedSessionTailKind {
+        meerkat_core::pending_continuation_admission::observe_session_tail(self.session.messages())
+    }
 
     fn hot_swap_llm_identity(
         &mut self,
@@ -29936,6 +29948,62 @@ async fn test_spawn_member_customizer_fires_with_source_and_spawner_provenance()
             continuity_key: "helper/helper-promoted".to_string(),
         },
         "promoted helper continuity intent must survive spawn finalization"
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_member_customizer_spawner_provenance_ignores_roster_state_mirror() {
+    let customizer = RecordingSpawnCustomizer::new();
+    let definition = sample_definition_with_mob_tools();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service)
+        .with_spawn_member_customizer(Arc::new(customizer.clone()))
+        .create()
+        .await
+        .expect("create mob");
+
+    let lead = AgentIdentity::from("lead-roster-mirror");
+    let lead_ref = handle
+        .spawn_spec(SpawnMemberSpec::new("lead", lead.as_str()))
+        .await
+        .expect("spawn lead");
+    let lead_session_id = handle
+        .resolve_bridge_session_id(&lead_ref.agent_identity)
+        .await
+        .expect("lead bridge session");
+
+    {
+        let mut snapshot = handle.roster.read().await.snapshot();
+        snapshot.get_mut(&lead).expect("lead roster entry").state =
+            crate::roster::MemberState::Retiring;
+        *handle.roster.write().await =
+            super::roster_authority::RosterAuthority::from_roster(snapshot);
+    }
+
+    handle
+        .spawn_spec_receipt_with_owner_context(
+            SpawnMemberSpec::new("worker", "worker-roster-mirror"),
+            super::handle::CanonicalOpsOwnerContext {
+                owner_bridge_session_id: lead_session_id,
+                ops_registry: Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new()),
+            },
+        )
+        .await
+        .expect("agent spawn_member");
+
+    assert!(
+        customizer
+            .calls()
+            .iter()
+            .any(|ctx| ctx.spawn_source == SpawnSource::AgentSpawnMember
+                && ctx.spawner_identity.as_ref() == Some(&lead)
+                && ctx
+                    .spawner_runtime_id
+                    .as_ref()
+                    .is_some_and(|id| id.identity.as_str() == lead.as_str())),
+        "spawn provenance must be gated by MobMachine lifecycle projection, not the roster compatibility state mirror"
     );
 }
 

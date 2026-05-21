@@ -367,19 +367,15 @@ impl std::fmt::Debug for DslAuthority {
     }
 }
 
-/// Create a DSL authority initialized with `lifecycle_phase: Idle` and all
-/// ops-related fields at their defaults. Per-op transitions guard only on
-/// `op_statuses.contains_key(operation_id)`, so the phase stays in `Idle`
-/// permanently (they all `to Idle`).
+/// Create a DSL authority initialized through generated authority. Per-op
+/// transitions guard only on `op_statuses.contains_key(operation_id)`, so the
+/// phase stays in `Idle` permanently (they all `to Idle`).
 fn new_ops_dsl_authority() -> DslAuthority {
-    let state = mm_dsl::MeerkatMachineState {
-        lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
-        ..mm_dsl::MeerkatMachineState::default()
-    };
-    DslAuthority(crate::meerkat_machine::recover_projected_authority(
-        state,
-        "ops lifecycle DSL state must be recoverable",
-    ))
+    DslAuthority(
+        crate::meerkat_machine::dsl_authority::new_initialized_authority(
+            "ops lifecycle DSL Initialize must be accepted",
+        ),
+    )
 }
 
 impl ShellState {
@@ -1118,16 +1114,9 @@ impl ShellState {
         input: mm_dsl::MeerkatMachineInput,
         label: &'static str,
     ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, OpsLifecycleError> {
-        let mut authority =
-            mm_dsl::MeerkatMachineAuthority::recover_from_state(mm_dsl::MeerkatMachineState {
-                lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
-                ..mm_dsl::MeerkatMachineState::default()
-            })
-            .map_err(|err| {
-                OpsLifecycleError::Internal(format!(
-                    "DSL rejected ops state recovery ({label}): {err:?}"
-                ))
-            })?;
+        let mut authority = crate::meerkat_machine::dsl_authority::new_initialized_authority(
+            "ops stateless classifier Initialize must be accepted",
+        );
         let transition =
             mm_dsl::MeerkatMachineMutator::apply(&mut authority, input).map_err(|err| {
                 OpsLifecycleError::Internal(format!(

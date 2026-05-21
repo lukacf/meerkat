@@ -46,6 +46,32 @@ fn session_id(label: &str) -> SessionId {
     SessionId(label.to_string())
 }
 
+fn profile_material_digest(identity_name: &str, generation: u64) -> String {
+    format!("test-profile-digest:{identity_name}:{generation}")
+}
+
+fn authorize_spawn_profile(
+    authority: &mut MobMachineAuthority,
+    identity_name: &str,
+    generation: u64,
+) {
+    MobMachineMutator::apply(
+        authority,
+        MobMachineInput::AuthorizeSpawnProfile {
+            agent_identity: identity(identity_name),
+            profile_name: "test".to_string(),
+            model: "test-model".to_string(),
+            profile_material_digest: profile_material_digest(identity_name, generation),
+            tool_config_digest: "test-tool-config-digest".to_string(),
+            skills_digest: "test-skills-digest".to_string(),
+            provider_params_digest: None,
+            output_schema_digest: None,
+            external_addressable: false,
+        },
+    )
+    .expect("spawn profile material must be authorized before Spawn");
+}
+
 fn spawn_input(
     identity_name: &str,
     generation: u64,
@@ -57,6 +83,7 @@ fn spawn_input(
         agent_runtime_id: runtime_id(identity_name, generation),
         fence_token: FenceToken(generation),
         generation: Generation(generation),
+        profile_material_digest: profile_material_digest(identity_name, generation),
         external_addressable: false,
         bridge_session_id: session_id(bridge_sid),
         replacing,
@@ -214,6 +241,7 @@ fn recovery_member_session_binding_is_generated_authority_owned() {
 #[test]
 fn fresh_spawn_emits_member_session_binding_changed_none_to_some() {
     let mut authority = MobMachineAuthority::new();
+    authorize_spawn_profile(&mut authority, "alpha", 1);
     let transition = MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 1, "bridge-a-gen1", None),
@@ -244,6 +272,7 @@ fn fresh_spawn_emits_member_session_binding_changed_none_to_some() {
 fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
     let mut authority = MobMachineAuthority::new();
     // Initial spawn — binds alpha to bridge-a-gen1.
+    authorize_spawn_profile(&mut authority, "alpha", 1);
     MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 1, "bridge-a-gen1", None),
@@ -267,6 +296,7 @@ fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
         .member_session_bindings
         .get(&identity("alpha"))
         .cloned();
+    authorize_spawn_profile(&mut authority, "alpha", 2);
     let transition = MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 2, "bridge-a-gen2", prior),
@@ -298,6 +328,7 @@ fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
 #[test]
 fn retire_after_spawn_emits_member_session_binding_changed_some_to_none() {
     let mut authority = MobMachineAuthority::new();
+    authorize_spawn_profile(&mut authority, "alpha", 1);
     MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 1, "bridge-a-gen1", None),
@@ -341,6 +372,7 @@ fn spawn_with_wrong_replacing_witness_is_rejected() {
     // SpawnRunningReplacing requires the state's binding map to contain
     // the identity. Neither guard matches, so the transition is
     // rejected.
+    authorize_spawn_profile(&mut authority, "ghost", 1);
     let result = MobMachineMutator::apply(
         &mut authority,
         spawn_input("ghost", 1, "bridge-g-gen1", Some(session_id("fabricated"))),
@@ -368,6 +400,7 @@ fn retire_with_none_releasing_when_bound_takes_preserving_branch() {
     // atomic rotation (Some -> Some) `MemberSessionBindingChanged`.
     // No binding-change effect is emitted; the binding stays put.
     let mut authority = MobMachineAuthority::new();
+    authorize_spawn_profile(&mut authority, "alpha", 1);
     MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 1, "bridge-a-gen1", None),
@@ -394,6 +427,7 @@ fn retire_with_none_releasing_when_bound_takes_preserving_branch() {
 #[test]
 fn retire_with_some_releasing_but_wrong_value_is_rejected() {
     let mut authority = MobMachineAuthority::new();
+    authorize_spawn_profile(&mut authority, "alpha", 1);
     MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 1, "bridge-a-gen1", None),
@@ -428,6 +462,7 @@ fn bindings_require_known_identity_invariant_holds_through_spawn_retire_cycle() 
     // identity for the mob even after retirement). So the subset
     // relation holds through the whole lifecycle.
     let mut authority = MobMachineAuthority::new();
+    authorize_spawn_profile(&mut authority, "alpha", 1);
     MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 1, "bridge-a-gen1", None),

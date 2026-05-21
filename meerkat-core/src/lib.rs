@@ -329,7 +329,7 @@ pub use auth::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use auth::{
     AuthLoginLifecycleGuard, AuthStatusRehydrateError, acquire_auth_login_lifecycle_guard,
-    rehydrate_marked_oauth_tokens_for_status,
+    rehydrate_marked_tokens_for_status, restore_marked_token_lifecycle,
 };
 pub use connection::{
     AuthBindingRef, AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig,

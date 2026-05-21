@@ -21,7 +21,7 @@ pub use lease::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use lifecycle::{
     AuthLoginLifecycleGuard, AuthStatusRehydrateError, acquire_auth_login_lifecycle_guard,
-    rehydrate_marked_oauth_tokens_for_status,
+    rehydrate_marked_tokens_for_status, restore_marked_token_lifecycle,
 };
 pub use lifecycle::{
     PublishedAuthStatus, TokenLifecycleClearError, clear_tokens_and_publish_lifecycle_released,

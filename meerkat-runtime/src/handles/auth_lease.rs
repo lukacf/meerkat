@@ -1380,6 +1380,46 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         Arc::as_ptr(&self.machines) as usize
     }
 
+    fn restore_published_credential_lifecycle(
+        &self,
+        lease_key: &LeaseKey,
+        expires_at: u64,
+        generation: u64,
+        credential_published_at_millis: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        let context = "AuthLeaseHandle::restore_published_credential_lifecycle";
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let from_phase = guard
+            .authorities
+            .get(lease_key)
+            .map(|authority| map_phase(authority.state().lifecycle_phase))
+            .unwrap_or(AuthLeasePhase::Released);
+        let (to_phase, auth_transition) = apply_restore_input_to_registry(
+            &mut guard,
+            lease_key,
+            restore_input_from_lifecycle(
+                auth_dsl::AuthLifecyclePhase::Valid,
+                (expires_at != u64::MAX).then_some(expires_at),
+                None,
+                0,
+                true,
+                generation,
+                Some(credential_published_at_millis),
+            ),
+            context,
+        )?;
+        emit_audit(
+            lease_key,
+            "restore_published_credential_lifecycle",
+            from_phase,
+            to_phase,
+        );
+        Ok(auth_transition)
+    }
+
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
         let guard = self
             .machines
@@ -1836,6 +1876,33 @@ mod tests {
             "restore must reject snapshots captured from a different runtime handle: {err:?}"
         );
         assert_eq!(second.snapshot(&key).phase, None);
+    }
+
+    #[test]
+    fn restore_published_credential_lifecycle_uses_generated_authority() {
+        let source = RuntimeAuthLeaseHandle::new();
+        let restored = RuntimeAuthLeaseHandle::new();
+        let key = lease("dev", "shared");
+        let transition = source.acquire_lease(&key, 1_800_000_000).unwrap();
+        let published_at = transition
+            .credential_published_at_millis()
+            .expect("acquire transition carries publication time");
+
+        restored
+            .restore_published_credential_lifecycle(
+                &key,
+                transition.expires_at(),
+                transition.generation(),
+                published_at,
+            )
+            .unwrap();
+
+        let snapshot = restored.snapshot(&key);
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(snapshot.expires_at, Some(transition.expires_at()));
+        assert_eq!(snapshot.generation, transition.generation());
+        assert_eq!(snapshot.credential_published_at_millis, Some(published_at));
+        assert!(snapshot.credential_present);
     }
 
     #[test]

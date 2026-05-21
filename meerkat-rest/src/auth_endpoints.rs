@@ -1682,7 +1682,7 @@ pub async fn get_auth_status(
     let mut phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
     let rehydrated = if phase == meerkat_core::AuthStatusPhase::Unknown && source_uses_store {
         if let Some(expected_mode) = expected_mode {
-            meerkat_core::rehydrate_marked_oauth_tokens_for_status(
+            meerkat_core::rehydrate_marked_tokens_for_status(
                 state.token_store.as_ref(),
                 state.auth_lease.as_ref(),
                 &auth_binding,

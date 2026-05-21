@@ -1405,6 +1405,32 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         ))
     }
 
+    /// Restore a durable credential lifecycle publication through generated
+    /// AuthMachine authority.
+    ///
+    /// The default fails closed so token stores cannot become handwritten
+    /// lifecycle reducers. Production handles must route this through the
+    /// generated `RestoreAuthoritySnapshot` input before exposing a restored
+    /// lease transition.
+    fn restore_published_credential_lifecycle(
+        &self,
+        lease_key: &LeaseKey,
+        expires_at: u64,
+        generation: u64,
+        credential_published_at_millis: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        let _ = (
+            lease_key,
+            expires_at,
+            generation,
+            credential_published_at_millis,
+        );
+        Err(DslTransitionError::new(
+            "AuthLeaseHandle::restore_published_credential_lifecycle",
+            "restoring durable auth lifecycle publications requires generated AuthMachine authority",
+        ))
+    }
+
     /// Observe the current DSL-level state of a binding.
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot;
 }

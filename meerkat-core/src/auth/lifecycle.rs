@@ -113,10 +113,6 @@ fn mark_tokens_lifecycle_published_inner(
     generation: Option<u64>,
     credential_published_at_millis: Option<u64>,
 ) -> PersistedTokens {
-    if !persisted_auth_mode_uses_oauth_login_lifecycle(tokens.auth_mode) {
-        return tokens.clone();
-    }
-
     let mut marked = tokens.clone();
     let mut marker = serde_json::json!({
         "published": true,
@@ -374,6 +370,8 @@ pub enum AuthStatusRehydrateError {
     TokenStore(#[from] TokenStoreError),
     #[error("AuthMachine lifecycle acquire failed: {0}")]
     LifecycleAcquire(DslTransitionError),
+    #[error("AuthMachine lifecycle restore failed: {0}")]
+    LifecycleRestore(DslTransitionError),
     #[error("AuthMachine lifecycle rollback failed after token marker save failure: {0}")]
     LifecycleRollback(DslTransitionError),
     #[error("TokenStore lifecycle marker save failed: {0}")]
@@ -381,17 +379,62 @@ pub enum AuthStatusRehydrateError {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn rehydrate_marked_oauth_tokens_for_status(
-    _token_store: &dyn TokenStore,
-    _auth_lease: &dyn AuthLeaseHandle,
-    _auth_binding: &AuthBindingRef,
-    _expected_mode: PersistedAuthMode,
-    _now: DateTime<Utc>,
+pub fn restore_marked_token_lifecycle(
+    auth_lease: &dyn AuthLeaseHandle,
+    auth_binding: &AuthBindingRef,
+    tokens: &PersistedTokens,
 ) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
-    // Lifecycle markers in persisted OAuth material are projection data only.
-    // Auth status must not recreate an AuthMachine credential lease from token
-    // JSON, otherwise durable material can shadow machine-owned lease truth.
-    Ok(None)
+    let Some(publication) = tokens_lifecycle_publication_with_explicit_expiry(tokens) else {
+        return Ok(None);
+    };
+    if publication.expires_at != persisted_token_expires_at_epoch_secs(tokens) {
+        return Ok(None);
+    }
+    let Some(generation) = publication.generation else {
+        return Ok(None);
+    };
+    let Some(credential_published_at_millis) = publication.credential_published_at_millis else {
+        return Ok(None);
+    };
+    let lease_key = LeaseKey::from_auth_binding(auth_binding);
+    auth_lease
+        .restore_published_credential_lifecycle(
+            &lease_key,
+            publication.expires_at,
+            generation,
+            credential_published_at_millis,
+        )
+        .map_err(AuthStatusRehydrateError::LifecycleRestore)?;
+    Ok(Some(tokens.clone()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn rehydrate_marked_tokens_for_status(
+    token_store: &dyn TokenStore,
+    auth_lease: &dyn AuthLeaseHandle,
+    auth_binding: &AuthBindingRef,
+    expected_mode: PersistedAuthMode,
+    now: DateTime<Utc>,
+) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
+    let key = TokenKey::from_auth_binding(auth_binding);
+    let Some(tokens) = token_store.load(&key).await? else {
+        return Ok(None);
+    };
+    if tokens.auth_mode != expected_mode {
+        return Ok(None);
+    }
+    let restored = restore_marked_token_lifecycle(auth_lease, auth_binding, &tokens)?;
+    if restored.is_some() {
+        let lease_key = LeaseKey::from_auth_binding(auth_binding);
+        auth_lease
+            .observe_credential_freshness(
+                &lease_key,
+                now.timestamp().max(0) as u64,
+                crate::handles::AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+            )
+            .map_err(AuthStatusRehydrateError::LifecycleRestore)?;
+    }
+    Ok(restored)
 }
 
 pub fn project_published_auth_status<'a>(
@@ -446,9 +489,10 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_marker_is_only_added_to_oauth_login_tokens() {
+    fn lifecycle_marker_is_added_to_managed_store_tokens() {
         let api_key = PersistedTokens::api_key("sk-test");
-        assert_eq!(mark_tokens_lifecycle_published(&api_key), api_key);
+        let marked_api_key = mark_tokens_lifecycle_published(&api_key);
+        assert!(tokens_lifecycle_published(&marked_api_key));
 
         let oauth = oauth_tokens_with_metadata(serde_json::Value::Null);
         let marked = mark_tokens_lifecycle_published(&oauth);

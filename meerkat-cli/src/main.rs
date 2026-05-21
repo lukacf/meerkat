@@ -5241,7 +5241,7 @@ async fn project_cli_auth_status(
         let phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
         if phase == AuthStatusPhase::Unknown
             && let Some(expected_mode) = expected_mode
-            && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_oauth_tokens_for_status(
+            && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_tokens_for_status(
                 store,
                 auth_lease,
                 auth_binding,
@@ -12424,13 +12424,19 @@ mod tests {
             Some(AuthLeasePhase::Valid),
             "CLI login must acquire the binding-scoped AuthMachine lease that status reads"
         );
-        assert!(
-            store
-                .load(&TokenKey::from_auth_binding(&auth_binding))
-                .await
-                .expect("token load succeeds")
-                .is_some(),
-            "login save boundary should still persist token material"
+        let stored = store
+            .load(&TokenKey::from_auth_binding(&auth_binding))
+            .await
+            .expect("token load succeeds")
+            .expect("login save boundary should still persist token material");
+        let marker = meerkat_core::tokens_lifecycle_publication(&stored)
+            .expect("login save boundary should stamp generated lifecycle handoff marker");
+        assert_eq!(marker.generation, Some(1));
+        assert_eq!(
+            marker.credential_published_at_millis,
+            auth_lease
+                .snapshot(&lease_key)
+                .credential_published_at_millis
         );
     }
 
@@ -12818,7 +12824,7 @@ mod tests {
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
-    async fn test_cli_auth_status_does_not_rehydrate_marked_oauth_token_after_restart() {
+    async fn test_cli_auth_status_rehydrates_marked_oauth_token_after_restart() {
         use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
 
@@ -12854,11 +12860,14 @@ mod tests {
         .await
         .expect("AuthMachine freshness observation succeeds");
 
-        assert_eq!(projection.phase, AuthStatusPhase::Unknown);
-        assert!(projection.expires_at.is_none());
+        assert_eq!(projection.phase, AuthStatusPhase::Valid);
+        assert!(projection.expires_at.is_some());
         let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&auth_binding));
-        assert_eq!(snapshot.phase, None);
-        assert!(!snapshot.credential_present);
+        assert_eq!(
+            snapshot.phase,
+            Some(meerkat_core::handles::AuthLeasePhase::Valid)
+        );
+        assert!(snapshot.credential_present);
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]

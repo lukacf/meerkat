@@ -48,10 +48,11 @@ pub use types::{
     DeliveryReceiptStage, ForkContextSpec, HelperOptionsSpec, IntervalTriggerSpec, MisfirePolicy,
     MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrenceId,
     OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, ResolvedSpawnSnapshot,
-    RuntimeDeliveryOutcome, Schedule, ScheduleConfig, ScheduleId, SchedulePhase, ScheduleRevision,
-    ScheduleSpawnTooling, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
-    ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
-    TriggerSpec, UpdateScheduleRequest,
+    RuntimeCompletionOutcome, RuntimeDeliveryOutcome, Schedule, ScheduleConfig, ScheduleId,
+    SchedulePhase, ScheduleRevision, ScheduleSpawnTooling, ScheduledMobAction,
+    ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
+    SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TriggerSpec,
+    UpdateScheduleRequest,
 };
 
 pub const SCHEDULE_CAPABILITY_DISABLED_DESCRIPTION: &str = "config.tools.schedule_enabled is false";

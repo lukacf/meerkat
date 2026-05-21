@@ -181,6 +181,7 @@ async fn async_completion_dispatch_threads_correlation_and_custom_future() {
             detail: Some("simulated runtime rejection".to_string()),
             failure_class: Some(OccurrenceFailureClass::RuntimeRejected),
             runtime_outcome: None,
+            runtime_completion_outcome: None,
             materialized_session_id: None,
         })
     });

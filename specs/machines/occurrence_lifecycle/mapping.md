@@ -8,11 +8,11 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `OccurrenceLifecycleMachine`
 
 ### Code Anchors
-- `occurrence_lifecycle`: `meerkat-schedule/src/lifecycle.rs` — Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, classify due no action, due claim eligible, due misfire required, due lease expired, claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
+- `occurrence_lifecycle`: `meerkat-schedule/src/lifecycle.rs` — Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, classify due no action, due claim eligible, due misfire required, due lease expired, claim, claimed, dispatch, await completion, complete, resolve runtime completion outcome, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
 
 ### Scenarios
 - `occurrence_start_complete_fail` — occurrence transitions through pending, running, and terminal lifecycle states
-- `occurrence_claim_dispatch_completion` — plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, and record claimed/dispatch/awaiting/completed effects
+- `occurrence_claim_dispatch_completion` — plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, resolve runtime completion outcome, and record claimed/dispatch/awaiting/completed effects
 - `occurrence_terminal_classification` — skip/skipped, misfire/misfired, supersede/superseded, delivery failed, occurrences superseded, records revision and explicit failure class for terminal occurrence outcomes
 - `occurrence_lease_recovery` — classify due no action, due claim eligible, due misfire required, due lease expired, and lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery
 
@@ -105,6 +105,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
 - `CompleteFromDispatchingOrAwaiting`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RuntimeCompletionCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RuntimeCompletionRuntimeRejected`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RuntimeCompletionTransportError`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RuntimeCompletionInternalError`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`
 - `SkipFromPendingOrLive`

@@ -8,10 +8,11 @@ use crate::machines::occurrence_lifecycle as occ_dsl;
 use crate::machines::schedule_lifecycle as sched_dsl;
 use crate::types::{
     CreateScheduleRequest, DeliveryReceipt, DeliveryReceiptStage, Occurrence,
-    OccurrenceFailureClass, OccurrenceOrdinal, OccurrencePhase, RuntimeDeliveryOutcome, Schedule,
-    ScheduleId, SchedulePhase, ScheduleRevision, TargetBinding, TriggerSpec, UpdateScheduleRequest,
-    delivery_receipt_id_from_authority, target_materialized_session_id,
-    validate_occurrence_machine_projection, validate_schedule_machine_projection,
+    OccurrenceFailureClass, OccurrenceOrdinal, OccurrencePhase, RuntimeCompletionOutcome,
+    RuntimeDeliveryOutcome, Schedule, ScheduleId, SchedulePhase, ScheduleRevision, TargetBinding,
+    TriggerSpec, UpdateScheduleRequest, delivery_receipt_id_from_authority,
+    target_materialized_session_id, validate_occurrence_machine_projection,
+    validate_schedule_machine_projection,
 };
 use chrono::{DateTime, Utc};
 use meerkat_core::SessionId;
@@ -159,6 +160,11 @@ pub enum OccurrenceLifecycleInput {
         at_utc: DateTime<Utc>,
     },
     Complete {
+        at_utc: DateTime<Utc>,
+    },
+    ResolveRuntimeCompletion {
+        outcome: RuntimeCompletionOutcome,
+        detail: Option<String>,
         at_utc: DateTime<Utc>,
     },
     Skip {
@@ -609,6 +615,15 @@ fn convert_occurrence_input(
                 at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
             }
         }
+        OccurrenceLifecycleInput::ResolveRuntimeCompletion {
+            outcome,
+            detail,
+            at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::ResolveRuntimeCompletion {
+            outcome: to_dsl_runtime_completion_outcome(*outcome),
+            detail: detail.clone(),
+            at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+        },
         OccurrenceLifecycleInput::Skip {
             detail,
             failure_class,
@@ -831,6 +846,7 @@ fn map_occurrence_error(
             OccurrenceLifecycleError::NotLeaseHolding
         }
         OccurrenceLifecycleInput::Complete { .. }
+        | OccurrenceLifecycleInput::ResolveRuntimeCompletion { .. }
         | OccurrenceLifecycleInput::Skip { .. }
         | OccurrenceLifecycleInput::Misfire { .. }
         | OccurrenceLifecycleInput::Supersede { .. }
@@ -1789,6 +1805,25 @@ fn to_dsl_failure_class(fc: OccurrenceFailureClass) -> occ_dsl::FailureClass {
     }
 }
 
+fn to_dsl_runtime_completion_outcome(
+    outcome: RuntimeCompletionOutcome,
+) -> occ_dsl::RuntimeCompletionOutcome {
+    match outcome {
+        RuntimeCompletionOutcome::Completed => occ_dsl::RuntimeCompletionOutcome::Completed,
+        RuntimeCompletionOutcome::CallbackPending => {
+            occ_dsl::RuntimeCompletionOutcome::CallbackPending
+        }
+        RuntimeCompletionOutcome::Cancelled => occ_dsl::RuntimeCompletionOutcome::Cancelled,
+        RuntimeCompletionOutcome::Abandoned => occ_dsl::RuntimeCompletionOutcome::Abandoned,
+        RuntimeCompletionOutcome::FinalizationFailed => {
+            occ_dsl::RuntimeCompletionOutcome::FinalizationFailed
+        }
+        RuntimeCompletionOutcome::RuntimeTerminated => {
+            occ_dsl::RuntimeCompletionOutcome::RuntimeTerminated
+        }
+    }
+}
+
 fn from_dsl_failure_class(fc: occ_dsl::FailureClass) -> OccurrenceFailureClass {
     match fc {
         occ_dsl::FailureClass::TargetMaterializationFailed => {
@@ -2097,6 +2132,52 @@ mod tests {
             result,
             Err(OccurrenceLifecycleError::NotDispatching)
         ));
+    }
+
+    #[test]
+    fn runtime_completion_terminality_comes_from_occurrence_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let at_utc = Utc::now();
+        let awaiting = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("corr-1".into()),
+                at_utc,
+            })?
+            .into_occurrence()
+            .apply(OccurrenceLifecycleInput::AwaitCompletion { at_utc })?
+            .into_occurrence();
+
+        let completed = awaiting
+            .clone()
+            .apply(OccurrenceLifecycleInput::ResolveRuntimeCompletion {
+                outcome: RuntimeCompletionOutcome::Completed,
+                detail: None,
+                at_utc,
+            })?
+            .into_occurrence();
+
+        assert_eq!(completed.phase, OccurrencePhase::Completed);
+        assert_eq!(completed.failure_class, None);
+        assert_eq!(completed.failure_detail, None);
+
+        let rejected = awaiting
+            .apply(OccurrenceLifecycleInput::ResolveRuntimeCompletion {
+                outcome: RuntimeCompletionOutcome::CallbackPending,
+                detail: Some("callback still pending".into()),
+                at_utc,
+            })?
+            .into_occurrence();
+
+        assert_eq!(rejected.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            rejected.failure_class,
+            Some(OccurrenceFailureClass::RuntimeRejected)
+        );
+        assert_eq!(
+            rejected.failure_detail.as_deref(),
+            Some("callback still pending")
+        );
+        Ok(())
     }
 
     #[test]

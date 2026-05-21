@@ -456,6 +456,72 @@ impl std::fmt::Display for OverlapPolicy {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeCompletionOutcome {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "Abandoned")]
+    Abandoned,
+    #[serde(rename = "FinalizationFailed")]
+    FinalizationFailed,
+    #[serde(rename = "RuntimeTerminated")]
+    RuntimeTerminated,
+}
+impl RuntimeCompletionOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::CallbackPending => "CallbackPending",
+            Self::Cancelled => "Cancelled",
+            Self::Abandoned => "Abandoned",
+            Self::FinalizationFailed => "FinalizationFailed",
+            Self::RuntimeTerminated => "RuntimeTerminated",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeCompletionOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "Cancelled" => Ok(Self::Cancelled),
+            "Abandoned" => Ok(Self::Abandoned),
+            "FinalizationFailed" => Ok(Self::FinalizationFailed),
+            "RuntimeTerminated" => Ok(Self::RuntimeTerminated),
+            other => Err(format!("invalid RuntimeCompletionOutcome value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeCompletionOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeCompletionOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -637,6 +703,12 @@ pub mod inputs {
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRuntimeCompletion {
+        pub outcome: RuntimeCompletionOutcome,
+        pub detail: Option<String>,
+        pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Skip {
         pub detail: Option<String>,
         pub failure_class: Option<OccurrenceFailureClass>,
@@ -679,6 +751,7 @@ pub enum Input {
     DispatchStarted(inputs::DispatchStarted),
     AwaitCompletion(inputs::AwaitCompletion),
     Complete(inputs::Complete),
+    ResolveRuntimeCompletion(inputs::ResolveRuntimeCompletion),
     Skip(inputs::Skip),
     Misfire(inputs::Misfire),
     Supersede(inputs::Supersede),
@@ -697,6 +770,7 @@ impl Input {
             Self::DispatchStarted(_) => InputKind::DispatchStarted,
             Self::AwaitCompletion(_) => InputKind::AwaitCompletion,
             Self::Complete(_) => InputKind::Complete,
+            Self::ResolveRuntimeCompletion(_) => InputKind::ResolveRuntimeCompletion,
             Self::Skip(_) => InputKind::Skip,
             Self::Misfire(_) => InputKind::Misfire,
             Self::Supersede(_) => InputKind::Supersede,
@@ -716,6 +790,7 @@ pub enum InputKind {
     DispatchStarted,
     AwaitCompletion,
     Complete,
+    ResolveRuntimeCompletion,
     Skip,
     Misfire,
     Supersede,
@@ -828,6 +903,10 @@ pub enum TransitionId {
     DispatchStartedFromClaimed,
     AwaitCompletionFromDispatching,
     CompleteFromDispatchingOrAwaiting,
+    RuntimeCompletionCompleted,
+    RuntimeCompletionRuntimeRejected,
+    RuntimeCompletionTransportError,
+    RuntimeCompletionInternalError,
     SkipFromPendingOrLive,
     MisfireFromPendingOrLive,
     SupersedePendingOrLive,

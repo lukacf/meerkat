@@ -55,6 +55,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DispatchStarted`(correlation_id: Option<String>, at_utc_ms: u64)
 - `AwaitCompletion`(at_utc_ms: u64)
 - `Complete`(at_utc_ms: u64)
+- `ResolveRuntimeCompletion`(outcome: RuntimeCompletionOutcome, detail: Option<String>, at_utc_ms: u64)
 - `Skip`(detail: Option<String>, failure_class: Option<OccurrenceFailureClass>, at_utc_ms: u64)
 - `Misfire`(detail: Option<String>, failure_class: Option<OccurrenceFailureClass>, at_utc_ms: u64)
 - `Supersede`(superseded_by_revision: u64, at_utc_ms: u64)
@@ -298,6 +299,38 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `Completed`
 - To: `Completed`
 
+### `RuntimeCompletionCompleted`
+- From: `Dispatching`, `AwaitingCompletion`
+- On: `ResolveRuntimeCompletion`(outcome, detail, at_utc_ms)
+- Guards:
+  - `runtime_outcome_completed`
+- Emits: `Completed`
+- To: `Completed`
+
+### `RuntimeCompletionRuntimeRejected`
+- From: `Dispatching`, `AwaitingCompletion`
+- On: `ResolveRuntimeCompletion`(outcome, detail, at_utc_ms)
+- Guards:
+  - `runtime_outcome_rejected`
+- Emits: `DeliveryFailed`
+- To: `DeliveryFailed`
+
+### `RuntimeCompletionTransportError`
+- From: `Dispatching`, `AwaitingCompletion`
+- On: `ResolveRuntimeCompletion`(outcome, detail, at_utc_ms)
+- Guards:
+  - `runtime_outcome_transport_error`
+- Emits: `DeliveryFailed`
+- To: `DeliveryFailed`
+
+### `RuntimeCompletionInternalError`
+- From: `Dispatching`, `AwaitingCompletion`
+- On: `ResolveRuntimeCompletion`(outcome, detail, at_utc_ms)
+- Guards:
+  - `runtime_outcome_internal_error`
+- Emits: `DeliveryFailed`
+- To: `DeliveryFailed`
+
 ### `SkipFromPendingOrLive`
 - From: `Pending`, `Claimed`, `Dispatching`, `AwaitingCompletion`
 - On: `Skip`(detail, failure_class, at_utc_ms)
@@ -360,10 +393,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-schedule/src/lifecycle.rs` — Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, classify due no action, due claim eligible, due misfire required, due lease expired, claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
+- `meerkat-schedule/src/lifecycle.rs` — Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, classify due no action, due claim eligible, due misfire required, due lease expired, claim, claimed, dispatch, await completion, complete, resolve runtime completion outcome, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
 
 ### Scenarios
 - `occurrence_start_complete_fail` — occurrence transitions through pending, running, and terminal lifecycle states
-- `occurrence_claim_dispatch_completion` — plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, and record claimed/dispatch/awaiting/completed effects
+- `occurrence_claim_dispatch_completion` — plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, resolve runtime completion outcome, and record claimed/dispatch/awaiting/completed effects
 - `occurrence_terminal_classification` — skip/skipped, misfire/misfired, supersede/superseded, delivery failed, occurrences superseded, records revision and explicit failure class for terminal occurrence outcomes
 - `occurrence_lease_recovery` — classify due no action, due claim eligible, due misfire required, due lease expired, and lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery

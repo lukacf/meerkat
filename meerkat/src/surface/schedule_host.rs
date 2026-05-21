@@ -419,7 +419,11 @@ fn delivery_terminal_from_completion_outcome(
 ) -> DeliveryTerminal {
     let mut terminal = match outcome {
         CompletionOutcome::Completed(_) | CompletionOutcome::CompletedWithoutResult => {
-            DeliveryTerminal::completed(None)
+            DeliveryTerminal::runtime_completion(
+                meerkat_schedule::RuntimeCompletionOutcome::Completed,
+                None,
+                None,
+            )
         }
         CompletionOutcome::CallbackPending { tool_name, args } => {
             let runtime_outcome =
@@ -427,18 +431,27 @@ fn delivery_terminal_from_completion_outcome(
                     tool_name,
                     payload: args,
                 };
-            delivery_failed_from_runtime_outcome(runtime_outcome)
+            terminal_from_runtime_completion_outcome(
+                meerkat_schedule::RuntimeCompletionOutcome::CallbackPending,
+                runtime_outcome,
+            )
         }
         CompletionOutcome::Cancelled => {
             let runtime_outcome = meerkat_schedule::RuntimeDeliveryOutcome::CompletionAbandoned {
                 detail: "request cancelled".to_string(),
             };
-            delivery_failed_from_runtime_outcome(runtime_outcome)
+            terminal_from_runtime_completion_outcome(
+                meerkat_schedule::RuntimeCompletionOutcome::Cancelled,
+                runtime_outcome,
+            )
         }
         CompletionOutcome::Abandoned(reason) => {
             let runtime_outcome =
                 meerkat_schedule::RuntimeDeliveryOutcome::CompletionAbandoned { detail: reason };
-            delivery_failed_from_runtime_outcome(runtime_outcome)
+            terminal_from_runtime_completion_outcome(
+                meerkat_schedule::RuntimeCompletionOutcome::Abandoned,
+                runtime_outcome,
+            )
         }
         CompletionOutcome::AbandonedWithError { reason, error } => {
             let error_detail =
@@ -446,14 +459,20 @@ fn delivery_terminal_from_completion_outcome(
             let runtime_outcome = meerkat_schedule::RuntimeDeliveryOutcome::CompletionAbandoned {
                 detail: format!("{reason}; error={error_detail}"),
             };
-            delivery_failed_from_runtime_outcome(runtime_outcome)
+            terminal_from_runtime_completion_outcome(
+                meerkat_schedule::RuntimeCompletionOutcome::Abandoned,
+                runtime_outcome,
+            )
         }
         CompletionOutcome::CompletedWithFinalizationFailure { error, .. } => {
-            DeliveryTerminal::delivery_failed(
-                error
-                    .detail
-                    .unwrap_or_else(|| "turn finalization failed".to_string()),
-                OccurrenceFailureClass::InternalError,
+            DeliveryTerminal::runtime_completion(
+                meerkat_schedule::RuntimeCompletionOutcome::FinalizationFailed,
+                Some(
+                    error
+                        .detail
+                        .unwrap_or_else(|| "turn finalization failed".to_string()),
+                ),
+                None,
             )
         }
         CompletionOutcome::RuntimeTerminated(reason) => {
@@ -461,26 +480,22 @@ fn delivery_terminal_from_completion_outcome(
                 meerkat_schedule::RuntimeDeliveryOutcome::CompletionRuntimeTerminated {
                     detail: reason,
                 };
-            delivery_failed_from_runtime_outcome(runtime_outcome)
+            terminal_from_runtime_completion_outcome(
+                meerkat_schedule::RuntimeCompletionOutcome::RuntimeTerminated,
+                runtime_outcome,
+            )
         }
     };
     terminal.materialized_session_id = materialized_session_id;
     terminal
 }
 
-fn delivery_failed_from_runtime_outcome(
+fn terminal_from_runtime_completion_outcome(
+    outcome: meerkat_schedule::RuntimeCompletionOutcome,
     runtime_outcome: meerkat_schedule::RuntimeDeliveryOutcome,
 ) -> DeliveryTerminal {
     let detail = runtime_outcome.detail();
-    let failure_class = runtime_outcome.derived_failure_class();
-    DeliveryTerminal {
-        phase: OccurrencePhase::DeliveryFailed,
-        receipt: None,
-        detail: Some(detail),
-        failure_class: Some(failure_class),
-        runtime_outcome: Some(runtime_outcome),
-        materialized_session_id: None,
-    }
+    DeliveryTerminal::runtime_completion(outcome, Some(detail), Some(runtime_outcome))
 }
 
 pub fn immediate_completed_dispatch(
@@ -544,6 +559,7 @@ pub fn immediate_delivery_failure(
                 receipt: None,
                 detail: Some(detail),
                 failure_class: Some(failure_class),
+                runtime_completion_outcome: None,
                 runtime_outcome: None,
                 materialized_session_id,
             })
@@ -666,10 +682,10 @@ mod tests {
         );
 
         let terminal = dispatch.completion.await.expect("completion terminal");
-        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(terminal.phase, OccurrencePhase::AwaitingCompletion);
         assert_eq!(
-            terminal.failure_class,
-            Some(OccurrenceFailureClass::RuntimeRejected)
+            terminal.runtime_completion_outcome,
+            Some(meerkat_schedule::RuntimeCompletionOutcome::CallbackPending)
         );
         assert!(
             terminal
@@ -694,6 +710,10 @@ mod tests {
         );
 
         let terminal = dispatch.completion.await.expect("completion terminal");
-        assert_eq!(terminal.phase, OccurrencePhase::Completed);
+        assert_eq!(terminal.phase, OccurrencePhase::AwaitingCompletion);
+        assert_eq!(
+            terminal.runtime_completion_outcome,
+            Some(meerkat_schedule::RuntimeCompletionOutcome::Completed)
+        );
     }
 }

@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for OccurrenceLifecycleMachine.
 
-CONSTANTS ClaimTokenValues, DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OverlapPolicyValues, ScheduleIdValues, SessionIdValues, StringValues
+CONSTANTS ClaimTokenValues, DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, ScheduleIdValues, SessionIdValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -457,6 +457,64 @@ CompleteFromDispatchingOrAwaiting(at_utc_ms) ==
     /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, failure_class, failure_detail, dispatched_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
+RuntimeCompletionCompleted(outcome, detail, at_utc_ms) ==
+    /\ phase = "Dispatching" \/ phase = "AwaitingCompletion"
+    /\ (outcome = "Completed")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
+    /\ receipt_stage' = Some("Completed")
+    /\ receipt_failure_class' = None
+    /\ receipt_detail' = None
+    /\ completed_at_utc_ms' = Some(at_utc_ms)
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, failure_class, failure_detail, dispatched_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
+RuntimeCompletionRuntimeRejected(outcome, detail, at_utc_ms) ==
+    /\ phase = "Dispatching" \/ phase = "AwaitingCompletion"
+    /\ ((outcome = "CallbackPending") \/ (outcome = "Cancelled") \/ (outcome = "Abandoned"))
+    /\ phase' = "DeliveryFailed"
+    /\ model_step_count' = model_step_count + 1
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
+    /\ receipt_stage' = Some("DeliveryFailed")
+    /\ receipt_failure_class' = Some("RuntimeRejected")
+    /\ receipt_detail' = detail
+    /\ failure_class' = Some("RuntimeRejected")
+    /\ failure_detail' = detail
+    /\ completed_at_utc_ms' = Some(at_utc_ms)
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, dispatched_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
+RuntimeCompletionTransportError(outcome, detail, at_utc_ms) ==
+    /\ phase = "Dispatching" \/ phase = "AwaitingCompletion"
+    /\ (outcome = "RuntimeTerminated")
+    /\ phase' = "DeliveryFailed"
+    /\ model_step_count' = model_step_count + 1
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
+    /\ receipt_stage' = Some("DeliveryFailed")
+    /\ receipt_failure_class' = Some("TransportError")
+    /\ receipt_detail' = detail
+    /\ failure_class' = Some("TransportError")
+    /\ failure_detail' = detail
+    /\ completed_at_utc_ms' = Some(at_utc_ms)
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, dispatched_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
+RuntimeCompletionInternalError(outcome, detail, at_utc_ms) ==
+    /\ phase = "Dispatching" \/ phase = "AwaitingCompletion"
+    /\ (outcome = "FinalizationFailed")
+    /\ phase' = "DeliveryFailed"
+    /\ model_step_count' = model_step_count + 1
+    /\ receipt_recorded_at_utc_ms' = Some(at_utc_ms)
+    /\ receipt_stage' = Some("DeliveryFailed")
+    /\ receipt_failure_class' = Some("InternalError")
+    /\ receipt_detail' = detail
+    /\ failure_class' = Some("InternalError")
+    /\ failure_detail' = detail
+    /\ completed_at_utc_ms' = Some(at_utc_ms)
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, dispatched_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
 SkipFromPendingOrLive(detail, arg_failure_class, at_utc_ms) ==
     /\ phase = "Pending" \/ phase = "Claimed" \/ phase = "Dispatching" \/ phase = "AwaitingCompletion"
     /\ phase' = "Skipped"
@@ -653,6 +711,10 @@ Next ==
     \/ \E correlation_id \in OptionStringValues : \E at_utc_ms \in 0..2 : DispatchStartedFromClaimed(correlation_id, at_utc_ms)
     \/ \E at_utc_ms \in 0..2 : AwaitCompletionFromDispatching(at_utc_ms)
     \/ \E at_utc_ms \in 0..2 : CompleteFromDispatchingOrAwaiting(at_utc_ms)
+    \/ \E outcome \in RuntimeCompletionOutcomeValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : RuntimeCompletionCompleted(outcome, detail, at_utc_ms)
+    \/ \E outcome \in RuntimeCompletionOutcomeValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : RuntimeCompletionRuntimeRejected(outcome, detail, at_utc_ms)
+    \/ \E outcome \in RuntimeCompletionOutcomeValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : RuntimeCompletionTransportError(outcome, detail, at_utc_ms)
+    \/ \E outcome \in RuntimeCompletionOutcomeValues : \E detail \in OptionStringValues : \E at_utc_ms \in 0..2 : RuntimeCompletionInternalError(outcome, detail, at_utc_ms)
     \/ \E detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E at_utc_ms \in 0..2 : SkipFromPendingOrLive(detail, arg_failure_class, at_utc_ms)
     \/ \E detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E at_utc_ms \in 0..2 : MisfireFromPendingOrLive(detail, arg_failure_class, at_utc_ms)
     \/ \E arg_superseded_by_revision \in 0..2 : \E at_utc_ms \in 0..2 : SupersedePendingOrLive(arg_superseded_by_revision, at_utc_ms)

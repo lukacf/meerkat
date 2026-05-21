@@ -168,6 +168,7 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
             &[
                 "Valid",
                 "Expiring",
+                "Expired",
                 "Refreshing",
                 "ReauthRequired",
                 "Released",
@@ -1429,6 +1430,17 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "LeaseLost",
                     "TransportError",
                     "InternalError",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeCompletionOutcome",
+                &[
+                    "Completed",
+                    "CallbackPending",
+                    "Cancelled",
+                    "Abandoned",
+                    "FinalizationFailed",
+                    "RuntimeTerminated",
                 ],
             ),
             NamedTypeBinding::string("OccurrenceId"),

@@ -51,6 +51,13 @@ impl LeaseFreshnessObserver {
         lease_generation: Option<u64>,
         now: DateTime<Utc>,
     ) -> Result<bool, AuthError> {
+        self.handle
+            .observe_credential_freshness(
+                &self.lease_key,
+                epoch_secs(now),
+                AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+            )
+            .map_err(|err| self.observer_error(authorizer_label, "observe_freshness", err))?;
         let snapshot = self.handle.snapshot(&self.lease_key);
         match snapshot.phase {
             Some(AuthLeasePhase::Valid) => {}
@@ -58,7 +65,10 @@ impl LeaseFreshnessObserver {
                 return Err(AuthError::UserReauthRequired);
             }
             Some(
-                AuthLeasePhase::Expiring | AuthLeasePhase::Refreshing | AuthLeasePhase::Released,
+                AuthLeasePhase::Expiring
+                | AuthLeasePhase::Expired
+                | AuthLeasePhase::Refreshing
+                | AuthLeasePhase::Released,
             )
             | None => return Ok(false),
         }
@@ -144,8 +154,16 @@ impl LeaseFreshnessObserver {
     }
 
     fn try_begin_refresh(&self, authorizer_label: &str) -> Result<LeaseRefreshStart, AuthError> {
+        let now = Utc::now();
+        self.handle
+            .observe_credential_freshness(
+                &self.lease_key,
+                epoch_secs(now),
+                AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+            )
+            .map_err(|err| self.observer_error(authorizer_label, "observe_freshness", err))?;
         match self.handle.snapshot(&self.lease_key).phase {
-            Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring) => {
+            Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring | AuthLeasePhase::Expired) => {
                 self.handle
                     .begin_refresh(&self.lease_key)
                     .map_err(|err| self.observer_error(authorizer_label, "begin_refresh", err))?;

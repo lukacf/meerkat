@@ -3607,7 +3607,7 @@ async fn handle_auth_command(
                 profile,
                 chrono::Utc::now(),
             )
-            .await;
+            .await?;
             println!("state:       {}", projection.phase.as_public_str());
             if let Some(expires_at) = projection.expires_at {
                 println!("expires_at:  {}", expires_at.to_rfc3339());
@@ -5218,8 +5218,15 @@ async fn project_cli_auth_status(
     auth_binding: &AuthBindingRef,
     auth_profile: &meerkat_core::AuthProfile,
     now: chrono::DateTime<chrono::Utc>,
-) -> CliAuthStatusProjection {
+) -> anyhow::Result<CliAuthStatusProjection> {
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
+    auth_lease
+        .observe_credential_freshness(
+            &lease_key,
+            now.timestamp().max(0) as u64,
+            meerkat_core::handles::AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+        )
+        .map_err(|err| anyhow::anyhow!("AuthMachine freshness observation failed: {err}"))?;
     let mut snapshot = auth_lease.snapshot(&lease_key);
     let expected_mode = meerkat_providers::auth_store::persisted_auth_mode_for_auth_method(
         &auth_profile.auth_method,
@@ -5290,10 +5297,10 @@ async fn project_cli_auth_status(
     };
     let projection =
         meerkat_core::project_published_auth_status(now, projection_tokens, projection_snapshot);
-    CliAuthStatusProjection {
+    Ok(CliAuthStatusProjection {
         phase: projection.phase,
         expires_at: projection.expires_at,
-    }
+    })
 }
 
 fn auth_status_binding_id<'a>(
@@ -12844,7 +12851,8 @@ mod tests {
             auth_profile,
             chrono::Utc::now(),
         )
-        .await;
+        .await
+        .expect("AuthMachine freshness observation succeeds");
 
         assert_eq!(projection.phase, AuthStatusPhase::Unknown);
         assert!(projection.expires_at.is_none());
@@ -12888,7 +12896,8 @@ mod tests {
             auth_profile,
             chrono::Utc::now(),
         )
-        .await;
+        .await
+        .expect("AuthMachine freshness observation succeeds");
 
         assert_eq!(projection.phase, AuthStatusPhase::Unknown);
         assert!(projection.expires_at.is_none());

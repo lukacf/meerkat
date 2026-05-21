@@ -1742,8 +1742,19 @@ pub async fn handle_auth_status_get(
     };
     let auth_lease = runtime.auth_lease_handle();
     let lease_key = LeaseKey::from_auth_binding(&auth_binding);
-    let mut snapshot = auth_lease.snapshot(&lease_key);
     let now = chrono::Utc::now();
+    if let Err(err) = auth_lease.observe_credential_freshness(
+        &lease_key,
+        now.timestamp().max(0) as u64,
+        meerkat_core::handles::AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+    ) {
+        return RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!("AuthMachine freshness observation failed: {err}"),
+        );
+    }
+    let mut snapshot = auth_lease.snapshot(&lease_key);
     let expected_mode = persisted_auth_mode_for_auth_method(&auth_profile.auth_method);
     let source_uses_store = credential_source_uses_persisted_store(&auth_profile.source);
     let oauth_mode = expected_mode

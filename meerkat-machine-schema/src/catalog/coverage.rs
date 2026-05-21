@@ -186,7 +186,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[anchor(
                 "occurrence_lifecycle",
                 "meerkat-schedule/src/lifecycle.rs",
-                "Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, classify due no action, due claim eligible, due misfire required, due lease expired, claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification",
+                "Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, classify due no action, due claim eligible, due misfire required, due lease expired, claim, claimed, dispatch, await completion, complete, resolve runtime completion outcome, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification",
             )],
             &[
                 scenario(
@@ -195,7 +195,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "occurrence_claim_dispatch_completion",
-                    "plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, and record claimed/dispatch/awaiting/completed effects",
+                    "plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, resolve runtime completion outcome, and record claimed/dispatch/awaiting/completed effects",
                 ),
                 scenario(
                     "occurrence_terminal_classification",
@@ -213,22 +213,22 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 anchor(
                     "auth_lease_handle",
                     "meerkat-runtime/src/handles/auth_lease.rs",
-                    "per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, expiring, refresh, reauth, release, lifecycle event, and wake loop DSL transitions through it",
+                    "per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, observe credential freshness, expiring, expired, refresh, reauth, release, lifecycle event, and wake loop DSL transitions through it",
                 ),
                 anchor(
                     "oauth_flow_handle",
                     "meerkat-runtime/src/handles/oauth_flow.rs",
-                    "per-binding AuthMachine-owned OAuth browser and device flow lifecycle authority for admit, verify, begin poll, finish poll, consume, expire, valid, expiring, refreshing, and reauth required phases",
+                    "per-binding AuthMachine-owned OAuth browser and device flow lifecycle authority for admit, verify, begin poll, finish poll, consume, expire, valid, expiring, expired, refreshing, and reauth required phases",
                 ),
             ],
             &[
                 scenario(
                     "acquire_expire_refresh_complete",
-                    "lease transitions through valid, expiring, refreshing, and back to valid on successful refresh",
+                    "lease transitions through valid, expiring, expired, refreshing, and back to valid on successful refresh",
                 ),
                 scenario(
                     "reauth_release_and_publication",
-                    "reauth required from valid/expiring/refreshing, release lease, emit lifecycle event, and wake refresh loop publication",
+                    "reauth required from valid/expiring/expired/refreshing, observe credential freshness for released state, release lease, emit lifecycle event, and wake refresh loop publication",
                 ),
                 scenario(
                     "oauth_browser_flow_lifecycle",

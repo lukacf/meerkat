@@ -984,6 +984,9 @@ impl RuntimeAuthLeaseHandle {
         match input {
             auth_dsl::AuthMachineInput::Acquire { .. } => "acquire_lease",
             auth_dsl::AuthMachineInput::MarkExpiring => "mark_expiring",
+            auth_dsl::AuthMachineInput::ObserveCredentialFreshness { .. } => {
+                "observe_credential_freshness"
+            }
             auth_dsl::AuthMachineInput::BeginRefresh => "begin_refresh",
             auth_dsl::AuthMachineInput::CompleteRefresh { .. } => "complete_refresh",
             auth_dsl::AuthMachineInput::RefreshFailed { .. } => "refresh_failed",
@@ -1031,6 +1034,7 @@ fn map_phase(phase: auth_dsl::AuthLifecyclePhase) -> AuthLeasePhase {
     match phase {
         auth_dsl::AuthLifecyclePhase::Valid => AuthLeasePhase::Valid,
         auth_dsl::AuthLifecyclePhase::Expiring => AuthLeasePhase::Expiring,
+        auth_dsl::AuthLifecyclePhase::Expired => AuthLeasePhase::Expired,
         auth_dsl::AuthLifecyclePhase::Refreshing => AuthLeasePhase::Refreshing,
         auth_dsl::AuthLifecyclePhase::ReauthRequired => AuthLeasePhase::ReauthRequired,
         auth_dsl::AuthLifecyclePhase::Released => AuthLeasePhase::Released,
@@ -1041,6 +1045,7 @@ fn restore_phase(phase: AuthLeasePhase) -> auth_dsl::AuthLifecyclePhase {
     match phase {
         AuthLeasePhase::Valid => auth_dsl::AuthLifecyclePhase::Valid,
         AuthLeasePhase::Expiring => auth_dsl::AuthLifecyclePhase::Expiring,
+        AuthLeasePhase::Expired => auth_dsl::AuthLifecyclePhase::Expired,
         AuthLeasePhase::Refreshing => auth_dsl::AuthLifecyclePhase::Refreshing,
         AuthLeasePhase::ReauthRequired => auth_dsl::AuthLifecyclePhase::ReauthRequired,
         AuthLeasePhase::Released => auth_dsl::AuthLifecyclePhase::Released,
@@ -1080,6 +1085,33 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             lease_key,
             auth_dsl::AuthMachineInput::MarkExpiring,
             "AuthLeaseHandle::mark_expiring",
+            false,
+        )
+        .map(|_| ())
+    }
+
+    fn observe_credential_freshness(
+        &self,
+        lease_key: &LeaseKey,
+        now: u64,
+        refresh_window_secs: u64,
+    ) -> Result<(), DslTransitionError> {
+        if !self
+            .machines
+            .lock()
+            .unwrap()
+            .authorities
+            .contains_key(lease_key)
+        {
+            return Ok(());
+        }
+        self.apply(
+            lease_key,
+            auth_dsl::AuthMachineInput::ObserveCredentialFreshness {
+                now_ts: now,
+                refresh_window_secs,
+            },
+            "AuthLeaseHandle::observe_credential_freshness",
             false,
         )
         .map(|_| ())
@@ -1432,6 +1464,20 @@ mod tests {
         let snap = h.snapshot(&k);
         assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
         assert_eq!(snap.expires_at, Some(1_800_000_900));
+    }
+
+    #[test]
+    fn observe_credential_freshness_marks_expired_through_authmachine() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let k = lease("dev", "expired_openai");
+
+        h.acquire_lease(&k, 1_800_000_000).unwrap();
+        h.observe_credential_freshness(&k, 1_800_000_001, 60)
+            .unwrap();
+
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Expired));
+        h.begin_refresh(&k).unwrap();
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Refreshing));
     }
 
     #[test]

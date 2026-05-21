@@ -74,6 +74,7 @@ macro_rules! auth_catalog_machine_dsl {
             phase AuthLifecyclePhase {
                 Valid,
                 Expiring,
+                Expired,
                 Refreshing,
                 ReauthRequired,
                 Released,
@@ -82,6 +83,7 @@ macro_rules! auth_catalog_machine_dsl {
             input AuthMachineInput {
                 Acquire { expires_at_ts: Option<u64>, credential_published_at_millis: u64 },
                 MarkExpiring,
+                ObserveCredentialFreshness { now_ts: u64, refresh_window_secs: u64 },
                 BeginRefresh,
                 CompleteRefresh { new_expires_at: Option<u64>, now_ts: u64, credential_published_at_millis: u64 },
                 RefreshFailed {
@@ -187,6 +189,150 @@ macro_rules! auth_catalog_machine_dsl {
                 }
             }
 
+            transition ObserveCredentialFreshnessValid {
+                on input ObserveCredentialFreshness { now_ts, refresh_window_secs }
+                guard { self.lifecycle_phase == Phase::Valid }
+                guard "credential_not_in_refresh_window" {
+                    if self.expires_at == None {
+                        true
+                    } else {
+                        now_ts + refresh_window_secs <= self.expires_at.get("value")
+                    }
+                }
+                to Valid
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition ObserveCredentialFreshnessExpiringFromValid {
+                on input ObserveCredentialFreshness { now_ts, refresh_window_secs }
+                guard { self.lifecycle_phase == Phase::Valid }
+                guard "credential_in_refresh_window" {
+                    if self.expires_at == None {
+                        false
+                    } else {
+                        now_ts < self.expires_at.get("value")
+                        && self.expires_at.get("value") < now_ts + refresh_window_secs
+                    }
+                }
+                to Expiring
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition ObserveCredentialFreshnessExpiredFromValid {
+                on input ObserveCredentialFreshness { now_ts, refresh_window_secs }
+                guard { self.lifecycle_phase == Phase::Valid }
+                guard "credential_expired" {
+                    if self.expires_at == None {
+                        false
+                    } else {
+                        self.expires_at.get("value") <= now_ts
+                    }
+                }
+                to Expired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition ObserveCredentialFreshnessExpiring {
+                on input ObserveCredentialFreshness { now_ts, refresh_window_secs }
+                guard { self.lifecycle_phase == Phase::Expiring }
+                guard "credential_not_expired" {
+                    if self.expires_at == None {
+                        true
+                    } else {
+                        now_ts < self.expires_at.get("value")
+                    }
+                }
+                to Expiring
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition ObserveCredentialFreshnessExpiredFromExpiring {
+                on input ObserveCredentialFreshness { now_ts, refresh_window_secs }
+                guard { self.lifecycle_phase == Phase::Expiring }
+                guard "credential_expired" {
+                    if self.expires_at == None {
+                        false
+                    } else {
+                        self.expires_at.get("value") <= now_ts
+                    }
+                }
+                to Expired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition ObserveCredentialFreshnessExpired {
+                on input ObserveCredentialFreshness { now_ts, refresh_window_secs }
+                guard { self.lifecycle_phase == Phase::Expired }
+                to Expired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition ObserveCredentialFreshnessRefreshing {
+                on input ObserveCredentialFreshness { now_ts, refresh_window_secs }
+                guard { self.lifecycle_phase == Phase::Refreshing }
+                to Refreshing
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition ObserveCredentialFreshnessReauthRequired {
+                on input ObserveCredentialFreshness { now_ts, refresh_window_secs }
+                guard { self.lifecycle_phase == Phase::ReauthRequired }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition ObserveCredentialFreshnessReleased {
+                on input ObserveCredentialFreshness { now_ts, refresh_window_secs }
+                guard { self.lifecycle_phase == Phase::Released }
+                to Released
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
             transition BeginRefreshFromValid {
                 on input BeginRefresh
                 guard { self.lifecycle_phase == Phase::Valid }
@@ -213,9 +359,29 @@ macro_rules! auth_catalog_machine_dsl {
                 emit WakeRefreshLoop
             }
 
+            transition BeginRefreshFromExpired {
+                on input BeginRefresh
+                guard { self.lifecycle_phase == Phase::Expired }
+                to Refreshing
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+                emit WakeRefreshLoop
+            }
+
             transition CompleteRefresh {
                 on input CompleteRefresh { new_expires_at, now_ts, credential_published_at_millis }
                 guard { self.lifecycle_phase == Phase::Refreshing }
+                guard "new_credential_not_expired" {
+                    if new_expires_at == None {
+                        true
+                    } else {
+                        now_ts < new_expires_at.get("value")
+                    }
+                }
                 update {
                     self.expires_at = new_expires_at;
                     self.last_refresh = Some(now_ts);
@@ -302,6 +468,18 @@ macro_rules! auth_catalog_machine_dsl {
             transition MarkReauthRequiredFromExpiring {
                 on input MarkReauthRequired
                 guard { self.lifecycle_phase == Phase::Expiring }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition MarkReauthRequiredFromExpired {
+                on input MarkReauthRequired
+                guard { self.lifecycle_phase == Phase::Expired }
                 to ReauthRequired
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
@@ -458,6 +636,36 @@ macro_rules! auth_catalog_machine_dsl {
                 }
             }
 
+            transition RestoreAuthoritySnapshotExpired {
+                on input RestoreAuthoritySnapshot {
+                    lifecycle_phase,
+                    expires_at,
+                    last_refresh,
+                    refresh_attempt,
+                    credential_present,
+                    credential_generation,
+                    credential_published_at_millis
+                }
+                guard { lifecycle_phase == Phase::Expired && credential_present && credential_published_at_millis != None }
+                update {
+                    self.expires_at = expires_at;
+                    self.last_refresh = last_refresh;
+                    self.refresh_attempt = refresh_attempt;
+                    self.credential_present = credential_present;
+                    if credential_generation > self.credential_generation {
+                        self.credential_generation = credential_generation;
+                    }
+                    self.credential_published_at_millis = credential_published_at_millis;
+                }
+                to Expired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
             transition RestoreAuthoritySnapshotReauthRequired {
                 on input RestoreAuthoritySnapshot {
                     lifecycle_phase,
@@ -519,7 +727,7 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition RestoreOAuthBrowserFlow {
-                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input RestoreOAuthBrowserFlow { flow_id, provider, redirect_uri, expires_at_millis }
                 update {
                     if self.oauth_browser_flow_ids.contains(flow_id) == false {
@@ -540,7 +748,7 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition RestoreOAuthDeviceFlow {
-                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input RestoreOAuthDeviceFlow { flow_id, provider, expires_at_millis, poll_active }
                 update {
                     if self.oauth_device_flow_ids.contains(flow_id) == false {
@@ -570,7 +778,7 @@ macro_rules! auth_catalog_machine_dsl {
             // placeholder; OAuth membership changes must not manufacture a
             // credential-valid lease.
             transition AdmitOAuthBrowserFlow {
-                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input AdmitOAuthBrowserFlow { flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows }
                 guard "browser_flow_absent" { self.oauth_browser_flow_ids.contains(flow_id) == false }
                 guard "oauth_capacity_available" { self.oauth_outstanding_flow_count < max_outstanding_flows }
@@ -615,7 +823,7 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition VerifyOAuthBrowserFlow {
-                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input VerifyOAuthBrowserFlow { flow_id, provider, redirect_uri, now_millis }
                 guard "browser_flow_present" { self.oauth_browser_flow_ids.contains(flow_id) }
                 guard "browser_flow_provider_matches" { self.oauth_browser_flow_providers.get_cloned(flow_id) == Some(provider) }
@@ -632,7 +840,7 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition ConsumeOAuthBrowserFlow {
-                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input ConsumeOAuthBrowserFlow { flow_id, provider, redirect_uri, now_millis }
                 guard "browser_flow_present" { self.oauth_browser_flow_ids.contains(flow_id) }
                 guard "browser_flow_provider_matches" { self.oauth_browser_flow_providers.get_cloned(flow_id) == Some(provider) }
@@ -655,7 +863,7 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition ExpireOAuthBrowserFlow {
-                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input ExpireOAuthBrowserFlow { flow_id }
                 guard "browser_flow_present" { self.oauth_browser_flow_ids.contains(flow_id) }
                 update {
@@ -675,7 +883,7 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition AdmitOAuthDeviceFlow {
-                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input AdmitOAuthDeviceFlow { flow_id, provider, expires_at_millis, max_outstanding_flows, observed_global_outstanding_flows }
                 guard "device_flow_absent" { self.oauth_device_flow_ids.contains(flow_id) == false }
                 guard "oauth_capacity_available" { self.oauth_outstanding_flow_count < max_outstanding_flows }
@@ -720,7 +928,7 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition ConfirmOAuthDurableAdmission {
-                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input ConfirmOAuthDurableAdmission { observed_global_outstanding_flows, max_outstanding_flows }
                 guard "oauth_global_capacity_available" { observed_global_outstanding_flows < max_outstanding_flows }
                 update {}
@@ -728,7 +936,7 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition VerifyOAuthDeviceFlow {
-                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input VerifyOAuthDeviceFlow { flow_id, provider, now_millis }
                 guard "device_flow_present" { self.oauth_device_flow_ids.contains(flow_id) }
                 guard "device_flow_provider_matches" { self.oauth_device_flow_providers.get_cloned(flow_id) == Some(provider) }
@@ -744,7 +952,7 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition BeginOAuthDevicePoll {
-                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input BeginOAuthDevicePoll { flow_id, provider, now_millis }
                 guard "device_flow_present" { self.oauth_device_flow_ids.contains(flow_id) }
                 guard "device_flow_provider_matches" { self.oauth_device_flow_providers.get_cloned(flow_id) == Some(provider) }
@@ -763,7 +971,7 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition FinishOAuthDevicePoll {
-                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input FinishOAuthDevicePoll { flow_id }
                 guard "device_poll_present" { self.oauth_device_poll_ids.contains(flow_id) }
                 update {
@@ -779,7 +987,7 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition ConsumeOAuthDeviceFlow {
-                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input ConsumeOAuthDeviceFlow { flow_id, provider, now_millis }
                 guard "device_flow_present" { self.oauth_device_flow_ids.contains(flow_id) }
                 guard "device_flow_provider_matches" { self.oauth_device_flow_providers.get_cloned(flow_id) == Some(provider) }
@@ -801,7 +1009,7 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition ExpireOAuthDeviceFlow {
-                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input ExpireOAuthDeviceFlow { flow_id }
                 guard "device_flow_present" { self.oauth_device_flow_ids.contains(flow_id) }
                 update {

@@ -114,6 +114,7 @@ impl DrainExitReason {
 pub enum AuthLeasePhase {
     Valid,
     Expiring,
+    Expired,
     Refreshing,
     ReauthRequired,
     Released,
@@ -1310,8 +1311,19 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
     /// Fire `MarkAuthExpiring { lease_key }` — only legal from `valid`.
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
 
+    /// Fire `ObserveCredentialFreshness { lease_key, now, refresh_window }`.
+    ///
+    /// AuthMachine owns whether the credential remains valid, becomes
+    /// expiring, or becomes expired from its observed expiry facts.
+    fn observe_credential_freshness(
+        &self,
+        lease_key: &LeaseKey,
+        now: u64,
+        refresh_window_secs: u64,
+    ) -> Result<(), DslTransitionError>;
+
     /// Fire `BeginAuthRefresh { lease_key }` — legal from `valid` or
-    /// `expiring`.
+    /// `expiring` or `expired`.
     ///
     /// Provides the DSL-level refresh dedup: once the binding is in
     /// `auth_refreshing_leases`, no concurrent `BeginAuthRefresh` is

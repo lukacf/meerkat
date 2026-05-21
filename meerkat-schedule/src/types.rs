@@ -1642,15 +1642,6 @@ pub enum RuntimeDeliveryOutcome {
 }
 
 impl RuntimeDeliveryOutcome {
-    pub fn derived_failure_class(&self) -> OccurrenceFailureClass {
-        match self {
-            Self::AdmissionRejected { .. }
-            | Self::CompletionAbandoned { .. }
-            | Self::CompletionCallbackPending { .. } => OccurrenceFailureClass::RuntimeRejected,
-            Self::CompletionRuntimeTerminated { .. } => OccurrenceFailureClass::TransportError,
-        }
-    }
-
     pub fn detail(&self) -> String {
         match self {
             Self::AdmissionRejected { detail }
@@ -1661,6 +1652,18 @@ impl RuntimeDeliveryOutcome {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCompletionOutcome {
+    Completed,
+    CallbackPending,
+    Cancelled,
+    Abandoned,
+    FinalizationFailed,
+    RuntimeTerminated,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

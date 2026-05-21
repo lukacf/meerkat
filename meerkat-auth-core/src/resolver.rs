@@ -361,6 +361,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
     let lifecycle = managed_store_lifecycle_from_phase(token_phase);
 
     if let Some(auth_lease) = env.auth_lease_handle.as_ref() {
+        observe_auth_lease_freshness_for_now(auth_lease.as_ref(), &lease_key, now)?;
         let restore_snapshot = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
         let snapshot = restore_snapshot.snapshot().clone();
         if snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired) {
@@ -489,6 +490,25 @@ fn epoch_secs(ts: chrono::DateTime<chrono::Utc>) -> u64 {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn observe_auth_lease_freshness_for_now(
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    lease_key: &meerkat_core::handles::LeaseKey,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), ProviderAuthError> {
+    auth_lease
+        .observe_credential_freshness(
+            lease_key,
+            epoch_secs(now),
+            meerkat_core::handles::AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+        )
+        .map_err(|e| {
+            ProviderAuthError::SourceResolutionFailed(format!(
+                "AuthMachine lifecycle freshness observation failed: {e}"
+            ))
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn begin_managed_store_oauth_refresh_lifecycle(
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
@@ -499,6 +519,7 @@ pub fn begin_managed_store_oauth_refresh_lifecycle(
         .as_ref()
         .ok_or_else(lease_absent_error)?;
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    observe_auth_lease_freshness_for_now(auth_lease.as_ref(), &lease_key, (env.now)())?;
     let current_restore_snapshot = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
     let current_snapshot = current_restore_snapshot.snapshot().clone();
     if current_snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::Refreshing) {
@@ -517,7 +538,8 @@ pub fn begin_managed_store_oauth_refresh_lifecycle(
     match current_snapshot.phase {
         Some(
             meerkat_core::handles::AuthLeasePhase::Valid
-            | meerkat_core::handles::AuthLeasePhase::Expiring,
+            | meerkat_core::handles::AuthLeasePhase::Expiring
+            | meerkat_core::handles::AuthLeasePhase::Expired,
         ) if current_snapshot.credential_present => {
             auth_lease.begin_refresh(&lease_key).map_err(|e| {
                 ProviderAuthError::SourceResolutionFailed(format!(
@@ -541,7 +563,8 @@ pub fn begin_managed_store_oauth_refresh_lifecycle(
         Some(meerkat_core::handles::AuthLeasePhase::Released) | None => Err(lease_absent_error()),
         Some(
             meerkat_core::handles::AuthLeasePhase::Valid
-            | meerkat_core::handles::AuthLeasePhase::Expiring,
+            | meerkat_core::handles::AuthLeasePhase::Expiring
+            | meerkat_core::handles::AuthLeasePhase::Expired,
         ) => Err(lease_absent_error()),
     }
 }
@@ -727,18 +750,12 @@ fn publish_managed_store_tokens_refresh_lifecycle(
     binding: &ValidatedBinding,
     tokens: &PersistedTokens,
 ) -> Result<meerkat_core::handles::AuthLeaseTransition, ProviderAuthError> {
-    if AuthStatusPhase::from_lease_expires_at(
-        (env.now)(),
-        Some(meerkat_core::persisted_token_expires_at_epoch_secs(tokens)),
-    ) == AuthStatusPhase::Expired
-    {
-        return Err(refresh_required_error());
-    }
     let auth_lease = env
         .auth_lease_handle
         .as_ref()
         .ok_or_else(lease_absent_error)?;
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    observe_auth_lease_freshness_for_now(auth_lease.as_ref(), &lease_key, (env.now)())?;
     let snapshot = auth_lease.snapshot(&lease_key);
     let began_here = if snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::Refreshing) {
         false
@@ -1519,6 +1536,15 @@ mod tests {
                 match snapshot.phase {
                     Some(AuthLeasePhase::Expiring) => {
                         handle.mark_expiring(&lease_key).unwrap();
+                    }
+                    Some(AuthLeasePhase::Expired) => {
+                        handle
+                            .observe_credential_freshness(
+                                &lease_key,
+                                snapshot.expires_at.unwrap_or(0).saturating_add(1),
+                                meerkat_core::handles::AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+                            )
+                            .unwrap();
                     }
                     Some(AuthLeasePhase::Refreshing) => {
                         handle.begin_refresh(&lease_key).unwrap();

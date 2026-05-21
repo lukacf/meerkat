@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for schedule_bundle.
 
-CONSTANTS ClaimTokenValues, DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OverlapPolicyValues, ScheduleIdValues, SessionIdValues, SetOfOccurrenceIdValues, StringValues
+CONSTANTS ClaimTokenValues, DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, ScheduleIdValues, SessionIdValues, SetOfOccurrenceIdValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -1319,6 +1319,116 @@ occurrence_CompleteFromDispatchingOrAwaiting(arg_at_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
+occurrence_RuntimeCompletionCompleted(arg_outcome, arg_detail, arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ResolveRuntimeCompletion"
+       /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.detail = arg_detail
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching" \/ occurrence_phase = "AwaitingCompletion"
+       /\ (packet.payload.outcome = "Completed")
+       /\ occurrence_phase' = "Completed"
+       /\ occurrence_receipt_recorded_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ occurrence_receipt_stage' = Some("Completed")
+       /\ occurrence_receipt_failure_class' = None
+       /\ occurrence_receipt_detail' = None
+       /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "Completed", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "RuntimeCompletionCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "RuntimeCompletionCompleted", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_RuntimeCompletionRuntimeRejected(arg_outcome, arg_detail, arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ResolveRuntimeCompletion"
+       /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.detail = arg_detail
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching" \/ occurrence_phase = "AwaitingCompletion"
+       /\ ((packet.payload.outcome = "CallbackPending") \/ (packet.payload.outcome = "Cancelled") \/ (packet.payload.outcome = "Abandoned"))
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ occurrence_receipt_recorded_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ occurrence_receipt_stage' = Some("DeliveryFailed")
+       /\ occurrence_receipt_failure_class' = Some("RuntimeRejected")
+       /\ occurrence_receipt_detail' = packet.payload.detail
+       /\ occurrence_failure_class' = Some("RuntimeRejected")
+       /\ occurrence_failure_detail' = packet.payload.detail
+       /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_dispatched_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "DeliveryFailed", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "RuntimeCompletionRuntimeRejected"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "RuntimeCompletionRuntimeRejected", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_RuntimeCompletionTransportError(arg_outcome, arg_detail, arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ResolveRuntimeCompletion"
+       /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.detail = arg_detail
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching" \/ occurrence_phase = "AwaitingCompletion"
+       /\ (packet.payload.outcome = "RuntimeTerminated")
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ occurrence_receipt_recorded_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ occurrence_receipt_stage' = Some("DeliveryFailed")
+       /\ occurrence_receipt_failure_class' = Some("TransportError")
+       /\ occurrence_receipt_detail' = packet.payload.detail
+       /\ occurrence_failure_class' = Some("TransportError")
+       /\ occurrence_failure_detail' = packet.payload.detail
+       /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_dispatched_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "DeliveryFailed", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "RuntimeCompletionTransportError"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "RuntimeCompletionTransportError", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_RuntimeCompletionInternalError(arg_outcome, arg_detail, arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ResolveRuntimeCompletion"
+       /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.detail = arg_detail
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching" \/ occurrence_phase = "AwaitingCompletion"
+       /\ (packet.payload.outcome = "FinalizationFailed")
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ occurrence_receipt_recorded_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ occurrence_receipt_stage' = Some("DeliveryFailed")
+       /\ occurrence_receipt_failure_class' = Some("InternalError")
+       /\ occurrence_receipt_detail' = packet.payload.detail
+       /\ occurrence_failure_class' = Some("InternalError")
+       /\ occurrence_failure_detail' = packet.payload.detail
+       /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_dispatched_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "DeliveryFailed", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "RuntimeCompletionInternalError"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "RuntimeCompletionInternalError", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
@@ -1678,6 +1788,10 @@ CoreNext ==
     \/ \E arg_correlation_id \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_at_utc_ms)
+    \/ \E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionCompleted(arg_outcome, arg_detail, arg_at_utc_ms)
+    \/ \E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionRuntimeRejected(arg_outcome, arg_detail, arg_at_utc_ms)
+    \/ \E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionTransportError(arg_outcome, arg_detail, arg_at_utc_ms)
+    \/ \E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionInternalError(arg_outcome, arg_detail, arg_at_utc_ms)
     \/ \E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms)
     \/ \E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_MisfireFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms)
     \/ \E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms)
@@ -1779,9 +1893,13 @@ WitnessFairness_revision_supersede_route_2 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_at_utc_ms))
-    /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms))
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionCompleted(arg_outcome, arg_detail, arg_at_utc_ms))
 
 WitnessFairness_revision_supersede_route_3 ==
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionRuntimeRejected(arg_outcome, arg_detail, arg_at_utc_ms))
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionTransportError(arg_outcome, arg_detail, arg_at_utc_ms))
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionInternalError(arg_outcome, arg_detail, arg_at_utc_ms))
+    /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms))
     /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_MisfireFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms))
     /\ WF_vars(\E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms))
     /\ WF_vars(\E arg_failure_class \in OccurrenceFailureClassValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailedFromClaimedOrLive(arg_failure_class, arg_detail, arg_at_utc_ms))
@@ -1849,9 +1967,13 @@ WitnessFairness_occurrence_supersede_ack_route_2 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_at_utc_ms))
-    /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms))
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionCompleted(arg_outcome, arg_detail, arg_at_utc_ms))
 
 WitnessFairness_occurrence_supersede_ack_route_3 ==
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionRuntimeRejected(arg_outcome, arg_detail, arg_at_utc_ms))
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionTransportError(arg_outcome, arg_detail, arg_at_utc_ms))
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionInternalError(arg_outcome, arg_detail, arg_at_utc_ms))
+    /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms))
     /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_MisfireFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms))
     /\ WF_vars(\E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms))
     /\ WF_vars(\E arg_failure_class \in OccurrenceFailureClassValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailedFromClaimedOrLive(arg_failure_class, arg_detail, arg_at_utc_ms))
@@ -1919,9 +2041,13 @@ WitnessFairness_pause_resume_without_revision_2 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_at_utc_ms))
-    /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms))
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionCompleted(arg_outcome, arg_detail, arg_at_utc_ms))
 
 WitnessFairness_pause_resume_without_revision_3 ==
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionRuntimeRejected(arg_outcome, arg_detail, arg_at_utc_ms))
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionTransportError(arg_outcome, arg_detail, arg_at_utc_ms))
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionInternalError(arg_outcome, arg_detail, arg_at_utc_ms))
+    /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms))
     /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_MisfireFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms))
     /\ WF_vars(\E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms))
     /\ WF_vars(\E arg_failure_class \in OccurrenceFailureClassValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailedFromClaimedOrLive(arg_failure_class, arg_detail, arg_at_utc_ms))

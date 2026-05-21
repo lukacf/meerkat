@@ -133,6 +133,11 @@ machine! {
             DispatchStarted { correlation_id: Option<String>, at_utc_ms: u64 },
             AwaitCompletion { at_utc_ms: u64 },
             Complete { at_utc_ms: u64 },
+            ResolveRuntimeCompletion {
+                outcome: Enum<RuntimeCompletionOutcome>,
+                detail: Option<String>,
+                at_utc_ms: u64
+            },
             Skip { detail: Option<String>, failure_class: Option<Enum<OccurrenceFailureClass>>, at_utc_ms: u64 },
             Misfire { detail: Option<String>, failure_class: Option<Enum<OccurrenceFailureClass>>, at_utc_ms: u64 },
             Supersede { superseded_by_revision: u64, at_utc_ms: u64 },
@@ -738,6 +743,76 @@ machine! {
             emit Completed
         }
 
+        transition RuntimeCompletionCompleted {
+            on input ResolveRuntimeCompletion { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "runtime_outcome_completed" { outcome == RuntimeCompletionOutcome::Completed }
+            update {
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Completed);
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
+            }
+            to Completed
+            emit Completed
+        }
+
+        transition RuntimeCompletionRuntimeRejected {
+            on input ResolveRuntimeCompletion { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "runtime_outcome_rejected" {
+                outcome == RuntimeCompletionOutcome::CallbackPending
+                || outcome == RuntimeCompletionOutcome::Cancelled
+                || outcome == RuntimeCompletionOutcome::Abandoned
+            }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::RuntimeRejected);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::RuntimeRejected);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        transition RuntimeCompletionTransportError {
+            on input ResolveRuntimeCompletion { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "runtime_outcome_transport_error" { outcome == RuntimeCompletionOutcome::RuntimeTerminated }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::TransportError);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::TransportError);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        transition RuntimeCompletionInternalError {
+            on input ResolveRuntimeCompletion { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "runtime_outcome_internal_error" { outcome == RuntimeCompletionOutcome::FinalizationFailed }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::InternalError);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::InternalError);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
         // --- Skip (from Pending or live claim phases) ---
 
         transition SkipFromPendingOrLive {
@@ -1014,6 +1089,16 @@ pub enum OccurrenceFailureClass {
     LeaseLost,
     TransportError,
     InternalError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeCompletionOutcome {
+    Completed,
+    CallbackPending,
+    Cancelled,
+    Abandoned,
+    FinalizationFailed,
+    RuntimeTerminated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

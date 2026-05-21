@@ -119,7 +119,7 @@ auth_machine_Acquire(arg_expires_at_ts, arg_credential_published_at_millis) ==
        /\ packet.payload.expires_at_ts = arg_expires_at_ts
        /\ packet.payload.credential_published_at_millis = arg_credential_published_at_millis
        /\ ~HigherPriorityReady("auth_machine_authority")
-       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
+       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
        /\ auth_machine_phase' = "Valid"
        /\ auth_machine_expires_at' = packet.payload.expires_at_ts
        /\ auth_machine_refresh_attempt' = 0
@@ -152,6 +152,191 @@ auth_machine_MarkExpiring ==
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expiring"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkExpiring"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "MarkExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
        /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expiring", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ObserveCredentialFreshnessValid(arg_now_ts, arg_refresh_window_secs) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ObserveCredentialFreshness"
+       /\ packet.payload.now_ts = arg_now_ts
+       /\ packet.payload.refresh_window_secs = arg_refresh_window_secs
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Valid"
+       /\ (IF (auth_machine_expires_at = None) THEN TRUE ELSE ((packet.payload.now_ts + packet.payload.refresh_window_secs) <= (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)))
+       /\ auth_machine_phase' = "Valid"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Valid"], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveCredentialFreshnessValid"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ObserveCredentialFreshnessValid", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Valid"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Valid", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ObserveCredentialFreshnessExpiringFromValid(arg_now_ts, arg_refresh_window_secs) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ObserveCredentialFreshness"
+       /\ packet.payload.now_ts = arg_now_ts
+       /\ packet.payload.refresh_window_secs = arg_refresh_window_secs
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Valid"
+       /\ (IF (auth_machine_expires_at = None) THEN FALSE ELSE ((packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)) /\ ((IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None) < (packet.payload.now_ts + packet.payload.refresh_window_secs))))
+       /\ auth_machine_phase' = "Expiring"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expiring"], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveCredentialFreshnessExpiringFromValid"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ObserveCredentialFreshnessExpiringFromValid", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expiring", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ObserveCredentialFreshnessExpiredFromValid(arg_now_ts, arg_refresh_window_secs) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ObserveCredentialFreshness"
+       /\ packet.payload.now_ts = arg_now_ts
+       /\ packet.payload.refresh_window_secs = arg_refresh_window_secs
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Valid"
+       /\ (IF (auth_machine_expires_at = None) THEN FALSE ELSE ((IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None) <= packet.payload.now_ts))
+       /\ auth_machine_phase' = "Expired"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveCredentialFreshnessExpiredFromValid"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ObserveCredentialFreshnessExpiredFromValid", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ObserveCredentialFreshnessExpiring(arg_now_ts, arg_refresh_window_secs) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ObserveCredentialFreshness"
+       /\ packet.payload.now_ts = arg_now_ts
+       /\ packet.payload.refresh_window_secs = arg_refresh_window_secs
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expiring"
+       /\ (IF (auth_machine_expires_at = None) THEN TRUE ELSE (packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)))
+       /\ auth_machine_phase' = "Expiring"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expiring"], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveCredentialFreshnessExpiring"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ObserveCredentialFreshnessExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expiring", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ObserveCredentialFreshnessExpiredFromExpiring(arg_now_ts, arg_refresh_window_secs) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ObserveCredentialFreshness"
+       /\ packet.payload.now_ts = arg_now_ts
+       /\ packet.payload.refresh_window_secs = arg_refresh_window_secs
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expiring"
+       /\ (IF (auth_machine_expires_at = None) THEN FALSE ELSE ((IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None) <= packet.payload.now_ts))
+       /\ auth_machine_phase' = "Expired"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveCredentialFreshnessExpiredFromExpiring"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ObserveCredentialFreshnessExpiredFromExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ObserveCredentialFreshnessExpired(arg_now_ts, arg_refresh_window_secs) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ObserveCredentialFreshness"
+       /\ packet.payload.now_ts = arg_now_ts
+       /\ packet.payload.refresh_window_secs = arg_refresh_window_secs
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ auth_machine_phase' = "Expired"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveCredentialFreshnessExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ObserveCredentialFreshnessExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ObserveCredentialFreshnessRefreshing(arg_now_ts, arg_refresh_window_secs) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ObserveCredentialFreshness"
+       /\ packet.payload.now_ts = arg_now_ts
+       /\ packet.payload.refresh_window_secs = arg_refresh_window_secs
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Refreshing"
+       /\ auth_machine_phase' = "Refreshing"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Refreshing"], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveCredentialFreshnessRefreshing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ObserveCredentialFreshnessRefreshing", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Refreshing"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Refreshing", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ObserveCredentialFreshnessReauthRequired(arg_now_ts, arg_refresh_window_secs) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ObserveCredentialFreshness"
+       /\ packet.payload.now_ts = arg_now_ts
+       /\ packet.payload.refresh_window_secs = arg_refresh_window_secs
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "ReauthRequired"
+       /\ auth_machine_phase' = "ReauthRequired"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "ReauthRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveCredentialFreshnessReauthRequired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ObserveCredentialFreshnessReauthRequired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "ReauthRequired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "ReauthRequired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ObserveCredentialFreshnessReleased(arg_now_ts, arg_refresh_window_secs) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ObserveCredentialFreshness"
+       /\ packet.payload.now_ts = arg_now_ts
+       /\ packet.payload.refresh_window_secs = arg_refresh_window_secs
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Released"
+       /\ auth_machine_phase' = "Released"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Released"], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveCredentialFreshnessReleased"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ObserveCredentialFreshnessReleased", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Released"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Released", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -191,6 +376,24 @@ auth_machine_BeginRefreshFromExpiring ==
        /\ model_step_count' = model_step_count + 1
 
 
+auth_machine_BeginRefreshFromExpired ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "BeginRefresh"
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ auth_machine_phase' = "Refreshing"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Refreshing"], effect_id |-> (model_step_count + 1), source_transition |-> "BeginRefreshFromExpired"], [machine |-> "auth_machine", variant |-> "WakeRefreshLoop", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BeginRefreshFromExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "BeginRefreshFromExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Refreshing"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Refreshing", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
 auth_machine_CompleteRefresh(arg_new_expires_at, arg_now_ts, arg_credential_published_at_millis) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
@@ -200,6 +403,7 @@ auth_machine_CompleteRefresh(arg_new_expires_at, arg_now_ts, arg_credential_publ
        /\ packet.payload.credential_published_at_millis = arg_credential_published_at_millis
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Refreshing"
+       /\ (IF (packet.payload.new_expires_at = None) THEN TRUE ELSE (packet.payload.now_ts < (IF "value" \in DOMAIN packet.payload.new_expires_at THEN packet.payload.new_expires_at["value"] ELSE None)))
        /\ auth_machine_phase' = "Valid"
        /\ auth_machine_expires_at' = packet.payload.new_expires_at
        /\ auth_machine_last_refresh' = Some(packet.payload.now_ts)
@@ -300,6 +504,24 @@ auth_machine_MarkReauthRequiredFromExpiring ==
        /\ model_step_count' = model_step_count + 1
 
 
+auth_machine_MarkReauthRequiredFromExpired ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "MarkReauthRequired"
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ auth_machine_phase' = "ReauthRequired"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "ReauthRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkReauthRequiredFromExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "MarkReauthRequiredFromExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "ReauthRequired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "ReauthRequired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
 auth_machine_MarkReauthRequiredFromRefreshing ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
@@ -323,7 +545,7 @@ auth_machine_ClearCredentialLifecycle ==
        /\ packet.machine = "auth_machine"
        /\ packet.variant = "ClearCredentialLifecycle"
        /\ ~HigherPriorityReady("auth_machine_authority")
-       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
+       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_expires_at' = None
        /\ auth_machine_last_refresh' = None
@@ -346,7 +568,7 @@ auth_machine_Release ==
        /\ packet.machine = "auth_machine"
        /\ packet.variant = "Release"
        /\ ~HigherPriorityReady("auth_machine_authority")
-       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
+       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
        /\ auth_machine_phase' = "Released"
        /\ auth_machine_expires_at' = None
        /\ auth_machine_last_refresh' = None
@@ -385,7 +607,7 @@ auth_machine_RestoreAuthoritySnapshotValid(arg_lifecycle_phase, arg_expires_at, 
        /\ packet.payload.credential_generation = arg_credential_generation
        /\ packet.payload.credential_published_at_millis = arg_credential_published_at_millis
        /\ ~HigherPriorityReady("auth_machine_authority")
-       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
+       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
        /\ ((packet.payload.lifecycle_phase = "Valid") /\ packet.payload.credential_present /\ (packet.payload.credential_published_at_millis # None))
        /\ auth_machine_phase' = "Valid"
        /\ auth_machine_expires_at' = packet.payload.expires_at
@@ -417,7 +639,7 @@ auth_machine_RestoreAuthoritySnapshotExpiring(arg_lifecycle_phase, arg_expires_a
        /\ packet.payload.credential_generation = arg_credential_generation
        /\ packet.payload.credential_published_at_millis = arg_credential_published_at_millis
        /\ ~HigherPriorityReady("auth_machine_authority")
-       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
+       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
        /\ ((packet.payload.lifecycle_phase = "Expiring") /\ packet.payload.credential_present /\ (packet.payload.credential_published_at_millis # None))
        /\ auth_machine_phase' = "Expiring"
        /\ auth_machine_expires_at' = packet.payload.expires_at
@@ -449,7 +671,7 @@ auth_machine_RestoreAuthoritySnapshotRefreshing(arg_lifecycle_phase, arg_expires
        /\ packet.payload.credential_generation = arg_credential_generation
        /\ packet.payload.credential_published_at_millis = arg_credential_published_at_millis
        /\ ~HigherPriorityReady("auth_machine_authority")
-       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
+       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
        /\ ((packet.payload.lifecycle_phase = "Refreshing") /\ packet.payload.credential_present /\ (packet.payload.credential_published_at_millis # None))
        /\ auth_machine_phase' = "Refreshing"
        /\ auth_machine_expires_at' = packet.payload.expires_at
@@ -469,6 +691,38 @@ auth_machine_RestoreAuthoritySnapshotRefreshing(arg_lifecycle_phase, arg_expires
        /\ model_step_count' = model_step_count + 1
 
 
+auth_machine_RestoreAuthoritySnapshotExpired(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "RestoreAuthoritySnapshot"
+       /\ packet.payload.lifecycle_phase = arg_lifecycle_phase
+       /\ packet.payload.expires_at = arg_expires_at
+       /\ packet.payload.last_refresh = arg_last_refresh
+       /\ packet.payload.refresh_attempt = arg_refresh_attempt
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.credential_generation = arg_credential_generation
+       /\ packet.payload.credential_published_at_millis = arg_credential_published_at_millis
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
+       /\ ((packet.payload.lifecycle_phase = "Expired") /\ packet.payload.credential_present /\ (packet.payload.credential_published_at_millis # None))
+       /\ auth_machine_phase' = "Expired"
+       /\ auth_machine_expires_at' = packet.payload.expires_at
+       /\ auth_machine_last_refresh' = packet.payload.last_refresh
+       /\ auth_machine_refresh_attempt' = packet.payload.refresh_attempt
+       /\ auth_machine_credential_present' = packet.payload.credential_present
+       /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
+       /\ auth_machine_credential_published_at_millis' = packet.payload.credential_published_at_millis
+       /\ UNCHANGED << auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation, credential_published_at_millis |-> packet.payload.credential_published_at_millis, expires_at |-> packet.payload.expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "RestoreAuthoritySnapshotExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "RestoreAuthoritySnapshotExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> packet.payload.expires_at, credential_generation |-> IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation, credential_published_at_millis |-> packet.payload.credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
 auth_machine_RestoreAuthoritySnapshotReauthRequired(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
@@ -481,7 +735,7 @@ auth_machine_RestoreAuthoritySnapshotReauthRequired(arg_lifecycle_phase, arg_exp
        /\ packet.payload.credential_generation = arg_credential_generation
        /\ packet.payload.credential_published_at_millis = arg_credential_published_at_millis
        /\ ~HigherPriorityReady("auth_machine_authority")
-       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
+       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
        /\ ((packet.payload.lifecycle_phase = "ReauthRequired") /\ ((packet.payload.credential_present = FALSE) \/ (packet.payload.credential_published_at_millis # None)))
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_expires_at' = packet.payload.expires_at
@@ -513,7 +767,7 @@ auth_machine_RestoreAuthoritySnapshotReleased(arg_lifecycle_phase, arg_expires_a
        /\ packet.payload.credential_generation = arg_credential_generation
        /\ packet.payload.credential_published_at_millis = arg_credential_published_at_millis
        /\ ~HigherPriorityReady("auth_machine_authority")
-       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
+       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
        /\ ((packet.payload.lifecycle_phase = "Released") /\ (packet.payload.credential_present = FALSE) /\ (packet.payload.credential_published_at_millis = None) /\ (auth_machine_oauth_outstanding_flow_count = 0))
        /\ auth_machine_phase' = "Released"
        /\ auth_machine_expires_at' = packet.payload.expires_at
@@ -584,6 +838,33 @@ auth_machine_RestoreOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redi
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expiring"], effect_id |-> (model_step_count + 1), source_transition |-> "RestoreOAuthBrowserFlowExpiring"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "RestoreOAuthBrowserFlowExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
        /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expiring", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_RestoreOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "RestoreOAuthBrowserFlow"
+       /\ packet.payload.flow_id = arg_flow_id
+       /\ packet.payload.provider = arg_provider
+       /\ packet.payload.redirect_uri = arg_redirect_uri
+       /\ packet.payload.expires_at_millis = arg_expires_at_millis
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ auth_machine_phase' = "Expired"
+       /\ auth_machine_oauth_browser_flow_ids' = (auth_machine_oauth_browser_flow_ids \cup {packet.payload.flow_id})
+       /\ auth_machine_oauth_browser_flow_providers' = MapSet(auth_machine_oauth_browser_flow_providers, packet.payload.flow_id, packet.payload.provider)
+       /\ auth_machine_oauth_browser_flow_redirect_uris' = MapSet(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id, packet.payload.redirect_uri)
+       /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapSet(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
+       /\ auth_machine_oauth_outstanding_flow_count' = IF ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE) THEN (auth_machine_oauth_outstanding_flow_count + 1) ELSE auth_machine_oauth_outstanding_flow_count
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "RestoreOAuthBrowserFlowExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "RestoreOAuthBrowserFlowExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -692,6 +973,33 @@ auth_machine_RestoreOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expir
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expiring"], effect_id |-> (model_step_count + 1), source_transition |-> "RestoreOAuthDeviceFlowExpiring"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "RestoreOAuthDeviceFlowExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
        /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expiring", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_RestoreOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_poll_active) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "RestoreOAuthDeviceFlow"
+       /\ packet.payload.flow_id = arg_flow_id
+       /\ packet.payload.provider = arg_provider
+       /\ packet.payload.expires_at_millis = arg_expires_at_millis
+       /\ packet.payload.poll_active = arg_poll_active
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ auth_machine_phase' = "Expired"
+       /\ auth_machine_oauth_device_flow_ids' = (auth_machine_oauth_device_flow_ids \cup {packet.payload.flow_id})
+       /\ auth_machine_oauth_device_flow_providers' = MapSet(auth_machine_oauth_device_flow_providers, packet.payload.flow_id, packet.payload.provider)
+       /\ auth_machine_oauth_device_flow_expires_at_millis' = MapSet(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
+       /\ auth_machine_oauth_device_poll_ids' = IF packet.payload.poll_active THEN (auth_machine_oauth_device_poll_ids \cup {packet.payload.flow_id}) ELSE (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
+       /\ auth_machine_oauth_outstanding_flow_count' = IF ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE) THEN (auth_machine_oauth_outstanding_flow_count + 1) ELSE auth_machine_oauth_outstanding_flow_count
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "RestoreOAuthDeviceFlowExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "RestoreOAuthDeviceFlowExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -810,6 +1118,38 @@ auth_machine_AdmitOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redire
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expiring"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmitOAuthBrowserFlowExpiring"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "AdmitOAuthBrowserFlowExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
        /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expiring", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_AdmitOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "AdmitOAuthBrowserFlow"
+       /\ packet.payload.flow_id = arg_flow_id
+       /\ packet.payload.provider = arg_provider
+       /\ packet.payload.redirect_uri = arg_redirect_uri
+       /\ packet.payload.expires_at_millis = arg_expires_at_millis
+       /\ packet.payload.max_outstanding_flows = arg_max_outstanding_flows
+       /\ packet.payload.observed_global_outstanding_flows = arg_observed_global_outstanding_flows
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE)
+       /\ (auth_machine_oauth_outstanding_flow_count < packet.payload.max_outstanding_flows)
+       /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
+       /\ auth_machine_phase' = "Expired"
+       /\ auth_machine_oauth_browser_flow_ids' = (auth_machine_oauth_browser_flow_ids \cup {packet.payload.flow_id})
+       /\ auth_machine_oauth_browser_flow_providers' = MapSet(auth_machine_oauth_browser_flow_providers, packet.payload.flow_id, packet.payload.provider)
+       /\ auth_machine_oauth_browser_flow_redirect_uris' = MapSet(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id, packet.payload.redirect_uri)
+       /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapSet(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
+       /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmitOAuthBrowserFlowExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "AdmitOAuthBrowserFlowExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -962,6 +1302,32 @@ auth_machine_VerifyOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redir
        /\ model_step_count' = model_step_count + 1
 
 
+auth_machine_VerifyOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "VerifyOAuthBrowserFlow"
+       /\ packet.payload.flow_id = arg_flow_id
+       /\ packet.payload.provider = arg_provider
+       /\ packet.payload.redirect_uri = arg_redirect_uri
+       /\ packet.payload.now_millis = arg_now_millis
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ (packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids)
+       /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_providers) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_providers THEN auth_machine_oauth_browser_flow_providers[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.provider))
+       /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris THEN auth_machine_oauth_browser_flow_redirect_uris[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.redirect_uri))
+       /\ (packet.payload.now_millis <= (IF "value" \in DOMAIN (IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_expires_at_millis THEN auth_machine_oauth_browser_flow_expires_at_millis[packet.payload.flow_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_expires_at_millis THEN auth_machine_oauth_browser_flow_expires_at_millis[packet.payload.flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+       /\ auth_machine_phase' = "Expired"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "VerifyOAuthBrowserFlowExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "VerifyOAuthBrowserFlowExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
 auth_machine_VerifyOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
@@ -1073,6 +1439,37 @@ auth_machine_ConsumeOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redi
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expiring"], effect_id |-> (model_step_count + 1), source_transition |-> "ConsumeOAuthBrowserFlowExpiring"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ConsumeOAuthBrowserFlowExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
        /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expiring", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ConsumeOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ConsumeOAuthBrowserFlow"
+       /\ packet.payload.flow_id = arg_flow_id
+       /\ packet.payload.provider = arg_provider
+       /\ packet.payload.redirect_uri = arg_redirect_uri
+       /\ packet.payload.now_millis = arg_now_millis
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ (packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids)
+       /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_providers) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_providers THEN auth_machine_oauth_browser_flow_providers[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.provider))
+       /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris THEN auth_machine_oauth_browser_flow_redirect_uris[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.redirect_uri))
+       /\ (packet.payload.now_millis <= (IF "value" \in DOMAIN (IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_expires_at_millis THEN auth_machine_oauth_browser_flow_expires_at_millis[packet.payload.flow_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_expires_at_millis THEN auth_machine_oauth_browser_flow_expires_at_millis[packet.payload.flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+       /\ auth_machine_phase' = "Expired"
+       /\ auth_machine_oauth_browser_flow_ids' = (auth_machine_oauth_browser_flow_ids \ {packet.payload.flow_id})
+       /\ auth_machine_oauth_browser_flow_providers' = MapRemove(auth_machine_oauth_browser_flow_providers, packet.payload.flow_id)
+       /\ auth_machine_oauth_browser_flow_redirect_uris' = MapRemove(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id)
+       /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapRemove(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id)
+       /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "ConsumeOAuthBrowserFlowExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ConsumeOAuthBrowserFlowExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1188,6 +1585,31 @@ auth_machine_ExpireOAuthBrowserFlowExpiring(arg_flow_id) ==
        /\ model_step_count' = model_step_count + 1
 
 
+auth_machine_ExpireOAuthBrowserFlowExpired(arg_flow_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ExpireOAuthBrowserFlow"
+       /\ packet.payload.flow_id = arg_flow_id
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ (packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids)
+       /\ auth_machine_phase' = "Expired"
+       /\ auth_machine_oauth_browser_flow_ids' = (auth_machine_oauth_browser_flow_ids \ {packet.payload.flow_id})
+       /\ auth_machine_oauth_browser_flow_providers' = MapRemove(auth_machine_oauth_browser_flow_providers, packet.payload.flow_id)
+       /\ auth_machine_oauth_browser_flow_redirect_uris' = MapRemove(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id)
+       /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapRemove(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id)
+       /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "ExpireOAuthBrowserFlowExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ExpireOAuthBrowserFlowExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
 auth_machine_ExpireOAuthBrowserFlowRefreshing(arg_flow_id) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
@@ -1297,6 +1719,37 @@ auth_machine_AdmitOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expiring"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmitOAuthDeviceFlowExpiring"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "AdmitOAuthDeviceFlowExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
        /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expiring", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_AdmitOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "AdmitOAuthDeviceFlow"
+       /\ packet.payload.flow_id = arg_flow_id
+       /\ packet.payload.provider = arg_provider
+       /\ packet.payload.expires_at_millis = arg_expires_at_millis
+       /\ packet.payload.max_outstanding_flows = arg_max_outstanding_flows
+       /\ packet.payload.observed_global_outstanding_flows = arg_observed_global_outstanding_flows
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE)
+       /\ (auth_machine_oauth_outstanding_flow_count < packet.payload.max_outstanding_flows)
+       /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
+       /\ auth_machine_phase' = "Expired"
+       /\ auth_machine_oauth_device_flow_ids' = (auth_machine_oauth_device_flow_ids \cup {packet.payload.flow_id})
+       /\ auth_machine_oauth_device_flow_providers' = MapSet(auth_machine_oauth_device_flow_providers, packet.payload.flow_id, packet.payload.provider)
+       /\ auth_machine_oauth_device_flow_expires_at_millis' = MapSet(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
+       /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
+       /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmitOAuthDeviceFlowExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "AdmitOAuthDeviceFlowExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1436,6 +1889,27 @@ auth_machine_ConfirmOAuthDurableAdmissionExpiring(arg_observed_global_outstandin
        /\ model_step_count' = model_step_count + 1
 
 
+auth_machine_ConfirmOAuthDurableAdmissionExpired(arg_observed_global_outstanding_flows, arg_max_outstanding_flows) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ConfirmOAuthDurableAdmission"
+       /\ packet.payload.observed_global_outstanding_flows = arg_observed_global_outstanding_flows
+       /\ packet.payload.max_outstanding_flows = arg_max_outstanding_flows
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
+       /\ auth_machine_phase' = "Expired"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ConfirmOAuthDurableAdmissionExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
 auth_machine_ConfirmOAuthDurableAdmissionRefreshing(arg_observed_global_outstanding_flows, arg_max_outstanding_flows) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
@@ -1523,6 +1997,30 @@ auth_machine_VerifyOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_now_mi
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expiring"], effect_id |-> (model_step_count + 1), source_transition |-> "VerifyOAuthDeviceFlowExpiring"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "VerifyOAuthDeviceFlowExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
        /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expiring", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_VerifyOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_now_millis) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "VerifyOAuthDeviceFlow"
+       /\ packet.payload.flow_id = arg_flow_id
+       /\ packet.payload.provider = arg_provider
+       /\ packet.payload.now_millis = arg_now_millis
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ (packet.payload.flow_id \in auth_machine_oauth_device_flow_ids)
+       /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers THEN auth_machine_oauth_device_flow_providers[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.provider))
+       /\ (packet.payload.now_millis <= (IF "value" \in DOMAIN (IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis THEN auth_machine_oauth_device_flow_expires_at_millis[packet.payload.flow_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis THEN auth_machine_oauth_device_flow_expires_at_millis[packet.payload.flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+       /\ auth_machine_phase' = "Expired"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "VerifyOAuthDeviceFlowExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "VerifyOAuthDeviceFlowExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1626,6 +2124,32 @@ auth_machine_BeginOAuthDevicePollExpiring(arg_flow_id, arg_provider, arg_now_mil
        /\ model_step_count' = model_step_count + 1
 
 
+auth_machine_BeginOAuthDevicePollExpired(arg_flow_id, arg_provider, arg_now_millis) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "BeginOAuthDevicePoll"
+       /\ packet.payload.flow_id = arg_flow_id
+       /\ packet.payload.provider = arg_provider
+       /\ packet.payload.now_millis = arg_now_millis
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ (packet.payload.flow_id \in auth_machine_oauth_device_flow_ids)
+       /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers THEN auth_machine_oauth_device_flow_providers[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.provider))
+       /\ (packet.payload.now_millis <= (IF "value" \in DOMAIN (IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis THEN auth_machine_oauth_device_flow_expires_at_millis[packet.payload.flow_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis THEN auth_machine_oauth_device_flow_expires_at_millis[packet.payload.flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+       /\ ((packet.payload.flow_id \in auth_machine_oauth_device_poll_ids) = FALSE)
+       /\ auth_machine_phase' = "Expired"
+       /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \cup {packet.payload.flow_id})
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "BeginOAuthDevicePollExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "BeginOAuthDevicePollExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
 auth_machine_BeginOAuthDevicePollRefreshing(arg_flow_id, arg_provider, arg_now_millis) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
@@ -1717,6 +2241,27 @@ auth_machine_FinishOAuthDevicePollExpiring(arg_flow_id) ==
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expiring"], effect_id |-> (model_step_count + 1), source_transition |-> "FinishOAuthDevicePollExpiring"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "FinishOAuthDevicePollExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
        /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expiring", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_FinishOAuthDevicePollExpired(arg_flow_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "FinishOAuthDevicePoll"
+       /\ packet.payload.flow_id = arg_flow_id
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ (packet.payload.flow_id \in auth_machine_oauth_device_poll_ids)
+       /\ auth_machine_phase' = "Expired"
+       /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "FinishOAuthDevicePollExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "FinishOAuthDevicePollExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1817,6 +2362,35 @@ auth_machine_ConsumeOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_now_m
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expiring"], effect_id |-> (model_step_count + 1), source_transition |-> "ConsumeOAuthDeviceFlowExpiring"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ConsumeOAuthDeviceFlowExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
        /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expiring", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ConsumeOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_now_millis) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ConsumeOAuthDeviceFlow"
+       /\ packet.payload.flow_id = arg_flow_id
+       /\ packet.payload.provider = arg_provider
+       /\ packet.payload.now_millis = arg_now_millis
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ (packet.payload.flow_id \in auth_machine_oauth_device_flow_ids)
+       /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers THEN auth_machine_oauth_device_flow_providers[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.provider))
+       /\ (packet.payload.now_millis <= (IF "value" \in DOMAIN (IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis THEN auth_machine_oauth_device_flow_expires_at_millis[packet.payload.flow_id] ELSE 0)) ELSE None) THEN (IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis THEN auth_machine_oauth_device_flow_expires_at_millis[packet.payload.flow_id] ELSE 0)) ELSE None)["value"] ELSE None))
+       /\ auth_machine_phase' = "Expired"
+       /\ auth_machine_oauth_device_flow_ids' = (auth_machine_oauth_device_flow_ids \ {packet.payload.flow_id})
+       /\ auth_machine_oauth_device_flow_providers' = MapRemove(auth_machine_oauth_device_flow_providers, packet.payload.flow_id)
+       /\ auth_machine_oauth_device_flow_expires_at_millis' = MapRemove(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id)
+       /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
+       /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "ConsumeOAuthDeviceFlowExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ConsumeOAuthDeviceFlowExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1928,6 +2502,31 @@ auth_machine_ExpireOAuthDeviceFlowExpiring(arg_flow_id) ==
        /\ model_step_count' = model_step_count + 1
 
 
+auth_machine_ExpireOAuthDeviceFlowExpired(arg_flow_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ExpireOAuthDeviceFlow"
+       /\ packet.payload.flow_id = arg_flow_id
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ (packet.payload.flow_id \in auth_machine_oauth_device_flow_ids)
+       /\ auth_machine_phase' = "Expired"
+       /\ auth_machine_oauth_device_flow_ids' = (auth_machine_oauth_device_flow_ids \ {packet.payload.flow_id})
+       /\ auth_machine_oauth_device_flow_providers' = MapRemove(auth_machine_oauth_device_flow_providers, packet.payload.flow_id)
+       /\ auth_machine_oauth_device_flow_expires_at_millis' = MapRemove(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id)
+       /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
+       /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "ExpireOAuthDeviceFlowExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ExpireOAuthDeviceFlowExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_lease_lifecycle_publication' = obligation_auth_lease_lifecycle_publication \cup {[new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ model_step_count' = model_step_count + 1
+
+
 auth_machine_ExpireOAuthDeviceFlowRefreshing(arg_flow_id) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
@@ -2001,73 +2600,98 @@ WitnessInjectNext_auth_lease_lifecycle_publication_round_trip ==
 CoreNext ==
     \/ \E arg_expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : auth_machine_Acquire(arg_expires_at_ts, arg_credential_published_at_millis)
     \/ auth_machine_MarkExpiring
+    \/ \E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessValid(arg_now_ts, arg_refresh_window_secs)
+    \/ \E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessExpiringFromValid(arg_now_ts, arg_refresh_window_secs)
+    \/ \E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessExpiredFromValid(arg_now_ts, arg_refresh_window_secs)
+    \/ \E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessExpiring(arg_now_ts, arg_refresh_window_secs)
+    \/ \E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessExpiredFromExpiring(arg_now_ts, arg_refresh_window_secs)
+    \/ \E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessExpired(arg_now_ts, arg_refresh_window_secs)
+    \/ \E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessRefreshing(arg_now_ts, arg_refresh_window_secs)
+    \/ \E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessReauthRequired(arg_now_ts, arg_refresh_window_secs)
+    \/ \E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessReleased(arg_now_ts, arg_refresh_window_secs)
     \/ auth_machine_BeginRefreshFromValid
     \/ auth_machine_BeginRefreshFromExpiring
+    \/ auth_machine_BeginRefreshFromExpired
     \/ \E arg_new_expires_at \in OptionU64Values : \E arg_now_ts \in 0..2 : \E arg_credential_published_at_millis \in 0..2 : auth_machine_CompleteRefresh(arg_new_expires_at, arg_now_ts, arg_credential_published_at_millis)
     \/ \E arg_http_status \in OptionU64Values : \E arg_oauth_error_code \in OptionStringValues : \E arg_local_credential_unusable \in BOOLEAN : auth_machine_RefreshFailedTransient(arg_http_status, arg_oauth_error_code, arg_local_credential_unusable)
     \/ \E arg_http_status \in OptionU64Values : \E arg_oauth_error_code \in OptionStringValues : \E arg_local_credential_unusable \in BOOLEAN : auth_machine_RefreshFailedPermanent(arg_http_status, arg_oauth_error_code, arg_local_credential_unusable)
     \/ auth_machine_MarkReauthRequiredFromValid
     \/ auth_machine_MarkReauthRequiredFromExpiring
+    \/ auth_machine_MarkReauthRequiredFromExpired
     \/ auth_machine_MarkReauthRequiredFromRefreshing
     \/ auth_machine_ClearCredentialLifecycle
     \/ auth_machine_Release
     \/ \E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_credential_generation \in 0..2 : \E arg_credential_published_at_millis \in OptionU64Values : auth_machine_RestoreAuthoritySnapshotValid(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis)
     \/ \E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_credential_generation \in 0..2 : \E arg_credential_published_at_millis \in OptionU64Values : auth_machine_RestoreAuthoritySnapshotExpiring(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis)
     \/ \E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_credential_generation \in 0..2 : \E arg_credential_published_at_millis \in OptionU64Values : auth_machine_RestoreAuthoritySnapshotRefreshing(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis)
+    \/ \E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_credential_generation \in 0..2 : \E arg_credential_published_at_millis \in OptionU64Values : auth_machine_RestoreAuthoritySnapshotExpired(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis)
     \/ \E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_credential_generation \in 0..2 : \E arg_credential_published_at_millis \in OptionU64Values : auth_machine_RestoreAuthoritySnapshotReauthRequired(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis)
     \/ \E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_credential_generation \in 0..2 : \E arg_credential_published_at_millis \in OptionU64Values : auth_machine_RestoreAuthoritySnapshotReleased(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : auth_machine_RestoreOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : auth_machine_RestoreOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : auth_machine_RestoreOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : auth_machine_RestoreOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : auth_machine_RestoreOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_poll_active \in BOOLEAN : auth_machine_RestoreOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_at_millis, arg_poll_active)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_poll_active \in BOOLEAN : auth_machine_RestoreOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires_at_millis, arg_poll_active)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_poll_active \in BOOLEAN : auth_machine_RestoreOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_poll_active)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_poll_active \in BOOLEAN : auth_machine_RestoreOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_expires_at_millis, arg_poll_active)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_poll_active \in BOOLEAN : auth_machine_RestoreOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_poll_active)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_ReopenReleasedForOAuthBrowserFlowAdmission(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowValid(arg_flow_id)
     \/ \E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowExpiring(arg_flow_id)
+    \/ \E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowExpired(arg_flow_id)
     \/ \E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowRefreshing(arg_flow_id)
     \/ \E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowReauthRequired(arg_flow_id)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_ReopenReleasedForOAuthDeviceFlowAdmission(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows)
     \/ \E arg_observed_global_outstanding_flows \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_ConfirmOAuthDurableAdmissionValid(arg_observed_global_outstanding_flows, arg_max_outstanding_flows)
     \/ \E arg_observed_global_outstanding_flows \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_ConfirmOAuthDurableAdmissionExpiring(arg_observed_global_outstanding_flows, arg_max_outstanding_flows)
+    \/ \E arg_observed_global_outstanding_flows \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_ConfirmOAuthDurableAdmissionExpired(arg_observed_global_outstanding_flows, arg_max_outstanding_flows)
     \/ \E arg_observed_global_outstanding_flows \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_ConfirmOAuthDurableAdmissionRefreshing(arg_observed_global_outstanding_flows, arg_max_outstanding_flows)
     \/ \E arg_observed_global_outstanding_flows \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_ConfirmOAuthDurableAdmissionReauthRequired(arg_observed_global_outstanding_flows, arg_max_outstanding_flows)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_now_millis)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_BeginOAuthDevicePollValid(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_BeginOAuthDevicePollExpiring(arg_flow_id, arg_provider, arg_now_millis)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_BeginOAuthDevicePollExpired(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_BeginOAuthDevicePollRefreshing(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_BeginOAuthDevicePollReauthRequired(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : auth_machine_FinishOAuthDevicePollValid(arg_flow_id)
     \/ \E arg_flow_id \in StringValues : auth_machine_FinishOAuthDevicePollExpiring(arg_flow_id)
+    \/ \E arg_flow_id \in StringValues : auth_machine_FinishOAuthDevicePollExpired(arg_flow_id)
     \/ \E arg_flow_id \in StringValues : auth_machine_FinishOAuthDevicePollRefreshing(arg_flow_id)
     \/ \E arg_flow_id \in StringValues : auth_machine_FinishOAuthDevicePollReauthRequired(arg_flow_id)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_now_millis)
+    \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_now_millis)
     \/ \E arg_flow_id \in StringValues : auth_machine_ExpireOAuthDeviceFlowValid(arg_flow_id)
     \/ \E arg_flow_id \in StringValues : auth_machine_ExpireOAuthDeviceFlowExpiring(arg_flow_id)
+    \/ \E arg_flow_id \in StringValues : auth_machine_ExpireOAuthDeviceFlowExpired(arg_flow_id)
     \/ \E arg_flow_id \in StringValues : auth_machine_ExpireOAuthDeviceFlowRefreshing(arg_flow_id)
     \/ \E arg_flow_id \in StringValues : auth_machine_ExpireOAuthDeviceFlowReauthRequired(arg_flow_id)
     \/ QuiescentStutter
@@ -2100,77 +2724,104 @@ Spec ==
 WitnessFairness_auth_lease_lifecycle_publication_round_trip_1 ==
     /\ WF_vars(\E arg_expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : auth_machine_Acquire(arg_expires_at_ts, arg_credential_published_at_millis))
     /\ WF_vars(auth_machine_MarkExpiring)
+    /\ WF_vars(\E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessValid(arg_now_ts, arg_refresh_window_secs))
+    /\ WF_vars(\E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessExpiringFromValid(arg_now_ts, arg_refresh_window_secs))
+    /\ WF_vars(\E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessExpiredFromValid(arg_now_ts, arg_refresh_window_secs))
+    /\ WF_vars(\E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessExpiring(arg_now_ts, arg_refresh_window_secs))
+    /\ WF_vars(\E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessExpiredFromExpiring(arg_now_ts, arg_refresh_window_secs))
+    /\ WF_vars(\E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessExpired(arg_now_ts, arg_refresh_window_secs))
+    /\ WF_vars(\E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessRefreshing(arg_now_ts, arg_refresh_window_secs))
+    /\ WF_vars(\E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessReauthRequired(arg_now_ts, arg_refresh_window_secs))
+    /\ WF_vars(\E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessReleased(arg_now_ts, arg_refresh_window_secs))
     /\ WF_vars(auth_machine_BeginRefreshFromValid)
     /\ WF_vars(auth_machine_BeginRefreshFromExpiring)
+    /\ WF_vars(auth_machine_BeginRefreshFromExpired)
     /\ WF_vars(\E arg_new_expires_at \in OptionU64Values : \E arg_now_ts \in 0..2 : \E arg_credential_published_at_millis \in 0..2 : auth_machine_CompleteRefresh(arg_new_expires_at, arg_now_ts, arg_credential_published_at_millis))
     /\ WF_vars(\E arg_http_status \in OptionU64Values : \E arg_oauth_error_code \in OptionStringValues : \E arg_local_credential_unusable \in BOOLEAN : auth_machine_RefreshFailedTransient(arg_http_status, arg_oauth_error_code, arg_local_credential_unusable))
     /\ WF_vars(\E arg_http_status \in OptionU64Values : \E arg_oauth_error_code \in OptionStringValues : \E arg_local_credential_unusable \in BOOLEAN : auth_machine_RefreshFailedPermanent(arg_http_status, arg_oauth_error_code, arg_local_credential_unusable))
     /\ WF_vars(auth_machine_MarkReauthRequiredFromValid)
     /\ WF_vars(auth_machine_MarkReauthRequiredFromExpiring)
+    /\ WF_vars(auth_machine_MarkReauthRequiredFromExpired)
     /\ WF_vars(auth_machine_MarkReauthRequiredFromRefreshing)
     /\ WF_vars(auth_machine_ClearCredentialLifecycle)
     /\ WF_vars(auth_machine_Release)
     /\ WF_vars(\E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_credential_generation \in 0..2 : \E arg_credential_published_at_millis \in OptionU64Values : auth_machine_RestoreAuthoritySnapshotValid(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis))
+
+WitnessFairness_auth_lease_lifecycle_publication_round_trip_2 ==
     /\ WF_vars(\E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_credential_generation \in 0..2 : \E arg_credential_published_at_millis \in OptionU64Values : auth_machine_RestoreAuthoritySnapshotExpiring(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis))
     /\ WF_vars(\E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_credential_generation \in 0..2 : \E arg_credential_published_at_millis \in OptionU64Values : auth_machine_RestoreAuthoritySnapshotRefreshing(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis))
+    /\ WF_vars(\E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_credential_generation \in 0..2 : \E arg_credential_published_at_millis \in OptionU64Values : auth_machine_RestoreAuthoritySnapshotExpired(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis))
     /\ WF_vars(\E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_credential_generation \in 0..2 : \E arg_credential_published_at_millis \in OptionU64Values : auth_machine_RestoreAuthoritySnapshotReauthRequired(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis))
     /\ WF_vars(\E arg_lifecycle_phase \in AuthLifecyclePhaseValues : \E arg_expires_at \in OptionU64Values : \E arg_last_refresh \in OptionU64Values : \E arg_refresh_attempt \in 0..2 : \E arg_credential_present \in BOOLEAN : \E arg_credential_generation \in 0..2 : \E arg_credential_published_at_millis \in OptionU64Values : auth_machine_RestoreAuthoritySnapshotReleased(arg_lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : auth_machine_RestoreOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : auth_machine_RestoreOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : auth_machine_RestoreOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : auth_machine_RestoreOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : auth_machine_RestoreOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_poll_active \in BOOLEAN : auth_machine_RestoreOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_at_millis, arg_poll_active))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_poll_active \in BOOLEAN : auth_machine_RestoreOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires_at_millis, arg_poll_active))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_poll_active \in BOOLEAN : auth_machine_RestoreOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_poll_active))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_poll_active \in BOOLEAN : auth_machine_RestoreOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_expires_at_millis, arg_poll_active))
-
-WitnessFairness_auth_lease_lifecycle_publication_round_trip_2 ==
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_poll_active \in BOOLEAN : auth_machine_RestoreOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_poll_active))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_ReopenReleasedForOAuthBrowserFlowAdmission(arg_flow_id, arg_provider, arg_redirect_uri, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis))
+
+WitnessFairness_auth_lease_lifecycle_publication_round_trip_3 ==
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_redirect_uri \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_redirect_uri, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowValid(arg_flow_id))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowExpiring(arg_flow_id))
+    /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowExpired(arg_flow_id))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowRefreshing(arg_flow_id))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_ExpireOAuthBrowserFlowReauthRequired(arg_flow_id))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_AdmitOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_expires_at_millis \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : \E arg_observed_global_outstanding_flows \in 0..2 : auth_machine_ReopenReleasedForOAuthDeviceFlowAdmission(arg_flow_id, arg_provider, arg_expires_at_millis, arg_max_outstanding_flows, arg_observed_global_outstanding_flows))
     /\ WF_vars(\E arg_observed_global_outstanding_flows \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_ConfirmOAuthDurableAdmissionValid(arg_observed_global_outstanding_flows, arg_max_outstanding_flows))
-
-WitnessFairness_auth_lease_lifecycle_publication_round_trip_3 ==
     /\ WF_vars(\E arg_observed_global_outstanding_flows \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_ConfirmOAuthDurableAdmissionExpiring(arg_observed_global_outstanding_flows, arg_max_outstanding_flows))
+    /\ WF_vars(\E arg_observed_global_outstanding_flows \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_ConfirmOAuthDurableAdmissionExpired(arg_observed_global_outstanding_flows, arg_max_outstanding_flows))
     /\ WF_vars(\E arg_observed_global_outstanding_flows \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_ConfirmOAuthDurableAdmissionRefreshing(arg_observed_global_outstanding_flows, arg_max_outstanding_flows))
     /\ WF_vars(\E arg_observed_global_outstanding_flows \in 0..2 : \E arg_max_outstanding_flows \in 0..2 : auth_machine_ConfirmOAuthDurableAdmissionReauthRequired(arg_observed_global_outstanding_flows, arg_max_outstanding_flows))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_now_millis))
+
+WitnessFairness_auth_lease_lifecycle_publication_round_trip_4 ==
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_now_millis))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_VerifyOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_BeginOAuthDevicePollValid(arg_flow_id, arg_provider, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_BeginOAuthDevicePollExpiring(arg_flow_id, arg_provider, arg_now_millis))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_BeginOAuthDevicePollExpired(arg_flow_id, arg_provider, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_BeginOAuthDevicePollRefreshing(arg_flow_id, arg_provider, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_BeginOAuthDevicePollReauthRequired(arg_flow_id, arg_provider, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_FinishOAuthDevicePollValid(arg_flow_id))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_FinishOAuthDevicePollExpiring(arg_flow_id))
+    /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_FinishOAuthDevicePollExpired(arg_flow_id))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_FinishOAuthDevicePollRefreshing(arg_flow_id))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_FinishOAuthDevicePollReauthRequired(arg_flow_id))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_now_millis))
+    /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : \E arg_provider \in StringValues : \E arg_now_millis \in 0..2 : auth_machine_ConsumeOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_now_millis))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_ExpireOAuthDeviceFlowValid(arg_flow_id))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_ExpireOAuthDeviceFlowExpiring(arg_flow_id))
+    /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_ExpireOAuthDeviceFlowExpired(arg_flow_id))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_ExpireOAuthDeviceFlowRefreshing(arg_flow_id))
     /\ WF_vars(\E arg_flow_id \in StringValues : auth_machine_ExpireOAuthDeviceFlowReauthRequired(arg_flow_id))
 
@@ -2180,6 +2831,7 @@ WitnessSpec_auth_lease_lifecycle_publication_round_trip ==
     /\ WitnessFairness_auth_lease_lifecycle_publication_round_trip_1
     /\ WitnessFairness_auth_lease_lifecycle_publication_round_trip_2
     /\ WitnessFairness_auth_lease_lifecycle_publication_round_trip_3
+    /\ WitnessFairness_auth_lease_lifecycle_publication_round_trip_4
 
 
 THEOREM Spec => []auth_lease_lifecycle_publication_protocol_covered

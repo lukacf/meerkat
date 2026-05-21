@@ -4,7 +4,7 @@ use crate::service::ScheduleService;
 use crate::store::{ClaimDueRequest, ScheduleStore};
 use crate::types::{
     DeliveryReceipt, Occurrence, OccurrenceFailureClass, OccurrencePhase, OverlapPolicy,
-    RuntimeDeliveryOutcome, SchedulePhase,
+    RuntimeCompletionOutcome, RuntimeDeliveryOutcome, SchedulePhase,
 };
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -40,6 +40,7 @@ pub struct DeliveryTerminal {
     pub receipt: Option<DeliveryReceipt>,
     pub detail: Option<String>,
     pub failure_class: Option<OccurrenceFailureClass>,
+    pub runtime_completion_outcome: Option<RuntimeCompletionOutcome>,
     pub runtime_outcome: Option<RuntimeDeliveryOutcome>,
     pub materialized_session_id: Option<SessionId>,
 }
@@ -51,6 +52,7 @@ impl DeliveryTerminal {
             receipt,
             detail: None,
             failure_class: None,
+            runtime_completion_outcome: None,
             runtime_outcome: None,
             materialized_session_id: None,
         }
@@ -62,6 +64,7 @@ impl DeliveryTerminal {
             receipt: None,
             detail: Some(detail.into()),
             failure_class: Some(failure_class),
+            runtime_completion_outcome: None,
             runtime_outcome: None,
             materialized_session_id: None,
         }
@@ -73,6 +76,7 @@ impl DeliveryTerminal {
             receipt: None,
             detail: Some(detail.into()),
             failure_class: Some(failure_class),
+            runtime_completion_outcome: None,
             runtime_outcome: None,
             materialized_session_id: None,
         }
@@ -87,7 +91,24 @@ impl DeliveryTerminal {
             receipt: None,
             detail: Some(detail.into()),
             failure_class: Some(failure_class),
+            runtime_completion_outcome: None,
             runtime_outcome: None,
+            materialized_session_id: None,
+        }
+    }
+
+    pub fn runtime_completion(
+        outcome: RuntimeCompletionOutcome,
+        detail: Option<String>,
+        runtime_outcome: Option<RuntimeDeliveryOutcome>,
+    ) -> Self {
+        Self {
+            phase: OccurrencePhase::AwaitingCompletion,
+            receipt: None,
+            detail,
+            failure_class: None,
+            runtime_completion_outcome: Some(outcome),
+            runtime_outcome,
             materialized_session_id: None,
         }
     }
@@ -463,31 +484,39 @@ async fn complete_dispatched_occurrence(
         return Ok(());
     }
 
-    let lifecycle = match terminal.phase {
-        OccurrencePhase::Completed => OccurrenceLifecycleInput::Complete {
-            at_utc: store_now_utc,
-        },
-        OccurrencePhase::Skipped => OccurrenceLifecycleInput::Skip {
-            detail: terminal.detail.clone(),
-            failure_class: terminal.failure_class,
-            at_utc: store_now_utc,
-        },
-        OccurrencePhase::Misfired => OccurrenceLifecycleInput::Misfire {
-            detail: terminal.detail.clone(),
-            failure_class: terminal.failure_class,
-            at_utc: store_now_utc,
-        },
-        OccurrencePhase::DeliveryFailed => OccurrenceLifecycleInput::DeliveryFailed {
-            failure_class: terminal
-                .failure_class
-                .unwrap_or(OccurrenceFailureClass::InternalError),
+    let lifecycle = if let Some(outcome) = terminal.runtime_completion_outcome {
+        OccurrenceLifecycleInput::ResolveRuntimeCompletion {
+            outcome,
             detail: terminal.detail.clone(),
             at_utc: store_now_utc,
-        },
-        other => {
-            return Err(ScheduleDomainError::Internal(format!(
-                "delivery terminal returned non-terminal occurrence phase: {other:?}"
-            )));
+        }
+    } else {
+        match terminal.phase {
+            OccurrencePhase::Completed => OccurrenceLifecycleInput::Complete {
+                at_utc: store_now_utc,
+            },
+            OccurrencePhase::Skipped => OccurrenceLifecycleInput::Skip {
+                detail: terminal.detail.clone(),
+                failure_class: terminal.failure_class,
+                at_utc: store_now_utc,
+            },
+            OccurrencePhase::Misfired => OccurrenceLifecycleInput::Misfire {
+                detail: terminal.detail.clone(),
+                failure_class: terminal.failure_class,
+                at_utc: store_now_utc,
+            },
+            OccurrencePhase::DeliveryFailed => OccurrenceLifecycleInput::DeliveryFailed {
+                failure_class: terminal
+                    .failure_class
+                    .unwrap_or(OccurrenceFailureClass::InternalError),
+                detail: terminal.detail.clone(),
+                at_utc: store_now_utc,
+            },
+            other => {
+                return Err(ScheduleDomainError::Internal(format!(
+                    "delivery terminal returned non-terminal occurrence phase: {other:?}"
+                )));
+            }
         }
     };
 
@@ -589,6 +618,7 @@ mod tests {
                         receipt: None,
                         detail: Some("session creation failed".into()),
                         failure_class: Some(OccurrenceFailureClass::TargetMaterializationFailed),
+                        runtime_completion_outcome: None,
                         runtime_outcome: None,
                         materialized_session_id: None,
                     })

@@ -256,6 +256,58 @@ impl std::fmt::Display for DependencyMode {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum EventSubscriptionRejectReasonKind {
+    #[default]
+    #[serde(rename = "MemberNotFound")]
+    MemberNotFound,
+    #[serde(rename = "NoSessionBinding")]
+    NoSessionBinding,
+}
+impl EventSubscriptionRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MemberNotFound => "MemberNotFound",
+            Self::NoSessionBinding => "NoSessionBinding",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for EventSubscriptionRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MemberNotFound" => Ok(Self::MemberNotFound),
+            "NoSessionBinding" => Ok(Self::NoSessionBinding),
+            other => Err(format!(
+                "invalid EventSubscriptionRejectReasonKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for EventSubscriptionRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for EventSubscriptionRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type ExternalPeerEdge = meerkat_machine_schema::catalog::dsl::mob_machine::ExternalPeerEdge;
 pub type ExternalPeerKey = meerkat_machine_schema::catalog::dsl::mob_machine::ExternalPeerKey;
 #[derive(
@@ -2464,11 +2516,38 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MemberStatus {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SubscribeAgentEvents {}
+    pub struct SubscribeAgentEvents {
+        pub agent_identity: AgentIdentity,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SubscribeAllAgentEvents {}
+    pub struct SubscribeAllAgentEvents {
+        pub session_bound_runtimes: std::collections::BTreeSet<AgentRuntimeId>,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SubscribeMobEvents {}
+    pub struct SubscribeMobEvents {
+        pub initial_cursor: u64,
+        pub channel_capacity: u64,
+        pub poll_interval_ms: u64,
+        pub session_bound_runtimes: std::collections::BTreeSet<AgentRuntimeId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SubscribeStructuralEvents {
+        pub after_cursor: u64,
+        pub latest_cursor: u64,
+        pub explicit_after_cursor: bool,
+        pub batch_limit: u64,
+        pub channel_capacity: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMobEventRouterMemberSubscription {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMobEventRouterMemberRemoval {
+        pub agent_identity: AgentIdentity,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PollEvents {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2589,6 +2668,9 @@ pub enum Input {
     SubscribeAgentEvents(inputs::SubscribeAgentEvents),
     SubscribeAllAgentEvents(inputs::SubscribeAllAgentEvents),
     SubscribeMobEvents(inputs::SubscribeMobEvents),
+    SubscribeStructuralEvents(inputs::SubscribeStructuralEvents),
+    AuthorizeMobEventRouterMemberSubscription(inputs::AuthorizeMobEventRouterMemberSubscription),
+    AuthorizeMobEventRouterMemberRemoval(inputs::AuthorizeMobEventRouterMemberRemoval),
     PollEvents(inputs::PollEvents),
     ReplayAllEvents(inputs::ReplayAllEvents),
     RecordOperatorActionProvenance(inputs::RecordOperatorActionProvenance),
@@ -2673,6 +2755,13 @@ impl Input {
             Self::SubscribeAgentEvents(_) => InputKind::SubscribeAgentEvents,
             Self::SubscribeAllAgentEvents(_) => InputKind::SubscribeAllAgentEvents,
             Self::SubscribeMobEvents(_) => InputKind::SubscribeMobEvents,
+            Self::SubscribeStructuralEvents(_) => InputKind::SubscribeStructuralEvents,
+            Self::AuthorizeMobEventRouterMemberSubscription(_) => {
+                InputKind::AuthorizeMobEventRouterMemberSubscription
+            }
+            Self::AuthorizeMobEventRouterMemberRemoval(_) => {
+                InputKind::AuthorizeMobEventRouterMemberRemoval
+            }
             Self::PollEvents(_) => InputKind::PollEvents,
             Self::ReplayAllEvents(_) => InputKind::ReplayAllEvents,
             Self::RecordOperatorActionProvenance(_) => InputKind::RecordOperatorActionProvenance,
@@ -2744,6 +2833,9 @@ pub enum InputKind {
     SubscribeAgentEvents,
     SubscribeAllAgentEvents,
     SubscribeMobEvents,
+    SubscribeStructuralEvents,
+    AuthorizeMobEventRouterMemberSubscription,
+    AuthorizeMobEventRouterMemberRemoval,
     PollEvents,
     ReplayAllEvents,
     RecordOperatorActionProvenance,
@@ -3279,6 +3371,54 @@ pub mod effects {
         pub kind: WiringLifecycleKind,
         pub edge: ExternalPeerEdge,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeAgentEventSubscription {
+        pub agent_identity: AgentIdentity,
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RejectAgentEventSubscription {
+        pub agent_identity: AgentIdentity,
+        pub reason: EventSubscriptionRejectReasonKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeAllAgentEventSubscription {
+        pub session_bound_runtimes: std::collections::BTreeSet<AgentRuntimeId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RejectAllAgentEventSubscription {
+        pub reason: EventSubscriptionRejectReasonKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMobEventRouter {
+        pub initial_cursor: u64,
+        pub channel_capacity: u64,
+        pub poll_interval_ms: u64,
+        pub session_bound_runtimes: std::collections::BTreeSet<AgentRuntimeId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMobEventRouterMemberSubscription {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMobEventRouterMemberRemoval {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeStructuralEventSubscription {
+        pub after_cursor: u64,
+        pub explicit_after_cursor: bool,
+        pub batch_limit: u64,
+        pub channel_capacity: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RejectStructuralEventSubscription {
+        pub after_cursor: u64,
+        pub latest_cursor: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3320,6 +3460,15 @@ pub enum Effect {
     ExternalPeerReciprocalTrustRequested(effects::ExternalPeerReciprocalTrustRequested),
     EmitWiringLifecycleNotice(effects::EmitWiringLifecycleNotice),
     EmitExternalPeerWiringLifecycleNotice(effects::EmitExternalPeerWiringLifecycleNotice),
+    AuthorizeAgentEventSubscription(effects::AuthorizeAgentEventSubscription),
+    RejectAgentEventSubscription(effects::RejectAgentEventSubscription),
+    AuthorizeAllAgentEventSubscription(effects::AuthorizeAllAgentEventSubscription),
+    RejectAllAgentEventSubscription(effects::RejectAllAgentEventSubscription),
+    AuthorizeMobEventRouter(effects::AuthorizeMobEventRouter),
+    AuthorizeMobEventRouterMemberSubscription(effects::AuthorizeMobEventRouterMemberSubscription),
+    AuthorizeMobEventRouterMemberRemoval(effects::AuthorizeMobEventRouterMemberRemoval),
+    AuthorizeStructuralEventSubscription(effects::AuthorizeStructuralEventSubscription),
+    RejectStructuralEventSubscription(effects::RejectStructuralEventSubscription),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -3360,6 +3509,15 @@ pub enum EffectKind {
     ExternalPeerReciprocalTrustRequested,
     EmitWiringLifecycleNotice,
     EmitExternalPeerWiringLifecycleNotice,
+    AuthorizeAgentEventSubscription,
+    RejectAgentEventSubscription,
+    AuthorizeAllAgentEventSubscription,
+    RejectAllAgentEventSubscription,
+    AuthorizeMobEventRouter,
+    AuthorizeMobEventRouterMemberSubscription,
+    AuthorizeMobEventRouterMemberRemoval,
+    AuthorizeStructuralEventSubscription,
+    RejectStructuralEventSubscription,
 }
 
 #[allow(non_camel_case_types)]
@@ -3492,14 +3650,54 @@ pub enum TransitionId {
     SubscribeAgentEventsStopped,
     SubscribeAgentEventsCompleted,
     SubscribeAgentEventsDestroyed,
+    SubscribeAgentEventsMissingMemberRunning,
+    SubscribeAgentEventsMissingMemberStopped,
+    SubscribeAgentEventsMissingMemberCompleted,
+    SubscribeAgentEventsMissingMemberDestroyed,
+    SubscribeAgentEventsMissingSessionRunning,
+    SubscribeAgentEventsMissingSessionStopped,
+    SubscribeAgentEventsMissingSessionCompleted,
+    SubscribeAgentEventsMissingSessionDestroyed,
+    SubscribeAgentEventsRuntimeNotLiveRunning,
+    SubscribeAgentEventsRuntimeNotLiveStopped,
+    SubscribeAgentEventsRuntimeNotLiveCompleted,
+    SubscribeAgentEventsRuntimeNotLiveDestroyed,
     SubscribeAllAgentEventsRunning,
     SubscribeAllAgentEventsStopped,
     SubscribeAllAgentEventsCompleted,
     SubscribeAllAgentEventsDestroyed,
+    SubscribeAllAgentEventsNoSessionBindingsRunning,
+    SubscribeAllAgentEventsNoSessionBindingsStopped,
+    SubscribeAllAgentEventsNoSessionBindingsCompleted,
+    SubscribeAllAgentEventsNoSessionBindingsDestroyed,
     SubscribeMobEventsRunning,
     SubscribeMobEventsStopped,
     SubscribeMobEventsCompleted,
     SubscribeMobEventsDestroyed,
+    SubscribeStructuralEventsRunning,
+    SubscribeStructuralEventsStopped,
+    SubscribeStructuralEventsCompleted,
+    SubscribeStructuralEventsDestroyed,
+    SubscribeStructuralEventsStaleRunning,
+    SubscribeStructuralEventsStaleStopped,
+    SubscribeStructuralEventsStaleCompleted,
+    SubscribeStructuralEventsStaleDestroyed,
+    AuthorizeMobEventRouterMemberSubscriptionRunning,
+    AuthorizeMobEventRouterMemberSubscriptionStopped,
+    AuthorizeMobEventRouterMemberSubscriptionCompleted,
+    AuthorizeMobEventRouterMemberSubscriptionDestroyed,
+    AuthorizeMobEventRouterMemberRemovalMissingRunning,
+    AuthorizeMobEventRouterMemberRemovalMissingStopped,
+    AuthorizeMobEventRouterMemberRemovalMissingCompleted,
+    AuthorizeMobEventRouterMemberRemovalMissingDestroyed,
+    AuthorizeMobEventRouterMemberRemovalUnboundRunning,
+    AuthorizeMobEventRouterMemberRemovalUnboundStopped,
+    AuthorizeMobEventRouterMemberRemovalUnboundCompleted,
+    AuthorizeMobEventRouterMemberRemovalUnboundDestroyed,
+    AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveRunning,
+    AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveStopped,
+    AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveCompleted,
+    AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveDestroyed,
     ShutdownRunning,
     ShutdownStopped,
     ShutdownCompleted,

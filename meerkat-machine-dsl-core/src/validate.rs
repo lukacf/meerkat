@@ -9,6 +9,7 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_machine_external_peer_edge_local",
     "mob_machine_external_peer_key_matches_edge",
     "mob_machine_external_peer_key_matches_local",
+    "mob_machine_session_bound_live_runtime_ids_match",
     "mob_machine_member_peer_endpoint_peer_id",
     "mob_machine_wiring_edge_matches_members",
     "mob_machine_frame_node_status_after_admit",

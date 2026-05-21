@@ -290,6 +290,10 @@ pub(super) enum MobCommand {
         input: Box<mob_dsl::MobMachineInput>,
         reply_tx: oneshot::Sender<Result<mob_dsl::MobMachineState, MobError>>,
     },
+    ApplyMachineInputEffects {
+        input: Box<mob_dsl::MobMachineInput>,
+        reply_tx: oneshot::Sender<Result<Vec<mob_dsl::MobMachineEffect>, MobError>>,
+    },
     PreviewMachineInput {
         input: Box<mob_dsl::MobMachineInput>,
         reply_tx: oneshot::Sender<Result<mob_dsl::MobMachineState, MobError>>,
@@ -370,13 +374,6 @@ pub(super) enum MobCommand {
     },
     Reset {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
-    },
-    SubscribeAgentEvents {
-        agent_identity: MeerkatId,
-        reply_tx: oneshot::Sender<Result<EventStream, MobError>>,
-    },
-    SubscribeAllAgentEvents {
-        reply_tx: oneshot::Sender<Result<Vec<(MeerkatId, EventStream)>, MobError>>,
     },
     RotateSupervisor {
         reply_tx: oneshot::Sender<Result<super::handle::SupervisorRotationReport, MobError>>,

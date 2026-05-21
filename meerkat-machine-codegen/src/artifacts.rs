@@ -6415,6 +6415,16 @@ impl<'a> MachineTlaCompiler<'a> {
         .expect("write to string");
         writeln!(
             out,
+            "{}(identity_to_runtime, member_session_bindings, live_runtime_ids, expected_runtime_ids) ==",
+            prefix("mob_machine_session_bound_live_runtime_ids_match")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    expected_runtime_ids = {{ identity_to_runtime[id] : id \\in DOMAIN member_session_bindings /\\ id \\in DOMAIN identity_to_runtime /\\ identity_to_runtime[id] \\in live_runtime_ids }}"
+        );
+        writeln!(
+            out,
             "{}(endpoint) == endpoint.peer_id",
             prefix("mob_machine_member_peer_endpoint_peer_id")
         )

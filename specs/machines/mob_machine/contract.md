@@ -162,9 +162,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ListMembersIncludingRetiring`
 - `ListAllMembers`
 - `MemberStatus`
-- `SubscribeAgentEvents`
-- `SubscribeAllAgentEvents`
-- `SubscribeMobEvents`
+- `SubscribeAgentEvents`(agent_identity: AgentIdentity)
+- `SubscribeAllAgentEvents`(session_bound_runtimes: Set<AgentRuntimeId>)
+- `SubscribeMobEvents`(initial_cursor: u64, channel_capacity: u64, poll_interval_ms: u64, session_bound_runtimes: Set<AgentRuntimeId>)
+- `SubscribeStructuralEvents`(after_cursor: u64, latest_cursor: u64, explicit_after_cursor: Bool, batch_limit: u64, channel_capacity: u64)
+- `AuthorizeMobEventRouterMemberSubscription`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `AuthorizeMobEventRouterMemberRemoval`(agent_identity: AgentIdentity)
 - `PollEvents`
 - `ReplayAllEvents`
 - `RecordOperatorActionProvenance`(tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String>)
@@ -278,6 +281,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ExternalPeerReciprocalTrustRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint, epoch: u64)
 - `EmitWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: WiringEdge)
 - `EmitExternalPeerWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: ExternalPeerEdge)
+- `AuthorizeAgentEventSubscription`(agent_identity: AgentIdentity, session_id: SessionId)
+- `RejectAgentEventSubscription`(agent_identity: AgentIdentity, reason: EventSubscriptionRejectReasonKind)
+- `AuthorizeAllAgentEventSubscription`(session_bound_runtimes: Set<AgentRuntimeId>)
+- `RejectAllAgentEventSubscription`(reason: EventSubscriptionRejectReasonKind)
+- `AuthorizeMobEventRouter`(initial_cursor: u64, channel_capacity: u64, poll_interval_ms: u64, session_bound_runtimes: Set<AgentRuntimeId>)
+- `AuthorizeMobEventRouterMemberSubscription`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId)
+- `AuthorizeMobEventRouterMemberRemoval`(agent_identity: AgentIdentity)
+- `AuthorizeStructuralEventSubscription`(after_cursor: u64, explicit_after_cursor: Bool, batch_limit: u64, channel_capacity: u64)
+- `RejectStructuralEventSubscription`(after_cursor: u64, latest_cursor: u64)
 
 ## Invariants
 - `bindings_require_known_identity`
@@ -1310,70 +1322,486 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SubscribeAgentEventsRunning`
 - From: `Running`
-- On: `SubscribeAgentEvents`()
+- On: `SubscribeAgentEvents`(agent_identity)
 - Guards:
-  - `active_members_present`
+  - `identity_present`
+  - `runtime_live`
+  - `session_bound`
+- Emits: `AuthorizeAgentEventSubscription`
 - To: `Running`
 
 ### `SubscribeAgentEventsStopped`
 - From: `Stopped`
-- On: `SubscribeAgentEvents`()
+- On: `SubscribeAgentEvents`(agent_identity)
 - Guards:
-  - `active_members_present`
+  - `identity_present`
+  - `runtime_live`
+  - `session_bound`
+- Emits: `AuthorizeAgentEventSubscription`
 - To: `Stopped`
 
 ### `SubscribeAgentEventsCompleted`
 - From: `Completed`
-- On: `SubscribeAgentEvents`()
+- On: `SubscribeAgentEvents`(agent_identity)
 - Guards:
-  - `active_members_present`
+  - `identity_present`
+  - `runtime_live`
+  - `session_bound`
+- Emits: `AuthorizeAgentEventSubscription`
 - To: `Completed`
 
 ### `SubscribeAgentEventsDestroyed`
 - From: `Destroyed`
-- On: `SubscribeAgentEvents`()
+- On: `SubscribeAgentEvents`(agent_identity)
 - Guards:
-  - `active_members_present`
+  - `identity_present`
+  - `runtime_live`
+  - `session_bound`
+- Emits: `AuthorizeAgentEventSubscription`
+- To: `Destroyed`
+
+### `SubscribeAgentEventsMissingMemberRunning`
+- From: `Running`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `RejectAgentEventSubscription`
+- To: `Running`
+
+### `SubscribeAgentEventsMissingMemberStopped`
+- From: `Stopped`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `RejectAgentEventSubscription`
+- To: `Stopped`
+
+### `SubscribeAgentEventsMissingMemberCompleted`
+- From: `Completed`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `RejectAgentEventSubscription`
+- To: `Completed`
+
+### `SubscribeAgentEventsMissingMemberDestroyed`
+- From: `Destroyed`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `RejectAgentEventSubscription`
+- To: `Destroyed`
+
+### `SubscribeAgentEventsMissingSessionRunning`
+- From: `Running`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_live`
+  - `session_unbound`
+- Emits: `RejectAgentEventSubscription`
+- To: `Running`
+
+### `SubscribeAgentEventsMissingSessionStopped`
+- From: `Stopped`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_live`
+  - `session_unbound`
+- Emits: `RejectAgentEventSubscription`
+- To: `Stopped`
+
+### `SubscribeAgentEventsMissingSessionCompleted`
+- From: `Completed`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_live`
+  - `session_unbound`
+- Emits: `RejectAgentEventSubscription`
+- To: `Completed`
+
+### `SubscribeAgentEventsMissingSessionDestroyed`
+- From: `Destroyed`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_live`
+  - `session_unbound`
+- Emits: `RejectAgentEventSubscription`
+- To: `Destroyed`
+
+### `SubscribeAgentEventsRuntimeNotLiveRunning`
+- From: `Running`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `RejectAgentEventSubscription`
+- To: `Running`
+
+### `SubscribeAgentEventsRuntimeNotLiveStopped`
+- From: `Stopped`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `RejectAgentEventSubscription`
+- To: `Stopped`
+
+### `SubscribeAgentEventsRuntimeNotLiveCompleted`
+- From: `Completed`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `RejectAgentEventSubscription`
+- To: `Completed`
+
+### `SubscribeAgentEventsRuntimeNotLiveDestroyed`
+- From: `Destroyed`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `RejectAgentEventSubscription`
 - To: `Destroyed`
 
 ### `SubscribeAllAgentEventsRunning`
 - From: `Running`
-- On: `SubscribeAllAgentEvents`()
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `session_bound_or_no_live_members`
+- Emits: `AuthorizeAllAgentEventSubscription`
 - To: `Running`
 
 ### `SubscribeAllAgentEventsStopped`
 - From: `Stopped`
-- On: `SubscribeAllAgentEvents`()
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `session_bound_or_no_live_members`
+- Emits: `AuthorizeAllAgentEventSubscription`
 - To: `Stopped`
 
 ### `SubscribeAllAgentEventsCompleted`
 - From: `Completed`
-- On: `SubscribeAllAgentEvents`()
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `session_bound_or_no_live_members`
+- Emits: `AuthorizeAllAgentEventSubscription`
 - To: `Completed`
 
 ### `SubscribeAllAgentEventsDestroyed`
 - From: `Destroyed`
-- On: `SubscribeAllAgentEvents`()
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `session_bound_or_no_live_members`
+- Emits: `AuthorizeAllAgentEventSubscription`
+- To: `Destroyed`
+
+### `SubscribeAllAgentEventsNoSessionBindingsRunning`
+- From: `Running`
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `no_session_bound_runtime`
+  - `live_members_present`
+- Emits: `RejectAllAgentEventSubscription`
+- To: `Running`
+
+### `SubscribeAllAgentEventsNoSessionBindingsStopped`
+- From: `Stopped`
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `no_session_bound_runtime`
+  - `live_members_present`
+- Emits: `RejectAllAgentEventSubscription`
+- To: `Stopped`
+
+### `SubscribeAllAgentEventsNoSessionBindingsCompleted`
+- From: `Completed`
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `no_session_bound_runtime`
+  - `live_members_present`
+- Emits: `RejectAllAgentEventSubscription`
+- To: `Completed`
+
+### `SubscribeAllAgentEventsNoSessionBindingsDestroyed`
+- From: `Destroyed`
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `no_session_bound_runtime`
+  - `live_members_present`
+- Emits: `RejectAllAgentEventSubscription`
 - To: `Destroyed`
 
 ### `SubscribeMobEventsRunning`
 - From: `Running`
-- On: `SubscribeMobEvents`()
+- On: `SubscribeMobEvents`(initial_cursor, channel_capacity, poll_interval_ms, session_bound_runtimes)
+- Guards:
+  - `channel_capacity_positive`
+  - `poll_interval_positive`
+  - `session_bound_runtimes_match`
+- Emits: `AuthorizeMobEventRouter`
 - To: `Running`
 
 ### `SubscribeMobEventsStopped`
 - From: `Stopped`
-- On: `SubscribeMobEvents`()
+- On: `SubscribeMobEvents`(initial_cursor, channel_capacity, poll_interval_ms, session_bound_runtimes)
+- Guards:
+  - `channel_capacity_positive`
+  - `poll_interval_positive`
+  - `session_bound_runtimes_match`
+- Emits: `AuthorizeMobEventRouter`
 - To: `Stopped`
 
 ### `SubscribeMobEventsCompleted`
 - From: `Completed`
-- On: `SubscribeMobEvents`()
+- On: `SubscribeMobEvents`(initial_cursor, channel_capacity, poll_interval_ms, session_bound_runtimes)
+- Guards:
+  - `channel_capacity_positive`
+  - `poll_interval_positive`
+  - `session_bound_runtimes_match`
+- Emits: `AuthorizeMobEventRouter`
 - To: `Completed`
 
 ### `SubscribeMobEventsDestroyed`
 - From: `Destroyed`
-- On: `SubscribeMobEvents`()
+- On: `SubscribeMobEvents`(initial_cursor, channel_capacity, poll_interval_ms, session_bound_runtimes)
+- Guards:
+  - `channel_capacity_positive`
+  - `poll_interval_positive`
+  - `session_bound_runtimes_match`
+- Emits: `AuthorizeMobEventRouter`
+- To: `Destroyed`
+
+### `SubscribeStructuralEventsRunning`
+- From: `Running`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_not_stale`
+  - `batch_limit_positive`
+  - `channel_capacity_positive`
+- Emits: `AuthorizeStructuralEventSubscription`
+- To: `Running`
+
+### `SubscribeStructuralEventsStopped`
+- From: `Stopped`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_not_stale`
+  - `batch_limit_positive`
+  - `channel_capacity_positive`
+- Emits: `AuthorizeStructuralEventSubscription`
+- To: `Stopped`
+
+### `SubscribeStructuralEventsCompleted`
+- From: `Completed`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_not_stale`
+  - `batch_limit_positive`
+  - `channel_capacity_positive`
+- Emits: `AuthorizeStructuralEventSubscription`
+- To: `Completed`
+
+### `SubscribeStructuralEventsDestroyed`
+- From: `Destroyed`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_not_stale`
+  - `batch_limit_positive`
+  - `channel_capacity_positive`
+- Emits: `AuthorizeStructuralEventSubscription`
+- To: `Destroyed`
+
+### `SubscribeStructuralEventsStaleRunning`
+- From: `Running`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStructuralEventSubscription`
+- To: `Running`
+
+### `SubscribeStructuralEventsStaleStopped`
+- From: `Stopped`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStructuralEventSubscription`
+- To: `Stopped`
+
+### `SubscribeStructuralEventsStaleCompleted`
+- From: `Completed`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStructuralEventSubscription`
+- To: `Completed`
+
+### `SubscribeStructuralEventsStaleDestroyed`
+- From: `Destroyed`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStructuralEventSubscription`
+- To: `Destroyed`
+
+### `AuthorizeMobEventRouterMemberSubscriptionRunning`
+- From: `Running`
+- On: `AuthorizeMobEventRouterMemberSubscription`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_live`
+  - `fence_matches`
+  - `session_bound`
+- Emits: `AuthorizeMobEventRouterMemberSubscription`
+- To: `Running`
+
+### `AuthorizeMobEventRouterMemberSubscriptionStopped`
+- From: `Stopped`
+- On: `AuthorizeMobEventRouterMemberSubscription`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_live`
+  - `fence_matches`
+  - `session_bound`
+- Emits: `AuthorizeMobEventRouterMemberSubscription`
+- To: `Stopped`
+
+### `AuthorizeMobEventRouterMemberSubscriptionCompleted`
+- From: `Completed`
+- On: `AuthorizeMobEventRouterMemberSubscription`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_live`
+  - `fence_matches`
+  - `session_bound`
+- Emits: `AuthorizeMobEventRouterMemberSubscription`
+- To: `Completed`
+
+### `AuthorizeMobEventRouterMemberSubscriptionDestroyed`
+- From: `Destroyed`
+- On: `AuthorizeMobEventRouterMemberSubscription`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_live`
+  - `fence_matches`
+  - `session_bound`
+- Emits: `AuthorizeMobEventRouterMemberSubscription`
+- To: `Destroyed`
+
+### `AuthorizeMobEventRouterMemberRemovalMissingRunning`
+- From: `Running`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Running`
+
+### `AuthorizeMobEventRouterMemberRemovalMissingStopped`
+- From: `Stopped`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Stopped`
+
+### `AuthorizeMobEventRouterMemberRemovalMissingCompleted`
+- From: `Completed`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Completed`
+
+### `AuthorizeMobEventRouterMemberRemovalMissingDestroyed`
+- From: `Destroyed`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Destroyed`
+
+### `AuthorizeMobEventRouterMemberRemovalUnboundRunning`
+- From: `Running`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `session_unbound`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Running`
+
+### `AuthorizeMobEventRouterMemberRemovalUnboundStopped`
+- From: `Stopped`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `session_unbound`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Stopped`
+
+### `AuthorizeMobEventRouterMemberRemovalUnboundCompleted`
+- From: `Completed`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `session_unbound`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Completed`
+
+### `AuthorizeMobEventRouterMemberRemovalUnboundDestroyed`
+- From: `Destroyed`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `session_unbound`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Destroyed`
+
+### `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveRunning`
+- From: `Running`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Running`
+
+### `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveStopped`
+- From: `Stopped`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Stopped`
+
+### `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveCompleted`
+- From: `Completed`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Completed`
+
+### `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveDestroyed`
+- From: `Destroyed`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
 - To: `Destroyed`
 
 ### `ShutdownRunning`

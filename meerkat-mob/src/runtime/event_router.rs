@@ -11,14 +11,14 @@
 //! Streams for retired members end naturally when sessions are archived.
 
 use crate::event::AttributedEvent;
-use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, MeerkatId, ProfileName};
+use crate::ids::{AgentRuntimeId, FenceToken, MeerkatId, ProfileName};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 
 use super::MobHandle;
 use futures::stream::{SelectAll, StreamExt};
 use meerkat_core::comms::EventStream;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -39,6 +39,22 @@ impl Default for MobEventRouterConfig {
             channel_capacity: 256,
         }
     }
+}
+
+#[derive(Clone)]
+pub(super) struct AuthorizedMobEventRouter {
+    pub initial_cursor: u64,
+    pub config: MobEventRouterConfig,
+    pub session_bound_runtimes: BTreeSet<crate::machines::mob_machine::AgentRuntimeId>,
+}
+
+#[derive(Clone)]
+pub(super) struct AuthorizedMobEventRouterMember {
+    pub agent_identity: MeerkatId,
+    pub runtime_id: AgentRuntimeId,
+    pub fence_token: FenceToken,
+    pub session_id: meerkat_core::types::SessionId,
+    pub role: ProfileName,
 }
 
 /// Handle returned by [`spawn_event_router`]. Drop to stop the router.
@@ -64,14 +80,14 @@ impl Drop for MobEventRouterHandle {
 /// Spawn the event router task and return its handle.
 pub(super) fn spawn_event_router(
     handle: MobHandle,
-    config: MobEventRouterConfig,
+    authority: AuthorizedMobEventRouter,
 ) -> MobEventRouterHandle {
-    let (event_tx, event_rx) = mpsc::channel(config.channel_capacity);
+    let (event_tx, event_rx) = mpsc::channel(authority.config.channel_capacity);
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
 
     tokio::spawn(async move {
-        run_event_router(handle, config, event_tx, cancel_clone).await;
+        run_event_router(handle, authority, event_tx, cancel_clone).await;
     });
 
     MobEventRouterHandle { event_rx, cancel }
@@ -80,51 +96,30 @@ pub(super) fn spawn_event_router(
 #[allow(clippy::ignored_unit_patterns)]
 async fn run_event_router(
     handle: MobHandle,
-    config: MobEventRouterConfig,
+    authority: AuthorizedMobEventRouter,
     event_tx: mpsc::Sender<AttributedEvent>,
     cancel: CancellationToken,
 ) {
     let mut merged: SelectAll<TaggedStream> = SelectAll::new();
     let mut tracked_ids: HashSet<MeerkatId> = HashSet::new();
-    let mut mob_cursor: u64 = 0;
+    let mut mob_cursor: u64 = authority.initial_cursor;
 
-    // Bootstrap: subscribe to all current roster members.
     {
-        for entry in handle.list_members().await {
-            if tracked_ids.contains(&entry.agent_identity) {
+        for member in handle
+            .authorized_mob_event_router_members(&authority.session_bound_runtimes)
+            .await
+        {
+            if tracked_ids.contains(&member.agent_identity) {
                 continue;
             }
-            let Some((runtime_id, fence_token)) = entry.binding_atoms() else {
-                tracing::warn!(
-                    meerkat_id = %entry.agent_identity,
-                    "mob event router: skipping member without MobMachine runtime binding",
-                );
-                continue;
-            };
-            // Only mark the member tracked once the subscription actually
-            // succeeded. Otherwise a transient subscribe failure would
-            // permanently exclude the member from the event stream.
-            if let Some(stream) = subscribe_member(
-                &handle,
-                entry.agent_identity.clone(),
-                runtime_id,
-                fence_token,
-                entry.role.clone(),
-            )
-            .await
-            {
-                tracked_ids.insert(entry.agent_identity.clone());
+            if let Some(stream) = subscribe_member(&handle, member.clone()).await {
+                tracked_ids.insert(member.agent_identity);
                 merged.push(stream);
             }
         }
     }
 
-    // Seed cursor from current event store.
-    if let Ok(cursor) = handle.events().latest_cursor().await {
-        mob_cursor = cursor;
-    }
-
-    let mut poll_interval = tokio::time::interval(config.poll_interval);
+    let mut poll_interval = tokio::time::interval(authority.config.poll_interval);
     #[cfg(not(target_arch = "wasm32"))]
     poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -158,22 +153,30 @@ async fn run_event_router(
                         crate::event::MobEventKind::MemberSpawned(ref event) => {
                             let meerkat_id =
                                 crate::ids::MeerkatId::from(event.agent_identity.as_str());
-                            // Only mark the member tracked once the subscription
-                            // actually succeeded so a transient failure at spawn
-                            // time doesn't permanently exclude them from the
-                            // merged event stream.
-                            if !tracked_ids.contains(&meerkat_id)
-                                && let Some(stream) = subscribe_member(
-                                    &handle,
-                                    meerkat_id.clone(),
-                                    event.agent_runtime_id.clone(),
-                                    event.fence_token,
-                                    event.role.clone(),
-                                )
-                                .await
-                            {
-                                tracked_ids.insert(meerkat_id);
-                                merged.push(stream);
+                            if !tracked_ids.contains(&meerkat_id) {
+                                match handle
+                                    .authorize_mob_event_router_member_subscription(
+                                        &meerkat_id,
+                                        &event.agent_runtime_id,
+                                        event.fence_token,
+                                        event.role.clone(),
+                                    )
+                                    .await
+                                {
+                                    Ok(member) => {
+                                        if let Some(stream) = subscribe_member(&handle, member.clone()).await {
+                                            tracked_ids.insert(member.agent_identity);
+                                            merged.push(stream);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            meerkat_id = %meerkat_id,
+                                            error = %error,
+                                            "mob event router: MobMachine rejected spawned member event subscription",
+                                        );
+                                    }
+                                }
                             }
                         }
                         crate::event::MobEventKind::MemberRetired {
@@ -182,7 +185,22 @@ async fn run_event_router(
                         } => {
                             let meerkat_id =
                                 crate::ids::MeerkatId::from(agent_identity.as_str());
-                            tracked_ids.remove(&meerkat_id);
+                            match handle
+                                .authorize_mob_event_router_member_removal(&meerkat_id)
+                                .await
+                            {
+                                Ok(true) => {
+                                    tracked_ids.remove(&meerkat_id);
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
+                                    tracing::warn!(
+                                        meerkat_id = %meerkat_id,
+                                        error = %error,
+                                        "mob event router: MobMachine rejected retired member removal",
+                                    );
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -209,29 +227,25 @@ type TaggedStream = futures::stream::Map<
 
 async fn subscribe_member(
     handle: &MobHandle,
-    agent_identity: MeerkatId,
-    runtime_id: AgentRuntimeId,
-    fence_token: FenceToken,
-    profile: ProfileName,
+    member: AuthorizedMobEventRouterMember,
 ) -> Option<TaggedStream> {
-    let identity = AgentIdentity::from(agent_identity.as_str());
-    let stream = match handle.subscribe_agent_events(&identity).await {
+    let stream = match handle
+        .subscribe_authorized_agent_session_events(&member.agent_identity, &member.session_id)
+        .await
+    {
         Ok(stream) => stream,
         Err(error) => {
-            // Log the failure so callers see why a member is missing from
-            // the merged event stream. The caller is expected to leave
-            // this member out of `tracked_ids` so a later tick can retry.
             tracing::warn!(
-                meerkat_id = %agent_identity,
+                meerkat_id = %member.agent_identity,
                 error = %error,
                 "mob event router: failed to subscribe to member agent events",
             );
             return None;
         }
     };
-    let prof = profile;
-    let source_runtime_id = runtime_id;
-    let source_fence_token = fence_token;
+    let prof = member.role;
+    let source_runtime_id = member.runtime_id;
+    let source_fence_token = member.fence_token;
     Some(stream.map(Box::new(move |envelope| {
         (
             source_runtime_id.clone(),

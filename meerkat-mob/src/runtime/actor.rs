@@ -4962,6 +4962,11 @@ impl MobActor {
                         .map(|()| self.dsl_authority.state().clone());
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::ApplyMachineInputEffects { input, reply_tx } => {
+                    let result =
+                        self.apply_dsl_input_collect_effects(*input, "apply_machine_input_effects");
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::PreviewMachineInput { input, reply_tx } => {
                     let result = self.preview_dsl_input(*input, "preview_machine_input");
                     let _ = reply_tx.send(result);
@@ -5282,83 +5287,6 @@ impl MobActor {
                     self.cancel_pending_peer_deliveries("mob is resetting")
                         .await;
                     let result = self.handle_reset(prior_state).await;
-                    let _ = reply_tx.send(result);
-                }
-                MobCommand::SubscribeAgentEvents {
-                    agent_identity,
-                    reply_tx,
-                } => {
-                    let result = async {
-                        let entry = self
-                            .roster
-                            .read()
-                            .await
-                            .entry(&agent_identity)
-                            .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
-                        let domain_identity = AgentIdentity::from(agent_identity.as_str());
-                        let session_id =
-                            match self.machine_bridge_session_id_for_identity(&domain_identity) {
-                            Some(session_id) => session_id,
-                            None => {
-                                return Err(MobError::UnsupportedForMode {
-                                    mode: entry.runtime_mode,
-                                    reason: "agent event subscriptions are not supported for peer-only members in phase 1".to_string(),
-                                });
-                            }
-                        };
-                        crate::runtime::session_service::MobSessionService::subscribe_session_events(
-                            self.session_service.as_ref(),
-                            &session_id,
-                        )
-                        .await
-                        .map_err(|e| {
-                            MobError::Internal(format!(
-                                "failed to subscribe to agent events for '{agent_identity}': {e}"
-                            ))
-                        })
-                    }
-                    .await;
-                    let _ = reply_tx.send(result);
-                }
-                MobCommand::SubscribeAllAgentEvents { reply_tx } => {
-                    let result = async {
-                        let entries = self.roster.read().await.list().cloned().collect::<Vec<_>>();
-                        let mut streams = Vec::with_capacity(entries.len());
-                        let mut unsupported_mode: Option<crate::MobRuntimeMode> = None;
-                        for entry in entries {
-                            let Some(session_id) = self.machine_bridge_session_id_for_identity(
-                                &AgentIdentity::from(entry.agent_identity.as_str()),
-                            ) else {
-                                // Peer-only members cannot supply an agent event stream;
-                                // skip silently and record the mode so callers who ended
-                                // up with zero streams learn why.
-                                unsupported_mode.get_or_insert(entry.runtime_mode);
-                                continue;
-                            };
-                            let stream = crate::runtime::session_service::MobSessionService::subscribe_session_events(
-                                self.session_service.as_ref(),
-                                &session_id,
-                            )
-                            .await
-                            .map_err(|e| {
-                                MobError::Internal(format!(
-                                    "failed to subscribe to agent events for '{}': {e}",
-                                    entry.agent_identity
-                                ))
-                            })?;
-                            streams.push((entry.agent_identity.clone(), stream));
-                        }
-                        if streams.is_empty()
-                            && let Some(mode) = unsupported_mode
-                        {
-                            return Err(MobError::UnsupportedForMode {
-                                mode,
-                                reason: "agent event subscriptions are not supported for peer-only members in phase 1".to_string(),
-                            });
-                        }
-                        Ok(streams)
-                    }
-                    .await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::RotateSupervisor { reply_tx } => {

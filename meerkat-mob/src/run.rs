@@ -159,9 +159,12 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ListMembersIncludingRetiring
             | mob_dsl::MobMachineInput::ListAllMembers
             | mob_dsl::MobMachineInput::MemberStatus
-            | mob_dsl::MobMachineInput::SubscribeAgentEvents
-            | mob_dsl::MobMachineInput::SubscribeAllAgentEvents
-            | mob_dsl::MobMachineInput::SubscribeMobEvents
+            | mob_dsl::MobMachineInput::SubscribeAgentEvents { .. }
+            | mob_dsl::MobMachineInput::SubscribeAllAgentEvents { .. }
+            | mob_dsl::MobMachineInput::SubscribeMobEvents { .. }
+            | mob_dsl::MobMachineInput::SubscribeStructuralEvents { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberSubscription { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberRemoval { .. }
             | mob_dsl::MobMachineInput::PollEvents
             | mob_dsl::MobMachineInput::ReplayAllEvents
             | mob_dsl::MobMachineInput::RecordOperatorActionProvenance { .. }
@@ -1242,9 +1245,12 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ListMembersIncludingRetiring
             | mob_dsl::MobMachineInput::ListAllMembers
             | mob_dsl::MobMachineInput::MemberStatus
-            | mob_dsl::MobMachineInput::SubscribeAgentEvents
-            | mob_dsl::MobMachineInput::SubscribeAllAgentEvents
-            | mob_dsl::MobMachineInput::SubscribeMobEvents
+            | mob_dsl::MobMachineInput::SubscribeAgentEvents { .. }
+            | mob_dsl::MobMachineInput::SubscribeAllAgentEvents { .. }
+            | mob_dsl::MobMachineInput::SubscribeMobEvents { .. }
+            | mob_dsl::MobMachineInput::SubscribeStructuralEvents { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberSubscription { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberRemoval { .. }
             | mob_dsl::MobMachineInput::PollEvents
             | mob_dsl::MobMachineInput::ReplayAllEvents
             | mob_dsl::MobMachineInput::RecordOperatorActionProvenance { .. }

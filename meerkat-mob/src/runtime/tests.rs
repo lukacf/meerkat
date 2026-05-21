@@ -21864,8 +21864,8 @@ fn test_lifecycle_commands_admit_on_live_authority_not_clone_probe() {
         .find("MobCommand::Stop { reply_tx }")
         .expect("Stop command arm exists");
     let end = source[start..]
-        .find("MobCommand::SubscribeAgentEvents")
-        .expect("SubscribeAgentEvents command arm follows lifecycle command arms");
+        .find("MobCommand::RotateSupervisor")
+        .expect("RotateSupervisor command arm follows lifecycle command arms");
     let lifecycle_arms = &source[start..start + end];
 
     for command in ["Stop", "ResumeLifecycle", "Complete", "Reset"] {
@@ -21877,7 +21877,7 @@ fn test_lifecycle_commands_admit_on_live_authority_not_clone_probe() {
             "MobCommand::Complete",
             "MobCommand::Destroy",
             "MobCommand::Reset",
-            "MobCommand::SubscribeAgentEvents",
+            "MobCommand::RotateSupervisor",
         ]
         .into_iter()
         .filter_map(|marker| {

@@ -399,9 +399,12 @@ macro_rules! mob_catalog_machine_dsl {
             ListMembersIncludingRetiring,
             ListAllMembers,
             MemberStatus,
-            SubscribeAgentEvents,
-            SubscribeAllAgentEvents,
-            SubscribeMobEvents,
+            SubscribeAgentEvents { agent_identity: AgentIdentity },
+            SubscribeAllAgentEvents { session_bound_runtimes: Set<AgentRuntimeId> },
+            SubscribeMobEvents { initial_cursor: u64, channel_capacity: u64, poll_interval_ms: u64, session_bound_runtimes: Set<AgentRuntimeId> },
+            SubscribeStructuralEvents { after_cursor: u64, latest_cursor: u64, explicit_after_cursor: bool, batch_limit: u64, channel_capacity: u64 },
+            AuthorizeMobEventRouterMemberSubscription { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            AuthorizeMobEventRouterMemberRemoval { agent_identity: AgentIdentity },
             PollEvents,
             ReplayAllEvents,
             RecordOperatorActionProvenance { tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String> },
@@ -545,6 +548,15 @@ macro_rules! mob_catalog_machine_dsl {
             // endpoint fields (`peer_id`, `address`, `signing_key`) that
             // cannot be represented by a member `WiringEdge`.
             EmitExternalPeerWiringLifecycleNotice { kind: Enum<WiringLifecycleKind>, edge: ExternalPeerEdge },
+            AuthorizeAgentEventSubscription { agent_identity: AgentIdentity, session_id: SessionId },
+            RejectAgentEventSubscription { agent_identity: AgentIdentity, reason: Enum<EventSubscriptionRejectReasonKind> },
+            AuthorizeAllAgentEventSubscription { session_bound_runtimes: Set<AgentRuntimeId> },
+            RejectAllAgentEventSubscription { reason: Enum<EventSubscriptionRejectReasonKind> },
+            AuthorizeMobEventRouter { initial_cursor: u64, channel_capacity: u64, poll_interval_ms: u64, session_bound_runtimes: Set<AgentRuntimeId> },
+            AuthorizeMobEventRouterMemberSubscription { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId },
+            AuthorizeMobEventRouterMemberRemoval { agent_identity: AgentIdentity },
+            AuthorizeStructuralEventSubscription { after_cursor: u64, explicit_after_cursor: bool, batch_limit: u64, channel_capacity: u64 },
+            RejectStructuralEventSubscription { after_cursor: u64, latest_cursor: u64 },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -584,6 +596,15 @@ macro_rules! mob_catalog_machine_dsl {
         disposition ExternalPeerReciprocalTrustRequested => external handoff mob_external_peer_reciprocal_trust,
         disposition EmitWiringLifecycleNotice => external,
         disposition EmitExternalPeerWiringLifecycleNotice => external,
+        disposition AuthorizeAgentEventSubscription => local,
+        disposition RejectAgentEventSubscription => local,
+        disposition AuthorizeAllAgentEventSubscription => local,
+        disposition RejectAllAgentEventSubscription => local,
+        disposition AuthorizeMobEventRouter => local,
+        disposition AuthorizeMobEventRouterMemberSubscription => local,
+        disposition AuthorizeMobEventRouterMemberRemoval => local,
+        disposition AuthorizeStructuralEventSubscription => local,
+        disposition RejectStructuralEventSubscription => local,
 
         // =====================================================================
         // Invariants
@@ -2412,82 +2433,505 @@ macro_rules! mob_catalog_machine_dsl {
         // =====================================================================
 
         transition SubscribeAgentEventsRunning {
-            on input SubscribeAgentEvents
+            on input SubscribeAgentEvents { agent_identity }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
             update {}
             to Running
+            emit AuthorizeAgentEventSubscription {
+                agent_identity: agent_identity,
+                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value")
+            }
         }
         transition SubscribeAgentEventsStopped {
-            on input SubscribeAgentEvents
+            on input SubscribeAgentEvents { agent_identity }
             guard { self.lifecycle_phase == Phase::Stopped }
-            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
             update {}
             to Stopped
+            emit AuthorizeAgentEventSubscription {
+                agent_identity: agent_identity,
+                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value")
+            }
         }
         transition SubscribeAgentEventsCompleted {
-            on input SubscribeAgentEvents
+            on input SubscribeAgentEvents { agent_identity }
             guard { self.lifecycle_phase == Phase::Completed }
-            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
             update {}
             to Completed
+            emit AuthorizeAgentEventSubscription {
+                agent_identity: agent_identity,
+                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value")
+            }
         }
         transition SubscribeAgentEventsDestroyed {
-            on input SubscribeAgentEvents
+            on input SubscribeAgentEvents { agent_identity }
             guard { self.lifecycle_phase == Phase::Destroyed }
-            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
             update {}
             to Destroyed
+            emit AuthorizeAgentEventSubscription {
+                agent_identity: agent_identity,
+                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value")
+            }
+        }
+        transition SubscribeAgentEventsMissingMemberRunning {
+            on input SubscribeAgentEvents { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Running
+            emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::MemberNotFound }
+        }
+        transition SubscribeAgentEventsMissingMemberStopped {
+            on input SubscribeAgentEvents { agent_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Stopped
+            emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::MemberNotFound }
+        }
+        transition SubscribeAgentEventsMissingMemberCompleted {
+            on input SubscribeAgentEvents { agent_identity }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Completed
+            emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::MemberNotFound }
+        }
+        transition SubscribeAgentEventsMissingMemberDestroyed {
+            on input SubscribeAgentEvents { agent_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Destroyed
+            emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::MemberNotFound }
+        }
+        transition SubscribeAgentEventsMissingSessionRunning {
+            on input SubscribeAgentEvents { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            update {}
+            to Running
+            emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::NoSessionBinding }
+        }
+        transition SubscribeAgentEventsMissingSessionStopped {
+            on input SubscribeAgentEvents { agent_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            update {}
+            to Stopped
+            emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::NoSessionBinding }
+        }
+        transition SubscribeAgentEventsMissingSessionCompleted {
+            on input SubscribeAgentEvents { agent_identity }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            update {}
+            to Completed
+            emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::NoSessionBinding }
+        }
+        transition SubscribeAgentEventsMissingSessionDestroyed {
+            on input SubscribeAgentEvents { agent_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
+            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            update {}
+            to Destroyed
+            emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::NoSessionBinding }
+        }
+        transition SubscribeAgentEventsRuntimeNotLiveRunning {
+            on input SubscribeAgentEvents { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false }
+            update {}
+            to Running
+            emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::MemberNotFound }
+        }
+        transition SubscribeAgentEventsRuntimeNotLiveStopped {
+            on input SubscribeAgentEvents { agent_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false }
+            update {}
+            to Stopped
+            emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::MemberNotFound }
+        }
+        transition SubscribeAgentEventsRuntimeNotLiveCompleted {
+            on input SubscribeAgentEvents { agent_identity }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false }
+            update {}
+            to Completed
+            emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::MemberNotFound }
+        }
+        transition SubscribeAgentEventsRuntimeNotLiveDestroyed {
+            on input SubscribeAgentEvents { agent_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false }
+            update {}
+            to Destroyed
+            emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::MemberNotFound }
         }
 
         transition SubscribeAllAgentEventsRunning {
-            on input SubscribeAllAgentEvents
+            on input SubscribeAllAgentEvents { session_bound_runtimes }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "session_bound_runtimes_match" { mob_machine_session_bound_live_runtime_ids_match(self.identity_to_runtime, self.member_session_bindings, self.live_runtime_ids, session_bound_runtimes) }
+            guard "session_bound_or_no_live_members" { session_bound_runtimes != EmptySet || self.live_runtime_ids == EmptySet }
             update {}
             to Running
+            emit AuthorizeAllAgentEventSubscription { session_bound_runtimes: session_bound_runtimes }
         }
         transition SubscribeAllAgentEventsStopped {
-            on input SubscribeAllAgentEvents
+            on input SubscribeAllAgentEvents { session_bound_runtimes }
             guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_bound_runtimes_match" { mob_machine_session_bound_live_runtime_ids_match(self.identity_to_runtime, self.member_session_bindings, self.live_runtime_ids, session_bound_runtimes) }
+            guard "session_bound_or_no_live_members" { session_bound_runtimes != EmptySet || self.live_runtime_ids == EmptySet }
             update {}
             to Stopped
+            emit AuthorizeAllAgentEventSubscription { session_bound_runtimes: session_bound_runtimes }
         }
         transition SubscribeAllAgentEventsCompleted {
-            on input SubscribeAllAgentEvents
+            on input SubscribeAllAgentEvents { session_bound_runtimes }
             guard { self.lifecycle_phase == Phase::Completed }
+            guard "session_bound_runtimes_match" { mob_machine_session_bound_live_runtime_ids_match(self.identity_to_runtime, self.member_session_bindings, self.live_runtime_ids, session_bound_runtimes) }
+            guard "session_bound_or_no_live_members" { session_bound_runtimes != EmptySet || self.live_runtime_ids == EmptySet }
             update {}
             to Completed
+            emit AuthorizeAllAgentEventSubscription { session_bound_runtimes: session_bound_runtimes }
         }
         transition SubscribeAllAgentEventsDestroyed {
-            on input SubscribeAllAgentEvents
+            on input SubscribeAllAgentEvents { session_bound_runtimes }
             guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "session_bound_runtimes_match" { mob_machine_session_bound_live_runtime_ids_match(self.identity_to_runtime, self.member_session_bindings, self.live_runtime_ids, session_bound_runtimes) }
+            guard "session_bound_or_no_live_members" { session_bound_runtimes != EmptySet || self.live_runtime_ids == EmptySet }
             update {}
             to Destroyed
+            emit AuthorizeAllAgentEventSubscription { session_bound_runtimes: session_bound_runtimes }
+        }
+        transition SubscribeAllAgentEventsNoSessionBindingsRunning {
+            on input SubscribeAllAgentEvents { session_bound_runtimes }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_bound_runtimes_match" { mob_machine_session_bound_live_runtime_ids_match(self.identity_to_runtime, self.member_session_bindings, self.live_runtime_ids, session_bound_runtimes) }
+            guard "no_session_bound_runtime" { session_bound_runtimes == EmptySet }
+            guard "live_members_present" { self.live_runtime_ids != EmptySet }
+            update {}
+            to Running
+            emit RejectAllAgentEventSubscription { reason: EventSubscriptionRejectReasonKind::NoSessionBinding }
+        }
+        transition SubscribeAllAgentEventsNoSessionBindingsStopped {
+            on input SubscribeAllAgentEvents { session_bound_runtimes }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_bound_runtimes_match" { mob_machine_session_bound_live_runtime_ids_match(self.identity_to_runtime, self.member_session_bindings, self.live_runtime_ids, session_bound_runtimes) }
+            guard "no_session_bound_runtime" { session_bound_runtimes == EmptySet }
+            guard "live_members_present" { self.live_runtime_ids != EmptySet }
+            update {}
+            to Stopped
+            emit RejectAllAgentEventSubscription { reason: EventSubscriptionRejectReasonKind::NoSessionBinding }
+        }
+        transition SubscribeAllAgentEventsNoSessionBindingsCompleted {
+            on input SubscribeAllAgentEvents { session_bound_runtimes }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "session_bound_runtimes_match" { mob_machine_session_bound_live_runtime_ids_match(self.identity_to_runtime, self.member_session_bindings, self.live_runtime_ids, session_bound_runtimes) }
+            guard "no_session_bound_runtime" { session_bound_runtimes == EmptySet }
+            guard "live_members_present" { self.live_runtime_ids != EmptySet }
+            update {}
+            to Completed
+            emit RejectAllAgentEventSubscription { reason: EventSubscriptionRejectReasonKind::NoSessionBinding }
+        }
+        transition SubscribeAllAgentEventsNoSessionBindingsDestroyed {
+            on input SubscribeAllAgentEvents { session_bound_runtimes }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "session_bound_runtimes_match" { mob_machine_session_bound_live_runtime_ids_match(self.identity_to_runtime, self.member_session_bindings, self.live_runtime_ids, session_bound_runtimes) }
+            guard "no_session_bound_runtime" { session_bound_runtimes == EmptySet }
+            guard "live_members_present" { self.live_runtime_ids != EmptySet }
+            update {}
+            to Destroyed
+            emit RejectAllAgentEventSubscription { reason: EventSubscriptionRejectReasonKind::NoSessionBinding }
         }
 
         transition SubscribeMobEventsRunning {
-            on input SubscribeMobEvents
+            on input SubscribeMobEvents { initial_cursor, channel_capacity, poll_interval_ms, session_bound_runtimes }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "channel_capacity_positive" { channel_capacity > 0 }
+            guard "poll_interval_positive" { poll_interval_ms > 0 }
+            guard "session_bound_runtimes_match" { mob_machine_session_bound_live_runtime_ids_match(self.identity_to_runtime, self.member_session_bindings, self.live_runtime_ids, session_bound_runtimes) }
             update {}
             to Running
+            emit AuthorizeMobEventRouter { initial_cursor: initial_cursor, channel_capacity: channel_capacity, poll_interval_ms: poll_interval_ms, session_bound_runtimes: session_bound_runtimes }
         }
         transition SubscribeMobEventsStopped {
-            on input SubscribeMobEvents
+            on input SubscribeMobEvents { initial_cursor, channel_capacity, poll_interval_ms, session_bound_runtimes }
             guard { self.lifecycle_phase == Phase::Stopped }
+            guard "channel_capacity_positive" { channel_capacity > 0 }
+            guard "poll_interval_positive" { poll_interval_ms > 0 }
+            guard "session_bound_runtimes_match" { mob_machine_session_bound_live_runtime_ids_match(self.identity_to_runtime, self.member_session_bindings, self.live_runtime_ids, session_bound_runtimes) }
             update {}
             to Stopped
+            emit AuthorizeMobEventRouter { initial_cursor: initial_cursor, channel_capacity: channel_capacity, poll_interval_ms: poll_interval_ms, session_bound_runtimes: session_bound_runtimes }
         }
         transition SubscribeMobEventsCompleted {
-            on input SubscribeMobEvents
+            on input SubscribeMobEvents { initial_cursor, channel_capacity, poll_interval_ms, session_bound_runtimes }
             guard { self.lifecycle_phase == Phase::Completed }
+            guard "channel_capacity_positive" { channel_capacity > 0 }
+            guard "poll_interval_positive" { poll_interval_ms > 0 }
+            guard "session_bound_runtimes_match" { mob_machine_session_bound_live_runtime_ids_match(self.identity_to_runtime, self.member_session_bindings, self.live_runtime_ids, session_bound_runtimes) }
             update {}
             to Completed
+            emit AuthorizeMobEventRouter { initial_cursor: initial_cursor, channel_capacity: channel_capacity, poll_interval_ms: poll_interval_ms, session_bound_runtimes: session_bound_runtimes }
         }
         transition SubscribeMobEventsDestroyed {
-            on input SubscribeMobEvents
+            on input SubscribeMobEvents { initial_cursor, channel_capacity, poll_interval_ms, session_bound_runtimes }
             guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "channel_capacity_positive" { channel_capacity > 0 }
+            guard "poll_interval_positive" { poll_interval_ms > 0 }
+            guard "session_bound_runtimes_match" { mob_machine_session_bound_live_runtime_ids_match(self.identity_to_runtime, self.member_session_bindings, self.live_runtime_ids, session_bound_runtimes) }
             update {}
             to Destroyed
+            emit AuthorizeMobEventRouter { initial_cursor: initial_cursor, channel_capacity: channel_capacity, poll_interval_ms: poll_interval_ms, session_bound_runtimes: session_bound_runtimes }
+        }
+
+        transition SubscribeStructuralEventsRunning {
+            on input SubscribeStructuralEvents { after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "cursor_not_stale" { after_cursor <= latest_cursor }
+            guard "batch_limit_positive" { batch_limit > 0 }
+            guard "channel_capacity_positive" { channel_capacity > 0 }
+            update {}
+            to Running
+            emit AuthorizeStructuralEventSubscription { after_cursor: after_cursor, explicit_after_cursor: explicit_after_cursor, batch_limit: batch_limit, channel_capacity: channel_capacity }
+        }
+        transition SubscribeStructuralEventsStopped {
+            on input SubscribeStructuralEvents { after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "cursor_not_stale" { after_cursor <= latest_cursor }
+            guard "batch_limit_positive" { batch_limit > 0 }
+            guard "channel_capacity_positive" { channel_capacity > 0 }
+            update {}
+            to Stopped
+            emit AuthorizeStructuralEventSubscription { after_cursor: after_cursor, explicit_after_cursor: explicit_after_cursor, batch_limit: batch_limit, channel_capacity: channel_capacity }
+        }
+        transition SubscribeStructuralEventsCompleted {
+            on input SubscribeStructuralEvents { after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "cursor_not_stale" { after_cursor <= latest_cursor }
+            guard "batch_limit_positive" { batch_limit > 0 }
+            guard "channel_capacity_positive" { channel_capacity > 0 }
+            update {}
+            to Completed
+            emit AuthorizeStructuralEventSubscription { after_cursor: after_cursor, explicit_after_cursor: explicit_after_cursor, batch_limit: batch_limit, channel_capacity: channel_capacity }
+        }
+        transition SubscribeStructuralEventsDestroyed {
+            on input SubscribeStructuralEvents { after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "cursor_not_stale" { after_cursor <= latest_cursor }
+            guard "batch_limit_positive" { batch_limit > 0 }
+            guard "channel_capacity_positive" { channel_capacity > 0 }
+            update {}
+            to Destroyed
+            emit AuthorizeStructuralEventSubscription { after_cursor: after_cursor, explicit_after_cursor: explicit_after_cursor, batch_limit: batch_limit, channel_capacity: channel_capacity }
+        }
+        transition SubscribeStructuralEventsStaleRunning {
+            on input SubscribeStructuralEvents { after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "cursor_stale" { after_cursor > latest_cursor }
+            update {}
+            to Running
+            emit RejectStructuralEventSubscription { after_cursor: after_cursor, latest_cursor: latest_cursor }
+        }
+        transition SubscribeStructuralEventsStaleStopped {
+            on input SubscribeStructuralEvents { after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "cursor_stale" { after_cursor > latest_cursor }
+            update {}
+            to Stopped
+            emit RejectStructuralEventSubscription { after_cursor: after_cursor, latest_cursor: latest_cursor }
+        }
+        transition SubscribeStructuralEventsStaleCompleted {
+            on input SubscribeStructuralEvents { after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "cursor_stale" { after_cursor > latest_cursor }
+            update {}
+            to Completed
+            emit RejectStructuralEventSubscription { after_cursor: after_cursor, latest_cursor: latest_cursor }
+        }
+        transition SubscribeStructuralEventsStaleDestroyed {
+            on input SubscribeStructuralEvents { after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "cursor_stale" { after_cursor > latest_cursor }
+            update {}
+            to Destroyed
+            emit RejectStructuralEventSubscription { after_cursor: after_cursor, latest_cursor: latest_cursor }
+        }
+
+        transition AuthorizeMobEventRouterMemberSubscriptionRunning {
+            on input AuthorizeMobEventRouterMemberSubscription { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            update {}
+            to Running
+            emit AuthorizeMobEventRouterMemberSubscription { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, session_id: self.member_session_bindings.get_cloned(agent_identity).get("value") }
+        }
+        transition AuthorizeMobEventRouterMemberSubscriptionStopped {
+            on input AuthorizeMobEventRouterMemberSubscription { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            update {}
+            to Stopped
+            emit AuthorizeMobEventRouterMemberSubscription { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, session_id: self.member_session_bindings.get_cloned(agent_identity).get("value") }
+        }
+        transition AuthorizeMobEventRouterMemberSubscriptionCompleted {
+            on input AuthorizeMobEventRouterMemberSubscription { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            update {}
+            to Completed
+            emit AuthorizeMobEventRouterMemberSubscription { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, session_id: self.member_session_bindings.get_cloned(agent_identity).get("value") }
+        }
+        transition AuthorizeMobEventRouterMemberSubscriptionDestroyed {
+            on input AuthorizeMobEventRouterMemberSubscription { agent_identity, agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            update {}
+            to Destroyed
+            emit AuthorizeMobEventRouterMemberSubscription { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, session_id: self.member_session_bindings.get_cloned(agent_identity).get("value") }
+        }
+
+        transition AuthorizeMobEventRouterMemberRemovalMissingRunning {
+            on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Running
+            emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
+        }
+        transition AuthorizeMobEventRouterMemberRemovalMissingStopped {
+            on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Stopped
+            emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
+        }
+        transition AuthorizeMobEventRouterMemberRemovalMissingCompleted {
+            on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Completed
+            emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
+        }
+        transition AuthorizeMobEventRouterMemberRemovalMissingDestroyed {
+            on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Destroyed
+            emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
+        }
+        transition AuthorizeMobEventRouterMemberRemovalUnboundRunning {
+            on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            update {}
+            to Running
+            emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
+        }
+        transition AuthorizeMobEventRouterMemberRemovalUnboundStopped {
+            on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            update {}
+            to Stopped
+            emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
+        }
+        transition AuthorizeMobEventRouterMemberRemovalUnboundCompleted {
+            on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            update {}
+            to Completed
+            emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
+        }
+        transition AuthorizeMobEventRouterMemberRemovalUnboundDestroyed {
+            on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            update {}
+            to Destroyed
+            emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
+        }
+        transition AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveRunning {
+            on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false }
+            update {}
+            to Running
+            emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
+        }
+        transition AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveStopped {
+            on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false }
+            update {}
+            to Stopped
+            emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
+        }
+        transition AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveCompleted {
+            on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false }
+            update {}
+            to Completed
+            emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
+        }
+        transition AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveDestroyed {
+            on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false }
+            update {}
+            to Destroyed
+            emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
         }
 
         // =====================================================================
@@ -4317,6 +4761,21 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         impl MobMachineAuthority {
+        fn mob_machine_session_bound_live_runtime_ids_match(
+            identity_to_runtime: &std::collections::BTreeMap<AgentIdentity, AgentRuntimeId>,
+            member_session_bindings: &std::collections::BTreeMap<AgentIdentity, SessionId>,
+            live_runtime_ids: &std::collections::BTreeSet<AgentRuntimeId>,
+            expected_runtime_ids: &std::collections::BTreeSet<AgentRuntimeId>,
+        ) -> bool {
+            let actual_runtime_ids = member_session_bindings
+                .keys()
+                .filter_map(|identity| identity_to_runtime.get(identity))
+                .filter(|runtime_id| live_runtime_ids.contains(*runtime_id))
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            &actual_runtime_ids == expected_runtime_ids
+        }
+
         fn mob_machine_external_peer_edge_has_matching_key(
             edges_by_key: &std::collections::BTreeMap<ExternalPeerKey, ExternalPeerEdge>,
             edge: &ExternalPeerEdge,
@@ -5085,6 +5544,16 @@ pub enum CancelAllWorkRejectReasonKind {
     MobNotRunning,
     MemberNotFound,
     StaleFenceToken,
+}
+
+/// Typed public rejection class for generated agent event subscription
+/// authority. The runtime shell may open a stream only when MobMachine emits
+/// an authorize effect; rejection effects own the public result class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum EventSubscriptionRejectReasonKind {
+    #[default]
+    MemberNotFound,
+    NoSessionBinding,
 }
 
 /// Typed work-origin classification for

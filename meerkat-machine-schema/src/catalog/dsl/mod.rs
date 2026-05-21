@@ -1221,6 +1221,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum("CollectionPolicyKind", &["All", "Any", "Quorum"]),
             NamedTypeBinding::string_enum("DependencyMode", &["All", "Any"]),
+            NamedTypeBinding::string_enum(
+                "EventSubscriptionRejectReasonKind",
+                &["MemberNotFound", "NoSessionBinding"],
+            ),
             NamedTypeBinding::u64("FenceToken"),
             NamedTypeBinding::string_enum(
                 "FlowFrameReducerCommandKind",

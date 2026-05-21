@@ -661,6 +661,15 @@ pub enum CancelAllWorkRejectReasonKind {
     StaleFenceToken,
 }
 
+/// Typed public rejection class for generated agent event subscription
+/// authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum EventSubscriptionRejectReasonKind {
+    #[default]
+    MemberNotFound,
+    NoSessionBinding,
+}
+
 /// Typed work-origin classification for
 /// [`MobMachineInput::SubmitWork`] / [`MobMachineEffect::RequestRuntimeIngress`].
 /// Closed mirror of [`crate::ids::WorkOrigin`] — the DSL uses this enum as

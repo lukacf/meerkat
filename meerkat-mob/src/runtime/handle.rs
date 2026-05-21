@@ -1258,25 +1258,36 @@ impl MobEventsView {
             ..config
         };
         let explicit_after_cursor = config.after_cursor.is_some();
+        let latest_cursor = self.latest_cursor().await?;
+        let after_cursor = config.after_cursor.unwrap_or(latest_cursor);
+        let batch_limit = u64::try_from(config.batch_limit).map_err(|_| {
+            MobError::Internal(
+                "structural event batch limit does not fit generated authority input".into(),
+            )
+        })?;
+        let channel_capacity = u64::try_from(config.channel_capacity).map_err(|_| {
+            MobError::Internal(
+                "structural event channel capacity does not fit generated authority input".into(),
+            )
+        })?;
+        let effects = self
+            .handle
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::SubscribeStructuralEvents {
+                after_cursor,
+                latest_cursor,
+                explicit_after_cursor,
+                batch_limit,
+                channel_capacity,
+            })
+            .await?;
+        let (after_cursor, _explicit_after_cursor, config) =
+            MobHandle::structural_event_subscription_authority_from_effects(effects)?;
         let source_rx = self.handle.events.subscribe().map_err(MobError::from)?;
-        let after_cursor = match config.after_cursor {
-            Some(cursor) => {
-                let latest_cursor = self.latest_cursor().await?;
-                if cursor > latest_cursor {
-                    return Err(MobError::StaleEventCursor {
-                        after_cursor: cursor,
-                        latest_cursor,
-                    });
-                }
-                cursor
-            }
-            None => self.latest_cursor().await?,
-        };
         Ok(spawn_structural_event_subscription(
             self.clone(),
             source_rx,
             after_cursor,
-            explicit_after_cursor,
+            true,
             config,
         ))
     }
@@ -1683,29 +1694,75 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::MemberStatus(snapshot))
             }
             MobMachineCommand::SubscribeAgentEvents { agent_identity } => {
-                self.project_machine_input(mob_dsl::MobMachineInput::SubscribeAgentEvents)
-                    .await?;
-                let stream = self
-                    .send_actor_command(|reply_tx| MobCommand::SubscribeAgentEvents {
-                        agent_identity,
-                        reply_tx,
+                let effects = self
+                    .apply_machine_input_effects(mob_dsl::MobMachineInput::SubscribeAgentEvents {
+                        agent_identity: mob_dsl::AgentIdentity(agent_identity.to_string()),
                     })
-                    .await??;
+                    .await?;
+                let session_id =
+                    Self::agent_event_subscription_session_from_effects(effects, &agent_identity)?;
+                let stream = self
+                    .subscribe_authorized_agent_session_events(&agent_identity, &session_id)
+                    .await?;
                 Ok(MobMachineCommandResult::EventStream(stream))
             }
             MobMachineCommand::SubscribeAllAgentEvents => {
-                self.project_machine_input(mob_dsl::MobMachineInput::SubscribeAllAgentEvents)
+                let machine_state = self.machine_state_watch_rx.borrow().clone();
+                let session_bound_runtimes =
+                    Self::session_bound_live_runtime_ids_from_machine(&machine_state);
+                let effects = self
+                    .apply_machine_input_effects(
+                        mob_dsl::MobMachineInput::SubscribeAllAgentEvents {
+                            session_bound_runtimes,
+                        },
+                    )
                     .await?;
-                let streams = self
-                    .send_actor_command(|reply_tx| MobCommand::SubscribeAllAgentEvents { reply_tx })
-                    .await??;
+                let authorized_runtimes =
+                    Self::all_agent_event_subscription_runtimes_from_effects(effects)?;
+                let mut streams = Vec::new();
+                for (dsl_identity, runtime_id) in &machine_state.identity_to_runtime {
+                    if !authorized_runtimes.contains(runtime_id) {
+                        continue;
+                    }
+                    let Some(dsl_session_id) =
+                        machine_state.member_session_bindings.get(dsl_identity)
+                    else {
+                        continue;
+                    };
+                    let agent_identity = MeerkatId::from(dsl_identity.0.as_str());
+                    let session_id =
+                        Self::session_id_from_dsl(dsl_session_id, "all-agent event subscription")?;
+                    let stream = self
+                        .subscribe_authorized_agent_session_events(&agent_identity, &session_id)
+                        .await?;
+                    streams.push((agent_identity, stream));
+                }
                 Ok(MobMachineCommandResult::AllAgentEventStreams(streams))
             }
             MobMachineCommand::SubscribeMobEvents { config } => {
-                self.project_machine_input(mob_dsl::MobMachineInput::SubscribeMobEvents)
+                let machine_state = self.machine_state_watch_rx.borrow().clone();
+                let session_bound_runtimes =
+                    Self::session_bound_live_runtime_ids_from_machine(&machine_state);
+                let initial_cursor = self.events.latest_cursor().await.map_err(MobError::from)?;
+                let channel_capacity = u64::try_from(config.channel_capacity).map_err(|_| {
+                    MobError::Internal(
+                        "mob event router channel capacity does not fit generated authority input"
+                            .into(),
+                    )
+                })?;
+                let poll_interval_ms =
+                    u64::try_from(config.poll_interval.as_millis()).unwrap_or(u64::MAX);
+                let effects = self
+                    .apply_machine_input_effects(mob_dsl::MobMachineInput::SubscribeMobEvents {
+                        initial_cursor,
+                        channel_capacity,
+                        poll_interval_ms,
+                        session_bound_runtimes,
+                    })
                     .await?;
+                let authority = Self::mob_event_router_authority_from_effects(effects)?;
                 Ok(MobMachineCommandResult::MobEventRouter(
-                    super::event_router::spawn_event_router(self.clone(), config),
+                    super::event_router::spawn_event_router(self.clone(), authority),
                 ))
             }
             MobMachineCommand::PollEvents {
@@ -2072,6 +2129,198 @@ impl MobHandle {
             .member_session_bindings
             .get(&dsl_identity)
             .and_then(|dsl_session_id| SessionId::parse(&dsl_session_id.0).ok())
+    }
+
+    fn session_bound_live_runtime_ids_from_machine(
+        machine_state: &mob_dsl::MobMachineState,
+    ) -> BTreeSet<mob_dsl::AgentRuntimeId> {
+        machine_state
+            .member_session_bindings
+            .keys()
+            .filter_map(|identity| machine_state.identity_to_runtime.get(identity))
+            .filter(|runtime_id| machine_state.live_runtime_ids.contains(*runtime_id))
+            .cloned()
+            .collect()
+    }
+
+    fn domain_identity_from_dsl(identity: &mob_dsl::AgentIdentity) -> AgentIdentity {
+        AgentIdentity::from(identity.0.as_str())
+    }
+
+    fn domain_runtime_from_machine_binding(
+        identity: &mob_dsl::AgentIdentity,
+        runtime_id: &mob_dsl::AgentRuntimeId,
+        machine_state: &mob_dsl::MobMachineState,
+    ) -> Option<AgentRuntimeId> {
+        let domain_identity = Self::domain_identity_from_dsl(identity);
+        let generation = machine_state.identity_runtime_generations.get(identity)?;
+        let domain_runtime =
+            AgentRuntimeId::new(domain_identity, crate::ids::Generation::new(generation.0));
+        (mob_dsl::AgentRuntimeId::from_domain(&domain_runtime) == *runtime_id)
+            .then_some(domain_runtime)
+    }
+
+    fn session_id_from_dsl(
+        session_id: &mob_dsl::SessionId,
+        context: &str,
+    ) -> Result<SessionId, MobError> {
+        SessionId::parse(&session_id.0).map_err(|_| {
+            MobError::Internal(format!(
+                "MobMachine produced invalid session id for {context}"
+            ))
+        })
+    }
+
+    fn agent_event_subscription_session_from_effects(
+        effects: Vec<mob_dsl::MobMachineEffect>,
+        agent_identity: &MeerkatId,
+    ) -> Result<SessionId, MobError> {
+        let dsl_identity = mob_dsl::AgentIdentity(agent_identity.to_string());
+        for effect in effects {
+            match effect {
+                mob_dsl::MobMachineEffect::AuthorizeAgentEventSubscription {
+                    agent_identity: effect_identity,
+                    session_id,
+                } if effect_identity == dsl_identity => {
+                    return Self::session_id_from_dsl(&session_id, "agent event subscription");
+                }
+                mob_dsl::MobMachineEffect::RejectAgentEventSubscription {
+                    agent_identity: effect_identity,
+                    reason,
+                } if effect_identity == dsl_identity => {
+                    return match reason {
+                        mob_dsl::EventSubscriptionRejectReasonKind::MemberNotFound => {
+                            Err(MobError::MemberNotFound(agent_identity.clone()))
+                        }
+                        mob_dsl::EventSubscriptionRejectReasonKind::NoSessionBinding => {
+                            Err(MobError::UnsupportedForMode {
+                                mode: MobRuntimeMode::TurnDriven,
+                                reason: "MobMachine rejected agent event subscription without a session binding".to_string(),
+                            })
+                        }
+                    };
+                }
+                _ => {}
+            }
+        }
+        Err(MobError::Internal(
+            "MobMachine did not emit agent event subscription authority".into(),
+        ))
+    }
+
+    fn all_agent_event_subscription_runtimes_from_effects(
+        effects: Vec<mob_dsl::MobMachineEffect>,
+    ) -> Result<BTreeSet<mob_dsl::AgentRuntimeId>, MobError> {
+        effects
+            .into_iter()
+            .try_fold(None, |authorized, effect| match effect {
+                mob_dsl::MobMachineEffect::AuthorizeAllAgentEventSubscription {
+                    session_bound_runtimes,
+                } => Ok(Some(session_bound_runtimes)),
+                mob_dsl::MobMachineEffect::RejectAllAgentEventSubscription { reason } => {
+                    let error = match reason {
+                        mob_dsl::EventSubscriptionRejectReasonKind::MemberNotFound => {
+                            MobError::Internal(
+                                "MobMachine rejected all-agent event subscription: member not found"
+                                    .into(),
+                            )
+                        }
+                        mob_dsl::EventSubscriptionRejectReasonKind::NoSessionBinding => {
+                            MobError::UnsupportedForMode {
+                                mode: MobRuntimeMode::TurnDriven,
+                                reason: "MobMachine rejected all-agent event subscription without any session-bound members".to_string(),
+                            }
+                        }
+                    };
+                    Err(error)
+                }
+                _ => Ok(authorized),
+            })
+            .and_then(|authorized| {
+                authorized.ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine did not emit all-agent event subscription authority".into(),
+                )
+                })
+            })
+    }
+
+    fn mob_event_router_authority_from_effects(
+        effects: Vec<mob_dsl::MobMachineEffect>,
+    ) -> Result<super::event_router::AuthorizedMobEventRouter, MobError> {
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::AuthorizeMobEventRouter {
+                    initial_cursor,
+                    channel_capacity,
+                    poll_interval_ms,
+                    session_bound_runtimes,
+                } => {
+                    let channel_capacity = usize::try_from(channel_capacity).ok()?.max(1);
+                    let poll_interval = Duration::from_millis(poll_interval_ms);
+                    Some(super::event_router::AuthorizedMobEventRouter {
+                        initial_cursor,
+                        config: super::event_router::MobEventRouterConfig {
+                            poll_interval,
+                            channel_capacity,
+                        },
+                        session_bound_runtimes,
+                    })
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal("MobMachine did not emit mob event router authority".into())
+            })
+    }
+
+    fn structural_event_subscription_authority_from_effects(
+        effects: Vec<mob_dsl::MobMachineEffect>,
+    ) -> Result<(u64, bool, MobEventsSubscriptionConfig), MobError> {
+        for effect in effects {
+            match effect {
+                mob_dsl::MobMachineEffect::AuthorizeStructuralEventSubscription {
+                    after_cursor,
+                    explicit_after_cursor,
+                    batch_limit,
+                    channel_capacity,
+                } => {
+                    let batch_limit = usize::try_from(batch_limit).map_err(|_| {
+                        MobError::Internal(
+                            "MobMachine produced invalid structural batch limit".into(),
+                        )
+                    })?;
+                    let channel_capacity = usize::try_from(channel_capacity).map_err(|_| {
+                        MobError::Internal(
+                            "MobMachine produced invalid structural channel capacity".into(),
+                        )
+                    })?;
+                    return Ok((
+                        after_cursor,
+                        explicit_after_cursor,
+                        MobEventsSubscriptionConfig {
+                            after_cursor: Some(after_cursor),
+                            batch_limit,
+                            channel_capacity,
+                        },
+                    ));
+                }
+                mob_dsl::MobMachineEffect::RejectStructuralEventSubscription {
+                    after_cursor,
+                    latest_cursor,
+                } => {
+                    return Err(MobError::StaleEventCursor {
+                        after_cursor,
+                        latest_cursor,
+                    });
+                }
+                _ => {}
+            }
+        }
+        Err(MobError::Internal(
+            "MobMachine did not emit structural event subscription authority".into(),
+        ))
     }
 
     fn project_member_ref_session_binding(
@@ -4126,6 +4375,150 @@ impl MobHandle {
             reply_tx,
         })
         .await?
+    }
+
+    pub(crate) async fn apply_machine_input_effects(
+        &self,
+        input: crate::machines::mob_machine::MobMachineInput,
+    ) -> Result<Vec<crate::machines::mob_machine::MobMachineEffect>, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ApplyMachineInputEffects {
+            input: Box::new(input),
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(super) async fn subscribe_authorized_agent_session_events(
+        &self,
+        agent_identity: &MeerkatId,
+        session_id: &SessionId,
+    ) -> Result<EventStream, MobError> {
+        crate::runtime::session_service::MobSessionService::subscribe_session_events(
+            self.session_service.as_ref(),
+            session_id,
+        )
+        .await
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "failed to subscribe to agent events for '{agent_identity}': {error}"
+            ))
+        })
+    }
+
+    pub(super) async fn authorized_mob_event_router_members(
+        &self,
+        runtime_ids: &BTreeSet<mob_dsl::AgentRuntimeId>,
+    ) -> Vec<super::event_router::AuthorizedMobEventRouterMember> {
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let roster = self.roster.read().await;
+        let mut members = Vec::new();
+        for (dsl_identity, dsl_runtime_id) in &machine_state.identity_to_runtime {
+            if !runtime_ids.contains(dsl_runtime_id) {
+                continue;
+            }
+            let Some(dsl_session_id) = machine_state.member_session_bindings.get(dsl_identity)
+            else {
+                continue;
+            };
+            let Some(dsl_fence_token) = machine_state.runtime_fence_tokens.get(dsl_runtime_id)
+            else {
+                continue;
+            };
+            let Some(runtime_id) = Self::domain_runtime_from_machine_binding(
+                dsl_identity,
+                dsl_runtime_id,
+                &machine_state,
+            ) else {
+                continue;
+            };
+            let Ok(session_id) =
+                Self::session_id_from_dsl(dsl_session_id, "mob event router bootstrap")
+            else {
+                continue;
+            };
+            let agent_identity = MeerkatId::from(dsl_identity.0.as_str());
+            let role = roster
+                .entry(&agent_identity)
+                .map(|entry| entry.role.clone())
+                .unwrap_or_else(|| ProfileName::from(agent_identity.as_str()));
+            members.push(super::event_router::AuthorizedMobEventRouterMember {
+                agent_identity,
+                runtime_id,
+                fence_token: FenceToken::new(dsl_fence_token.0),
+                session_id,
+                role,
+            });
+        }
+        members
+    }
+
+    pub(super) async fn authorize_mob_event_router_member_subscription(
+        &self,
+        agent_identity: &MeerkatId,
+        runtime_id: &AgentRuntimeId,
+        fence_token: FenceToken,
+        role: ProfileName,
+    ) -> Result<super::event_router::AuthorizedMobEventRouterMember, MobError> {
+        let dsl_identity = mob_dsl::AgentIdentity(agent_identity.to_string());
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(runtime_id);
+        let dsl_fence_token = mob_dsl::FenceToken::from_domain(fence_token);
+        let effects = self
+            .apply_machine_input_effects(
+                mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberSubscription {
+                    agent_identity: dsl_identity.clone(),
+                    agent_runtime_id: dsl_runtime_id.clone(),
+                    fence_token: dsl_fence_token,
+                },
+            )
+            .await?;
+        for effect in effects {
+            if let mob_dsl::MobMachineEffect::AuthorizeMobEventRouterMemberSubscription {
+                agent_identity: effect_identity,
+                agent_runtime_id: effect_runtime_id,
+                fence_token: effect_fence_token,
+                session_id,
+            } = effect
+                && effect_identity == dsl_identity
+                && effect_runtime_id == dsl_runtime_id
+                && effect_fence_token == dsl_fence_token
+            {
+                return Ok(super::event_router::AuthorizedMobEventRouterMember {
+                    agent_identity: agent_identity.clone(),
+                    runtime_id: runtime_id.clone(),
+                    fence_token,
+                    session_id: Self::session_id_from_dsl(
+                        &session_id,
+                        "mob event router member subscription",
+                    )?,
+                    role,
+                });
+            }
+        }
+        Err(MobError::Internal(
+            "MobMachine did not emit mob event router member subscription authority".into(),
+        ))
+    }
+
+    pub(super) async fn authorize_mob_event_router_member_removal(
+        &self,
+        agent_identity: &MeerkatId,
+    ) -> Result<bool, MobError> {
+        let dsl_identity = mob_dsl::AgentIdentity(agent_identity.to_string());
+        let effects = self
+            .apply_machine_input_effects(
+                mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberRemoval {
+                    agent_identity: dsl_identity.clone(),
+                },
+            )
+            .await?;
+        Ok(effects.into_iter().any(|effect| {
+            matches!(
+                effect,
+                mob_dsl::MobMachineEffect::AuthorizeMobEventRouterMemberRemoval {
+                    agent_identity
+                } if agent_identity == dsl_identity
+            )
+        }))
     }
 
     pub(super) async fn commit_flow_run_command(

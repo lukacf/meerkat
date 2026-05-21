@@ -402,6 +402,42 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SubscribeAgentEventsDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingMemberRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingMemberStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingMemberCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingMemberDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingSessionRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingSessionStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingSessionCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingSessionDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsRuntimeNotLiveRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsRuntimeNotLiveStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsRuntimeNotLiveCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsRuntimeNotLiveDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
 - `SubscribeAllAgentEventsRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
@@ -414,6 +450,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SubscribeAllAgentEventsDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAllAgentEventsNoSessionBindingsRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAllAgentEventsNoSessionBindingsStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAllAgentEventsNoSessionBindingsCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAllAgentEventsNoSessionBindingsDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
 - `SubscribeMobEventsRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
@@ -424,6 +472,78 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
 - `SubscribeMobEventsDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsStaleRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsStaleStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsStaleCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsStaleDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberSubscriptionRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberSubscriptionStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberSubscriptionCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberSubscriptionDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalMissingRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalMissingStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalMissingCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalMissingDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalUnboundRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalUnboundStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalUnboundCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalUnboundDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
 - `ShutdownRunning`
@@ -869,6 +989,33 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EmitExternalPeerWiringLifecycleNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`
+- `AuthorizeAgentEventSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `RejectAgentEventSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeAllAgentEventSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `RejectAllAgentEventSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouter`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemoval`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeStructuralEventSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `RejectStructuralEventSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
 
 ### Invariants
 - `bindings_require_known_identity`

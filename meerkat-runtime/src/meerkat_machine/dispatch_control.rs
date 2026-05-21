@@ -708,6 +708,92 @@ impl MeerkatMachine {
                     },
                 ))
             }
+            MeerkatMachineCommand::DenyImageOperationPlan {
+                session_id,
+                operation_id,
+                reason,
+            } => {
+                let operation_key = image_operation_key(operation_id);
+                let expected_reason = routing_image_plan_denial(&reason);
+                let terminal =
+                    meerkat_core::image_generation::ImageOperationTerminalClass::Denied {
+                        reason: reason.clone(),
+                    };
+                self.apply_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::DenyImageOperationPlan {
+                        operation_id: operation_key.clone(),
+                        reason: expected_reason,
+                        terminal_payload: serde_json::to_string(&terminal).map_err(|err| {
+                            RuntimeControlPlaneError::Internal(format!(
+                                "failed to serialize image operation planner denial: {err}"
+                            ))
+                        })?,
+                    },
+                    "DenyImageOperationPlan",
+                )
+                .await
+                .map_err(RuntimeControlPlaneError::Internal)?;
+                let state = self.session_dsl_state(&session_id).await?;
+                let machine_phase = state
+                    .model_routing_image_operation_phases
+                    .get(&operation_key)
+                    .copied()
+                    .ok_or_else(|| {
+                        RuntimeControlPlaneError::Internal(format!(
+                            "image operation planner denial missing machine phase for {operation_key}"
+                        ))
+                    })?;
+                if machine_phase != super::dsl::RoutingImageOperationPhase::Terminal {
+                    return Err(RuntimeControlPlaneError::Internal(format!(
+                        "image operation planner denial did not terminalize {operation_key}: {machine_phase:?}"
+                    )));
+                }
+                let machine_terminal = state
+                    .model_routing_image_terminals
+                    .get(&operation_key)
+                    .copied()
+                    .ok_or_else(|| {
+                        RuntimeControlPlaneError::Internal(format!(
+                            "image operation planner denial missing machine terminal for {operation_key}"
+                        ))
+                    })?;
+                if machine_terminal != super::dsl::RoutingImageTerminal::Denied {
+                    return Err(RuntimeControlPlaneError::Internal(format!(
+                        "image operation planner denial recorded non-denied terminal for {operation_key}: {machine_terminal:?}"
+                    )));
+                }
+                let machine_reason = state
+                    .model_routing_image_plan_denials
+                    .get(&operation_key)
+                    .copied()
+                    .ok_or_else(|| {
+                        RuntimeControlPlaneError::Internal(format!(
+                            "image operation planner denial missing machine denial reason for {operation_key}"
+                        ))
+                    })?;
+                if machine_reason != expected_reason {
+                    return Err(RuntimeControlPlaneError::Internal(format!(
+                        "image operation planner denial reason drift for {operation_key}: {machine_reason:?}"
+                    )));
+                }
+                let terminal_payload = state
+                    .model_routing_image_terminal_payloads
+                    .get(&operation_key)
+                    .ok_or_else(|| {
+                        RuntimeControlPlaneError::Internal(format!(
+                            "image operation planner denial missing machine terminal payload for {operation_key}"
+                        ))
+                    })?;
+                let terminal = serde_json::from_str(terminal_payload).map_err(|err| {
+                    RuntimeControlPlaneError::Internal(format!(
+                        "image operation planner denial machine terminal payload is invalid for {operation_key}: {err}"
+                    ))
+                })?;
+                Ok(MeerkatMachineCommandResult::ImageOperationPhase(
+                    meerkat_core::image_generation::ImageOperationPhase::Terminal { terminal },
+                ))
+            }
             MeerkatMachineCommand::ActivateImageOperationOverride {
                 session_id,
                 operation_id,
@@ -919,6 +1005,44 @@ fn image_denial_from_routing(
         }
         super::dsl::RoutingDenialReason::CapabilityPolicy => {
             ImageOperationDenialReason::CapabilityPolicy
+        }
+    }
+}
+
+fn routing_image_plan_denial(
+    reason: &meerkat_core::image_generation::ImageOperationDenialReason,
+) -> super::dsl::RoutingImagePlanDenialReason {
+    use meerkat_core::image_generation::ImageOperationDenialReason;
+    match reason {
+        ImageOperationDenialReason::UnsupportedTarget => {
+            super::dsl::RoutingImagePlanDenialReason::UnsupportedTarget
+        }
+        ImageOperationDenialReason::UnsupportedCount => {
+            super::dsl::RoutingImagePlanDenialReason::UnsupportedCount
+        }
+        ImageOperationDenialReason::CapabilityPolicy => {
+            super::dsl::RoutingImagePlanDenialReason::CapabilityPolicy
+        }
+        ImageOperationDenialReason::CostPolicy => {
+            super::dsl::RoutingImagePlanDenialReason::CostPolicy
+        }
+        ImageOperationDenialReason::SafetyPolicy => {
+            super::dsl::RoutingImagePlanDenialReason::SafetyPolicy
+        }
+        ImageOperationDenialReason::ApprovalRequiredButUnavailable => {
+            super::dsl::RoutingImagePlanDenialReason::ApprovalRequiredButUnavailable
+        }
+        ImageOperationDenialReason::DeniedDuringApproval { .. } => {
+            super::dsl::RoutingImagePlanDenialReason::DeniedDuringApproval
+        }
+        ImageOperationDenialReason::ScopedOverrideConflict => {
+            super::dsl::RoutingImagePlanDenialReason::ScopedOverrideConflict
+        }
+        ImageOperationDenialReason::RealtimeTransportConflict => {
+            super::dsl::RoutingImagePlanDenialReason::RealtimeTransportConflict
+        }
+        ImageOperationDenialReason::ProjectionUnsupported => {
+            super::dsl::RoutingImagePlanDenialReason::ProjectionUnsupported
         }
     }
 }

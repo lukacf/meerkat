@@ -2732,6 +2732,21 @@ pub enum RoutingDenialReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImagePlanDenialReason {
+    #[default]
+    UnsupportedTarget,
+    UnsupportedCount,
+    CapabilityPolicy,
+    CostPolicy,
+    SafetyPolicy,
+    ApprovalRequiredButUnavailable,
+    DeniedDuringApproval,
+    ScopedOverrideConflict,
+    RealtimeTransportConflict,
+    ProjectionUnsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RoutingApprovalPhase {
     #[default]
     Pending,

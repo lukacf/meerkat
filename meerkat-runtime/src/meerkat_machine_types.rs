@@ -399,6 +399,11 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         request: Box<ImageOperationRoutingRequest>,
     },
+    DenyImageOperationPlan {
+        session_id: SessionId,
+        operation_id: ImageOperationId,
+        reason: ImageOperationDenialReason,
+    },
     ActivateImageOperationOverride {
         session_id: SessionId,
         operation_id: ImageOperationId,
@@ -977,6 +982,7 @@ pub enum MeerkatMachineCatalogInput {
     RequestUntilChangedSwitchTurn,
     AdmitModelRoutingAssistantTurn,
     BeginImageOperation,
+    DenyImageOperationPlan,
     ActivateImageOperationOverride,
     CompleteImageOperation,
     RestoreImageOperationOverride,
@@ -1027,6 +1033,7 @@ impl MeerkatMachineCatalogInput {
         Self::RequestUntilChangedSwitchTurn,
         Self::AdmitModelRoutingAssistantTurn,
         Self::BeginImageOperation,
+        Self::DenyImageOperationPlan,
         Self::ActivateImageOperationOverride,
         Self::CompleteImageOperation,
         Self::RestoreImageOperationOverride,
@@ -1088,6 +1095,7 @@ impl MeerkatMachineCatalogInput {
                 MeerkatMachineInputVariant::AdmitModelRoutingAssistantTurn
             }
             Self::BeginImageOperation => MeerkatMachineInputVariant::BeginImageOperation,
+            Self::DenyImageOperationPlan => MeerkatMachineInputVariant::DenyImageOperationPlan,
             Self::ActivateImageOperationOverride => {
                 MeerkatMachineInputVariant::ActivateImageOperationOverride
             }
@@ -1144,6 +1152,7 @@ impl MeerkatMachineCatalogInput {
             Self::RequestUntilChangedSwitchTurn => "RequestUntilChangedSwitchTurn",
             Self::AdmitModelRoutingAssistantTurn => "AdmitModelRoutingAssistantTurn",
             Self::BeginImageOperation => "BeginImageOperation",
+            Self::DenyImageOperationPlan => "DenyImageOperationPlan",
             Self::ActivateImageOperationOverride => "ActivateImageOperationOverride",
             Self::CompleteImageOperation => "CompleteImageOperation",
             Self::RestoreImageOperationOverride => "RestoreImageOperationOverride",
@@ -1209,6 +1218,9 @@ impl MeerkatMachineCommandVariant {
                 Some(MeerkatMachineCatalogInput::AdmitModelRoutingAssistantTurn)
             }
             Self::BeginImageOperation => Some(MeerkatMachineCatalogInput::BeginImageOperation),
+            Self::DenyImageOperationPlan => {
+                Some(MeerkatMachineCatalogInput::DenyImageOperationPlan)
+            }
             Self::ActivateImageOperationOverride => {
                 Some(MeerkatMachineCatalogInput::ActivateImageOperationOverride)
             }
@@ -1432,6 +1444,11 @@ const fn meerkat_machine_command_classification(
         MeerkatMachineCommandVariant::BeginImageOperation => {
             MeerkatMachineCommandClassification::CatalogInput(
                 MeerkatMachineCatalogInput::BeginImageOperation,
+            )
+        }
+        MeerkatMachineCommandVariant::DenyImageOperationPlan => {
+            MeerkatMachineCommandClassification::CatalogInput(
+                MeerkatMachineCatalogInput::DenyImageOperationPlan,
             )
         }
         MeerkatMachineCommandVariant::ActivateImageOperationOverride => {

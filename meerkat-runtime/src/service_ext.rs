@@ -151,6 +151,17 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         ))
     }
 
+    async fn deny_image_operation_plan(
+        &self,
+        _session_id: &SessionId,
+        _operation_id: meerkat_core::image_generation::ImageOperationId,
+        _reason: meerkat_core::image_generation::ImageOperationDenialReason,
+    ) -> Result<meerkat_core::image_generation::ImageOperationPhase, RuntimeDriverError> {
+        Err(RuntimeDriverError::Internal(
+            "image operation plan denial is not supported by this runtime adapter".into(),
+        ))
+    }
+
     async fn activate_image_operation_override(
         &self,
         _session_id: &SessionId,

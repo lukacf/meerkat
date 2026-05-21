@@ -676,6 +676,21 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "RoutingImagePlanDenialReason",
+                &[
+                    "UnsupportedTarget",
+                    "UnsupportedCount",
+                    "CapabilityPolicy",
+                    "CostPolicy",
+                    "SafetyPolicy",
+                    "ApprovalRequiredButUnavailable",
+                    "DeniedDuringApproval",
+                    "ScopedOverrideConflict",
+                    "RealtimeTransportConflict",
+                    "ProjectionUnsupported",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "RoutingImageOperationPhase",
                 &[
                     "Requested",

@@ -4678,6 +4678,90 @@ impl std::fmt::Display for RoutingImageOperationPhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RoutingImagePlanDenialReason {
+    #[default]
+    #[serde(rename = "UnsupportedTarget")]
+    UnsupportedTarget,
+    #[serde(rename = "UnsupportedCount")]
+    UnsupportedCount,
+    #[serde(rename = "CapabilityPolicy")]
+    CapabilityPolicy,
+    #[serde(rename = "CostPolicy")]
+    CostPolicy,
+    #[serde(rename = "SafetyPolicy")]
+    SafetyPolicy,
+    #[serde(rename = "ApprovalRequiredButUnavailable")]
+    ApprovalRequiredButUnavailable,
+    #[serde(rename = "DeniedDuringApproval")]
+    DeniedDuringApproval,
+    #[serde(rename = "ScopedOverrideConflict")]
+    ScopedOverrideConflict,
+    #[serde(rename = "RealtimeTransportConflict")]
+    RealtimeTransportConflict,
+    #[serde(rename = "ProjectionUnsupported")]
+    ProjectionUnsupported,
+}
+impl RoutingImagePlanDenialReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UnsupportedTarget => "UnsupportedTarget",
+            Self::UnsupportedCount => "UnsupportedCount",
+            Self::CapabilityPolicy => "CapabilityPolicy",
+            Self::CostPolicy => "CostPolicy",
+            Self::SafetyPolicy => "SafetyPolicy",
+            Self::ApprovalRequiredButUnavailable => "ApprovalRequiredButUnavailable",
+            Self::DeniedDuringApproval => "DeniedDuringApproval",
+            Self::ScopedOverrideConflict => "ScopedOverrideConflict",
+            Self::RealtimeTransportConflict => "RealtimeTransportConflict",
+            Self::ProjectionUnsupported => "ProjectionUnsupported",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingImagePlanDenialReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "UnsupportedTarget" => Ok(Self::UnsupportedTarget),
+            "UnsupportedCount" => Ok(Self::UnsupportedCount),
+            "CapabilityPolicy" => Ok(Self::CapabilityPolicy),
+            "CostPolicy" => Ok(Self::CostPolicy),
+            "SafetyPolicy" => Ok(Self::SafetyPolicy),
+            "ApprovalRequiredButUnavailable" => Ok(Self::ApprovalRequiredButUnavailable),
+            "DeniedDuringApproval" => Ok(Self::DeniedDuringApproval),
+            "ScopedOverrideConflict" => Ok(Self::ScopedOverrideConflict),
+            "RealtimeTransportConflict" => Ok(Self::RealtimeTransportConflict),
+            "ProjectionUnsupported" => Ok(Self::ProjectionUnsupported),
+            other => Err(format!(
+                "invalid RoutingImagePlanDenialReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingImagePlanDenialReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingImagePlanDenialReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RoutingImageTerminal {
     #[default]
     #[serde(rename = "Generated")]
@@ -6622,6 +6706,8 @@ pub struct State {
     pub model_routing_image_terminals: std::collections::BTreeMap<String, RoutingImageTerminal>,
     pub model_routing_image_terminal_payloads: std::collections::BTreeMap<String, String>,
     pub model_routing_image_denials: std::collections::BTreeMap<String, RoutingDenialReason>,
+    pub model_routing_image_plan_denials:
+        std::collections::BTreeMap<String, RoutingImagePlanDenialReason>,
     pub model_routing_approval_phases: std::collections::BTreeMap<String, RoutingApprovalPhase>,
     pub model_routing_approval_parent_kind:
         std::collections::BTreeMap<String, RoutingApprovalParentKind>,
@@ -6962,6 +7048,12 @@ pub mod inputs {
         pub approval_denied: bool,
         pub realtime_detach_allowed: bool,
         pub requires_scoped_override: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DenyImageOperationPlan {
+        pub operation_id: String,
+        pub reason: RoutingImagePlanDenialReason,
+        pub terminal_payload: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ActivateImageOperationOverride {
@@ -7781,6 +7873,7 @@ pub enum Input {
     CompleteUntilChangedSwitchTurnReconfigure(inputs::CompleteUntilChangedSwitchTurnReconfigure),
     AdmitModelRoutingAssistantTurn(inputs::AdmitModelRoutingAssistantTurn),
     BeginImageOperation(inputs::BeginImageOperation),
+    DenyImageOperationPlan(inputs::DenyImageOperationPlan),
     ActivateImageOperationOverride(inputs::ActivateImageOperationOverride),
     CompleteImageOperation(inputs::CompleteImageOperation),
     RestoreImageOperationOverride(inputs::RestoreImageOperationOverride),
@@ -7989,6 +8082,7 @@ impl Input {
             }
             Self::AdmitModelRoutingAssistantTurn(_) => InputKind::AdmitModelRoutingAssistantTurn,
             Self::BeginImageOperation(_) => InputKind::BeginImageOperation,
+            Self::DenyImageOperationPlan(_) => InputKind::DenyImageOperationPlan,
             Self::ActivateImageOperationOverride(_) => InputKind::ActivateImageOperationOverride,
             Self::CompleteImageOperation(_) => InputKind::CompleteImageOperation,
             Self::RestoreImageOperationOverride(_) => InputKind::RestoreImageOperationOverride,
@@ -8218,6 +8312,7 @@ pub enum InputKind {
     CompleteUntilChangedSwitchTurnReconfigure,
     AdmitModelRoutingAssistantTurn,
     BeginImageOperation,
+    DenyImageOperationPlan,
     ActivateImageOperationOverride,
     CompleteImageOperation,
     RestoreImageOperationOverride,
@@ -9243,6 +9338,9 @@ pub enum TransitionId {
     BeginImageOperationAcceptedIdle,
     BeginImageOperationAcceptedAttached,
     BeginImageOperationAcceptedRunning,
+    DenyImageOperationPlanIdle,
+    DenyImageOperationPlanAttached,
+    DenyImageOperationPlanRunning,
     ActivateImageOperationOverrideIdle,
     ActivateImageOperationOverrideAttached,
     ActivateImageOperationOverrideRunning,
@@ -10349,6 +10447,7 @@ pub fn initial_state() -> State {
         model_routing_image_terminals: Default::default(),
         model_routing_image_terminal_payloads: Default::default(),
         model_routing_image_denials: Default::default(),
+        model_routing_image_plan_denials: Default::default(),
         model_routing_approval_phases: Default::default(),
         model_routing_approval_parent_kind: Default::default(),
         registration_phase: RegistrationPhase::Queuing,

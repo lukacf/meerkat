@@ -61,6 +61,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `model_routing_image_terminals`: `Map<String, RoutingImageTerminal>`
 - `model_routing_image_terminal_payloads`: `Map<String, String>`
 - `model_routing_image_denials`: `Map<String, RoutingDenialReason>`
+- `model_routing_image_plan_denials`: `Map<String, RoutingImagePlanDenialReason>`
 - `model_routing_approval_phases`: `Map<String, RoutingApprovalPhase>`
 - `model_routing_approval_parent_kind`: `Map<String, RoutingApprovalParentKind>`
 - `registration_phase`: `RegistrationPhase`
@@ -217,6 +218,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CompleteUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `AdmitModelRoutingAssistantTurn`
 - `BeginImageOperation`(operation_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, realtime_detach_allowed: Bool, requires_scoped_override: Bool)
+- `DenyImageOperationPlan`(operation_id: String, reason: RoutingImagePlanDenialReason, terminal_payload: String)
 - `ActivateImageOperationOverride`(operation_id: String, target_model: String, target_realtime_capable: Bool)
 - `CompleteImageOperation`(operation_id: String, terminal: RoutingImageTerminal, terminal_payload: String)
 - `RestoreImageOperationOverride`(operation_id: String)
@@ -1024,6 +1026,30 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `baseline_known`
   - `no_operation_in_operation`
   - `approval_satisfied`
+- Emits: `ImageOperationPhaseChanged`
+- To: `Running`
+
+### `DenyImageOperationPlanIdle`
+- From: `Idle`
+- On: `DenyImageOperationPlan`(operation_id, reason, terminal_payload)
+- Guards:
+  - `operation_not_recorded`
+- Emits: `ImageOperationPhaseChanged`
+- To: `Idle`
+
+### `DenyImageOperationPlanAttached`
+- From: `Attached`
+- On: `DenyImageOperationPlan`(operation_id, reason, terminal_payload)
+- Guards:
+  - `operation_not_recorded`
+- Emits: `ImageOperationPhaseChanged`
+- To: `Attached`
+
+### `DenyImageOperationPlanRunning`
+- From: `Running`
+- On: `DenyImageOperationPlan`(operation_id, reason, terminal_payload)
+- Guards:
+  - `operation_not_recorded`
 - Emits: `ImageOperationPhaseChanged`
 - To: `Running`
 

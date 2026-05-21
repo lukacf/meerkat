@@ -1776,6 +1776,7 @@ impl MeerkatMachine {
                 | MeerkatMachineCommand::RequestSwitchTurn { .. }
                 | MeerkatMachineCommand::AdmitModelRoutingAssistantTurn { .. }
                 | MeerkatMachineCommand::BeginImageOperation { .. }
+                | MeerkatMachineCommand::DenyImageOperationPlan { .. }
                 | MeerkatMachineCommand::ActivateImageOperationOverride { .. }
                 | MeerkatMachineCommand::CompleteImageOperation { .. }
                 | MeerkatMachineCommand::RestoreImageOperationOverride { .. }

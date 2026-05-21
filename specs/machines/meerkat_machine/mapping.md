@@ -215,6 +215,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BeginImageOperationAcceptedRunning`
   - anchors: `meerkat_machine`
   - scenarios: `model_routing_and_image_operation`
+- `DenyImageOperationPlanIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `DenyImageOperationPlanAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
+- `DenyImageOperationPlanRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `model_routing_and_image_operation`
 - `ActivateImageOperationOverrideIdle`
   - anchors: `meerkat_machine`
   - scenarios: `model_routing_and_image_operation`

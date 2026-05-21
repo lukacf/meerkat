@@ -1426,6 +1426,21 @@ pub enum RoutingDenialReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImagePlanDenialReason {
+    #[default]
+    UnsupportedTarget,
+    UnsupportedCount,
+    CapabilityPolicy,
+    CostPolicy,
+    SafetyPolicy,
+    ApprovalRequiredButUnavailable,
+    DeniedDuringApproval,
+    ScopedOverrideConflict,
+    RealtimeTransportConflict,
+    ProjectionUnsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RoutingApprovalPhase {
     #[default]
     Pending,
@@ -1696,6 +1711,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             model_routing_image_terminals: Map<String, Enum<RoutingImageTerminal>>,
             model_routing_image_terminal_payloads: Map<String, String>,
             model_routing_image_denials: Map<String, Enum<RoutingDenialReason>>,
+            model_routing_image_plan_denials: Map<String, Enum<RoutingImagePlanDenialReason>>,
             model_routing_approval_phases: Map<String, Enum<RoutingApprovalPhase>>,
             model_routing_approval_parent_kind: Map<String, Enum<RoutingApprovalParentKind>>,
 
@@ -2032,6 +2048,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             model_routing_image_terminals = EmptyMap,
             model_routing_image_terminal_payloads = EmptyMap,
             model_routing_image_denials = EmptyMap,
+            model_routing_image_plan_denials = EmptyMap,
             model_routing_approval_phases = EmptyMap,
             model_routing_approval_parent_kind = EmptyMap,
             // Registration substate
@@ -2277,6 +2294,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 approval_denied: bool,
                 realtime_detach_allowed: bool,
                 requires_scoped_override: bool,
+            },
+            DenyImageOperationPlan {
+                operation_id: String,
+                reason: Enum<RoutingImagePlanDenialReason>,
+                terminal_payload: String,
             },
             ActivateImageOperationOverride { operation_id: String, target_model: String, target_realtime_capable: bool },
             CompleteImageOperation { operation_id: String, terminal: Enum<RoutingImageTerminal>, terminal_payload: String },
@@ -3772,6 +3794,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit ImageOperationPhaseChanged { operation_id: operation_id, phase: RoutingImageOperationPhase::PlanResolved }
+        }
+
+        transition DenyImageOperationPlan {
+            per_phase [Idle, Attached, Running]
+            on input DenyImageOperationPlan { operation_id, reason, terminal_payload }
+            guard "operation_not_recorded" { !self.model_routing_image_operation_phases.contains_key(operation_id) }
+            update {
+                self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::Terminal);
+                self.model_routing_image_terminals.insert(operation_id, RoutingImageTerminal::Denied);
+                self.model_routing_image_terminal_payloads.insert(operation_id, terminal_payload);
+                self.model_routing_image_plan_denials.insert(operation_id, reason);
+            }
+            to Idle
+            emit ImageOperationPhaseChanged { operation_id: operation_id, phase: RoutingImageOperationPhase::Terminal }
         }
 
         transition ActivateImageOperationOverride {

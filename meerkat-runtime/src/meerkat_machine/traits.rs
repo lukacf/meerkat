@@ -295,6 +295,31 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         }
     }
 
+    async fn deny_image_operation_plan(
+        &self,
+        session_id: &SessionId,
+        operation_id: meerkat_core::image_generation::ImageOperationId,
+        reason: meerkat_core::image_generation::ImageOperationDenialReason,
+    ) -> Result<meerkat_core::image_generation::ImageOperationPhase, RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::DenyImageOperationPlan {
+                    session_id: session_id.clone(),
+                    operation_id,
+                    reason,
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::ImageOperationPhase(phase) => Ok(phase),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::deny_image_operation_plan: {other:?}"
+            ))),
+        }
+    }
+
     async fn activate_image_operation_override(
         &self,
         session_id: &SessionId,

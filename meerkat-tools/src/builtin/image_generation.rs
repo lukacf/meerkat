@@ -45,6 +45,13 @@ pub trait ImageGenerationMachine: Send + Sync {
         request: ImageOperationRoutingRequest,
     ) -> Result<ImageOperationRoutingResult, RuntimeDriverError>;
 
+    async fn deny_image_operation_plan(
+        &self,
+        session_id: &SessionId,
+        operation_id: ImageOperationId,
+        reason: ImageOperationDenialReason,
+    ) -> Result<ImageOperationPhase, RuntimeDriverError>;
+
     async fn activate_image_operation_override(
         &self,
         session_id: &SessionId,
@@ -84,6 +91,16 @@ where
         request: ImageOperationRoutingRequest,
     ) -> Result<ImageOperationRoutingResult, RuntimeDriverError> {
         SessionServiceRuntimeExt::begin_image_operation(self, session_id, request).await
+    }
+
+    async fn deny_image_operation_plan(
+        &self,
+        session_id: &SessionId,
+        operation_id: ImageOperationId,
+        reason: ImageOperationDenialReason,
+    ) -> Result<ImageOperationPhase, RuntimeDriverError> {
+        SessionServiceRuntimeExt::deny_image_operation_plan(self, session_id, operation_id, reason)
+            .await
     }
 
     async fn activate_image_operation_override(
@@ -299,9 +316,20 @@ impl BuiltinTool for GenerateImageTool {
         ) {
             Ok(plan) => plan,
             Err(reason) => {
+                let phase = self
+                    .runtime
+                    .machine
+                    .deny_image_operation_plan(&self.runtime.session_id, operation_id, reason)
+                    .await
+                    .map_err(|err| BuiltinToolError::execution_failed(err.to_string()))?;
+                let ImageOperationPhase::Terminal { terminal } = phase else {
+                    return Err(BuiltinToolError::execution_failed(format!(
+                        "image operation machine did not terminalize planner denial: {phase:?}"
+                    )));
+                };
                 return json_result(ImageGenerationToolResult {
                     operation_id,
-                    terminal: ImageOperationTerminalClass::Denied { reason },
+                    terminal,
                     images: Vec::new(),
                     provider_text: ProviderTextDisposition::NotEmitted,
                     revised_prompt:
@@ -1027,6 +1055,18 @@ mod tests {
             })
         }
 
+        async fn deny_image_operation_plan(
+            &self,
+            _session_id: &SessionId,
+            _operation_id: ImageOperationId,
+            reason: ImageOperationDenialReason,
+        ) -> Result<ImageOperationPhase, RuntimeDriverError> {
+            self.calls.lock().unwrap().push("deny");
+            Ok(ImageOperationPhase::Terminal {
+                terminal: ImageOperationTerminalClass::Denied { reason },
+            })
+        }
+
         async fn activate_image_operation_override(
             &self,
             _session_id: &SessionId,
@@ -1562,6 +1602,6 @@ mod tests {
                 reason: ImageOperationDenialReason::UnsupportedCount
             }
         ));
-        assert!(machine.calls.lock().unwrap().is_empty());
+        assert_eq!(machine.calls.lock().unwrap().as_slice(), ["deny"]);
     }
 }

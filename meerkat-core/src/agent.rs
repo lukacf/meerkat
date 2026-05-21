@@ -770,6 +770,38 @@ pub trait CommsRuntime: Send + Sync {
         ))
     }
 
+    /// Bind this target runtime to the generated MobMachine owner token whose
+    /// trust handoffs may mutate mob-owned trust rows.
+    ///
+    /// Mob runtimes call this before submitting a generated mob trust mutation.
+    /// Implementations must fail closed when they cannot remember and compare
+    /// the owner token during [`Self::apply_trust_mutation`].
+    async fn install_generated_mob_trust_owner(
+        &self,
+        _owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "generated mob trust owner binding not supported for this CommsRuntime".to_string(),
+        ))
+    }
+
+    /// Rebind this target runtime to the owner token of a recovered
+    /// MobMachine authority.
+    ///
+    /// Recovery reconstructs generated authority from persisted machine state,
+    /// which gives it a fresh process-local owner token. Implementations must
+    /// continue to compare mob trust mutations against this recovered owner
+    /// during [`Self::apply_trust_mutation`].
+    async fn install_recovered_generated_mob_trust_owner(
+        &self,
+        _owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "recovered generated mob trust owner binding not supported for this CommsRuntime"
+                .to_string(),
+        ))
+    }
+
     /// Compatibility helper for legacy callers without generated authority.
     ///
     /// This fails closed by default so public surfaces cannot mutate trust

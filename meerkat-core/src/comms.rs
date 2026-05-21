@@ -636,6 +636,27 @@ impl CommsTrustMutationAuthority {
         }
     }
 
+    pub fn validate_target_source_owner_token(
+        &self,
+        expected_meerkat_machine_owner: Option<&Arc<dyn Any + Send + Sync>>,
+        expected_mob_machine_owner: Option<&Arc<dyn Any + Send + Sync>>,
+    ) -> Result<(), String> {
+        if is_meerkat_machine_trust_source(self.source_kind) {
+            self.validate_source_owner_token(expected_meerkat_machine_owner)
+        } else if is_mob_machine_trust_source(self.source_kind) {
+            self.validate_source_owner_token(expected_mob_machine_owner)
+        } else {
+            Err(format!(
+                "trust authority from {:?} has no target owner validator",
+                self.source_kind,
+            ))
+        }
+    }
+
+    pub fn is_mob_machine_source(&self) -> bool {
+        is_mob_machine_trust_source(self.source_kind)
+    }
+
     pub fn trust_row_owner_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind {
         self.trust_row_owner_kind
     }
@@ -875,7 +896,6 @@ fn validate_mob_machine_trust_source(
     }
 }
 
-#[cfg(meerkat_internal_generated_authority_bridge)]
 fn is_meerkat_machine_trust_source(kind: GeneratedCommsTrustAuthoritySourceKind) -> bool {
     matches!(
         kind,
@@ -885,7 +905,6 @@ fn is_meerkat_machine_trust_source(kind: GeneratedCommsTrustAuthoritySourceKind)
     )
 }
 
-#[cfg(meerkat_internal_generated_authority_bridge)]
 fn is_mob_machine_trust_source(kind: GeneratedCommsTrustAuthoritySourceKind) -> bool {
     matches!(
         kind,

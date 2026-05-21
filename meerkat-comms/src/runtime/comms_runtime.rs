@@ -322,7 +322,7 @@ impl CoreCommsRuntime for CommsRuntime {
     ) -> Result<CommsTrustMutationResult, SendError> {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
-                self.validate_meerkat_machine_trust_authority_owner(&authority)?;
+                self.validate_generated_trust_authority_owner(&authority)?;
                 authority
                     .validate_public_add(self.peer_id(), &peer)
                     .map_err(SendError::Validation)?;
@@ -331,7 +331,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
-                self.validate_meerkat_machine_trust_authority_owner(&authority)?;
+                self.validate_generated_trust_authority_owner(&authority)?;
                 let parsed_peer_id = meerkat_core::comms::PeerId::parse(&peer_id)
                     .map_err(|err| SendError::Validation(err.to_string()))?;
                 authority
@@ -343,7 +343,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
             CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
-                self.validate_meerkat_machine_trust_authority_owner(&authority)?;
+                self.validate_generated_trust_authority_owner(&authority)?;
                 authority
                     .validate_private_add(self.peer_id(), &peer)
                     .map_err(SendError::Validation)?;
@@ -352,7 +352,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
-                self.validate_meerkat_machine_trust_authority_owner(&authority)?;
+                self.validate_generated_trust_authority_owner(&authority)?;
                 let parsed_peer_id = meerkat_core::comms::PeerId::parse(&peer_id)
                     .map_err(|err| SendError::Validation(err.to_string()))?;
                 authority
@@ -364,6 +364,32 @@ impl CoreCommsRuntime for CommsRuntime {
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
         }
+    }
+
+    async fn install_generated_mob_trust_owner(
+        &self,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        let mut expected = self.mob_machine_trust_owner.write();
+        if let Some(existing) = expected.as_ref() {
+            if Arc::ptr_eq(existing, &owner) {
+                return Ok(());
+            }
+            return Err(SendError::Validation(
+                "target runtime is already bound to a different generated MobMachine trust owner"
+                    .to_string(),
+            ));
+        }
+        *expected = Some(owner);
+        Ok(())
+    }
+
+    async fn install_recovered_generated_mob_trust_owner(
+        &self,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        *self.mob_machine_trust_owner.write() = Some(owner);
+        Ok(())
     }
 
     fn dismiss_received(&self) -> bool {
@@ -1260,6 +1286,7 @@ pub struct CommsRuntime {
     interaction_stream_registry: InteractionStreamRegistry,
     peer_comms_handle: crate::classify::PeerCommsHandleSlot,
     meerkat_machine_trust_owner: parking_lot::RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
+    mob_machine_trust_owner: parking_lot::RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
     require_peer_comms_machine_authority: Arc<AtomicBool>,
     /// Narrow notify that fires only for actionable peer input (messages/requests).
     /// Set during construction when classified inbox is used.
@@ -1402,6 +1429,7 @@ impl CommsRuntime {
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
             meerkat_machine_trust_owner: parking_lot::RwLock::new(None),
+            mob_machine_trust_owner: parking_lot::RwLock::new(None),
             require_peer_comms_machine_authority,
             actionable_notify,
             blob_store: None,
@@ -1511,6 +1539,7 @@ impl CommsRuntime {
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
             meerkat_machine_trust_owner: parking_lot::RwLock::new(None),
+            mob_machine_trust_owner: parking_lot::RwLock::new(None),
             require_peer_comms_machine_authority,
             actionable_notify,
             blob_store: None,
@@ -1600,6 +1629,7 @@ impl CommsRuntime {
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
             meerkat_machine_trust_owner: parking_lot::RwLock::new(None),
+            mob_machine_trust_owner: parking_lot::RwLock::new(None),
             require_peer_comms_machine_authority,
             actionable_notify,
             blob_store: None,
@@ -1649,21 +1679,14 @@ impl CommsRuntime {
         *self.peer_comms_handle.write() = Some(handle);
     }
 
-    fn validate_meerkat_machine_trust_authority_owner(
+    fn validate_generated_trust_authority_owner(
         &self,
         authority: &meerkat_core::comms::CommsTrustMutationAuthority,
     ) -> Result<(), SendError> {
-        if !matches!(
-            authority.source_kind(),
-            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection
-                | GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish
-                | GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke
-        ) {
-            return Ok(());
-        }
-        let expected = self.meerkat_machine_trust_owner.read();
+        let expected_meerkat = self.meerkat_machine_trust_owner.read();
+        let expected_mob = self.mob_machine_trust_owner.read();
         authority
-            .validate_source_owner_token(expected.as_ref())
+            .validate_target_source_owner_token(expected_meerkat.as_ref(), expected_mob.as_ref())
             .map_err(SendError::Validation)
     }
 

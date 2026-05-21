@@ -23,9 +23,9 @@ use indexmap::IndexMap;
 use meerkat_core::Provider;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, CommsTrustMutation, CommsTrustMutationResult, PeerCapabilitySet,
-    PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName, PeerRoute, PeerSendability,
-    SendError, SendReceipt, TrustedPeerDescriptor,
+    CommsCommand, CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult,
+    PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName, PeerRoute,
+    PeerSendability, SendError, SendReceipt, TrustedPeerDescriptor,
 };
 use meerkat_core::error::ToolError;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
@@ -363,6 +363,7 @@ struct MockCommsRuntime {
     trusted_peers: RwLock<HashMap<String, TrustedPeerDescriptor>>,
     sent_intents: RwLock<Vec<String>>,
     inbox_notify: Arc<tokio::sync::Notify>,
+    mob_machine_trust_owner: std::sync::RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
 }
 
 impl MockCommsRuntime {
@@ -404,6 +405,7 @@ impl MockCommsRuntime {
             trusted_peers: RwLock::new(HashMap::new()),
             sent_intents: RwLock::new(Vec::new()),
             inbox_notify: Arc::new(tokio::sync::Notify::new()),
+            mob_machine_trust_owner: std::sync::RwLock::new(None),
         }
     }
 
@@ -468,6 +470,22 @@ impl MockCommsRuntime {
     async fn sent_intents(&self) -> Vec<String> {
         self.sent_intents.read().await.clone()
     }
+
+    fn validate_mob_trust_authority_owner(
+        &self,
+        authority: &CommsTrustMutationAuthority,
+    ) -> Result<(), SendError> {
+        if !authority.is_mob_machine_source() {
+            return Ok(());
+        }
+        let expected = self
+            .mob_machine_trust_owner
+            .read()
+            .expect("poisoned mob_machine_trust_owner lock in mock runtime");
+        authority
+            .validate_source_owner_token(expected.as_ref())
+            .map_err(SendError::Validation)
+    }
 }
 
 impl TestPeerProjectionOwnerInstall for MockCommsRuntime {}
@@ -524,6 +542,7 @@ impl CoreCommsRuntime for MockCommsRuntime {
     ) -> Result<CommsTrustMutationResult, SendError> {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                self.validate_mob_trust_authority_owner(&authority)?;
                 authority
                     .validate_public_add(self.peer_id(), &peer)
                     .map_err(SendError::Validation)?;
@@ -531,6 +550,7 @@ impl CoreCommsRuntime for MockCommsRuntime {
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                self.validate_mob_trust_authority_owner(&authority)?;
                 let parsed_peer_id = PeerId::parse(&peer_id)
                     .map_err(|error| SendError::Validation(error.to_string()))?;
                 authority
@@ -540,6 +560,7 @@ impl CoreCommsRuntime for MockCommsRuntime {
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
             CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                self.validate_mob_trust_authority_owner(&authority)?;
                 authority
                     .validate_private_add(self.peer_id(), &peer)
                     .map_err(SendError::Validation)?;
@@ -547,6 +568,7 @@ impl CoreCommsRuntime for MockCommsRuntime {
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                self.validate_mob_trust_authority_owner(&authority)?;
                 let parsed_peer_id = PeerId::parse(&peer_id)
                     .map_err(|error| SendError::Validation(error.to_string()))?;
                 authority
@@ -556,6 +578,38 @@ impl CoreCommsRuntime for MockCommsRuntime {
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
         }
+    }
+
+    async fn install_generated_mob_trust_owner(
+        &self,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        let mut expected = self
+            .mob_machine_trust_owner
+            .write()
+            .expect("poisoned mob_machine_trust_owner lock in mock runtime");
+        if let Some(existing) = expected.as_ref() {
+            if Arc::ptr_eq(existing, &owner) {
+                return Ok(());
+            }
+            return Err(SendError::Validation(
+                "target runtime is already bound to a different generated MobMachine trust owner"
+                    .to_string(),
+            ));
+        }
+        *expected = Some(owner);
+        Ok(())
+    }
+
+    async fn install_recovered_generated_mob_trust_owner(
+        &self,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        *self
+            .mob_machine_trust_owner
+            .write()
+            .expect("poisoned mob_machine_trust_owner lock in mock runtime") = Some(owner);
+        Ok(())
     }
 
     async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
@@ -27483,6 +27537,91 @@ async fn test_stale_member_trust_obligation_cannot_readd_local_trust_when_machin
     assert!(
         !peers_b.iter().any(|entry| entry.name.as_str() == name_a),
         "stale member obligation must not re-add lead trust on worker"
+    );
+}
+
+#[tokio::test]
+async fn test_member_trust_mutation_rejects_foreign_mob_owner() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
+
+    let sid_a = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_b = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    handle
+        .wire(AgentIdentity::from("l-1"), MeerkatId::from("w-1"))
+        .await
+        .expect("wire");
+
+    let comms_a = service.real_comms(&sid_a).await.expect("comms for l-1");
+    let comms_b = service.real_comms(&sid_b).await.expect("comms for w-1");
+    let foreign_state = handle
+        .query_machine_state()
+        .await
+        .expect("query wired machine state");
+    let mut foreign_authority =
+        crate::machines::mob_machine::MobMachineAuthority::recover_from_state(foreign_state)
+            .expect("recover foreign authority over equivalent state");
+    let edge = crate::machines::mob_machine::WiringEdge::new(
+        crate::machines::mob_machine::AgentIdentity("l-1".to_string()),
+        crate::machines::mob_machine::AgentIdentity("w-1".to_string()),
+    );
+    let transition = crate::machines::mob_machine::MobMachineMutator::apply(
+        &mut foreign_authority,
+        crate::machines::mob_machine::MobMachineInput::AuthorizeMemberTrustWiring {
+            edge: edge.clone(),
+            a_identity: edge.a.clone(),
+            b_identity: edge.b.clone(),
+        },
+    )
+    .expect("foreign authority can produce a generated handoff for its own owner");
+    let topology_epoch = Arc::new(AtomicU64::new(foreign_authority.state().topology_epoch));
+    let obligation =
+        crate::generated::protocol_mob_member_trust_wiring::extract_obligations_with_freshness(
+            &transition,
+            crate::generated::protocol_mob_member_trust_wiring::MobTopologyFreshnessAuthority::from_live_topology_epoch(
+                topology_epoch,
+                foreign_authority.generated_authority_owner_token(),
+            ),
+        )
+        .pop()
+        .expect("foreign generated member wiring obligation");
+    let peer = TrustedPeerDescriptor::unsigned_with_pubkey(
+        test_comms_name("worker", "w-1"),
+        comms_b.peer_id().expect("worker peer id").to_string(),
+        comms_b.public_key_bytes().expect("worker pubkey bytes"),
+        CoreCommsRuntime::advertised_address(&*comms_b).expect("worker advertised address"),
+    )
+    .expect("valid worker descriptor");
+    let peer_id = peer.peer_id.to_string();
+    let authority =
+        crate::generated::protocol_mob_member_trust_wiring::wiring_authority_for_identity(
+            &obligation,
+            "w-1",
+            &peer_id,
+        )
+        .expect("foreign generated authority");
+
+    let error = CoreCommsRuntime::apply_trust_mutation(
+        &*comms_a,
+        CommsTrustMutation::AddTrustedPeer { peer, authority },
+    )
+    .await
+    .expect_err("foreign MobMachine owner must not mutate target trust");
+    assert!(
+        matches!(error, SendError::Validation(ref message) if message.contains("different generated owner")),
+        "unexpected foreign-owner rejection: {error:?}"
     );
 }
 

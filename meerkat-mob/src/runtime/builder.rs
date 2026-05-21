@@ -304,7 +304,13 @@ async fn apply_resume_trusted_peer_add(
     comms: &(dyn CoreCommsRuntime + '_),
     peer: TrustedPeerDescriptor,
     authority: CommsTrustMutationAuthority,
+    mob_owner_token: &Arc<dyn std::any::Any + Send + Sync>,
 ) -> Result<(), SendError> {
+    if authority.is_mob_machine_source() {
+        comms
+            .install_recovered_generated_mob_trust_owner(Arc::clone(mob_owner_token))
+            .await?;
+    }
     match comms
         .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer { peer, authority })
         .await?
@@ -321,7 +327,13 @@ async fn apply_resume_trusted_peer_remove(
     comms: &(dyn CoreCommsRuntime + '_),
     peer_id: String,
     authority: CommsTrustMutationAuthority,
+    mob_owner_token: &Arc<dyn std::any::Any + Send + Sync>,
 ) -> Result<(), SendError> {
+    if authority.is_mob_machine_source() {
+        comms
+            .install_recovered_generated_mob_trust_owner(Arc::clone(mob_owner_token))
+            .await?;
+    }
     match comms
         .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer { peer_id, authority })
         .await?
@@ -2139,6 +2151,7 @@ impl MobBuilder {
         let machine_external_peer_edges = dsl_authority.state().external_peer_edges.clone();
         let restore_diagnostics_snapshot = tool_handle.restore_diagnostics.read().await.clone();
         seed_mob_authority_restore_failures(dsl_authority, &restore_diagnostics_snapshot)?;
+        let mob_owner_token = dsl_authority.generated_authority_owner_token();
         let broken_members = restore_diagnostics_snapshot
             .keys()
             .cloned()
@@ -2246,6 +2259,7 @@ impl MobBuilder {
                                     comms_a.as_ref(),
                                     stale_peer.peer_id.to_string(),
                                     authority,
+                                    &mob_owner_token,
                                 )
                                 .await
                                 {
@@ -2386,6 +2400,7 @@ impl MobBuilder {
                     comms_a.as_ref(),
                     desired.spec.clone(),
                     repair_authority,
+                    &mob_owner_token,
                 )
                 .await
                 {

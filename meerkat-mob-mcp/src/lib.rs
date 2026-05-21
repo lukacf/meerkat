@@ -1732,6 +1732,7 @@ struct LocalCommsRuntime {
     key: String,
     trusted: RwLock<HashMap<String, BTreeSet<GeneratedCommsTrustAuthoritySourceKind>>>,
     meerkat_machine_trust_owner: RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
+    mob_machine_trust_owner: RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
     notify: Arc<tokio::sync::Notify>,
 }
 
@@ -1785,6 +1786,7 @@ impl LocalCommsRuntime {
             key: encode_ed25519_public_key(&public_key_bytes),
             trusted: RwLock::new(HashMap::new()),
             meerkat_machine_trust_owner: RwLock::new(None),
+            mob_machine_trust_owner: RwLock::new(None),
             notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -1796,21 +1798,14 @@ impl LocalCommsRuntime {
         *self.meerkat_machine_trust_owner.write().await = owner;
     }
 
-    async fn validate_meerkat_machine_trust_authority_owner(
+    async fn validate_generated_trust_authority_owner(
         &self,
         authority: &meerkat_core::comms::CommsTrustMutationAuthority,
     ) -> Result<(), SendError> {
-        if !matches!(
-            authority.source_kind(),
-            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection
-                | GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish
-                | GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke
-        ) {
-            return Ok(());
-        }
-        let expected = self.meerkat_machine_trust_owner.read().await;
+        let expected_meerkat = self.meerkat_machine_trust_owner.read().await.clone();
+        let expected_mob = self.mob_machine_trust_owner.read().await.clone();
         authority
-            .validate_source_owner_token(expected.as_ref())
+            .validate_target_source_owner_token(expected_meerkat.as_ref(), expected_mob.as_ref())
             .map_err(SendError::Validation)
     }
 }
@@ -1861,7 +1856,7 @@ impl CoreCommsRuntime for LocalCommsRuntime {
     ) -> Result<CommsTrustMutationResult, SendError> {
         match mutation {
             CommsTrustMutation::AddTrustedPeer { peer, authority } => {
-                self.validate_meerkat_machine_trust_authority_owner(&authority)
+                self.validate_generated_trust_authority_owner(&authority)
                     .await?;
                 authority
                     .validate_public_add(self.peer_id(), &peer)
@@ -1877,7 +1872,7 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
-                self.validate_meerkat_machine_trust_authority_owner(&authority)
+                self.validate_generated_trust_authority_owner(&authority)
                     .await?;
                 let parsed_peer_id = PeerId::parse(&peer_id)
                     .map_err(|err| SendError::Validation(err.to_string()))?;
@@ -1890,7 +1885,7 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
             CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
-                self.validate_meerkat_machine_trust_authority_owner(&authority)
+                self.validate_generated_trust_authority_owner(&authority)
                     .await?;
                 authority
                     .validate_private_add(self.peer_id(), &peer)
@@ -1900,7 +1895,7 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                 Ok(CommsTrustMutationResult::Added)
             }
             CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
-                self.validate_meerkat_machine_trust_authority_owner(&authority)
+                self.validate_generated_trust_authority_owner(&authority)
                     .await?;
                 let parsed_peer_id = PeerId::parse(&peer_id)
                     .map_err(|err| SendError::Validation(err.to_string()))?;
@@ -1910,6 +1905,32 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                 Ok(CommsTrustMutationResult::Removed { removed: false })
             }
         }
+    }
+
+    async fn install_generated_mob_trust_owner(
+        &self,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        let mut expected = self.mob_machine_trust_owner.write().await;
+        if let Some(existing) = expected.as_ref() {
+            if Arc::ptr_eq(existing, &owner) {
+                return Ok(());
+            }
+            return Err(SendError::Validation(
+                "target runtime is already bound to a different generated MobMachine trust owner"
+                    .to_string(),
+            ));
+        }
+        *expected = Some(owner);
+        Ok(())
+    }
+
+    async fn install_recovered_generated_mob_trust_owner(
+        &self,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        *self.mob_machine_trust_owner.write().await = Some(owner);
+        Ok(())
     }
 
     async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
@@ -3822,6 +3843,7 @@ mod tests {
         address: String,
         key: String,
         trusted: RwLock<HashMap<String, BTreeSet<GeneratedCommsTrustAuthoritySourceKind>>>,
+        mob_machine_trust_owner: RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
         notify: Arc<Notify>,
     }
 
@@ -3887,8 +3909,22 @@ mod tests {
                 address: format!("inproc://{name}"),
                 key: super::encode_ed25519_public_key(&public_key_bytes),
                 trusted: RwLock::new(HashMap::new()),
+                mob_machine_trust_owner: RwLock::new(None),
                 notify: Arc::new(Notify::new()),
             }
+        }
+
+        async fn validate_mob_trust_authority_owner(
+            &self,
+            authority: &meerkat_core::comms::CommsTrustMutationAuthority,
+        ) -> Result<(), SendError> {
+            if !authority.is_mob_machine_source() {
+                return Ok(());
+            }
+            let expected = self.mob_machine_trust_owner.read().await;
+            authority
+                .validate_source_owner_token(expected.as_ref())
+                .map_err(SendError::Validation)
         }
     }
 
@@ -3920,6 +3956,7 @@ mod tests {
         ) -> Result<CommsTrustMutationResult, SendError> {
             match mutation {
                 CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority).await?;
                     authority
                         .validate_public_add(self.peer_id(), &peer)
                         .map_err(SendError::Validation)?;
@@ -3937,6 +3974,7 @@ mod tests {
                     Ok(CommsTrustMutationResult::Added)
                 }
                 CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority).await?;
                     let parsed_peer_id = PeerId::parse(&peer_id)
                         .map_err(|err| SendError::Validation(err.to_string()))?;
                     authority
@@ -3951,6 +3989,7 @@ mod tests {
                     Ok(CommsTrustMutationResult::Removed { removed })
                 }
                 CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority).await?;
                     authority
                         .validate_private_add(self.peer_id(), &peer)
                         .map_err(SendError::Validation)?;
@@ -3962,6 +4001,7 @@ mod tests {
                     Ok(CommsTrustMutationResult::Added)
                 }
                 CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority).await?;
                     let parsed_peer_id = PeerId::parse(&peer_id)
                         .map_err(|err| SendError::Validation(err.to_string()))?;
                     authority
@@ -3970,6 +4010,32 @@ mod tests {
                     Ok(CommsTrustMutationResult::Removed { removed: false })
                 }
             }
+        }
+
+        async fn install_generated_mob_trust_owner(
+            &self,
+            owner: Arc<dyn std::any::Any + Send + Sync>,
+        ) -> Result<(), SendError> {
+            let mut expected = self.mob_machine_trust_owner.write().await;
+            if let Some(existing) = expected.as_ref() {
+                if Arc::ptr_eq(existing, &owner) {
+                    return Ok(());
+                }
+                return Err(SendError::Validation(
+                    "target runtime is already bound to a different generated MobMachine trust owner"
+                        .to_string(),
+                ));
+            }
+            *expected = Some(owner);
+            Ok(())
+        }
+
+        async fn install_recovered_generated_mob_trust_owner(
+            &self,
+            owner: Arc<dyn std::any::Any + Send + Sync>,
+        ) -> Result<(), SendError> {
+            *self.mob_machine_trust_owner.write().await = Some(owner);
+            Ok(())
         }
 
         async fn add_trusted_peer(

@@ -7,7 +7,6 @@ use chrono::Utc;
 use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::{InputId, RunId};
-use meerkat_runtime::PersistentRuntimeDriver;
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
@@ -17,6 +16,7 @@ use meerkat_runtime::input_state::{
 };
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore};
 use meerkat_runtime::traits::RuntimeDriver;
+use meerkat_runtime::{EphemeralRuntimeDriver, PersistentRuntimeDriver};
 use meerkat_store::MemoryBlobStore;
 use uuid::Uuid;
 
@@ -85,8 +85,10 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
 }
 
 fn persistable(stored: StoredInputState) -> InputStatePersistenceRecord {
-    InputStatePersistenceRecord::from_generated_authority(stored)
-        .expect("test input-state seed should pass generated persistence authority")
+    let mut driver = EphemeralRuntimeDriver::new(make_runtime_id("persistence-record"));
+    driver
+        .recover_input_state_persistence_record(stored)
+        .expect("test input-state seed should pass generated recovery authority")
 }
 
 fn sorted_ids(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {

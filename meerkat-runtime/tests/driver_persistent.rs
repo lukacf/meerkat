@@ -14,9 +14,9 @@ use meerkat_runtime::input_state::{
 };
 use meerkat_runtime::store::RuntimeStoreError;
 use meerkat_runtime::{
-    InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputOrigin, InputState,
-    InputVisibility, LogicalRuntimeId, PersistentRuntimeDriver, PromptInput, RuntimeDriver,
-    RuntimeState, RuntimeStore, SessionDelta,
+    EphemeralRuntimeDriver, InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputOrigin,
+    InputState, InputVisibility, LogicalRuntimeId, PersistentRuntimeDriver, PromptInput,
+    RuntimeDriver, RuntimeState, RuntimeStore, SessionDelta,
 };
 use meerkat_store::MemoryBlobStore;
 
@@ -50,8 +50,13 @@ fn stored_accepted(mut state: InputState) -> StoredInputState {
 }
 
 fn persistable(stored: StoredInputState) -> InputStatePersistenceRecord {
-    InputStatePersistenceRecord::from_generated_authority(stored)
-        .expect("test input-state seed should pass generated persistence authority")
+    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new(format!(
+        "persistence-record-{}",
+        stored.state.input_id
+    )));
+    driver
+        .recover_input_state_persistence_record(stored)
+        .expect("test input-state seed should pass generated recovery authority")
 }
 
 struct FailPersistInputStore {
@@ -526,8 +531,13 @@ async fn recover_discards_machine_classified_ephemeral_inputs() {
     let rid = LogicalRuntimeId::new("test");
 
     // Pre-populate with an ephemeral input state
-    let input_id = InputId::new();
+    let mut input = make_prompt("ephemeral recovered input");
+    if let Input::Prompt(ref mut prompt) = input {
+        prompt.header.durability = InputDurability::Ephemeral;
+    }
+    let input_id = input.id().clone();
     let mut state = InputState::new_accepted(input_id.clone());
+    state.persisted_input = Some(input);
     state.durability = Some(InputDurability::Ephemeral);
     store
         .persist_input_state(&rid, &persistable(stored_accepted(state)))
@@ -682,13 +692,13 @@ async fn recovery_lifecycle_commit_failure_restores_recovered_projection() {
         .expect("durable recovery seed should remain");
     assert_eq!(
         stored.seed.phase,
-        meerkat_runtime::input_state::InputLifecycleState::Accepted,
-        "failed recovery must not rewrite durable input lifecycle",
+        meerkat_runtime::input_state::InputLifecycleState::Queued,
+        "failed recovery must not rewrite durable input lifecycle after generated persistence normalization",
     );
 }
 
 #[tokio::test]
-async fn recovery_rejecting_later_row_restores_partial_recovered_projection() {
+async fn persistence_record_rejects_unstamped_recovered_row_before_store_write() {
     let store = Arc::new(InMemoryRuntimeStore::new());
     let rid = LogicalRuntimeId::new("test");
 
@@ -707,39 +717,34 @@ async fn recovery_rejecting_later_row_restores_partial_recovered_projection() {
     let mut invalid_state = InputState::new_accepted(invalid_id.clone());
     invalid_state.persisted_input = Some(invalid_input);
     invalid_state.durability = Some(InputDurability::Durable);
-    store
-        .persist_input_state(
-            &rid,
-            &persistable(StoredInputState {
-                state: invalid_state,
-                seed: InputStateSeed::new_accepted(),
-            }),
-        )
-        .await
-        .unwrap();
-
-    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
+    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("unstamped-record"));
     let err = driver
-        .recover()
-        .await
-        .expect_err("unstamped later row should fail recovery");
+        .recover_input_state_persistence_record(StoredInputState {
+            state: invalid_state,
+            seed: InputStateSeed::new_accepted(),
+        })
+        .expect_err("unstamped later row should fail before store write");
 
     assert!(
         err.to_string()
-            .contains("missing runtime execution semantics stamp"),
+            .contains("missing recovered admission witness"),
         "unexpected error: {err}",
     );
     assert!(
-        driver.input_state(&valid_id).is_none(),
-        "failed recovery must roll back already admitted recovered rows",
-    );
-    assert!(
         driver.input_state(&invalid_id).is_none(),
-        "failed recovery must not retain the rejected row",
+        "failed persistence-record recovery must not retain the rejected row",
     );
     assert!(
         driver.dequeue_next().is_none(),
-        "failed recovery must not leave recovered queue projection",
+        "failed persistence-record recovery must not leave recovered queue projection",
+    );
+    assert!(
+        store
+            .load_input_state(&rid, &valid_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "valid generated-authority record should remain persisted",
     );
 }
 
@@ -1258,13 +1263,13 @@ async fn driver_persistent_recovery_persists_machine_lifecycle_truth_not_termina
     assert_eq!(report.inputs_recovered, 0);
     assert_eq!(
         driver.runtime_state(),
-        RuntimeState::Idle,
-        "recovery must not realize destroyed lifecycle truth from a runtime-state projection",
+        RuntimeState::Destroyed,
+        "generated recovery authority may realize a terminal runtime-state projection when no active inputs conflict",
     );
     assert_eq!(
         store.load_runtime_state(&rid).await.unwrap(),
-        Some(RuntimeState::Idle),
-        "recovery durable projection must be rewritten from machine truth, not the loaded terminal projection",
+        Some(RuntimeState::Destroyed),
+        "recovery must not rewrite a generated-accepted terminal lifecycle projection without another machine transition",
     );
 }
 
@@ -1290,9 +1295,7 @@ async fn driver_persistent_recovery_fails_closed_for_terminal_projection_with_ac
         .await
         .expect_err("terminal runtime-state projection with active inputs must fail closed");
     assert!(
-        error
-            .to_string()
-            .contains("runtime-state projection 'destroyed' conflicts with 1 active inputs"),
+        error.to_string().contains("RecoverAdmittedInput"),
         "unexpected error: {error}",
     );
     assert_eq!(

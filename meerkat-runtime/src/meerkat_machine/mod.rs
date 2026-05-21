@@ -338,7 +338,7 @@ pub(crate) fn input_phase_behavioral_terminality_via_authority(
 
 /// Authorize DSL-owned input-state seed facts before they are written to a
 /// runtime store.
-pub fn authorize_stored_input_state_seed(
+pub(crate) fn authorize_stored_input_state_seed(
     input_id: &InputId,
     seed: &InputStateSeed,
 ) -> Result<(), String> {

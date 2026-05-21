@@ -7898,13 +7898,20 @@ mod tests {
             .runtime_adapter
             .unregister_session(&target_session_id)
             .await;
+        let active_input = {
+            let mut driver = meerkat_runtime::EphemeralRuntimeDriver::new(
+                meerkat_runtime::LogicalRuntimeId::new(format!(
+                    "rest-persistence-record-{target_session_id}"
+                )),
+            );
+            driver
+                .recover_input_state_persistence_record(active_input)
+                .expect("test input-state seed should pass generated recovery authority")
+        };
         runtime_store
             .persist_input_state(
                 &meerkat_runtime::LogicalRuntimeId::for_session(&target_session_id),
-                &meerkat_runtime::input_state::InputStatePersistenceRecord::from_generated_authority(
-                    active_input,
-                )
-                .expect("test input-state seed should pass generated persistence authority"),
+                &active_input,
             )
             .await
             .expect("persist conflicting active input state");

@@ -294,7 +294,7 @@ mod tests {
     }
 
     fn persistable(bundle: StoredInputState) -> InputStatePersistenceRecord {
-        InputStatePersistenceRecord::from_generated_authority(bundle).unwrap()
+        InputStatePersistenceRecord::from_machine_snapshot(bundle).unwrap()
     }
 
     #[tokio::test]

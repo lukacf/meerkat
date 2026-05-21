@@ -1691,7 +1691,7 @@ impl EphemeralRuntimeDriver {
         self.stored_input_states_snapshot()?
             .into_iter()
             .map(|bundle| {
-                InputStatePersistenceRecord::from_generated_authority(bundle)
+                InputStatePersistenceRecord::from_machine_snapshot(bundle)
                     .map_err(RuntimeDriverError::Internal)
             })
             .collect()
@@ -1703,9 +1703,70 @@ impl EphemeralRuntimeDriver {
         input_id: &InputId,
     ) -> Result<Option<InputStatePersistenceRecord>, RuntimeDriverError> {
         self.stored_input_state(input_id)
-            .map(InputStatePersistenceRecord::from_generated_authority)
+            .map(InputStatePersistenceRecord::from_machine_snapshot)
             .transpose()
             .map_err(RuntimeDriverError::Internal)
+    }
+
+    /// Replay a recovered store bundle through generated recovery authority and
+    /// return the machine-owned persistence snapshot. This is for migration and
+    /// recovery tests that must seed a store before a persistent driver exists;
+    /// direct store writes still cannot mint records from raw seed facts.
+    pub fn recover_input_state_persistence_record(
+        &mut self,
+        mut bundle: StoredInputState,
+    ) -> Result<InputStatePersistenceRecord, RuntimeDriverError> {
+        let delta = crate::meerkat_machine::driver::machine_apply_recovered_input_normalization(
+            &mut bundle,
+            None,
+        )?;
+        let input_id = bundle.state.input_id.clone();
+        if self.ledger.get(&input_id).is_some() {
+            return Err(RuntimeDriverError::Internal(format!(
+                "input-state persistence recovery record requested for duplicate input {input_id}"
+            )));
+        }
+
+        let terminal = crate::meerkat_machine::input_seed_behavioral_terminality_via_authority(
+            &input_id,
+            &bundle.seed,
+        )
+        .map_err(RuntimeDriverError::Internal)?;
+
+        if terminal {
+            self.recover_terminal_input_lifecycle(
+                &input_id,
+                &bundle.seed,
+                bundle.state.idempotency_key.as_ref(),
+            )?;
+        } else {
+            let Some(entry) = crate::meerkat_machine::driver::machine_build_recovered_ingress_entry(
+                &bundle.state,
+                &bundle.seed,
+            ) else {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "input-state persistence recovery record for '{input_id}' missing recovered admission witness"
+                )));
+            };
+            self.admit_recovered_to_ingress(
+                input_id.clone(),
+                entry.runtime_semantics,
+                &bundle.state,
+                &bundle.seed,
+                None,
+                None,
+                delta.admission_sequence_recovery,
+            )?;
+        }
+
+        self.ledger.recover(bundle.state);
+        self.rebuild_queue_projections_after_recovery();
+        self.authorized_stored_input_state(&input_id)?
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "generated input-state persistence recovery emitted no record for {input_id}"
+                ))
+            })
     }
     /// Clear the physical queue projections without touching canonical ingress
     /// truth. Used by recovery contract tests to simulate projection loss.

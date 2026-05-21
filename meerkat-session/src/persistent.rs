@@ -10301,9 +10301,36 @@ mod tests {
         );
     }
 
-    fn persistable_input_state(stored: StoredInputState) -> InputStatePersistenceRecord {
-        InputStatePersistenceRecord::from_generated_authority(stored)
-            .expect("test input-state seed should pass generated persistence authority")
+    fn persistable_input_state(mut stored: StoredInputState) -> InputStatePersistenceRecord {
+        if stored.state.persisted_input.is_none() {
+            let mut prompt =
+                meerkat_runtime::PromptInput::new("test recovered input-state seed", None);
+            prompt.header.id = stored.state.input_id.clone();
+            stored.state.persisted_input = Some(meerkat_runtime::Input::Prompt(prompt));
+        }
+        if let Some(input) = stored.state.persisted_input.as_ref() {
+            let policy = meerkat_runtime::DefaultPolicyTable::resolve(input, true);
+            let policy_version = policy.policy_version;
+            stored.state.runtime_semantics = Some(
+                meerkat_runtime::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                    &policy,
+                    input.kind(),
+                ),
+            );
+            stored.state.policy = Some(meerkat_runtime::PolicySnapshot {
+                version: policy_version,
+                decision: policy,
+            });
+        }
+        if stored.seed.terminal_outcome.is_none() && stored.seed.recovery_lane.is_none() {
+            stored.seed.recovery_lane = Some(meerkat_core::types::HandlingMode::Queue);
+        }
+        let mut driver = meerkat_runtime::EphemeralRuntimeDriver::new(LogicalRuntimeId::new(
+            format!("persistence-record-{}", stored.state.input_id),
+        ));
+        driver
+            .recover_input_state_persistence_record(stored)
+            .expect("test input-state seed should pass generated recovery authority")
     }
 
     #[tokio::test]

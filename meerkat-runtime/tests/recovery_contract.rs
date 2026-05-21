@@ -147,8 +147,10 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
 }
 
 fn persistable(stored: StoredInputState) -> InputStatePersistenceRecord {
-    InputStatePersistenceRecord::from_generated_authority(stored)
-        .expect("test input-state seed should pass generated persistence authority")
+    let mut driver = EphemeralRuntimeDriver::new(make_runtime_id("persistence-record"));
+    driver
+        .recover_input_state_persistence_record(stored)
+        .expect("test input-state seed should pass generated recovery authority")
 }
 
 fn sorted_id_strings(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {

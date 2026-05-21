@@ -377,7 +377,7 @@ impl PersistentRuntimeDriver {
     }
 
     async fn persist_state(&self, state: &StoredInputState) -> Result<(), RuntimeDriverError> {
-        let state = InputStatePersistenceRecord::from_generated_authority(state.clone())
+        let state = InputStatePersistenceRecord::from_machine_snapshot(state.clone())
             .map_err(RuntimeDriverError::Internal)?;
         self.store
             .persist_input_state(&self.runtime_id, &state)

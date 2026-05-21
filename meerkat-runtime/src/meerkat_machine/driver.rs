@@ -2971,7 +2971,7 @@ mod recovery_tests {
     fn persistable(
         bundle: crate::input_state::StoredInputState,
     ) -> crate::input_state::InputStatePersistenceRecord {
-        crate::input_state::InputStatePersistenceRecord::from_generated_authority(bundle)
+        crate::input_state::InputStatePersistenceRecord::from_machine_snapshot(bundle)
             .expect("test input-state seed should pass generated persistence authority")
     }
 

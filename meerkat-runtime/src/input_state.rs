@@ -172,16 +172,17 @@ impl StoredInputState {
 }
 
 /// Store-write wrapper for an input-state bundle whose DSL-owned seed facts
-/// have passed generated MeerkatMachine authority.
+/// came from a generated MeerkatMachine-owned snapshot.
 #[derive(Debug, Clone)]
 pub struct InputStatePersistenceRecord {
     bundle: StoredInputState,
 }
 
 impl InputStatePersistenceRecord {
-    /// Authorize a store-bound input-state bundle through generated
-    /// MeerkatMachine seed persistence authority.
-    pub fn from_generated_authority(bundle: StoredInputState) -> Result<Self, String> {
+    /// Package a store-bound input-state bundle that was read from generated
+    /// MeerkatMachine authority. This is intentionally crate-private so
+    /// callers cannot mint persistence records from handwritten seed facts.
+    pub(crate) fn from_machine_snapshot(bundle: StoredInputState) -> Result<Self, String> {
         crate::meerkat_machine::authorize_stored_input_state_seed(
             &bundle.state.input_id,
             &bundle.seed,
@@ -202,14 +203,6 @@ impl InputStatePersistenceRecord {
     /// Consume the approved record into its raw bundle.
     pub fn into_stored(self) -> StoredInputState {
         self.bundle
-    }
-}
-
-impl TryFrom<StoredInputState> for InputStatePersistenceRecord {
-    type Error = String;
-
-    fn try_from(bundle: StoredInputState) -> Result<Self, Self::Error> {
-        Self::from_generated_authority(bundle)
     }
 }
 

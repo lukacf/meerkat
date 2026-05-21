@@ -166,6 +166,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberSubscription { .. }
             | mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberRemoval { .. }
             | mob_dsl::MobMachineInput::PollEvents
+            | mob_dsl::MobMachineInput::PollEventsStrict { .. }
             | mob_dsl::MobMachineInput::ReplayAllEvents
             | mob_dsl::MobMachineInput::RecordOperatorActionProvenance { .. }
             | mob_dsl::MobMachineInput::GetMember
@@ -1252,6 +1253,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberSubscription { .. }
             | mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberRemoval { .. }
             | mob_dsl::MobMachineInput::PollEvents
+            | mob_dsl::MobMachineInput::PollEventsStrict { .. }
             | mob_dsl::MobMachineInput::ReplayAllEvents
             | mob_dsl::MobMachineInput::RecordOperatorActionProvenance { .. }
             | mob_dsl::MobMachineInput::GetMember

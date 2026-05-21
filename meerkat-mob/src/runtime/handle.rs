@@ -1318,12 +1318,20 @@ impl MobEventsView {
         limit: usize,
     ) -> Result<Vec<crate::event::MobEvent>, MobError> {
         let latest_cursor = self.latest_cursor().await?;
-        if after_cursor > latest_cursor {
-            return Err(MobError::StaleEventCursor {
+        let limit = u64::try_from(limit).map_err(|_| {
+            MobError::Internal(
+                "strict event poll limit does not fit generated authority input".into(),
+            )
+        })?;
+        let effects = self
+            .handle
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::PollEventsStrict {
                 after_cursor,
                 latest_cursor,
-            });
-        }
+                limit,
+            })
+            .await?;
+        let (after_cursor, limit) = MobHandle::strict_event_poll_authority_from_effects(effects)?;
         self.poll(after_cursor, limit).await
     }
 
@@ -2320,6 +2328,39 @@ impl MobHandle {
         }
         Err(MobError::Internal(
             "MobMachine did not emit structural event subscription authority".into(),
+        ))
+    }
+
+    fn strict_event_poll_authority_from_effects(
+        effects: Vec<mob_dsl::MobMachineEffect>,
+    ) -> Result<(u64, usize), MobError> {
+        for effect in effects {
+            match effect {
+                mob_dsl::MobMachineEffect::AuthorizeStrictEventPoll {
+                    after_cursor,
+                    limit,
+                } => {
+                    let limit = usize::try_from(limit).map_err(|_| {
+                        MobError::Internal(
+                            "MobMachine produced invalid strict event poll limit".into(),
+                        )
+                    })?;
+                    return Ok((after_cursor, limit));
+                }
+                mob_dsl::MobMachineEffect::RejectStrictEventPoll {
+                    after_cursor,
+                    latest_cursor,
+                } => {
+                    return Err(MobError::StaleEventCursor {
+                        after_cursor,
+                        latest_cursor,
+                    });
+                }
+                _ => {}
+            }
+        }
+        Err(MobError::Internal(
+            "MobMachine did not emit strict event poll authority".into(),
         ))
     }
 

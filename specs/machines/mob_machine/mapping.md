@@ -498,6 +498,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SubscribeStructuralEventsStaleDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
+- `PollEventsStrictRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `PollEventsStrictStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `event-subscriptions-and-notices`
+- `PollEventsStrictCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `PollEventsStrictDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `PollEventsStrictStaleRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `PollEventsStrictStaleStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `event-subscriptions-and-notices`
+- `PollEventsStrictStaleCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `PollEventsStrictStaleDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
 - `AuthorizeMobEventRouterMemberSubscriptionRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
@@ -1014,6 +1038,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
 - `RejectStructuralEventSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeStrictEventPoll`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `RejectStrictEventPoll`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
 

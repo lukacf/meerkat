@@ -28420,6 +28420,37 @@ async fn test_mob_events_view_subscribe_after_rejects_future_cursor() {
 }
 
 #[tokio::test]
+async fn test_mob_events_view_poll_strict_rejects_future_cursor() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let (handle, _service) = create_test_mob_with_events(sample_definition(), events.clone()).await;
+    let latest_cursor = handle
+        .events()
+        .latest_cursor()
+        .await
+        .expect("latest cursor");
+    let after_cursor = latest_cursor.saturating_add(10);
+    let poll_calls_before = events.poll_calls();
+
+    match handle.events().poll_strict(after_cursor, 16).await {
+        Err(MobError::StaleEventCursor {
+            after_cursor: observed_after_cursor,
+            latest_cursor: observed_latest_cursor,
+        }) => {
+            assert_eq!(observed_after_cursor, after_cursor);
+            assert_eq!(observed_latest_cursor, latest_cursor);
+        }
+        Err(error) => panic!("expected stale cursor error, got {error:?}"),
+        Ok(_) => panic!("future cursor strict poll should fail"),
+    }
+
+    assert_eq!(
+        events.poll_calls(),
+        poll_calls_before,
+        "strict poll should not read events after MobMachine rejects the cursor"
+    );
+}
+
+#[tokio::test]
 async fn test_mob_handle_list_runs_reads_public_run_listing() {
     let store = Arc::new(InMemoryMobRunStore::new());
     let definition = sample_definition();

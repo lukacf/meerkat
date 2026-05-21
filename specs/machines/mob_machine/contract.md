@@ -169,6 +169,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeMobEventRouterMemberSubscription`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `AuthorizeMobEventRouterMemberRemoval`(agent_identity: AgentIdentity)
 - `PollEvents`
+- `PollEventsStrict`(after_cursor: u64, latest_cursor: u64, limit: u64)
 - `ReplayAllEvents`
 - `RecordOperatorActionProvenance`(tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String>)
 - `GetMember`
@@ -290,6 +291,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeMobEventRouterMemberRemoval`(agent_identity: AgentIdentity)
 - `AuthorizeStructuralEventSubscription`(after_cursor: u64, explicit_after_cursor: Bool, batch_limit: u64, channel_capacity: u64)
 - `RejectStructuralEventSubscription`(after_cursor: u64, latest_cursor: u64)
+- `AuthorizeStrictEventPoll`(after_cursor: u64, limit: u64)
+- `RejectStrictEventPoll`(after_cursor: u64, latest_cursor: u64)
 
 ## Invariants
 - `bindings_require_known_identity`
@@ -1654,6 +1657,70 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `cursor_stale`
 - Emits: `RejectStructuralEventSubscription`
+- To: `Destroyed`
+
+### `PollEventsStrictRunning`
+- From: `Running`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_not_stale`
+- Emits: `AuthorizeStrictEventPoll`
+- To: `Running`
+
+### `PollEventsStrictStopped`
+- From: `Stopped`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_not_stale`
+- Emits: `AuthorizeStrictEventPoll`
+- To: `Stopped`
+
+### `PollEventsStrictCompleted`
+- From: `Completed`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_not_stale`
+- Emits: `AuthorizeStrictEventPoll`
+- To: `Completed`
+
+### `PollEventsStrictDestroyed`
+- From: `Destroyed`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_not_stale`
+- Emits: `AuthorizeStrictEventPoll`
+- To: `Destroyed`
+
+### `PollEventsStrictStaleRunning`
+- From: `Running`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStrictEventPoll`
+- To: `Running`
+
+### `PollEventsStrictStaleStopped`
+- From: `Stopped`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStrictEventPoll`
+- To: `Stopped`
+
+### `PollEventsStrictStaleCompleted`
+- From: `Completed`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStrictEventPoll`
+- To: `Completed`
+
+### `PollEventsStrictStaleDestroyed`
+- From: `Destroyed`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStrictEventPoll`
 - To: `Destroyed`
 
 ### `AuthorizeMobEventRouterMemberSubscriptionRunning`

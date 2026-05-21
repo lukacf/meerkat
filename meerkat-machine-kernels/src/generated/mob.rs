@@ -2551,6 +2551,12 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PollEvents {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PollEventsStrict {
+        pub after_cursor: u64,
+        pub latest_cursor: u64,
+        pub limit: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReplayAllEvents {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordOperatorActionProvenance {
@@ -2672,6 +2678,7 @@ pub enum Input {
     AuthorizeMobEventRouterMemberSubscription(inputs::AuthorizeMobEventRouterMemberSubscription),
     AuthorizeMobEventRouterMemberRemoval(inputs::AuthorizeMobEventRouterMemberRemoval),
     PollEvents(inputs::PollEvents),
+    PollEventsStrict(inputs::PollEventsStrict),
     ReplayAllEvents(inputs::ReplayAllEvents),
     RecordOperatorActionProvenance(inputs::RecordOperatorActionProvenance),
     GetMember(inputs::GetMember),
@@ -2763,6 +2770,7 @@ impl Input {
                 InputKind::AuthorizeMobEventRouterMemberRemoval
             }
             Self::PollEvents(_) => InputKind::PollEvents,
+            Self::PollEventsStrict(_) => InputKind::PollEventsStrict,
             Self::ReplayAllEvents(_) => InputKind::ReplayAllEvents,
             Self::RecordOperatorActionProvenance(_) => InputKind::RecordOperatorActionProvenance,
             Self::GetMember(_) => InputKind::GetMember,
@@ -2837,6 +2845,7 @@ pub enum InputKind {
     AuthorizeMobEventRouterMemberSubscription,
     AuthorizeMobEventRouterMemberRemoval,
     PollEvents,
+    PollEventsStrict,
     ReplayAllEvents,
     RecordOperatorActionProvenance,
     GetMember,
@@ -3419,6 +3428,16 @@ pub mod effects {
         pub after_cursor: u64,
         pub latest_cursor: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeStrictEventPoll {
+        pub after_cursor: u64,
+        pub limit: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RejectStrictEventPoll {
+        pub after_cursor: u64,
+        pub latest_cursor: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3469,6 +3488,8 @@ pub enum Effect {
     AuthorizeMobEventRouterMemberRemoval(effects::AuthorizeMobEventRouterMemberRemoval),
     AuthorizeStructuralEventSubscription(effects::AuthorizeStructuralEventSubscription),
     RejectStructuralEventSubscription(effects::RejectStructuralEventSubscription),
+    AuthorizeStrictEventPoll(effects::AuthorizeStrictEventPoll),
+    RejectStrictEventPoll(effects::RejectStrictEventPoll),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -3518,6 +3539,8 @@ pub enum EffectKind {
     AuthorizeMobEventRouterMemberRemoval,
     AuthorizeStructuralEventSubscription,
     RejectStructuralEventSubscription,
+    AuthorizeStrictEventPoll,
+    RejectStrictEventPoll,
 }
 
 #[allow(non_camel_case_types)]
@@ -3682,6 +3705,14 @@ pub enum TransitionId {
     SubscribeStructuralEventsStaleStopped,
     SubscribeStructuralEventsStaleCompleted,
     SubscribeStructuralEventsStaleDestroyed,
+    PollEventsStrictRunning,
+    PollEventsStrictStopped,
+    PollEventsStrictCompleted,
+    PollEventsStrictDestroyed,
+    PollEventsStrictStaleRunning,
+    PollEventsStrictStaleStopped,
+    PollEventsStrictStaleCompleted,
+    PollEventsStrictStaleDestroyed,
     AuthorizeMobEventRouterMemberSubscriptionRunning,
     AuthorizeMobEventRouterMemberSubscriptionStopped,
     AuthorizeMobEventRouterMemberSubscriptionCompleted,

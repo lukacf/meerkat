@@ -406,6 +406,7 @@ macro_rules! mob_catalog_machine_dsl {
             AuthorizeMobEventRouterMemberSubscription { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             AuthorizeMobEventRouterMemberRemoval { agent_identity: AgentIdentity },
             PollEvents,
+            PollEventsStrict { after_cursor: u64, latest_cursor: u64, limit: u64 },
             ReplayAllEvents,
             RecordOperatorActionProvenance { tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String> },
             GetMember,
@@ -557,6 +558,8 @@ macro_rules! mob_catalog_machine_dsl {
             AuthorizeMobEventRouterMemberRemoval { agent_identity: AgentIdentity },
             AuthorizeStructuralEventSubscription { after_cursor: u64, explicit_after_cursor: bool, batch_limit: u64, channel_capacity: u64 },
             RejectStructuralEventSubscription { after_cursor: u64, latest_cursor: u64 },
+            AuthorizeStrictEventPoll { after_cursor: u64, limit: u64 },
+            RejectStrictEventPoll { after_cursor: u64, latest_cursor: u64 },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -605,6 +608,8 @@ macro_rules! mob_catalog_machine_dsl {
         disposition AuthorizeMobEventRouterMemberRemoval => local,
         disposition AuthorizeStructuralEventSubscription => local,
         disposition RejectStructuralEventSubscription => local,
+        disposition AuthorizeStrictEventPoll => local,
+        disposition RejectStrictEventPoll => local,
 
         // =====================================================================
         // Invariants
@@ -2782,6 +2787,71 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Destroyed
             emit RejectStructuralEventSubscription { after_cursor: after_cursor, latest_cursor: latest_cursor }
+        }
+
+        transition PollEventsStrictRunning {
+            on input PollEventsStrict { after_cursor, latest_cursor, limit }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "cursor_not_stale" { after_cursor <= latest_cursor }
+            update {}
+            to Running
+            emit AuthorizeStrictEventPoll { after_cursor: after_cursor, limit: limit }
+        }
+        transition PollEventsStrictStopped {
+            on input PollEventsStrict { after_cursor, latest_cursor, limit }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "cursor_not_stale" { after_cursor <= latest_cursor }
+            update {}
+            to Stopped
+            emit AuthorizeStrictEventPoll { after_cursor: after_cursor, limit: limit }
+        }
+        transition PollEventsStrictCompleted {
+            on input PollEventsStrict { after_cursor, latest_cursor, limit }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "cursor_not_stale" { after_cursor <= latest_cursor }
+            update {}
+            to Completed
+            emit AuthorizeStrictEventPoll { after_cursor: after_cursor, limit: limit }
+        }
+        transition PollEventsStrictDestroyed {
+            on input PollEventsStrict { after_cursor, latest_cursor, limit }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "cursor_not_stale" { after_cursor <= latest_cursor }
+            update {}
+            to Destroyed
+            emit AuthorizeStrictEventPoll { after_cursor: after_cursor, limit: limit }
+        }
+        transition PollEventsStrictStaleRunning {
+            on input PollEventsStrict { after_cursor, latest_cursor, limit }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "cursor_stale" { after_cursor > latest_cursor }
+            update {}
+            to Running
+            emit RejectStrictEventPoll { after_cursor: after_cursor, latest_cursor: latest_cursor }
+        }
+        transition PollEventsStrictStaleStopped {
+            on input PollEventsStrict { after_cursor, latest_cursor, limit }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "cursor_stale" { after_cursor > latest_cursor }
+            update {}
+            to Stopped
+            emit RejectStrictEventPoll { after_cursor: after_cursor, latest_cursor: latest_cursor }
+        }
+        transition PollEventsStrictStaleCompleted {
+            on input PollEventsStrict { after_cursor, latest_cursor, limit }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "cursor_stale" { after_cursor > latest_cursor }
+            update {}
+            to Completed
+            emit RejectStrictEventPoll { after_cursor: after_cursor, latest_cursor: latest_cursor }
+        }
+        transition PollEventsStrictStaleDestroyed {
+            on input PollEventsStrict { after_cursor, latest_cursor, limit }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "cursor_stale" { after_cursor > latest_cursor }
+            update {}
+            to Destroyed
+            emit RejectStrictEventPoll { after_cursor: after_cursor, latest_cursor: latest_cursor }
         }
 
         transition AuthorizeMobEventRouterMemberSubscriptionRunning {

@@ -10,7 +10,7 @@ pub mod sqlite;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 
 use crate::identifiers::LogicalRuntimeId;
-use crate::input_state::StoredInputState;
+use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
 use crate::runtime_state::RuntimeState;
 
 /// Errors from RuntimeStore operations.
@@ -149,7 +149,7 @@ pub trait RuntimeStore: Send + Sync {
         runtime_id: &LogicalRuntimeId,
         session_delta: Option<SessionDelta>,
         receipt: RunBoundaryReceipt,
-        input_updates: Vec<StoredInputState>,
+        input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError>;
 
@@ -177,7 +177,7 @@ pub trait RuntimeStore: Send + Sync {
     async fn persist_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
-        state: &StoredInputState,
+        state: &InputStatePersistenceRecord,
     ) -> Result<(), RuntimeStoreError>;
 
     /// Load a single input state.
@@ -202,7 +202,7 @@ pub trait RuntimeStore: Send + Sync {
         &self,
         runtime_id: &LogicalRuntimeId,
         commit: MachineLifecycleCommit,
-        input_states: &[StoredInputState],
+        input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError>;
 
     /// Persist a snapshot of the ops lifecycle registry state.

@@ -7901,7 +7901,10 @@ mod tests {
         runtime_store
             .persist_input_state(
                 &meerkat_runtime::LogicalRuntimeId::for_session(&target_session_id),
-                &active_input,
+                &meerkat_runtime::input_state::InputStatePersistenceRecord::from_generated_authority(
+                    active_input,
+                )
+                .expect("test input-state seed should pass generated persistence authority"),
             )
             .await
             .expect("persist conflicting active input state");

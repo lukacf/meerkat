@@ -1690,7 +1690,7 @@ mod tests {
 
     use super::*;
     use crate::identifiers::LogicalRuntimeId;
-    use crate::input_state::StoredInputState;
+    use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
     use crate::runtime_state::RuntimeState;
     use crate::store::{RuntimeStore, RuntimeStoreError, SessionDelta};
 
@@ -1852,7 +1852,7 @@ mod tests {
             _runtime_id: &LogicalRuntimeId,
             _session_delta: Option<SessionDelta>,
             _receipt: RunBoundaryReceipt,
-            _input_updates: Vec<StoredInputState>,
+            _input_updates: Vec<InputStatePersistenceRecord>,
             _session_store_key: Option<SessionId>,
         ) -> Result<(), RuntimeStoreError> {
             Err(RuntimeStoreError::Unsupported("atomic_apply".to_string()))
@@ -1890,7 +1890,7 @@ mod tests {
         async fn persist_input_state(
             &self,
             _runtime_id: &LogicalRuntimeId,
-            _state: &StoredInputState,
+            _state: &InputStatePersistenceRecord,
         ) -> Result<(), RuntimeStoreError> {
             Err(RuntimeStoreError::Unsupported(
                 "persist_input_state".to_string(),
@@ -1920,7 +1920,7 @@ mod tests {
             &self,
             _runtime_id: &LogicalRuntimeId,
             _commit: crate::store::MachineLifecycleCommit,
-            _input_states: &[StoredInputState],
+            _input_states: &[InputStatePersistenceRecord],
         ) -> Result<(), RuntimeStoreError> {
             Err(RuntimeStoreError::Unsupported(
                 "commit_machine_lifecycle".to_string(),

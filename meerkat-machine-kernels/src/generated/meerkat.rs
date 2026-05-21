@@ -7503,6 +7503,21 @@ pub mod inputs {
         pub abandon_reason: Option<InputAbandonReason>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeStoredInputStateSeed {
+        pub input_id: String,
+        pub phase: RecoveredInputObservedPhase,
+        pub terminal_kind: Option<InputTerminalKind>,
+        pub superseded_by: Option<String>,
+        pub aggregate_id: Option<String>,
+        pub abandon_reason: Option<InputAbandonReason>,
+        pub abandon_attempt_count: u64,
+        pub attempt_count: u64,
+        pub run_id: Option<String>,
+        pub boundary_sequence: Option<u64>,
+        pub admission_sequence: Option<u64>,
+        pub recovery_lane: Option<InputLane>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyRuntimeLifecycleState {
         pub state: RuntimeLifecycleObservedState,
     }
@@ -8278,6 +8293,7 @@ pub enum Input {
     ResolveInputPublicLifecycle(inputs::ResolveInputPublicLifecycle),
     ResolveInputPublicTerminalOutcome(inputs::ResolveInputPublicTerminalOutcome),
     ClassifyInputTerminality(inputs::ClassifyInputTerminality),
+    AuthorizeStoredInputStateSeed(inputs::AuthorizeStoredInputStateSeed),
     ClassifyRuntimeLifecycleState(inputs::ClassifyRuntimeLifecycleState),
     ClassifyRuntimeLifecycleDurability(inputs::ClassifyRuntimeLifecycleDurability),
     ClassifyRuntimeLoopQueueAdmission(inputs::ClassifyRuntimeLoopQueueAdmission),
@@ -8500,6 +8516,7 @@ impl Input {
                 InputKind::ResolveInputPublicTerminalOutcome
             }
             Self::ClassifyInputTerminality(_) => InputKind::ClassifyInputTerminality,
+            Self::AuthorizeStoredInputStateSeed(_) => InputKind::AuthorizeStoredInputStateSeed,
             Self::ClassifyRuntimeLifecycleState(_) => InputKind::ClassifyRuntimeLifecycleState,
             Self::ClassifyRuntimeLifecycleDurability(_) => {
                 InputKind::ClassifyRuntimeLifecycleDurability
@@ -8733,6 +8750,7 @@ pub enum InputKind {
     ResolveInputPublicLifecycle,
     ResolveInputPublicTerminalOutcome,
     ClassifyInputTerminality,
+    AuthorizeStoredInputStateSeed,
     ClassifyRuntimeLifecycleState,
     ClassifyRuntimeLifecycleDurability,
     ClassifyRuntimeLoopQueueAdmission,
@@ -9140,6 +9158,10 @@ pub mod effects {
     pub struct InputBehavioralTerminalityResolved {
         pub input_id: String,
         pub terminal: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StoredInputStateSeedAuthorized {
+        pub input_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeLifecycleStateClassified {
@@ -9552,6 +9574,7 @@ pub enum Effect {
     InputPublicLifecycleResolved(effects::InputPublicLifecycleResolved),
     InputPublicTerminalOutcomeResolved(effects::InputPublicTerminalOutcomeResolved),
     InputBehavioralTerminalityResolved(effects::InputBehavioralTerminalityResolved),
+    StoredInputStateSeedAuthorized(effects::StoredInputStateSeedAuthorized),
     RuntimeLifecycleStateClassified(effects::RuntimeLifecycleStateClassified),
     RuntimeLifecycleDurabilityClassified(effects::RuntimeLifecycleDurabilityClassified),
     RuntimeLoopQueueAdmissionClassified(effects::RuntimeLoopQueueAdmissionClassified),
@@ -9671,6 +9694,7 @@ pub enum EffectKind {
     InputPublicLifecycleResolved,
     InputPublicTerminalOutcomeResolved,
     InputBehavioralTerminalityResolved,
+    StoredInputStateSeedAuthorized,
     RuntimeLifecycleStateClassified,
     RuntimeLifecycleDurabilityClassified,
     RuntimeLoopQueueAdmissionClassified,
@@ -10080,6 +10104,7 @@ pub enum TransitionId {
     ClassifyInputTerminalitySupersededIdle,
     ClassifyInputTerminalityCoalescedIdle,
     ClassifyInputTerminalityAbandonedIdle,
+    AuthorizeStoredInputStateSeedIdle,
     ClassifyRuntimeLifecycleInitializingIdle,
     ClassifyRuntimeLifecycleIdleIdle,
     ClassifyRuntimeLifecycleAttachedIdle,

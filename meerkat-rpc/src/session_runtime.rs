@@ -59,6 +59,7 @@ use meerkat_core::{
     build_recovered_session,
 };
 use meerkat_core::{EventEnvelope, EventStream, InputId, RunId, StreamError};
+use meerkat_runtime::input_state::InputStatePersistenceRecord;
 use meerkat_runtime::{
     HydratedSessionLlmState, MeerkatMachine, ResolvedSessionLlmReconfigure, RuntimeDriverError,
     RuntimeState, SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus,
@@ -8387,7 +8388,7 @@ mod tests {
             runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
             session_delta: Option<meerkat_runtime::store::SessionDelta>,
             receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
-            input_updates: Vec<meerkat_runtime::input_state::StoredInputState>,
+            input_updates: Vec<InputStatePersistenceRecord>,
             session_store_key: Option<SessionId>,
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
             self.inner
@@ -8435,7 +8436,7 @@ mod tests {
         async fn persist_input_state(
             &self,
             runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-            state: &meerkat_runtime::input_state::StoredInputState,
+            state: &InputStatePersistenceRecord,
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
             self.inner.persist_input_state(runtime_id, state).await
         }
@@ -8462,7 +8463,7 @@ mod tests {
             &self,
             runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
             commit: meerkat_runtime::store::MachineLifecycleCommit,
-            input_states: &[meerkat_runtime::input_state::StoredInputState],
+            input_states: &[InputStatePersistenceRecord],
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
             if self.fail_lifecycle_once.swap(false, AtomicOrdering::AcqRel) {
                 return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(

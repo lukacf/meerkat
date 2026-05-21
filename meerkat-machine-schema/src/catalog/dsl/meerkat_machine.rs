@@ -2454,6 +2454,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 terminal_kind: Option<Enum<InputTerminalKind>>,
                 abandon_reason: Option<Enum<InputAbandonReason>>,
             },
+            AuthorizeStoredInputStateSeed {
+                input_id: String,
+                phase: Enum<RecoveredInputObservedPhase>,
+                terminal_kind: Option<Enum<InputTerminalKind>>,
+                superseded_by: Option<String>,
+                aggregate_id: Option<String>,
+                abandon_reason: Option<Enum<InputAbandonReason>>,
+                abandon_attempt_count: u64,
+                attempt_count: u64,
+                run_id: Option<String>,
+                boundary_sequence: Option<u64>,
+                admission_sequence: Option<u64>,
+                recovery_lane: Option<Enum<InputLane>>,
+            },
             ClassifyRuntimeLifecycleState {
                 state: Enum<RuntimeLifecycleObservedState>,
             },
@@ -2999,6 +3013,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 terminal_outcome: Option<Enum<InputPublicTerminalOutcome>>,
             },
             InputBehavioralTerminalityResolved { input_id: String, terminal: bool },
+            StoredInputStateSeedAuthorized { input_id: String },
             RuntimeLifecycleStateClassified {
                 state: Enum<RuntimeLifecycleObservedState>,
                 terminality: Enum<RuntimeLifecycleTerminality>,
@@ -3264,6 +3279,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InputPublicLifecycleResolved => local,
         disposition InputPublicTerminalOutcomeResolved => local,
         disposition InputBehavioralTerminalityResolved => local,
+        disposition StoredInputStateSeedAuthorized => local,
         disposition RuntimeLifecycleStateClassified => local,
         disposition RuntimeLifecycleDurabilityClassified => local,
         disposition RuntimeLoopQueueAdmissionClassified => local,
@@ -5923,6 +5939,86 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {}
             to Idle
             emit InputBehavioralTerminalityResolved { input_id: input_id, terminal: true }
+        }
+
+        // AuthorizeStoredInputStateSeed: generated persistence handoff for
+        // DSL-owned input seed facts at the store boundary. Stores may carry
+        // arbitrary shell metadata, but lifecycle/admission/recovery seed
+        // facts must pass through this typed authority before a new durable
+        // write is accepted.
+        transition AuthorizeStoredInputStateSeed {
+            per_phase [Idle]
+            on input AuthorizeStoredInputStateSeed {
+                input_id,
+                phase,
+                terminal_kind,
+                superseded_by,
+                aggregate_id,
+                abandon_reason,
+                abandon_attempt_count,
+                attempt_count,
+                run_id,
+                boundary_sequence,
+                admission_sequence,
+                recovery_lane
+            }
+            guard "stored_seed_terminal_payload_matches_phase" {
+                (
+                    phase == RecoveredInputObservedPhase::Consumed
+                    && terminal_kind == Some(InputTerminalKind::Consumed)
+                    && superseded_by == None
+                    && aggregate_id == None
+                    && abandon_reason == None
+                )
+                || (
+                    phase == RecoveredInputObservedPhase::Superseded
+                    && terminal_kind == Some(InputTerminalKind::Superseded)
+                    && superseded_by != None
+                    && aggregate_id == None
+                    && abandon_reason == None
+                )
+                || (
+                    phase == RecoveredInputObservedPhase::Coalesced
+                    && terminal_kind == Some(InputTerminalKind::Coalesced)
+                    && superseded_by == None
+                    && aggregate_id != None
+                    && abandon_reason == None
+                )
+                || (
+                    phase == RecoveredInputObservedPhase::Abandoned
+                    && terminal_kind == Some(InputTerminalKind::Abandoned)
+                    && superseded_by == None
+                    && aggregate_id == None
+                    && abandon_reason != None
+                )
+                || (
+                    phase != RecoveredInputObservedPhase::Consumed
+                    && phase != RecoveredInputObservedPhase::Superseded
+                    && phase != RecoveredInputObservedPhase::Coalesced
+                    && phase != RecoveredInputObservedPhase::Abandoned
+                    && terminal_kind == None
+                    && superseded_by == None
+                    && aggregate_id == None
+                    && abandon_reason == None
+                    && abandon_attempt_count == 0
+                )
+            }
+            guard "stored_seed_terminal_has_no_recovery_lane" {
+                (
+                    phase != RecoveredInputObservedPhase::Consumed
+                    && phase != RecoveredInputObservedPhase::Superseded
+                    && phase != RecoveredInputObservedPhase::Coalesced
+                    && phase != RecoveredInputObservedPhase::Abandoned
+                )
+                || recovery_lane == None
+            }
+            guard "stored_seed_max_attempts_reason_matches_count" {
+                abandon_reason != Some(InputAbandonReason::MaxAttemptsExhausted)
+                || abandon_attempt_count == attempt_count
+            }
+            update {}
+            to Idle
+            emit StoredInputStateSeedAuthorized { input_id: input_id }
         }
 
         // ClassifyRuntimeLifecycleState: generated lifecycle/admission fact

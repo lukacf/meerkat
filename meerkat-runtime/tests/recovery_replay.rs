@@ -13,7 +13,7 @@ use meerkat_runtime::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
 };
 use meerkat_runtime::input_state::{
-    InputLifecycleState, InputState, InputStateSeed, StoredInputState,
+    InputLifecycleState, InputState, InputStatePersistenceRecord, InputStateSeed, StoredInputState,
 };
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore};
 use meerkat_runtime::traits::RuntimeDriver;
@@ -84,6 +84,11 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
     }
 }
 
+fn persistable(stored: StoredInputState) -> InputStatePersistenceRecord {
+    InputStatePersistenceRecord::from_generated_authority(stored)
+        .expect("test input-state seed should pass generated persistence authority")
+}
+
 fn sorted_ids(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
     let mut ids = ids.into_iter().map(|id| id.to_string()).collect::<Vec<_>>();
     ids.sort();
@@ -102,11 +107,17 @@ async fn recovery_replay_red_ok_requeues_missing_boundary_contributors_through_p
     let store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
 
     store
-        .persist_input_state(&runtime_id, &applied_pending_state(&first, &run_id, 0))
+        .persist_input_state(
+            &runtime_id,
+            &persistable(applied_pending_state(&first, &run_id, 0)),
+        )
         .await
         .expect("persist first applied state");
     store
-        .persist_input_state(&runtime_id, &applied_pending_state(&second, &run_id, 0))
+        .persist_input_state(
+            &runtime_id,
+            &persistable(applied_pending_state(&second, &run_id, 0)),
+        )
         .await
         .expect("persist second applied state");
 

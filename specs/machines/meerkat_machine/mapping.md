@@ -1007,6 +1007,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyInputTerminalityAbandonedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `AuthorizeStoredInputStateSeedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`, `live_topology_and_supervision`
 - `ClassifyRuntimeLifecycleInitializingIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
@@ -3409,6 +3412,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `InputBehavioralTerminalityResolved`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `StoredInputStateSeedAuthorized`
+  - anchors: `meerkat_machine`
+  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `product_turn_streaming`, `model_routing_and_image_operation`
 - `RuntimeLifecycleStateClassified`
   - anchors: `meerkat_machine`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`

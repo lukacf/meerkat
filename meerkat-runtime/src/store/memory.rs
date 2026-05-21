@@ -19,7 +19,7 @@ use super::{
     SessionDelta,
 };
 use crate::identifiers::LogicalRuntimeId;
-use crate::input_state::StoredInputState;
+use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
 use crate::ops_lifecycle::PersistedOpsSnapshot;
 use crate::runtime_state::RuntimeState;
 
@@ -122,7 +122,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         session_delta: Option<SessionDelta>,
         receipt: RunBoundaryReceipt,
-        input_updates: Vec<StoredInputState>,
+        input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
@@ -156,7 +156,8 @@ impl RuntimeStore for InMemoryRuntimeStore {
 
         // Input states
         let states = inner.input_states.entry(rid).or_default();
-        for bundle in input_updates {
+        for record in input_updates {
+            let bundle = record.into_stored();
             states.insert(bundle.state.input_id.clone(), bundle);
         }
 
@@ -202,11 +203,12 @@ impl RuntimeStore for InMemoryRuntimeStore {
     async fn persist_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
-        state: &StoredInputState,
+        state: &InputStatePersistenceRecord,
     ) -> Result<(), RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
         let states = inner.input_states.entry(runtime_id.0.clone()).or_default();
-        states.insert(state.state.input_id.clone(), state.clone());
+        let bundle = state.as_stored();
+        states.insert(bundle.state.input_id.clone(), bundle.clone());
         Ok(())
     }
 
@@ -235,7 +237,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         &self,
         runtime_id: &LogicalRuntimeId,
         commit: MachineLifecycleCommit,
-        input_states: &[StoredInputState],
+        input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
         let rid = runtime_id.0.clone();
@@ -245,7 +247,8 @@ impl RuntimeStore for InMemoryRuntimeStore {
             .runtime_states
             .insert(rid.clone(), commit.runtime_state());
         let states = inner.input_states.entry(rid).or_default();
-        for bundle in input_states {
+        for record in input_states {
+            let bundle = record.as_stored();
             states.insert(bundle.state.input_id.clone(), bundle.clone());
         }
 
@@ -290,6 +293,10 @@ mod tests {
         }
     }
 
+    fn persistable(bundle: StoredInputState) -> InputStatePersistenceRecord {
+        InputStatePersistenceRecord::from_generated_authority(bundle).unwrap()
+    }
+
     #[tokio::test]
     async fn atomic_apply_roundtrip() {
         let store = InMemoryRuntimeStore::new();
@@ -307,7 +314,7 @@ mod tests {
                     session_snapshot: b"session-data".to_vec(),
                 }),
                 receipt.clone(),
-                vec![bundle],
+                vec![persistable(bundle)],
                 None,
             )
             .await
@@ -330,7 +337,10 @@ mod tests {
         let input_id = InputId::new();
         let bundle = StoredInputState::new_accepted(input_id.clone());
 
-        store.persist_input_state(&rid, &bundle).await.unwrap();
+        store
+            .persist_input_state(&rid, &persistable(bundle))
+            .await
+            .unwrap();
 
         let loaded = store.load_input_state(&rid, &input_id).await.unwrap();
         assert!(loaded.is_some());
@@ -368,7 +378,7 @@ mod tests {
                 &rid,
                 None,
                 make_receipt(RunId::new(), 0),
-                vec![bundle1],
+                vec![persistable(bundle1)],
                 None,
             )
             .await
@@ -382,7 +392,7 @@ mod tests {
                 &rid,
                 None,
                 make_receipt(RunId::new(), 1),
-                vec![bundle2],
+                vec![persistable(bundle2)],
                 None,
             )
             .await
@@ -480,7 +490,7 @@ mod tests {
                     session_snapshot: snapshot,
                 }),
                 receipt.clone(),
-                vec![StoredInputState::new_accepted(input_id)],
+                vec![persistable(StoredInputState::new_accepted(input_id))],
                 None,
             )
             .await
@@ -506,15 +516,24 @@ mod tests {
         let rid2 = LogicalRuntimeId::new("runtime-2");
 
         store
-            .persist_input_state(&rid1, &StoredInputState::new_accepted(InputId::new()))
+            .persist_input_state(
+                &rid1,
+                &persistable(StoredInputState::new_accepted(InputId::new())),
+            )
             .await
             .unwrap();
         store
-            .persist_input_state(&rid2, &StoredInputState::new_accepted(InputId::new()))
+            .persist_input_state(
+                &rid2,
+                &persistable(StoredInputState::new_accepted(InputId::new())),
+            )
             .await
             .unwrap();
         store
-            .persist_input_state(&rid2, &StoredInputState::new_accepted(InputId::new()))
+            .persist_input_state(
+                &rid2,
+                &persistable(StoredInputState::new_accepted(InputId::new())),
+            )
             .await
             .unwrap();
 

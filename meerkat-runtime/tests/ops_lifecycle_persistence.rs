@@ -457,7 +457,7 @@ impl RuntimeStore for FailingOpsLifecycleStore {
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         session_delta: Option<meerkat_runtime::SessionDelta>,
         receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
-        input_updates: Vec<meerkat_runtime::input_state::StoredInputState>,
+        input_updates: Vec<meerkat_runtime::input_state::InputStatePersistenceRecord>,
         session_store_key: Option<SessionId>,
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
         self.inner
@@ -505,7 +505,7 @@ impl RuntimeStore for FailingOpsLifecycleStore {
     async fn persist_input_state(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-        state: &meerkat_runtime::input_state::StoredInputState,
+        state: &meerkat_runtime::input_state::InputStatePersistenceRecord,
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
         self.inner.persist_input_state(runtime_id, state).await
     }
@@ -532,7 +532,7 @@ impl RuntimeStore for FailingOpsLifecycleStore {
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         commit: meerkat_runtime::store::MachineLifecycleCommit,
-        input_states: &[meerkat_runtime::input_state::StoredInputState],
+        input_states: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
         self.inner
             .commit_machine_lifecycle(runtime_id, commit, input_states)

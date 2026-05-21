@@ -336,6 +336,56 @@ pub(crate) fn input_phase_behavioral_terminality_via_authority(
     classify_input_behavioral_terminality(input_id, phase, terminal_outcome.as_ref())
 }
 
+/// Authorize DSL-owned input-state seed facts before they are written to a
+/// runtime store.
+pub fn authorize_stored_input_state_seed(
+    input_id: &InputId,
+    seed: &InputStateSeed,
+) -> Result<(), String> {
+    let input_key = input_id.to_string();
+    let (terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count) =
+        input_seed_terminal_parts(seed)?;
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::AuthorizeStoredInputStateSeed {
+            input_id: input_key.clone(),
+            phase: observed_input_phase(seed.phase),
+            terminal_kind,
+            superseded_by,
+            aggregate_id,
+            abandon_reason,
+            abandon_attempt_count,
+            attempt_count: u64::from(seed.attempt_count),
+            run_id: seed
+                .last_run_id
+                .as_ref()
+                .map(std::string::ToString::to_string),
+            boundary_sequence: seed.last_boundary_sequence,
+            admission_sequence: seed.admission_sequence,
+            recovery_lane: seed.recovery_lane.map(dsl::InputLane::from),
+        },
+    )
+    .map_err(|err| {
+        format!("MeerkatMachine rejected stored input-state seed for '{input_id}': {err}")
+    })?;
+
+    transition
+        .into_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::StoredInputStateSeedAuthorized { input_id }
+                if input_id == input_key =>
+            {
+                Some(())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!("MeerkatMachine emitted no stored input-state seed authority for '{input_id}'")
+        })
+}
+
 fn classify_input_behavioral_terminality(
     input_id: &InputId,
     phase: InputLifecycleState,
@@ -428,6 +478,61 @@ fn observed_input_phase(phase: InputLifecycleState) -> dsl::RecoveredInputObserv
         InputLifecycleState::Superseded => dsl::RecoveredInputObservedPhase::Superseded,
         InputLifecycleState::Coalesced => dsl::RecoveredInputObservedPhase::Coalesced,
         InputLifecycleState::Abandoned => dsl::RecoveredInputObservedPhase::Abandoned,
+    }
+}
+
+fn input_seed_terminal_parts(
+    seed: &InputStateSeed,
+) -> Result<
+    (
+        Option<dsl::InputTerminalKind>,
+        Option<String>,
+        Option<String>,
+        Option<dsl::InputAbandonReason>,
+        u64,
+    ),
+    String,
+> {
+    match seed.terminal_outcome.as_ref() {
+        None => Ok((None, None, None, None, 0)),
+        Some(InputTerminalOutcome::Consumed) => {
+            Ok((Some(dsl::InputTerminalKind::Consumed), None, None, None, 0))
+        }
+        Some(InputTerminalOutcome::Superseded { superseded_by }) => Ok((
+            Some(dsl::InputTerminalKind::Superseded),
+            Some(superseded_by.to_string()),
+            None,
+            None,
+            0,
+        )),
+        Some(InputTerminalOutcome::Coalesced { aggregate_id }) => Ok((
+            Some(dsl::InputTerminalKind::Coalesced),
+            None,
+            Some(aggregate_id.to_string()),
+            None,
+            0,
+        )),
+        Some(InputTerminalOutcome::Abandoned { reason }) => {
+            let abandon_attempt_count = match reason {
+                InputAbandonReason::MaxAttemptsExhausted { attempts } => {
+                    if seed.attempt_count != *attempts {
+                        return Err(format!(
+                            "stored input-state max-attempts terminal reason carries {attempts} attempts but seed carries {}",
+                            seed.attempt_count
+                        ));
+                    }
+                    u64::from(*attempts)
+                }
+                _ => u64::from(seed.attempt_count),
+            };
+            Ok((
+                Some(dsl::InputTerminalKind::Abandoned),
+                None,
+                None,
+                input_terminality_parts(seed.terminal_outcome.as_ref()).1,
+                abandon_attempt_count,
+            ))
+        }
     }
 }
 

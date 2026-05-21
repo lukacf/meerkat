@@ -11,7 +11,7 @@ mod inner {
     use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
     use crate::identifiers::LogicalRuntimeId;
-    use crate::input_state::StoredInputState;
+    use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
     use crate::runtime_state::RuntimeState;
     use crate::store::{
         AuthOAuthFlowSnapshotUpdate, MachineLifecycleCommit, RuntimeStore, RuntimeStoreError,
@@ -281,11 +281,15 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             runtime_id: &LogicalRuntimeId,
             session_delta: Option<SessionDelta>,
             receipt: RunBoundaryReceipt,
-            input_updates: Vec<StoredInputState>,
+            input_updates: Vec<InputStatePersistenceRecord>,
             session_store_key: Option<meerkat_core::types::SessionId>,
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
+            let input_updates = input_updates
+                .into_iter()
+                .map(InputStatePersistenceRecord::into_stored)
+                .collect::<Vec<_>>();
             tokio::task::spawn_blocking(move || {
                 let session_snapshot = session_delta
                     .as_ref()
@@ -419,11 +423,11 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         async fn persist_input_state(
             &self,
             runtime_id: &LogicalRuntimeId,
-            state: &StoredInputState,
+            state: &InputStatePersistenceRecord,
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            let state = state.clone();
+            let state = state.clone_stored();
             tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
@@ -496,12 +500,15 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             &self,
             runtime_id: &LogicalRuntimeId,
             commit: MachineLifecycleCommit,
-            input_states: &[StoredInputState],
+            input_states: &[InputStatePersistenceRecord],
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let runtime_state = commit.runtime_state();
-            let input_states = input_states.to_vec();
+            let input_states = input_states
+                .iter()
+                .map(InputStatePersistenceRecord::clone_stored)
+                .collect::<Vec<_>>();
             tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;

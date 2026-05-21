@@ -250,6 +250,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveInputPublicLifecycle`(input_id: String, phase: RecoveredInputObservedPhase)
 - `ResolveInputPublicTerminalOutcome`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `ClassifyInputTerminality`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
+- `AuthorizeStoredInputStateSeed`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, recovery_lane: Option<InputLane>)
 - `ClassifyRuntimeLifecycleState`(state: RuntimeLifecycleObservedState)
 - `ClassifyRuntimeLifecycleDurability`(state: RuntimeLifecycleObservedState)
 - `ClassifyRuntimeLoopQueueAdmission`(state: RuntimeLifecycleObservedState, current_run_bound: Bool)
@@ -462,6 +463,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InputPublicLifecycleResolved`(input_id: String, phase: InputPublicLifecycleState)
 - `InputPublicTerminalOutcomeResolved`(input_id: String, terminal_outcome: Option<InputPublicTerminalOutcome>)
 - `InputBehavioralTerminalityResolved`(input_id: String, terminal: Bool)
+- `StoredInputStateSeedAuthorized`(input_id: String)
 - `RuntimeLifecycleStateClassified`(state: RuntimeLifecycleObservedState, terminality: RuntimeLifecycleTerminality, input_admission: RuntimeInputAdmission, queue_admission: RuntimeQueueAdmission, prepare_admission: RuntimePrepareAdmission, ingress_admission: RuntimeIngressAdmission)
 - `RuntimeLifecycleDurabilityClassified`(state: RuntimeLifecycleObservedState, durable_state: RuntimeLifecycleObservedState)
 - `RuntimeLoopQueueAdmissionClassified`(state: RuntimeLifecycleObservedState, current_run_bound: Bool, queue_admission: RuntimeQueueAdmission, run_binding: RuntimeLoopRunBinding)
@@ -3418,6 +3420,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `abandoned_phase`
   - `abandoned_terminal`
 - Emits: `InputBehavioralTerminalityResolved`
+- To: `Idle`
+
+### `AuthorizeStoredInputStateSeedIdle`
+- From: `Idle`
+- On: `AuthorizeStoredInputStateSeed`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, recovery_lane)
+- Guards:
+  - `stored_seed_terminal_payload_matches_phase`
+  - `stored_seed_terminal_has_no_recovery_lane`
+  - `stored_seed_max_attempts_reason_matches_count`
+- Emits: `StoredInputStateSeedAuthorized`
 - To: `Idle`
 
 ### `ClassifyRuntimeLifecycleInitializingIdle`

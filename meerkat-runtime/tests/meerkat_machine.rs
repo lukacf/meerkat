@@ -18,7 +18,9 @@ use meerkat_core::lifecycle::{
     InputId, RunBoundaryReceipt, RunId, run_primitive::RunApplyBoundary,
 };
 use meerkat_core::types::SessionId;
-use meerkat_runtime::input_state::{InputAbandonReason, InputTerminalOutcome, StoredInputState};
+use meerkat_runtime::input_state::{
+    InputAbandonReason, InputStatePersistenceRecord, InputTerminalOutcome, StoredInputState,
+};
 use meerkat_runtime::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, LogicalRuntimeId,
     MeerkatMachine, PromptInput, RuntimeDriverError, RuntimeState, RuntimeStore, RuntimeStoreError,
@@ -238,7 +240,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         session_delta: Option<SessionDelta>,
         receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
-        input_updates: Vec<StoredInputState>,
+        input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError> {
         if self.fail_atomic_apply {
@@ -288,7 +290,7 @@ impl RuntimeStore for HarnessRuntimeStore {
     async fn persist_input_state(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-        state: &StoredInputState,
+        state: &InputStatePersistenceRecord,
     ) -> Result<(), RuntimeStoreError> {
         let call_index = self
             .persist_input_state_calls
@@ -332,7 +334,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         commit: meerkat_runtime::store::MachineLifecycleCommit,
-        input_states: &[StoredInputState],
+        input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
         let call_index = self
             .commit_machine_lifecycle_calls

@@ -17,7 +17,8 @@ use meerkat_runtime::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
 };
 use meerkat_runtime::input_state::{
-    InputLifecycleState, InputState, InputStateSeed, InputTerminalOutcome, StoredInputState,
+    InputLifecycleState, InputState, InputStatePersistenceRecord, InputStateSeed,
+    InputTerminalOutcome, StoredInputState,
 };
 use meerkat_runtime::runtime_state::RuntimeState;
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore, SessionDelta};
@@ -145,6 +146,11 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
     }
 }
 
+fn persistable(stored: StoredInputState) -> InputStatePersistenceRecord {
+    InputStatePersistenceRecord::from_generated_authority(stored)
+        .expect("test input-state seed should pass generated persistence authority")
+}
+
 fn sorted_id_strings(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
     let mut ids = ids.into_iter().map(|id| id.to_string()).collect::<Vec<_>>();
     ids.sort();
@@ -195,8 +201,8 @@ async fn recovery_store_contract_applies_machine_owned_receipts_across_supported
                 }),
                 receipt.clone(),
                 vec![
-                    applied_pending_state(&first, &run_id, 0),
-                    applied_pending_state(&second, &run_id, 0),
+                    persistable(applied_pending_state(&first, &run_id, 0)),
+                    persistable(applied_pending_state(&second, &run_id, 0)),
                 ],
                 None,
             )
@@ -289,7 +295,7 @@ async fn recovery_store_contract_applies_machine_owned_receipts_across_supported
                     message_count: 1,
                     sequence: 1,
                 },
-                vec![applied_pending_state(&second, &run_id, 1)],
+                vec![persistable(applied_pending_state(&second, &run_id, 1))],
                 None,
             )
             .await;
@@ -326,12 +332,18 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
 
         harness
             .store
-            .persist_input_state(&runtime_id, &applied_pending_state(&first, &run_id, 0))
+            .persist_input_state(
+                &runtime_id,
+                &persistable(applied_pending_state(&first, &run_id, 0)),
+            )
             .await
             .unwrap();
         harness
             .store
-            .persist_input_state(&runtime_id, &applied_pending_state(&second, &run_id, 0))
+            .persist_input_state(
+                &runtime_id,
+                &persistable(applied_pending_state(&second, &run_id, 0)),
+            )
             .await
             .unwrap();
 
@@ -478,8 +490,8 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
                 }),
                 receipt.clone(),
                 vec![
-                    applied_pending_state(&first, &run_id, 0),
-                    applied_pending_state(&second, &run_id, 0),
+                    persistable(applied_pending_state(&first, &run_id, 0)),
+                    persistable(applied_pending_state(&second, &run_id, 0)),
                 ],
                 None,
             )

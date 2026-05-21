@@ -2968,6 +2968,13 @@ mod recovery_tests {
         seed
     }
 
+    fn persistable(
+        bundle: crate::input_state::StoredInputState,
+    ) -> crate::input_state::InputStatePersistenceRecord {
+        crate::input_state::InputStatePersistenceRecord::from_generated_authority(bundle)
+            .expect("test input-state seed should pass generated persistence authority")
+    }
+
     #[test]
     fn recovered_durability_retention_is_generated() {
         let mut state = crate::input_state::InputState::new_accepted(InputId::new());
@@ -3176,7 +3183,7 @@ mod recovery_tests {
         let bundle = crate::input_state::StoredInputState { state, seed };
         let store = crate::store::memory::InMemoryRuntimeStore::new();
         store
-            .persist_input_state(&runtime_id, &bundle)
+            .persist_input_state(&runtime_id, &persistable(bundle))
             .await
             .expect("persist corrupt recovered input state");
 
@@ -3216,7 +3223,7 @@ mod recovery_tests {
         let bundle = crate::input_state::StoredInputState { state, seed };
         let store = crate::store::memory::InMemoryRuntimeStore::new();
         store
-            .persist_input_state(&runtime_id, &bundle)
+            .persist_input_state(&runtime_id, &persistable(bundle))
             .await
             .expect("persist corrupt recovered input state");
 
@@ -3241,7 +3248,7 @@ mod recovery_tests {
         let store = crate::store::memory::InMemoryRuntimeStore::new();
         let bundle = crate::input_state::StoredInputState::new_accepted(input_id.clone());
         store
-            .persist_input_state(&runtime_id, &bundle)
+            .persist_input_state(&runtime_id, &persistable(bundle))
             .await
             .expect("persist corrupt recovered input state");
 
@@ -3280,7 +3287,7 @@ mod recovery_tests {
         };
         let store = crate::store::memory::InMemoryRuntimeStore::new();
         store
-            .persist_input_state(&runtime_id, &bundle)
+            .persist_input_state(&runtime_id, &persistable(bundle))
             .await
             .expect("persist corrupt recovered input state");
 
@@ -3336,11 +3343,11 @@ mod recovery_tests {
         };
         let store = crate::store::memory::InMemoryRuntimeStore::new();
         store
-            .persist_input_state(&runtime_id, &second_bundle)
+            .persist_input_state(&runtime_id, &persistable(second_bundle))
             .await
             .expect("persist later input first");
         store
-            .persist_input_state(&runtime_id, &first_bundle)
+            .persist_input_state(&runtime_id, &persistable(first_bundle))
             .await
             .expect("persist earlier input second");
 

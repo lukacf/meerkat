@@ -54,7 +54,9 @@ use meerkat_core::{DeferredFirstTurnPhase, SessionDeferredTurnState};
 use meerkat_core::{InputId, RunId};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 #[cfg(test)]
-use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
+use meerkat_runtime::input_state::{
+    InputLifecycleState, InputStatePersistenceRecord, InputTerminalOutcome, StoredInputState,
+};
 use meerkat_runtime::store::SessionDelta;
 use meerkat_runtime::{
     MachineSessionControlAuthority, MeerkatMachine, RuntimeMode, RuntimeState, RuntimeStore,
@@ -4100,7 +4102,7 @@ mod tests {
             runtime_id: &LogicalRuntimeId,
             session_delta: Option<meerkat_runtime::store::SessionDelta>,
             receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
-            input_updates: Vec<StoredInputState>,
+            input_updates: Vec<InputStatePersistenceRecord>,
             session_store_key: Option<SessionId>,
         ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
             self.inner
@@ -4167,7 +4169,7 @@ mod tests {
         async fn persist_input_state(
             &self,
             runtime_id: &LogicalRuntimeId,
-            state: &StoredInputState,
+            state: &InputStatePersistenceRecord,
         ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
             self.inner.persist_input_state(runtime_id, state).await
         }
@@ -4192,7 +4194,7 @@ mod tests {
             &self,
             runtime_id: &LogicalRuntimeId,
             commit: meerkat_runtime::store::MachineLifecycleCommit,
-            input_states: &[StoredInputState],
+            input_states: &[InputStatePersistenceRecord],
         ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
             self.inner
                 .commit_machine_lifecycle(runtime_id, commit, input_states)
@@ -10299,6 +10301,11 @@ mod tests {
         );
     }
 
+    fn persistable_input_state(stored: StoredInputState) -> InputStatePersistenceRecord {
+        InputStatePersistenceRecord::from_generated_authority(stored)
+            .expect("test input-state seed should pass generated persistence authority")
+    }
+
     #[tokio::test]
     async fn test_runtime_input_updates_ignore_legacy_alias_load_error_after_canonical_states() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -10322,7 +10329,7 @@ mod tests {
             seed: meerkat_runtime::input_state::InputStateSeed::new_accepted(),
         };
         runtime_store
-            .persist_input_state(&canonical_runtime_id, &stored)
+            .persist_input_state(&canonical_runtime_id, &persistable_input_state(stored))
             .await
             .expect("test should seed canonical input state");
         runtime_store
@@ -10427,7 +10434,10 @@ mod tests {
             seed: meerkat_runtime::input_state::InputStateSeed::new_accepted(),
         };
         runtime_store
-            .persist_input_state(&canonical_runtime_id, &canonical_stored)
+            .persist_input_state(
+                &canonical_runtime_id,
+                &persistable_input_state(canonical_stored),
+            )
             .await
             .expect("test should seed canonical input state");
 
@@ -10438,10 +10448,10 @@ mod tests {
         runtime_store
             .persist_input_state(
                 &legacy_runtime_id,
-                &StoredInputState {
+                &persistable_input_state(StoredInputState {
                     state: legacy_state,
                     seed: meerkat_runtime::input_state::InputStateSeed::new_accepted(),
-                },
+                }),
             )
             .await
             .expect("test should seed newer stale legacy input state");

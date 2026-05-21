@@ -9,7 +9,9 @@ use chrono::Utc;
 use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::{InputId, RunId, run_receipt::RunBoundaryReceipt};
 use meerkat_core::types::{ContentBlock, ImageData, SessionId};
-use meerkat_runtime::input_state::{InputStateSeed, InputTerminalOutcome, StoredInputState};
+use meerkat_runtime::input_state::{
+    InputStatePersistenceRecord, InputStateSeed, InputTerminalOutcome, StoredInputState,
+};
 use meerkat_runtime::store::RuntimeStoreError;
 use meerkat_runtime::{
     InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputOrigin, InputState,
@@ -45,6 +47,11 @@ fn stored_accepted(mut state: InputState) -> StoredInputState {
     let mut seed = InputStateSeed::new_accepted();
     seed.recovery_lane = Some(meerkat_core::types::HandlingMode::Queue);
     StoredInputState { seed, state }
+}
+
+fn persistable(stored: StoredInputState) -> InputStatePersistenceRecord {
+    InputStatePersistenceRecord::from_generated_authority(stored)
+        .expect("test input-state seed should pass generated persistence authority")
 }
 
 struct FailPersistInputStore {
@@ -175,7 +182,7 @@ impl RuntimeStore for FailPersistInputStore {
         runtime_id: &LogicalRuntimeId,
         session_delta: Option<SessionDelta>,
         receipt: RunBoundaryReceipt,
-        input_updates: Vec<StoredInputState>,
+        input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError> {
         if self.fail_atomic_apply.swap(false, Ordering::SeqCst) {
@@ -232,7 +239,7 @@ impl RuntimeStore for FailPersistInputStore {
     async fn persist_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
-        state: &StoredInputState,
+        state: &InputStatePersistenceRecord,
     ) -> Result<(), RuntimeStoreError> {
         if self.fail_persist_input_state.swap(false, Ordering::SeqCst) {
             return Err(RuntimeStoreError::WriteFailed(
@@ -275,7 +282,7 @@ impl RuntimeStore for FailPersistInputStore {
         &self,
         runtime_id: &LogicalRuntimeId,
         commit: meerkat_runtime::store::MachineLifecycleCommit,
-        input_states: &[StoredInputState],
+        input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
         if self
             .fail_commit_machine_lifecycle
@@ -412,7 +419,7 @@ async fn recover_from_store() {
     state.persisted_input = Some(input.clone());
     state.durability = Some(InputDurability::Durable);
     store
-        .persist_input_state(&rid, &stored_accepted(state))
+        .persist_input_state(&rid, &persistable(stored_accepted(state)))
         .await
         .unwrap();
 
@@ -448,7 +455,10 @@ async fn recover_ignores_legacy_session_alias_input_states() {
     canonical_state.persisted_input = Some(canonical_input);
     canonical_state.durability = Some(InputDurability::Durable);
     store
-        .persist_input_state(&canonical_rid, &stored_accepted(canonical_state))
+        .persist_input_state(
+            &canonical_rid,
+            &persistable(stored_accepted(canonical_state)),
+        )
         .await
         .unwrap();
 
@@ -458,7 +468,7 @@ async fn recover_ignores_legacy_session_alias_input_states() {
     legacy_state.persisted_input = Some(legacy_input);
     legacy_state.durability = Some(InputDurability::Durable);
     store
-        .persist_input_state(&legacy_rid, &stored_accepted(legacy_state))
+        .persist_input_state(&legacy_rid, &persistable(stored_accepted(legacy_state)))
         .await
         .unwrap();
 
@@ -490,7 +500,7 @@ async fn recover_rebuilds_dedup_index() {
     state.durability = Some(InputDurability::Durable);
     state.persisted_input = Some(input);
     store
-        .persist_input_state(&rid, &stored_accepted(state))
+        .persist_input_state(&rid, &persistable(stored_accepted(state)))
         .await
         .unwrap();
 
@@ -520,7 +530,7 @@ async fn recover_discards_machine_classified_ephemeral_inputs() {
     let mut state = InputState::new_accepted(input_id.clone());
     state.durability = Some(InputDurability::Ephemeral);
     store
-        .persist_input_state(&rid, &stored_accepted(state))
+        .persist_input_state(&rid, &persistable(stored_accepted(state)))
         .await
         .unwrap();
 
@@ -639,7 +649,7 @@ async fn recovery_lifecycle_commit_failure_restores_recovered_projection() {
     state.persisted_input = Some(input);
     state.durability = Some(InputDurability::Durable);
     inner
-        .persist_input_state(&rid, &stored_accepted(state))
+        .persist_input_state(&rid, &persistable(stored_accepted(state)))
         .await
         .unwrap();
 
@@ -688,7 +698,7 @@ async fn recovery_rejecting_later_row_restores_partial_recovered_projection() {
     valid_state.persisted_input = Some(valid_input);
     valid_state.durability = Some(InputDurability::Durable);
     store
-        .persist_input_state(&rid, &stored_accepted(valid_state))
+        .persist_input_state(&rid, &persistable(stored_accepted(valid_state)))
         .await
         .unwrap();
 
@@ -700,10 +710,10 @@ async fn recovery_rejecting_later_row_restores_partial_recovered_projection() {
     store
         .persist_input_state(
             &rid,
-            &StoredInputState {
+            &persistable(StoredInputState {
                 state: invalid_state,
                 seed: InputStateSeed::new_accepted(),
-            },
+            }),
         )
         .await
         .unwrap();
@@ -749,7 +759,7 @@ async fn recover_allows_legacy_unstamped_terminal_rows() {
     store
         .persist_input_state(
             &rid,
-            &StoredInputState {
+            &persistable(StoredInputState {
                 state,
                 seed: InputStateSeed {
                     phase: InputLifecycleState::Consumed,
@@ -760,7 +770,7 @@ async fn recover_allows_legacy_unstamped_terminal_rows() {
                     admission_sequence: None,
                     recovery_lane: None,
                 },
-            },
+            }),
         )
         .await
         .unwrap();
@@ -829,7 +839,10 @@ async fn recover_consumes_committed_applied_pending_inputs() {
             recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
         },
     };
-    store.persist_input_state(&rid, &stored).await.unwrap();
+    store
+        .persist_input_state(&rid, &persistable(stored.clone()))
+        .await
+        .unwrap();
     store
         .atomic_apply(
             &rid,
@@ -842,7 +855,7 @@ async fn recover_consumes_committed_applied_pending_inputs() {
                 message_count: 1,
                 sequence: 0,
             },
-            vec![stored.clone()],
+            vec![persistable(stored.clone())],
             None,
         )
         .await
@@ -914,7 +927,7 @@ async fn recover_duplicate_legacy_input_row_keeps_canonical_boundary_receipt() {
                 message_count: 1,
                 sequence: 0,
             },
-            vec![canonical_stored.clone()],
+            vec![persistable(canonical_stored.clone())],
             None,
         )
         .await
@@ -927,7 +940,7 @@ async fn recover_duplicate_legacy_input_row_keeps_canonical_boundary_receipt() {
         seed: canonical_stored.seed.clone(),
     };
     store
-        .persist_input_state(&legacy_rid, &legacy_stored)
+        .persist_input_state(&legacy_rid, &persistable(legacy_stored))
         .await
         .unwrap();
 
@@ -989,7 +1002,7 @@ async fn recover_prefers_canonical_duplicate_over_newer_stale_legacy_row() {
                 message_count: 1,
                 sequence: 0,
             },
-            vec![canonical_stored.clone()],
+            vec![persistable(canonical_stored.clone())],
             None,
         )
         .await
@@ -998,7 +1011,7 @@ async fn recover_prefers_canonical_duplicate_over_newer_stale_legacy_row() {
     let mut legacy_state = canonical_state;
     legacy_state.updated_at = canonical_stored.state.updated_at + chrono::Duration::milliseconds(1);
     store
-        .persist_input_state(&legacy_rid, &stored_accepted(legacy_state))
+        .persist_input_state(&legacy_rid, &persistable(stored_accepted(legacy_state)))
         .await
         .unwrap();
 
@@ -1037,7 +1050,7 @@ async fn recover_ignores_legacy_boundary_receipt_load_error_after_canonical_miss
     inner
         .persist_input_state(
             &canonical_rid,
-            &StoredInputState {
+            &persistable(StoredInputState {
                 state,
                 seed: InputStateSeed {
                     phase: InputLifecycleState::AppliedPendingConsumption,
@@ -1048,7 +1061,7 @@ async fn recover_ignores_legacy_boundary_receipt_load_error_after_canonical_miss
                     admission_sequence: None,
                     recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
                 },
-            },
+            }),
         )
         .await
         .unwrap();
@@ -1099,7 +1112,7 @@ async fn recover_treats_canonical_boundary_receipt_miss_as_authoritative() {
     store
         .persist_input_state(
             &canonical_rid,
-            &StoredInputState {
+            &persistable(StoredInputState {
                 state,
                 seed: InputStateSeed {
                     phase: InputLifecycleState::AppliedPendingConsumption,
@@ -1110,7 +1123,7 @@ async fn recover_treats_canonical_boundary_receipt_miss_as_authoritative() {
                     admission_sequence: None,
                     recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
                 },
-            },
+            }),
         )
         .await
         .unwrap();
@@ -1164,7 +1177,7 @@ async fn recover_ignores_legacy_input_state_load_error_after_canonical_states() 
     state.persisted_input = Some(input);
     state.durability = Some(InputDurability::Durable);
     inner
-        .persist_input_state(&canonical_rid, &stored_accepted(state))
+        .persist_input_state(&canonical_rid, &persistable(stored_accepted(state)))
         .await
         .unwrap();
 
@@ -1266,7 +1279,7 @@ async fn driver_persistent_recovery_fails_closed_for_terminal_projection_with_ac
     state.persisted_input = Some(input);
     state.durability = Some(InputDurability::Durable);
     store
-        .persist_input_state(&rid, &stored_accepted(state))
+        .persist_input_state(&rid, &persistable(stored_accepted(state)))
         .await
         .unwrap();
     store.seed_runtime_state_projection(rid.clone(), RuntimeState::Destroyed);

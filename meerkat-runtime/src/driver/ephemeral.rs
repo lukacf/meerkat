@@ -31,8 +31,9 @@ use crate::ingress_types::{
 use crate::input::Input;
 use crate::input_ledger::InputLedger;
 use crate::input_state::{
-    InputAbandonReason, InputLifecycleState, InputState, InputStateHistoryEntry, InputStateSeed,
-    InputTerminalOutcome, MAX_STAGE_ATTEMPTS, PolicySnapshot, StoredInputState,
+    InputAbandonReason, InputLifecycleState, InputState, InputStateHistoryEntry,
+    InputStatePersistenceRecord, InputStateSeed, InputTerminalOutcome, MAX_STAGE_ATTEMPTS,
+    PolicySnapshot, StoredInputState,
 };
 use crate::meerkat_machine::dsl as mm_dsl;
 use crate::policy::PolicyDecision;
@@ -1680,6 +1681,31 @@ impl EphemeralRuntimeDriver {
                 Ok(StoredInputState { state, seed })
             })
             .collect()
+    }
+
+    /// Snapshot of every ledger entry paired with generated persistence
+    /// authority for the DSL-owned seed facts.
+    pub fn authorized_stored_input_states_snapshot(
+        &self,
+    ) -> Result<Vec<InputStatePersistenceRecord>, RuntimeDriverError> {
+        self.stored_input_states_snapshot()?
+            .into_iter()
+            .map(|bundle| {
+                InputStatePersistenceRecord::from_generated_authority(bundle)
+                    .map_err(RuntimeDriverError::Internal)
+            })
+            .collect()
+    }
+
+    /// Store-write record for one input's generated seed snapshot.
+    pub fn authorized_stored_input_state(
+        &self,
+        input_id: &InputId,
+    ) -> Result<Option<InputStatePersistenceRecord>, RuntimeDriverError> {
+        self.stored_input_state(input_id)
+            .map(InputStatePersistenceRecord::from_generated_authority)
+            .transpose()
+            .map_err(RuntimeDriverError::Internal)
     }
     /// Clear the physical queue projections without touching canonical ingress
     /// truth. Used by recovery contract tests to simulate projection loss.

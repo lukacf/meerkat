@@ -171,6 +171,48 @@ impl StoredInputState {
     }
 }
 
+/// Store-write wrapper for an input-state bundle whose DSL-owned seed facts
+/// have passed generated MeerkatMachine authority.
+#[derive(Debug, Clone)]
+pub struct InputStatePersistenceRecord {
+    bundle: StoredInputState,
+}
+
+impl InputStatePersistenceRecord {
+    /// Authorize a store-bound input-state bundle through generated
+    /// MeerkatMachine seed persistence authority.
+    pub fn from_generated_authority(bundle: StoredInputState) -> Result<Self, String> {
+        crate::meerkat_machine::authorize_stored_input_state_seed(
+            &bundle.state.input_id,
+            &bundle.seed,
+        )?;
+        Ok(Self { bundle })
+    }
+
+    /// Raw bundle approved for durable persistence.
+    pub fn as_stored(&self) -> &StoredInputState {
+        &self.bundle
+    }
+
+    /// Clone the approved raw bundle.
+    pub fn clone_stored(&self) -> StoredInputState {
+        self.bundle.clone()
+    }
+
+    /// Consume the approved record into its raw bundle.
+    pub fn into_stored(self) -> StoredInputState {
+        self.bundle
+    }
+}
+
+impl TryFrom<StoredInputState> for InputStatePersistenceRecord {
+    type Error = String;
+
+    fn try_from(bundle: StoredInputState) -> Result<Self, Self::Error> {
+        Self::from_generated_authority(bundle)
+    }
+}
+
 /// Per-input shell data. Plain fields, no hidden state machine.
 ///
 /// All DSL-owned lifecycle fields (`phase`, `last_run_id`,

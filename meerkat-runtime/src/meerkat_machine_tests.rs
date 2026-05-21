@@ -3350,7 +3350,7 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
             runtime_id: &LogicalRuntimeId,
             session_delta: Option<crate::store::SessionDelta>,
             receipt: RunBoundaryReceipt,
-            input_updates: Vec<crate::input_state::StoredInputState>,
+            input_updates: Vec<crate::input_state::InputStatePersistenceRecord>,
             session_store_key: Option<SessionId>,
         ) -> Result<(), crate::store::RuntimeStoreError> {
             self.inner
@@ -3393,7 +3393,7 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
         async fn persist_input_state(
             &self,
             runtime_id: &LogicalRuntimeId,
-            state: &crate::input_state::StoredInputState,
+            state: &crate::input_state::InputStatePersistenceRecord,
         ) -> Result<(), crate::store::RuntimeStoreError> {
             self.inner.persist_input_state(runtime_id, state).await
         }
@@ -3418,7 +3418,7 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
             &self,
             runtime_id: &LogicalRuntimeId,
             commit: crate::store::MachineLifecycleCommit,
-            input_states: &[crate::input_state::StoredInputState],
+            input_states: &[crate::input_state::InputStatePersistenceRecord],
         ) -> Result<(), crate::store::RuntimeStoreError> {
             self.inner
                 .commit_machine_lifecycle(runtime_id, commit, input_states)
@@ -14501,7 +14501,7 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         runtime_id: &LogicalRuntimeId,
         session_delta: Option<crate::store::SessionDelta>,
         receipt: RunBoundaryReceipt,
-        input_updates: Vec<crate::input_state::StoredInputState>,
+        input_updates: Vec<crate::input_state::InputStatePersistenceRecord>,
         session_store_key: Option<SessionId>,
     ) -> Result<(), crate::store::RuntimeStoreError> {
         if self.fail_atomic_apply.swap(false, Ordering::SeqCst) {
@@ -14548,7 +14548,7 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
     async fn persist_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
-        state: &crate::input_state::StoredInputState,
+        state: &crate::input_state::InputStatePersistenceRecord,
     ) -> Result<(), crate::store::RuntimeStoreError> {
         self.inner.persist_input_state(runtime_id, state).await
     }
@@ -14572,7 +14572,7 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         &self,
         runtime_id: &LogicalRuntimeId,
         commit: crate::store::MachineLifecycleCommit,
-        input_states: &[crate::input_state::StoredInputState],
+        input_states: &[crate::input_state::InputStatePersistenceRecord],
     ) -> Result<(), crate::store::RuntimeStoreError> {
         self.commit_machine_lifecycle_calls
             .fetch_add(1, Ordering::SeqCst);

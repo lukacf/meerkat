@@ -13,7 +13,10 @@ use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 use crate::accept::AcceptOutcome;
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::{Input, externalize_input_images};
-use crate::input_state::{InputAbandonReason, InputLifecycleState, InputState, StoredInputState};
+use crate::input_state::{
+    InputAbandonReason, InputLifecycleState, InputState, InputStatePersistenceRecord,
+    StoredInputState,
+};
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
 use crate::store::{MachineLifecycleCommit, RuntimeStore};
@@ -121,7 +124,7 @@ impl PersistentRuntimeDriver {
         target_state: RuntimeState,
         context: &str,
     ) -> Result<(), RuntimeDriverError> {
-        let input_states = self.inner.stored_input_states_snapshot()?;
+        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(
@@ -374,8 +377,10 @@ impl PersistentRuntimeDriver {
     }
 
     async fn persist_state(&self, state: &StoredInputState) -> Result<(), RuntimeDriverError> {
+        let state = InputStatePersistenceRecord::from_generated_authority(state.clone())
+            .map_err(RuntimeDriverError::Internal)?;
         self.store
-            .persist_input_state(&self.runtime_id, state)
+            .persist_input_state(&self.runtime_id, &state)
             .await
             .map_err(|e| RuntimeDriverError::Internal(e.to_string()))
     }
@@ -392,7 +397,7 @@ impl PersistentRuntimeDriver {
                 return Err(err);
             }
         };
-        let input_states = self.inner.stored_input_states_snapshot()?;
+        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
         let target_state = self.runtime_state_for_persistence()?;
         if let Err(err) = self
             .store
@@ -424,7 +429,7 @@ impl PersistentRuntimeDriver {
                 return Err(err);
             }
         };
-        let input_states = self.inner.stored_input_states_snapshot()?;
+        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
         let target_state = self.runtime_state_for_persistence()?;
         if let Err(err) = self
             .store
@@ -567,7 +572,7 @@ impl PersistentRuntimeDriver {
             self.inner.restore_rollback_snapshot(checkpoint);
             return Err(err);
         }
-        let input_updates = match self.inner.stored_input_states_snapshot() {
+        let input_updates = match self.inner.authorized_stored_input_states_snapshot() {
             Ok(input_updates) => input_updates,
             Err(err) => {
                 self.inner.restore_rollback_snapshot(checkpoint);
@@ -607,7 +612,7 @@ impl PersistentRuntimeDriver {
         receipt: &RunBoundaryReceipt,
         session_snapshot: Option<&Vec<u8>>,
     ) -> Result<(), RuntimeDriverError> {
-        let input_updates = self.inner.stored_input_states_snapshot()?;
+        let input_updates = self.inner.authorized_stored_input_states_snapshot()?;
         self.store
             .atomic_apply(
                 &self.runtime_id,
@@ -650,7 +655,7 @@ impl PersistentRuntimeDriver {
             failure_cause = ?failure_cause,
             "persistent driver realized machine-owned failed-run replay"
         );
-        let input_states = self.inner.stored_input_states_snapshot()?;
+        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(
@@ -681,7 +686,7 @@ impl PersistentRuntimeDriver {
             contributors = contributing_input_ids.len(),
             "persistent driver realized machine-owned cancelled run"
         );
-        let input_states = self.inner.stored_input_states_snapshot()?;
+        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(
@@ -724,7 +729,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         )
         .await?;
 
-        let input_states = staged.stored_input_states_snapshot()?;
+        let input_states = staged.authorized_stored_input_states_snapshot()?;
         let recovered_runtime_state = Self::runtime_state_for_persistence_from_inner(&staged)?;
         self.store
             .commit_machine_lifecycle(

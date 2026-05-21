@@ -1173,53 +1173,6 @@ impl AuthLeaseTransition {
     }
 }
 
-/// Opaque durable AuthMachine lifecycle publication recovered from the
-/// generated durable marker contract.
-///
-/// Callers can observe the fields for validation/projection, but cannot
-/// construct one from raw scalars. Restore callers must therefore come through
-/// the generated marker decoder instead of selecting lifecycle facts directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthLeaseDurableRestorePublication {
-    phase: AuthLeasePhase,
-    expires_at: u64,
-    generation: u64,
-    credential_published_at_millis: u64,
-}
-
-impl AuthLeaseDurableRestorePublication {
-    pub fn phase(&self) -> AuthLeasePhase {
-        self.phase
-    }
-
-    pub fn expires_at(&self) -> u64 {
-        self.expires_at
-    }
-
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    pub fn credential_published_at_millis(&self) -> u64 {
-        self.credential_published_at_millis
-    }
-
-    #[cfg_attr(not(meerkat_internal_generated_authority_bridge), allow(dead_code))]
-    pub(crate) fn from_generated_durable_marker_contract(
-        phase: AuthLeasePhase,
-        expires_at: u64,
-        generation: u64,
-        credential_published_at_millis: u64,
-    ) -> Self {
-        Self {
-            phase,
-            expires_at,
-            generation,
-            credential_published_at_millis,
-        }
-    }
-}
-
 /// Auth lease lifecycle handle certified by the generated AuthMachine
 /// publication authority.
 ///
@@ -1471,7 +1424,7 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
     fn restore_published_credential_lifecycle(
         &self,
         lease_key: &LeaseKey,
-        publication: &AuthLeaseDurableRestorePublication,
+        publication: &crate::generated::auth_lease_durable_lifecycle_marker::AuthLeaseDurableRestorePublication,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
         let _ = (lease_key, publication);
         Err(DslTransitionError::new(

@@ -23,9 +23,10 @@ use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::AuthBindingRef;
 use meerkat_core::RefreshFailureObservation;
+use meerkat_core::generated::auth_lease_durable_lifecycle_marker::AuthLeaseDurableRestorePublication;
 use meerkat_core::handles::{
-    AuthLeaseDurableRestorePublication, AuthLeaseHandle, AuthLeasePhase, AuthLeaseRestoreSnapshot,
-    AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError, LeaseKey,
+    AuthLeaseHandle, AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot,
+    AuthLeaseTransition, DslTransitionError, LeaseKey,
 };
 use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
 

@@ -1681,6 +1681,15 @@ pub enum RpcEventStreamTerminalReason {
     ExplicitClose,
 }
 
+/// Typed public error code for RPC event-stream terminal notifications. The
+/// RPC surface may only project this value from a generated
+/// `*EventStreamTerminalResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RpcEventStreamTerminalErrorCode {
+    #[default]
+    StreamQueueOverflow,
+}
+
 /// Typed public status class for `live/status` after the live host has
 /// observed the adapter transport state. RPC/SDK surfaces may only project
 /// these values from generated `LiveChannelStatusResolved` effects.

@@ -453,24 +453,28 @@ impl NotificationSink {
     }
 
     /// Emit a machine-authorized terminal notification for a session stream.
-    async fn emit_session_stream_end(
-        &self,
-        stream_id: &Uuid,
-        session_id: &SessionId,
-        outcome: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason,
-        detail: Option<&str>,
-    ) {
+    async fn emit_session_stream_end(&self, terminal: &SessionStreamTerminalAuthority) {
         let mut params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
-            "session_id": session_id.to_string(),
+            "stream_id": terminal.stream_id.as_str(),
+            "session_id": terminal.session_id.as_str(),
             "ended": true,
-            "outcome": rpc_event_stream_terminal_reason_wire(outcome),
+            "outcome": rpc_event_stream_terminal_reason_wire(terminal.reason),
         });
-        if let Some(detail) = detail {
-            params["error"] = serde_json::json!({
-                "code": "stream_queue_overflow",
-                "message": detail,
-            });
+        match (terminal.error_code, terminal.detail.as_deref()) {
+            (Some(error_code), Some(detail)) => {
+                params["error"] = serde_json::json!({
+                    "code": rpc_event_stream_terminal_error_code_wire(error_code),
+                    "message": detail,
+                });
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                tracing::warn!(
+                    stream_id = %terminal.stream_id,
+                    "generated session event stream terminal effect had inconsistent error fields"
+                );
+                return;
+            }
+            (None, None) => {}
         }
         let notification = RpcNotification::new("session/stream_end", params);
         let _ = self.tx.send(notification).await;
@@ -501,22 +505,27 @@ impl NotificationSink {
     }
 
     #[cfg(feature = "mob")]
-    async fn emit_mob_stream_end(
-        &self,
-        stream_id: &Uuid,
-        outcome: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason,
-        detail: Option<&str>,
-    ) {
+    async fn emit_mob_stream_end(&self, terminal: &MobStreamTerminalAuthority) {
         let mut params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
+            "stream_id": terminal.stream_id.as_str(),
             "ended": true,
-            "outcome": rpc_event_stream_terminal_reason_wire(outcome),
+            "outcome": rpc_event_stream_terminal_reason_wire(terminal.reason),
         });
-        if let Some(detail) = detail {
-            params["error"] = serde_json::json!({
-                "code": "stream_queue_overflow",
-                "message": detail,
-            });
+        match (terminal.error_code, terminal.detail.as_deref()) {
+            (Some(error_code), Some(detail)) => {
+                params["error"] = serde_json::json!({
+                    "code": rpc_event_stream_terminal_error_code_wire(error_code),
+                    "message": detail,
+                });
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                tracing::warn!(
+                    stream_id = %terminal.stream_id,
+                    "generated mob event stream terminal effect had inconsistent error fields"
+                );
+                return;
+            }
+            (None, None) => {}
         }
         let notification = RpcNotification::new("mob/stream_end", params);
         let _ = self.tx.send(notification).await;
@@ -553,8 +562,10 @@ struct SessionStreamOpenAuthority {
 
 #[derive(Debug, Clone)]
 struct SessionStreamTerminalAuthority {
+    stream_id: String,
     session_id: String,
     reason: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason,
+    error_code: Option<meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode>,
     detail: Option<String>,
 }
 
@@ -572,7 +583,9 @@ struct MobStreamOpenAuthority {
 
 #[derive(Debug, Clone)]
 struct MobStreamTerminalAuthority {
+    stream_id: String,
     reason: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason,
+    error_code: Option<meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode>,
     detail: Option<String>,
 }
 
@@ -603,6 +616,16 @@ fn rpc_event_stream_terminal_reason_wire(
         }
         meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::ExplicitClose => {
             "explicit_close"
+        }
+    }
+}
+
+fn rpc_event_stream_terminal_error_code_wire(
+    code: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode,
+) -> &'static str {
+    match code {
+        meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode::StreamQueueOverflow => {
+            "stream_queue_overflow"
         }
     }
 }
@@ -688,6 +711,7 @@ async fn record_session_stream_terminal_authority(
     authority: &RpcStreamAuthority,
     stream_id: &Uuid,
     reason: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason,
+    error_code: Option<meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode>,
     detail: Option<String>,
 ) -> Result<SessionStreamTerminalAuthority, String> {
     let stream_id = stream_id.to_string();
@@ -697,6 +721,7 @@ async fn record_session_stream_terminal_authority(
         meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RecordSessionEventStreamTerminated {
             stream_id: stream_id.clone(),
             reason,
+            error_code,
             detail: detail.clone(),
         },
     )
@@ -710,12 +735,17 @@ async fn record_session_stream_terminal_authority(
                 stream_id: effect_stream_id,
                 session_id,
                 reason: effect_reason,
+                error_code: effect_error_code,
                 detail: effect_detail,
                 ..
-            } if *effect_stream_id == stream_id && *effect_reason == reason => {
+            } if *effect_stream_id == stream_id
+                && *effect_reason == reason
+                && *effect_error_code == error_code => {
                 Some(SessionStreamTerminalAuthority {
+                    stream_id: effect_stream_id.clone(),
                     session_id: session_id.clone(),
                     reason: *effect_reason,
+                    error_code: *effect_error_code,
                     detail: effect_detail.clone(),
                 })
             }
@@ -734,11 +764,17 @@ async fn emit_authorized_session_stream_terminal(
     stream_authority: &RpcStreamAuthority,
     stream_id: Uuid,
     reason: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason,
+    error_code: Option<meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode>,
     detail: Option<String>,
 ) {
-    let terminal =
-        record_session_stream_terminal_authority(stream_authority, &stream_id, reason, detail)
-            .await;
+    let terminal = record_session_stream_terminal_authority(
+        stream_authority,
+        &stream_id,
+        reason,
+        error_code,
+        detail,
+    )
+    .await;
     active_session_streams.lock().await.remove(&stream_id);
     let terminal = match terminal {
         Ok(terminal) => terminal,
@@ -750,25 +786,7 @@ async fn emit_authorized_session_stream_terminal(
             return;
         }
     };
-    let terminal_session_id = match SessionId::parse(&terminal.session_id) {
-        Ok(session_id) => session_id,
-        Err(error) => {
-            tracing::warn!(
-                stream_id = %stream_id,
-                session_id = %terminal.session_id,
-                "session event stream authority emitted invalid session id: {error}"
-            );
-            return;
-        }
-    };
-    notification_sink
-        .emit_session_stream_end(
-            &stream_id,
-            &terminal_session_id,
-            terminal.reason,
-            terminal.detail.as_deref(),
-        )
-        .await;
+    notification_sink.emit_session_stream_end(&terminal).await;
 }
 
 async fn resolve_session_stream_close_authority(
@@ -795,17 +813,20 @@ async fn resolve_session_stream_close_authority(
         _ => None,
     });
     let terminal = transition.effects().iter().find_map(|effect| match effect {
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineEffect::SessionEventStreamTerminalResolved {
-            stream_id: effect_stream_id,
-            session_id,
-            reason,
-            detail,
-            ..
-        } if *effect_stream_id == stream_id => Some(SessionStreamTerminalAuthority {
-            session_id: session_id.clone(),
-            reason: *reason,
-            detail: detail.clone(),
-        }),
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineEffect::SessionEventStreamTerminalResolved {
+                stream_id: effect_stream_id,
+                session_id,
+                reason,
+                error_code,
+                detail,
+                ..
+            } if *effect_stream_id == stream_id => Some(SessionStreamTerminalAuthority {
+                stream_id: effect_stream_id.clone(),
+                session_id: session_id.clone(),
+                reason: *reason,
+                error_code: *error_code,
+                detail: detail.clone(),
+            }),
         _ => None,
     });
 
@@ -858,6 +879,7 @@ async fn record_mob_stream_terminal_authority(
     authority: &RpcStreamAuthority,
     stream_id: &Uuid,
     reason: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason,
+    error_code: Option<meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode>,
     detail: Option<String>,
 ) -> Result<MobStreamTerminalAuthority, String> {
     let stream_id = stream_id.to_string();
@@ -867,6 +889,7 @@ async fn record_mob_stream_terminal_authority(
         meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RecordMobEventStreamTerminated {
             stream_id: stream_id.clone(),
             reason,
+            error_code,
             detail: detail.clone(),
         },
     )
@@ -879,11 +902,16 @@ async fn record_mob_stream_terminal_authority(
             meerkat_runtime::meerkat_machine::dsl::MeerkatMachineEffect::MobEventStreamTerminalResolved {
                 stream_id: effect_stream_id,
                 reason: effect_reason,
+                error_code: effect_error_code,
                 detail: effect_detail,
                 ..
-            } if *effect_stream_id == stream_id && *effect_reason == reason => {
+            } if *effect_stream_id == stream_id
+                && *effect_reason == reason
+                && *effect_error_code == error_code => {
                 Some(MobStreamTerminalAuthority {
+                    stream_id: effect_stream_id.clone(),
                     reason: *effect_reason,
+                    error_code: *effect_error_code,
                     detail: effect_detail.clone(),
                 })
             }
@@ -902,10 +930,17 @@ async fn emit_authorized_mob_stream_terminal(
     stream_authority: &RpcStreamAuthority,
     stream_id: Uuid,
     reason: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason,
+    error_code: Option<meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode>,
     detail: Option<String>,
 ) {
-    let terminal =
-        record_mob_stream_terminal_authority(stream_authority, &stream_id, reason, detail).await;
+    let terminal = record_mob_stream_terminal_authority(
+        stream_authority,
+        &stream_id,
+        reason,
+        error_code,
+        detail,
+    )
+    .await;
     active_mob_streams.lock().await.remove(&stream_id);
     let terminal = match terminal {
         Ok(terminal) => terminal,
@@ -917,9 +952,7 @@ async fn emit_authorized_mob_stream_terminal(
             return;
         }
     };
-    notification_sink
-        .emit_mob_stream_end(&stream_id, terminal.reason, terminal.detail.as_deref())
-        .await;
+    notification_sink.emit_mob_stream_end(&terminal).await;
 }
 
 async fn resolve_mob_stream_close_authority(
@@ -948,15 +981,18 @@ async fn resolve_mob_stream_close_authority(
     }
     });
     let terminal = transition.effects().iter().find_map(|effect| match effect {
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineEffect::MobEventStreamTerminalResolved {
-            stream_id: effect_stream_id,
-            reason,
-            detail,
-            ..
-        } if *effect_stream_id == stream_id => Some(MobStreamTerminalAuthority {
-            reason: *reason,
-            detail: detail.clone(),
-        }),
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineEffect::MobEventStreamTerminalResolved {
+                stream_id: effect_stream_id,
+                reason,
+                error_code,
+                detail,
+                ..
+            } if *effect_stream_id == stream_id => Some(MobStreamTerminalAuthority {
+                stream_id: effect_stream_id.clone(),
+                reason: *reason,
+                error_code: *error_code,
+                detail: detail.clone(),
+            }),
         _ => None,
     });
 
@@ -2770,6 +2806,7 @@ impl MethodRouter {
                                         &stream_authority,
                                         stream_id_for_task,
                                         meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
+                                        Some(meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode::StreamQueueOverflow),
                                         Some("transport stream notification queue overflow".to_string()),
                                     )
                                     .await;
@@ -2783,6 +2820,7 @@ impl MethodRouter {
                                     &stream_authority,
                                     stream_id_for_task,
                                     meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::RemoteEnd,
+                                    None,
                                     None,
                                 )
                                 .await;
@@ -2857,27 +2895,9 @@ impl MethodRouter {
             stop_stream_forwarder(&mut stream);
         };
         if let Some(terminal) = close_authority.terminal.as_ref() {
-            let terminal_session_id = match SessionId::parse(&terminal.session_id) {
-                Ok(session_id) => session_id,
-                Err(error) => {
-                    return RpcResponse::error(
-                        id,
-                        error::INTERNAL_ERROR,
-                        format!(
-                            "Session event stream authority emitted invalid session id '{}': {error}",
-                            terminal.session_id
-                        ),
-                    );
-                }
-            };
             if !close_authority.already_closed {
                 self.notification_sink
-                    .emit_session_stream_end(
-                        &stream_id,
-                        &terminal_session_id,
-                        terminal.reason,
-                        terminal.detail.as_deref(),
-                    )
+                    .emit_session_stream_end(terminal)
                     .await;
             }
         }
@@ -2997,6 +3017,7 @@ impl MethodRouter {
                                             &stream_authority,
                                             stream_id_for_task,
                                             meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
+                                            Some(meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode::StreamQueueOverflow),
                                             Some("transport stream notification queue overflow".to_string()),
                                         )
                                         .await;
@@ -3010,6 +3031,7 @@ impl MethodRouter {
                                         &stream_authority,
                                         stream_id_for_task,
                                         meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::RemoteEnd,
+                                        None,
                                         None,
                                     )
                                     .await;
@@ -3081,6 +3103,7 @@ impl MethodRouter {
                                             &stream_authority,
                                             stream_id_for_task,
                                             meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
+                                            Some(meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode::StreamQueueOverflow),
                                             Some("transport stream notification queue overflow".to_string()),
                                         )
                                         .await;
@@ -3094,6 +3117,7 @@ impl MethodRouter {
                                         &stream_authority,
                                         stream_id_for_task,
                                         meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::RemoteEnd,
+                                        None,
                                         None,
                                     )
                                     .await;
@@ -3167,9 +3191,7 @@ impl MethodRouter {
         };
         if let Some(terminal) = close_authority.terminal.as_ref() {
             if !close_authority.already_closed {
-                self.notification_sink
-                    .emit_mob_stream_end(&stream_id, terminal.reason, terminal.detail.as_deref())
-                    .await;
+                self.notification_sink.emit_mob_stream_end(terminal).await;
             }
         }
 
@@ -5008,6 +5030,7 @@ args = [{}]
             &router.stream_authority,
             &stream_uuid,
             meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::RemoteEnd,
+            None,
             None,
         )
         .await
@@ -6866,8 +6889,13 @@ args = [{}]
     async fn session_stream_overflow_emits_terminal_error_outcome() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let sink = NotificationSink::new(tx);
+        let authority = Arc::new(Mutex::new(new_rpc_stream_authority()));
+        let active_streams = Arc::new(Mutex::new(HashMap::new()));
         let session_id = SessionId::new();
         let stream_id = Uuid::new_v4();
+        resolve_session_stream_open_authority(&authority, &stream_id, &session_id)
+            .await
+            .expect("machine should accept session stream open");
         let envelope = EventEnvelope::new_session(
             session_id.clone(),
             1,
@@ -6890,13 +6918,17 @@ args = [{}]
 
         let terminal = tokio::spawn({
             let sink = sink.clone();
-            let session_id = session_id.clone();
+            let authority = authority.clone();
+            let active_streams = active_streams.clone();
             async move {
-                sink.emit_session_stream_end(
-                    &stream_id,
-                    &session_id,
+                emit_authorized_session_stream_terminal(
+                    &sink,
+                    &active_streams,
+                    &authority,
+                    stream_id,
                     meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
-                    Some("transport stream notification queue overflow"),
+                    Some(meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode::StreamQueueOverflow),
+                    Some("transport stream notification queue overflow".to_string()),
                 )
                 .await;
             }
@@ -6987,7 +7019,12 @@ args = [{}]
     async fn mob_stream_overflow_emits_terminal_error_outcome() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let sink = NotificationSink::new(tx);
+        let authority = Arc::new(Mutex::new(new_rpc_stream_authority()));
+        let active_streams = Arc::new(Mutex::new(HashMap::new()));
         let stream_id = Uuid::new_v4();
+        resolve_mob_stream_open_authority(&authority, &stream_id)
+            .await
+            .expect("machine should accept mob stream open");
         let event = serde_json::json!({
             "event_id": "e1",
             "payload": {
@@ -7007,11 +7044,17 @@ args = [{}]
 
         let terminal = tokio::spawn({
             let sink = sink.clone();
+            let authority = authority.clone();
+            let active_streams = active_streams.clone();
             async move {
-                sink.emit_mob_stream_end(
-                    &stream_id,
+                emit_authorized_mob_stream_terminal(
+                    &sink,
+                    &active_streams,
+                    &authority,
+                    stream_id,
                     meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
-                    Some("transport stream notification queue overflow"),
+                    Some(meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode::StreamQueueOverflow),
+                    Some("transport stream notification queue overflow".to_string()),
                 )
                 .await;
             }
@@ -7568,8 +7611,9 @@ args = [{}]
         record_mob_stream_terminal_authority(
             &router.stream_authority,
             &stream_uuid,
-            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
-            Some("stale active map fixture".to_string()),
+            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::RemoteEnd,
+            None,
+            None,
         )
         .await
         .expect("machine should accept mob terminal observation");

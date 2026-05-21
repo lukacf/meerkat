@@ -798,6 +798,15 @@ pub enum RpcEventStreamTerminalReason {
     ExplicitClose,
 }
 
+/// Typed public error code for RPC event-stream terminal notifications. The
+/// RPC surface may only project this value from a generated
+/// `*EventStreamTerminalResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RpcEventStreamTerminalErrorCode {
+    #[default]
+    StreamQueueOverflow,
+}
+
 /// Typed public status class for `live/status` after the live host has
 /// observed the adapter transport state. RPC/SDK surfaces may only project
 /// these values from generated `LiveChannelStatusResolved` effects.
@@ -2640,6 +2649,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             RecordSessionEventStreamTerminated {
                 stream_id: String,
                 reason: Enum<RpcEventStreamTerminalReason>,
+                error_code: Option<Enum<RpcEventStreamTerminalErrorCode>>,
                 detail: Option<String>,
             },
             ResolveSessionEventStreamClose { stream_id: String },
@@ -2647,6 +2657,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             RecordMobEventStreamTerminated {
                 stream_id: String,
                 reason: Enum<RpcEventStreamTerminalReason>,
+                error_code: Option<Enum<RpcEventStreamTerminalErrorCode>>,
                 detail: Option<String>,
             },
             ResolveMobEventStreamClose { stream_id: String },
@@ -3080,6 +3091,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 stream_id: String,
                 session_id: String,
                 reason: Enum<RpcEventStreamTerminalReason>,
+                error_code: Option<Enum<RpcEventStreamTerminalErrorCode>>,
                 detail: Option<String>,
                 sequence: u64,
             },
@@ -3097,6 +3109,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             MobEventStreamTerminalResolved {
                 stream_id: String,
                 reason: Enum<RpcEventStreamTerminalReason>,
+                error_code: Option<Enum<RpcEventStreamTerminalErrorCode>>,
                 detail: Option<String>,
                 sequence: u64,
             },
@@ -11657,11 +11670,19 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition RecordSessionEventStreamTerminated {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RecordSessionEventStreamTerminated { stream_id, reason, detail }
+            on input RecordSessionEventStreamTerminated { stream_id, reason, error_code, detail }
             guard "stream_id_present" { stream_id != "" }
             guard "stream_active" { self.active_session_event_streams.contains(stream_id) }
             guard "session_binding_recorded" {
                 self.session_event_stream_session_ids.contains_key(stream_id)
+            }
+            guard "terminal_error_fields_match_reason" {
+                (reason == RpcEventStreamTerminalReason::TerminalError
+                    && error_code != None
+                    && detail != None)
+                || (reason != RpcEventStreamTerminalReason::TerminalError
+                    && error_code == None
+                    && detail == None)
             }
             update {
                 self.session_event_stream_terminal_sequence += 1;
@@ -11673,6 +11694,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 stream_id: stream_id,
                 session_id: self.session_event_stream_session_ids.get_cloned(stream_id).get("value"),
                 reason: reason,
+                error_code: error_code,
                 detail: detail,
                 sequence: self.session_event_stream_terminal_sequence
             }
@@ -11703,6 +11725,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 stream_id: stream_id,
                 session_id: self.session_event_stream_session_ids.get_cloned(stream_id).get("value"),
                 reason: RpcEventStreamTerminalReason::ExplicitClose,
+                error_code: None,
                 detail: None,
                 sequence: self.session_event_stream_terminal_sequence
             }
@@ -11746,9 +11769,17 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition RecordMobEventStreamTerminated {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RecordMobEventStreamTerminated { stream_id, reason, detail }
+            on input RecordMobEventStreamTerminated { stream_id, reason, error_code, detail }
             guard "stream_id_present" { stream_id != "" }
             guard "stream_active" { self.active_mob_event_streams.contains(stream_id) }
+            guard "terminal_error_fields_match_reason" {
+                (reason == RpcEventStreamTerminalReason::TerminalError
+                    && error_code != None
+                    && detail != None)
+                || (reason != RpcEventStreamTerminalReason::TerminalError
+                    && error_code == None
+                    && detail == None)
+            }
             update {
                 self.mob_event_stream_terminal_sequence += 1;
                 self.active_mob_event_streams.remove(stream_id);
@@ -11758,6 +11789,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit MobEventStreamTerminalResolved {
                 stream_id: stream_id,
                 reason: reason,
+                error_code: error_code,
                 detail: detail,
                 sequence: self.mob_event_stream_terminal_sequence
             }
@@ -11784,6 +11816,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit MobEventStreamTerminalResolved {
                 stream_id: stream_id,
                 reason: RpcEventStreamTerminalReason::ExplicitClose,
+                error_code: None,
                 detail: None,
                 sequence: self.mob_event_stream_terminal_sequence
             }

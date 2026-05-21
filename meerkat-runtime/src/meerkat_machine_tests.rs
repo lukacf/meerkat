@@ -15882,6 +15882,7 @@ fn session_event_stream_close_result_is_machine_owned() {
             stream_id,
             session_id,
             reason: mm_dsl::RpcEventStreamTerminalReason::ExplicitClose,
+            error_code: None,
             detail: None,
             sequence: 1,
         } if stream_id == "session-stream-1" && session_id == "session-1"
@@ -15924,6 +15925,7 @@ fn session_event_stream_close_result_is_machine_owned() {
         mm_dsl::MeerkatMachineInput::RecordSessionEventStreamTerminated {
             stream_id: "session-stream-2".to_string(),
             reason: mm_dsl::RpcEventStreamTerminalReason::RemoteEnd,
+            error_code: None,
             detail: None,
         },
     )
@@ -16024,6 +16026,7 @@ fn mob_event_stream_close_result_is_machine_owned() {
         mm_dsl::MeerkatMachineEffect::MobEventStreamTerminalResolved {
             stream_id,
             reason: mm_dsl::RpcEventStreamTerminalReason::ExplicitClose,
+            error_code: None,
             detail: None,
             sequence: 1,
         } if stream_id == "mob-stream-1"
@@ -16065,6 +16068,7 @@ fn mob_event_stream_close_result_is_machine_owned() {
         mm_dsl::MeerkatMachineInput::RecordMobEventStreamTerminated {
             stream_id: "mob-stream-2".to_string(),
             reason: mm_dsl::RpcEventStreamTerminalReason::TerminalError,
+            error_code: Some(mm_dsl::RpcEventStreamTerminalErrorCode::StreamQueueOverflow),
             detail: Some("queue overflow".to_string()),
         },
     )
@@ -16074,6 +16078,7 @@ fn mob_event_stream_close_result_is_machine_owned() {
         mm_dsl::MeerkatMachineEffect::MobEventStreamTerminalResolved {
             stream_id,
             reason: mm_dsl::RpcEventStreamTerminalReason::TerminalError,
+            error_code: Some(mm_dsl::RpcEventStreamTerminalErrorCode::StreamQueueOverflow),
             detail: Some(detail),
             ..
         } if stream_id == "mob-stream-2" && detail == "queue overflow"

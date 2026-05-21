@@ -343,10 +343,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordLiveRefreshQueued`(channel_id: String, queue_acceptance_sequence: u64)
 - `RecordLiveCloseClosed`(channel_id: String, close_observation_sequence: u64)
 - `RecordSessionEventStreamOpened`(stream_id: String, session_id: String)
-- `RecordSessionEventStreamTerminated`(stream_id: String, reason: RpcEventStreamTerminalReason, detail: Option<String>)
+- `RecordSessionEventStreamTerminated`(stream_id: String, reason: RpcEventStreamTerminalReason, error_code: Option<RpcEventStreamTerminalErrorCode>, detail: Option<String>)
 - `ResolveSessionEventStreamClose`(stream_id: String)
 - `RecordMobEventStreamOpened`(stream_id: String)
-- `RecordMobEventStreamTerminated`(stream_id: String, reason: RpcEventStreamTerminalReason, detail: Option<String>)
+- `RecordMobEventStreamTerminated`(stream_id: String, reason: RpcEventStreamTerminalReason, error_code: Option<RpcEventStreamTerminalErrorCode>, detail: Option<String>)
 - `ResolveMobEventStreamClose`(stream_id: String)
 - `RecordLiveChannelStatus`(channel_id: String, status: LiveChannelPublicStatus, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
 - `SpawnDrain`(mode: DrainMode)
@@ -509,10 +509,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveRefreshResultResolved`(channel_id: String, status: LiveRefreshPublicStatus, refresh_enqueued: Bool, sequence: u64, queue_acceptance_sequence: u64)
 - `LiveCloseResultResolved`(channel_id: String, status: LiveClosePublicStatus, closed: Bool, sequence: u64, close_observation_sequence: u64)
 - `SessionEventStreamOpenResolved`(stream_id: String, session_id: String, opened: Bool, sequence: u64)
-- `SessionEventStreamTerminalResolved`(stream_id: String, session_id: String, reason: RpcEventStreamTerminalReason, detail: Option<String>, sequence: u64)
+- `SessionEventStreamTerminalResolved`(stream_id: String, session_id: String, reason: RpcEventStreamTerminalReason, error_code: Option<RpcEventStreamTerminalErrorCode>, detail: Option<String>, sequence: u64)
 - `SessionEventStreamCloseResolved`(stream_id: String, closed: Bool, already_closed: Bool, sequence: u64)
 - `MobEventStreamOpenResolved`(stream_id: String, opened: Bool, sequence: u64)
-- `MobEventStreamTerminalResolved`(stream_id: String, reason: RpcEventStreamTerminalReason, detail: Option<String>, sequence: u64)
+- `MobEventStreamTerminalResolved`(stream_id: String, reason: RpcEventStreamTerminalReason, error_code: Option<RpcEventStreamTerminalErrorCode>, detail: Option<String>, sequence: u64)
 - `MobEventStreamCloseResolved`(stream_id: String, closed: Bool, already_closed: Bool, sequence: u64)
 - `LiveChannelStatusResolved`(channel_id: String, status: LiveChannelPublicStatus, sequence: u64, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
 - `EnqueueClassifiedEntry`
@@ -7634,51 +7634,56 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordSessionEventStreamTerminatedIdle`
 - From: `Idle`
-- On: `RecordSessionEventStreamTerminated`(stream_id, reason, detail)
+- On: `RecordSessionEventStreamTerminated`(stream_id, reason, error_code, detail)
 - Guards:
   - `stream_id_present`
   - `stream_active`
   - `session_binding_recorded`
+  - `terminal_error_fields_match_reason`
 - Emits: `SessionEventStreamTerminalResolved`
 - To: `Idle`
 
 ### `RecordSessionEventStreamTerminatedAttached`
 - From: `Attached`
-- On: `RecordSessionEventStreamTerminated`(stream_id, reason, detail)
+- On: `RecordSessionEventStreamTerminated`(stream_id, reason, error_code, detail)
 - Guards:
   - `stream_id_present`
   - `stream_active`
   - `session_binding_recorded`
+  - `terminal_error_fields_match_reason`
 - Emits: `SessionEventStreamTerminalResolved`
 - To: `Attached`
 
 ### `RecordSessionEventStreamTerminatedRunning`
 - From: `Running`
-- On: `RecordSessionEventStreamTerminated`(stream_id, reason, detail)
+- On: `RecordSessionEventStreamTerminated`(stream_id, reason, error_code, detail)
 - Guards:
   - `stream_id_present`
   - `stream_active`
   - `session_binding_recorded`
+  - `terminal_error_fields_match_reason`
 - Emits: `SessionEventStreamTerminalResolved`
 - To: `Running`
 
 ### `RecordSessionEventStreamTerminatedRetired`
 - From: `Retired`
-- On: `RecordSessionEventStreamTerminated`(stream_id, reason, detail)
+- On: `RecordSessionEventStreamTerminated`(stream_id, reason, error_code, detail)
 - Guards:
   - `stream_id_present`
   - `stream_active`
   - `session_binding_recorded`
+  - `terminal_error_fields_match_reason`
 - Emits: `SessionEventStreamTerminalResolved`
 - To: `Retired`
 
 ### `RecordSessionEventStreamTerminatedStopped`
 - From: `Stopped`
-- On: `RecordSessionEventStreamTerminated`(stream_id, reason, detail)
+- On: `RecordSessionEventStreamTerminated`(stream_id, reason, error_code, detail)
 - Guards:
   - `stream_id_present`
   - `stream_active`
   - `session_binding_recorded`
+  - `terminal_error_fields_match_reason`
 - Emits: `SessionEventStreamTerminalResolved`
 - To: `Stopped`
 
@@ -7834,46 +7839,51 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordMobEventStreamTerminatedIdle`
 - From: `Idle`
-- On: `RecordMobEventStreamTerminated`(stream_id, reason, detail)
+- On: `RecordMobEventStreamTerminated`(stream_id, reason, error_code, detail)
 - Guards:
   - `stream_id_present`
   - `stream_active`
+  - `terminal_error_fields_match_reason`
 - Emits: `MobEventStreamTerminalResolved`
 - To: `Idle`
 
 ### `RecordMobEventStreamTerminatedAttached`
 - From: `Attached`
-- On: `RecordMobEventStreamTerminated`(stream_id, reason, detail)
+- On: `RecordMobEventStreamTerminated`(stream_id, reason, error_code, detail)
 - Guards:
   - `stream_id_present`
   - `stream_active`
+  - `terminal_error_fields_match_reason`
 - Emits: `MobEventStreamTerminalResolved`
 - To: `Attached`
 
 ### `RecordMobEventStreamTerminatedRunning`
 - From: `Running`
-- On: `RecordMobEventStreamTerminated`(stream_id, reason, detail)
+- On: `RecordMobEventStreamTerminated`(stream_id, reason, error_code, detail)
 - Guards:
   - `stream_id_present`
   - `stream_active`
+  - `terminal_error_fields_match_reason`
 - Emits: `MobEventStreamTerminalResolved`
 - To: `Running`
 
 ### `RecordMobEventStreamTerminatedRetired`
 - From: `Retired`
-- On: `RecordMobEventStreamTerminated`(stream_id, reason, detail)
+- On: `RecordMobEventStreamTerminated`(stream_id, reason, error_code, detail)
 - Guards:
   - `stream_id_present`
   - `stream_active`
+  - `terminal_error_fields_match_reason`
 - Emits: `MobEventStreamTerminalResolved`
 - To: `Retired`
 
 ### `RecordMobEventStreamTerminatedStopped`
 - From: `Stopped`
-- On: `RecordMobEventStreamTerminated`(stream_id, reason, detail)
+- On: `RecordMobEventStreamTerminated`(stream_id, reason, error_code, detail)
 - Guards:
   - `stream_id_present`
   - `stream_active`
+  - `terminal_error_fields_match_reason`
 - Emits: `MobEventStreamTerminalResolved`
 - To: `Stopped`
 

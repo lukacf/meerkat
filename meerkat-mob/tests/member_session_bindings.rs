@@ -84,6 +84,7 @@ fn recover_roster_member_signal(identity_name: &str, generation: u64) -> MobMach
         agent_identity: identity(identity_name),
         agent_runtime_id: runtime_id(identity_name, generation),
         fence_token: FenceToken(generation),
+        generation: Generation(generation),
         external_addressable: false,
     }
 }

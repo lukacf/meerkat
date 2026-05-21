@@ -40,18 +40,32 @@ impl FileApprovalStore {
         &self.path
     }
 
-    fn read_all_map(&self) -> Result<BTreeMap<ApprovalId, ApprovalRecord>, ApprovalStoreError> {
+    fn read_all_records(&self) -> Result<Vec<ApprovalRecord>, ApprovalStoreError> {
         let bytes = std::fs::read(&self.path).map_err(io_error)?;
         if bytes.is_empty() {
-            return Ok(BTreeMap::new());
+            return Ok(Vec::new());
         }
         let file: ApprovalStoreFile =
             serde_json::from_slice(&bytes).map_err(serialization_error)?;
-        Ok(file
-            .approvals
-            .into_iter()
-            .map(|record| (record.approval_id.clone(), record))
-            .collect())
+        Ok(file.approvals)
+    }
+
+    fn read_all_map_for_write(
+        &self,
+    ) -> Result<BTreeMap<ApprovalId, ApprovalRecord>, ApprovalStoreError> {
+        let mut records_by_id = BTreeMap::new();
+        for record in self.read_all_records()? {
+            if records_by_id
+                .insert(record.approval_id.clone(), record)
+                .is_some()
+            {
+                return Err(ApprovalStoreError::Backend(
+                    "approval file store contains duplicate approval ids; refusing to choose a durable row"
+                        .to_string(),
+                ));
+            }
+        }
+        Ok(records_by_id)
     }
 
     fn write_all(
@@ -74,7 +88,7 @@ impl FileApprovalStore {
 
 impl ApprovalStore for FileApprovalStore {
     fn load_all(&self) -> Result<Vec<ApprovalRecord>, ApprovalStoreError> {
-        Ok(self.read_all_map()?.into_values().collect())
+        self.read_all_records()
     }
 
     fn put(&self, record: &ApprovalRecord) -> Result<(), ApprovalStoreError> {
@@ -82,7 +96,7 @@ impl ApprovalStore for FileApprovalStore {
             .write_lock
             .lock()
             .map_err(|_| ApprovalStoreError::Backend("approval store lock poisoned".to_string()))?;
-        let mut records = self.read_all_map()?;
+        let mut records = self.read_all_map_for_write()?;
         records.insert(record.approval_id.clone(), record.clone());
         self.write_all(&records)
     }
@@ -108,7 +122,7 @@ mod tests {
     use meerkat_core::{
         ApprovalActionKind, ApprovalDecision, ApprovalOwnerRef, ApprovalPrincipalId,
         ApprovalProposedAction, ApprovalRequest, ApprovalResourceKind, ApprovalResourceRef,
-        ApprovalRisk, ApprovalService, SurfaceMetadata,
+        ApprovalRisk, ApprovalService, ApprovalStore, SurfaceMetadata,
     };
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -154,5 +168,49 @@ mod tests {
         let loaded = reopened.get(&record.approval_id).expect("load approval");
         assert_eq!(loaded.approval_id, record.approval_id);
         assert_eq!(loaded.status, record.status);
+    }
+
+    #[test]
+    fn duplicate_persisted_records_reach_generated_restore_authority() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("approvals.json");
+        let record = ApprovalService::new()
+            .request(request())
+            .expect("request approval");
+        let file = ApprovalStoreFile {
+            approvals: vec![record.clone(), record],
+        };
+        let bytes = serde_json::to_vec_pretty(&file).expect("serialize approvals");
+        std::fs::write(&path, bytes).expect("write duplicate approvals");
+
+        let store = FileApprovalStore::open(&path).expect("open approval store");
+        let loaded = store.load_all().expect("raw approval rows");
+        assert_eq!(loaded.len(), 2);
+
+        let restored = ApprovalService::with_store(Arc::new(store));
+        assert!(matches!(
+            restored,
+            Err(meerkat_core::ApprovalError::Store(_))
+        ));
+    }
+
+    #[test]
+    fn put_refuses_to_rewrite_duplicate_durable_rows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("approvals.json");
+        let record = ApprovalService::new()
+            .request(request())
+            .expect("request approval");
+        let file = ApprovalStoreFile {
+            approvals: vec![record.clone(), record.clone()],
+        };
+        let bytes = serde_json::to_vec_pretty(&file).expect("serialize approvals");
+        std::fs::write(&path, bytes).expect("write duplicate approvals");
+
+        let store = FileApprovalStore::open(&path).expect("open approval store");
+        let err = store
+            .put(&record)
+            .expect_err("store should fail closed instead of deduping");
+        assert!(err.to_string().contains("duplicate approval ids"));
     }
 }

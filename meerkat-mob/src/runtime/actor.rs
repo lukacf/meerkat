@@ -12,7 +12,7 @@ use super::terminalization::{TerminalizationOutcome, TerminalizationTarget};
 use super::transaction::LifecycleRollback;
 use super::*;
 use crate::generated::protocol_mob_destroying_session_ingress::MobDestroyingSessionIngressObligation;
-use crate::ids::{AgentIdentity, Generation};
+use crate::ids::{AgentIdentity, AgentRuntimeId};
 use crate::machines::mob_machine as mob_dsl;
 use crate::run::{MobMachineFlowAuthorityToken, MobMachineFlowRunCommand, MobRunStatus, flow_run};
 #[cfg(target_arch = "wasm32")]
@@ -7295,37 +7295,42 @@ impl MobActor {
         spawned_meerkat_id: &MeerkatId,
     ) -> Option<MeerkatId> {
         let owner_bridge_session_id = owner_bridge_session_id?;
-        let broken_members = self
-            .dsl_authority
-            .state()
-            .member_restore_failures
-            .keys()
-            .map(|identity| MeerkatId::from(identity.0.as_str()))
-            .collect::<HashSet<_>>();
-        let roster = self.roster.read().await;
-        roster
-            .list()
-            .find(|entry| {
-                self.machine_roster_state_for_entry(entry) == crate::roster::MemberState::Active
-                    && entry.agent_identity != *spawned_meerkat_id
-                    && !broken_members.contains(&entry.agent_identity)
-                    && entry.member_ref.bridge_session_id() == Some(owner_bridge_session_id)
+        let dsl_session_id = mob_dsl::SessionId::from_domain(owner_bridge_session_id);
+        let dsl = self.dsl_authority.state();
+        dsl.member_session_bindings
+            .iter()
+            .find(|(identity, bound_session_id)| {
+                **bound_session_id == dsl_session_id
+                    && identity.0.as_str() != spawned_meerkat_id.as_str()
+                    && !dsl.member_restore_failures.contains_key(*identity)
+                    && MobMemberLifecycleProjection::roster_state_for_machine_lifecycle(
+                        &dsl.member_lifecycle_for_identity(identity),
+                    ) == crate::roster::MemberState::Active
             })
-            .map(|entry| entry.agent_identity.clone())
+            .map(|(identity, _)| MeerkatId::from(identity.0.as_str()))
     }
 
     async fn spawner_for_bridge_session(
         &self,
         owner_bridge_session_id: &SessionId,
     ) -> Option<(AgentIdentity, AgentRuntimeId)> {
-        let roster = self.roster.read().await;
-        roster
-            .list()
-            .find(|entry| {
-                self.machine_roster_state_for_entry(entry) == crate::roster::MemberState::Active
-                    && entry.member_ref.bridge_session_id() == Some(owner_bridge_session_id)
+        let dsl_session_id = mob_dsl::SessionId::from_domain(owner_bridge_session_id);
+        let dsl = self.dsl_authority.state();
+        dsl.member_session_bindings
+            .iter()
+            .find_map(|(identity, bound_session_id)| {
+                if *bound_session_id != dsl_session_id
+                    || MobMemberLifecycleProjection::roster_state_for_machine_lifecycle(
+                        &dsl.member_lifecycle_for_identity(identity),
+                    ) != crate::roster::MemberState::Active
+                {
+                    return None;
+                }
+                let agent_identity = AgentIdentity::from(identity.0.as_str());
+                let runtime_id = dsl.identity_to_runtime.get(identity)?;
+                let agent_runtime_id = runtime_id.to_domain_for_identity(&agent_identity)?;
+                Some((agent_identity, agent_runtime_id))
             })
-            .map(|entry| (entry.agent_identity.clone(), entry.agent_runtime_id.clone()))
     }
 
     /// P1-T05: force-cancel a member's in-flight turn cooperatively.
@@ -11113,7 +11118,11 @@ impl MobActor {
     }
 
     fn runtime_binding_for_entry(entry: &RosterEntry) -> Option<crate::RuntimeBinding> {
-        match &entry.member_ref {
+        Self::runtime_binding_for_member_ref(&entry.member_ref)
+    }
+
+    fn runtime_binding_for_member_ref(member_ref: &MemberRef) -> Option<crate::RuntimeBinding> {
+        match member_ref {
             MemberRef::BackendPeer {
                 peer_id,
                 address,
@@ -14933,7 +14942,8 @@ impl MobActor {
         context: &'static str,
     ) -> Result<WiringEndpoint, MobError> {
         let comms_name = self.comms_name_for(entry);
-        if let Some(comms) = self.provisioner_comms(&entry.member_ref).await {
+        let member_ref = self.machine_member_ref_for_behavior(entry, context)?;
+        if let Some(comms) = self.provisioner_comms(&member_ref).await {
             let public_key = comms.public_key().ok_or_else(|| {
                 MobError::WiringError(format!(
                     "{context} requires public key for '{}'",
@@ -14942,7 +14952,7 @@ impl MobActor {
             })?;
             let spec = self
                 .provisioner
-                .trusted_peer_spec(&entry.member_ref, &comms_name, &public_key)
+                .trusted_peer_spec(&member_ref, &comms_name, &public_key)
                 .await?;
             return Ok(WiringEndpoint::Local {
                 entry: Box::new(entry.clone()),
@@ -14952,14 +14962,15 @@ impl MobActor {
             });
         }
 
-        match &entry.member_ref {
-            MemberRef::BackendPeer { peer_id, .. } => {
-                let binding = Self::runtime_binding_for_entry(entry).ok_or_else(|| {
-                    MobError::WiringError(format!(
-                        "{context} requires external runtime binding for '{}'",
-                        entry.agent_identity
-                    ))
-                })?;
+        match &member_ref {
+            MemberRef::BackendPeer { .. } => {
+                let binding =
+                    Self::runtime_binding_for_member_ref(&member_ref).ok_or_else(|| {
+                        MobError::WiringError(format!(
+                            "{context} requires external runtime binding for '{}'",
+                            entry.agent_identity
+                        ))
+                    })?;
                 let spec = Self::peer_only_spec_for_binding(&binding, context)?;
                 Ok(WiringEndpoint::PeerOnly { spec, binding })
             }

@@ -17739,6 +17739,14 @@ async fn test_auto_wire_parent_uses_spawning_member_not_orchestrator() {
         .bridge_session_id()
         .expect("session-backed")
         .clone();
+    {
+        let w1 = AgentIdentity::from("w-1");
+        let mut snapshot = handle.roster.read().await.snapshot();
+        snapshot.get_mut(&w1).expect("w-1 roster entry").member_ref =
+            crate::event::MemberRef::from_bridge_session_id(SessionId::new());
+        *handle.roster.write().await =
+            super::roster_authority::RosterAuthority::from_roster(snapshot);
+    }
 
     let mut spec = super::handle::SpawnMemberSpec::new("worker", "w-2");
     spec.auto_wire_parent = true;
@@ -29976,8 +29984,10 @@ async fn test_spawn_member_customizer_spawner_provenance_ignores_roster_state_mi
 
     {
         let mut snapshot = handle.roster.read().await.snapshot();
-        snapshot.get_mut(&lead).expect("lead roster entry").state =
-            crate::roster::MemberState::Retiring;
+        let entry = snapshot.get_mut(&lead).expect("lead roster entry");
+        entry.state = crate::roster::MemberState::Retiring;
+        entry.agent_runtime_id = AgentRuntimeId::new(lead.clone(), crate::ids::Generation::new(99));
+        entry.member_ref = crate::event::MemberRef::from_bridge_session_id(SessionId::new());
         *handle.roster.write().await =
             super::roster_authority::RosterAuthority::from_roster(snapshot);
     }

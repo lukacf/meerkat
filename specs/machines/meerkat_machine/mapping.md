@@ -2456,6 +2456,126 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordLiveCloseClosedStopped`
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
+- `RecordSessionEventStreamOpenedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`
+- `RecordSessionEventStreamOpenedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `RecordSessionEventStreamOpenedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `realtime_connection_projection`
+- `RecordSessionEventStreamOpenedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`
+- `RecordSessionEventStreamOpenedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+- `RecordSessionEventStreamTerminatedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`
+- `RecordSessionEventStreamTerminatedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `RecordSessionEventStreamTerminatedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`
+- `RecordSessionEventStreamTerminatedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`
+- `RecordSessionEventStreamTerminatedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`
+- `ResolveSessionEventStreamCloseActiveIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveSessionEventStreamCloseActiveAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveSessionEventStreamCloseActiveRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveSessionEventStreamCloseActiveRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveSessionEventStreamCloseActiveStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveSessionEventStreamCloseAlreadyClosedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveSessionEventStreamCloseAlreadyClosedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveSessionEventStreamCloseAlreadyClosedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveSessionEventStreamCloseAlreadyClosedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveSessionEventStreamCloseAlreadyClosedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `RecordMobEventStreamOpenedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+- `RecordMobEventStreamOpenedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+- `RecordMobEventStreamOpenedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+- `RecordMobEventStreamOpenedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+- `RecordMobEventStreamOpenedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `RecordMobEventStreamTerminatedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`
+- `RecordMobEventStreamTerminatedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`
+- `RecordMobEventStreamTerminatedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `product_turn_streaming`
+- `RecordMobEventStreamTerminatedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`
+- `RecordMobEventStreamTerminatedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `product_turn_streaming`
+- `ResolveMobEventStreamCloseActiveIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+- `ResolveMobEventStreamCloseActiveAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveMobEventStreamCloseActiveRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+- `ResolveMobEventStreamCloseActiveRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+- `ResolveMobEventStreamCloseActiveStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+- `ResolveMobEventStreamCloseAlreadyClosedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveMobEventStreamCloseAlreadyClosedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveMobEventStreamCloseAlreadyClosedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveMobEventStreamCloseAlreadyClosedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ResolveMobEventStreamCloseAlreadyClosedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
 - `RecordLiveChannelStatusIdle`
   - anchors: `meerkat_machine`
   - scenarios: `recycle_and_compaction`
@@ -3427,6 +3547,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveCloseResultResolved`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
+- `SessionEventStreamOpenResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+- `SessionEventStreamTerminalResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `SessionEventStreamCloseResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `MobEventStreamOpenResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `MobEventStreamTerminalResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `MobEventStreamCloseResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
 - `LiveChannelStatusResolved`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`, `live_topology_and_supervision`

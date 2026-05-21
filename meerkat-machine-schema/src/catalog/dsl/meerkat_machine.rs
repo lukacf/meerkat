@@ -787,6 +787,17 @@ pub enum LiveClosePublicStatus {
     Closed,
 }
 
+/// Typed terminal reason for RPC event streams. The router observes transport
+/// end conditions, then submits the closed set here before projecting the
+/// public `*/stream_end` notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RpcEventStreamTerminalReason {
+    #[default]
+    RemoteEnd,
+    TerminalError,
+    ExplicitClose,
+}
+
 /// Typed public status class for `live/status` after the live host has
 /// observed the adapter transport state. RPC/SDK surfaces may only project
 /// these values from generated `LiveChannelStatusResolved` effects.
@@ -1858,6 +1869,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_channel_status_observation_sequence_by_channel: Map<String, u64>,
             live_channel_status_by_channel: Map<String, Enum<LiveChannelPublicStatus>>,
 
+            // --- RPC event-stream public result authority ---
+            //
+            // Routers own transport tasks and subscription handles only. The
+            // generated authority below owns stream open result truth, terminal
+            // notification class, and close result classification, including
+            // `already_closed`.
+            session_event_stream_open_result_sequence: u64,
+            session_event_stream_close_result_sequence: u64,
+            session_event_stream_terminal_sequence: u64,
+            active_session_event_streams: Set<String>,
+            closed_session_event_streams: Set<String>,
+            session_event_stream_session_ids: Map<String, String>,
+            mob_event_stream_open_result_sequence: u64,
+            mob_event_stream_close_result_sequence: u64,
+            mob_event_stream_terminal_sequence: u64,
+            active_mob_event_streams: Set<String>,
+            closed_mob_event_streams: Set<String>,
+
             // --- External tool surface substate ---
             known_surfaces: Set<String>,
             active_surfaces: Set<String>,
@@ -2153,6 +2182,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_channel_status_result_sequence = 0,
             live_channel_status_observation_sequence_by_channel = EmptyMap,
             live_channel_status_by_channel = EmptyMap,
+            // RPC event-stream public result authority
+            session_event_stream_open_result_sequence = 0,
+            session_event_stream_close_result_sequence = 0,
+            session_event_stream_terminal_sequence = 0,
+            active_session_event_streams = EmptySet,
+            closed_session_event_streams = EmptySet,
+            session_event_stream_session_ids = EmptyMap,
+            mob_event_stream_open_result_sequence = 0,
+            mob_event_stream_close_result_sequence = 0,
+            mob_event_stream_terminal_sequence = 0,
+            active_mob_event_streams = EmptySet,
+            closed_mob_event_streams = EmptySet,
             // External tool surface substate
             known_surfaces = EmptySet,
             active_surfaces = EmptySet,
@@ -2595,6 +2636,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             FinishSurfaceRequestUnpublished { request_key: String },
             RecordLiveRefreshQueued { channel_id: String, queue_acceptance_sequence: u64 },
             RecordLiveCloseClosed { channel_id: String, close_observation_sequence: u64 },
+            RecordSessionEventStreamOpened { stream_id: String, session_id: String },
+            RecordSessionEventStreamTerminated {
+                stream_id: String,
+                reason: Enum<RpcEventStreamTerminalReason>,
+                detail: Option<String>,
+            },
+            ResolveSessionEventStreamClose { stream_id: String },
+            RecordMobEventStreamOpened { stream_id: String },
+            RecordMobEventStreamTerminated {
+                stream_id: String,
+                reason: Enum<RpcEventStreamTerminalReason>,
+                detail: Option<String>,
+            },
+            ResolveMobEventStreamClose { stream_id: String },
             RecordLiveChannelStatus {
                 channel_id: String,
                 status: Enum<LiveChannelPublicStatus>,
@@ -3015,6 +3070,42 @@ macro_rules! meerkat_catalog_machine_dsl {
                 sequence: u64,
                 close_observation_sequence: u64,
             },
+            SessionEventStreamOpenResolved {
+                stream_id: String,
+                session_id: String,
+                opened: bool,
+                sequence: u64,
+            },
+            SessionEventStreamTerminalResolved {
+                stream_id: String,
+                session_id: String,
+                reason: Enum<RpcEventStreamTerminalReason>,
+                detail: Option<String>,
+                sequence: u64,
+            },
+            SessionEventStreamCloseResolved {
+                stream_id: String,
+                closed: bool,
+                already_closed: bool,
+                sequence: u64,
+            },
+            MobEventStreamOpenResolved {
+                stream_id: String,
+                opened: bool,
+                sequence: u64,
+            },
+            MobEventStreamTerminalResolved {
+                stream_id: String,
+                reason: Enum<RpcEventStreamTerminalReason>,
+                detail: Option<String>,
+                sequence: u64,
+            },
+            MobEventStreamCloseResolved {
+                stream_id: String,
+                closed: bool,
+                already_closed: bool,
+                sequence: u64,
+            },
             LiveChannelStatusResolved {
                 channel_id: String,
                 status: Enum<LiveChannelPublicStatus>,
@@ -3196,6 +3287,12 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition SurfaceRequestSupersededByCancel => local,
         disposition LiveRefreshResultResolved => local,
         disposition LiveCloseResultResolved => local,
+        disposition SessionEventStreamOpenResolved => local,
+        disposition SessionEventStreamTerminalResolved => local,
+        disposition SessionEventStreamCloseResolved => local,
+        disposition MobEventStreamOpenResolved => local,
+        disposition MobEventStreamTerminalResolved => local,
+        disposition MobEventStreamCloseResolved => local,
         disposition LiveChannelStatusResolved => local,
         disposition EnqueueClassifiedEntry => local,
         disposition PeerIngressClassified => local,
@@ -11531,6 +11628,182 @@ macro_rules! meerkat_catalog_machine_dsl {
                 closed: true,
                 sequence: self.live_close_result_sequence,
                 close_observation_sequence: close_observation_sequence
+            }
+        }
+
+        // RPC event-stream authority: the router may own async tasks and
+        // subscription handles, but open/terminal/close public result classes
+        // are generated here so stale side maps cannot decide wire truth.
+        transition RecordSessionEventStreamOpened {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordSessionEventStreamOpened { stream_id, session_id }
+            guard "stream_id_present" { stream_id != "" }
+            guard "session_id_present" { session_id != "" }
+            guard "stream_not_active" { !self.active_session_event_streams.contains(stream_id) }
+            guard "stream_not_closed" { !self.closed_session_event_streams.contains(stream_id) }
+            update {
+                self.session_event_stream_open_result_sequence += 1;
+                self.active_session_event_streams.insert(stream_id);
+                self.session_event_stream_session_ids.insert(stream_id, session_id);
+            }
+            to Idle
+            emit SessionEventStreamOpenResolved {
+                stream_id: stream_id,
+                session_id: session_id,
+                opened: true,
+                sequence: self.session_event_stream_open_result_sequence
+            }
+        }
+
+        transition RecordSessionEventStreamTerminated {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordSessionEventStreamTerminated { stream_id, reason, detail }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_active" { self.active_session_event_streams.contains(stream_id) }
+            guard "session_binding_recorded" {
+                self.session_event_stream_session_ids.contains_key(stream_id)
+            }
+            update {
+                self.session_event_stream_terminal_sequence += 1;
+                self.active_session_event_streams.remove(stream_id);
+                self.closed_session_event_streams.insert(stream_id);
+            }
+            to Idle
+            emit SessionEventStreamTerminalResolved {
+                stream_id: stream_id,
+                session_id: self.session_event_stream_session_ids.get_cloned(stream_id).get("value"),
+                reason: reason,
+                detail: detail,
+                sequence: self.session_event_stream_terminal_sequence
+            }
+        }
+
+        transition ResolveSessionEventStreamCloseActive {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveSessionEventStreamClose { stream_id }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_active" { self.active_session_event_streams.contains(stream_id) }
+            guard "session_binding_recorded" {
+                self.session_event_stream_session_ids.contains_key(stream_id)
+            }
+            update {
+                self.session_event_stream_close_result_sequence += 1;
+                self.session_event_stream_terminal_sequence += 1;
+                self.active_session_event_streams.remove(stream_id);
+                self.closed_session_event_streams.insert(stream_id);
+            }
+            to Idle
+            emit SessionEventStreamCloseResolved {
+                stream_id: stream_id,
+                closed: true,
+                already_closed: false,
+                sequence: self.session_event_stream_close_result_sequence
+            }
+            emit SessionEventStreamTerminalResolved {
+                stream_id: stream_id,
+                session_id: self.session_event_stream_session_ids.get_cloned(stream_id).get("value"),
+                reason: RpcEventStreamTerminalReason::ExplicitClose,
+                detail: None,
+                sequence: self.session_event_stream_terminal_sequence
+            }
+        }
+
+        transition ResolveSessionEventStreamCloseAlreadyClosed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveSessionEventStreamClose { stream_id }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_not_active" { !self.active_session_event_streams.contains(stream_id) }
+            guard "stream_closed" { self.closed_session_event_streams.contains(stream_id) }
+            update {
+                self.session_event_stream_close_result_sequence += 1;
+            }
+            to Idle
+            emit SessionEventStreamCloseResolved {
+                stream_id: stream_id,
+                closed: true,
+                already_closed: true,
+                sequence: self.session_event_stream_close_result_sequence
+            }
+        }
+
+        transition RecordMobEventStreamOpened {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordMobEventStreamOpened { stream_id }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_not_active" { !self.active_mob_event_streams.contains(stream_id) }
+            guard "stream_not_closed" { !self.closed_mob_event_streams.contains(stream_id) }
+            update {
+                self.mob_event_stream_open_result_sequence += 1;
+                self.active_mob_event_streams.insert(stream_id);
+            }
+            to Idle
+            emit MobEventStreamOpenResolved {
+                stream_id: stream_id,
+                opened: true,
+                sequence: self.mob_event_stream_open_result_sequence
+            }
+        }
+
+        transition RecordMobEventStreamTerminated {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordMobEventStreamTerminated { stream_id, reason, detail }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_active" { self.active_mob_event_streams.contains(stream_id) }
+            update {
+                self.mob_event_stream_terminal_sequence += 1;
+                self.active_mob_event_streams.remove(stream_id);
+                self.closed_mob_event_streams.insert(stream_id);
+            }
+            to Idle
+            emit MobEventStreamTerminalResolved {
+                stream_id: stream_id,
+                reason: reason,
+                detail: detail,
+                sequence: self.mob_event_stream_terminal_sequence
+            }
+        }
+
+        transition ResolveMobEventStreamCloseActive {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveMobEventStreamClose { stream_id }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_active" { self.active_mob_event_streams.contains(stream_id) }
+            update {
+                self.mob_event_stream_close_result_sequence += 1;
+                self.mob_event_stream_terminal_sequence += 1;
+                self.active_mob_event_streams.remove(stream_id);
+                self.closed_mob_event_streams.insert(stream_id);
+            }
+            to Idle
+            emit MobEventStreamCloseResolved {
+                stream_id: stream_id,
+                closed: true,
+                already_closed: false,
+                sequence: self.mob_event_stream_close_result_sequence
+            }
+            emit MobEventStreamTerminalResolved {
+                stream_id: stream_id,
+                reason: RpcEventStreamTerminalReason::ExplicitClose,
+                detail: None,
+                sequence: self.mob_event_stream_terminal_sequence
+            }
+        }
+
+        transition ResolveMobEventStreamCloseAlreadyClosed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveMobEventStreamClose { stream_id }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_not_active" { !self.active_mob_event_streams.contains(stream_id) }
+            guard "stream_closed" { self.closed_mob_event_streams.contains(stream_id) }
+            update {
+                self.mob_event_stream_close_result_sequence += 1;
+            }
+            to Idle
+            emit MobEventStreamCloseResolved {
+                stream_id: stream_id,
+                closed: true,
+                already_closed: true,
+                sequence: self.mob_event_stream_close_result_sequence
             }
         }
 

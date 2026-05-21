@@ -1670,6 +1670,17 @@ pub enum LiveClosePublicStatus {
     Closed,
 }
 
+/// Typed terminal reason for RPC event streams. The router observes transport
+/// end conditions, then submits the closed set here before projecting the
+/// public `*/stream_end` notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RpcEventStreamTerminalReason {
+    #[default]
+    RemoteEnd,
+    TerminalError,
+    ExplicitClose,
+}
+
 /// Typed public status class for `live/status` after the live host has
 /// observed the adapter transport state. RPC/SDK surfaces may only project
 /// these values from generated `LiveChannelStatusResolved` effects.

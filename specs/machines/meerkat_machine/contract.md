@@ -126,6 +126,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_channel_status_result_sequence`: `u64`
 - `live_channel_status_observation_sequence_by_channel`: `Map<String, u64>`
 - `live_channel_status_by_channel`: `Map<String, LiveChannelPublicStatus>`
+- `session_event_stream_open_result_sequence`: `u64`
+- `session_event_stream_close_result_sequence`: `u64`
+- `session_event_stream_terminal_sequence`: `u64`
+- `active_session_event_streams`: `Set<String>`
+- `closed_session_event_streams`: `Set<String>`
+- `session_event_stream_session_ids`: `Map<String, String>`
+- `mob_event_stream_open_result_sequence`: `u64`
+- `mob_event_stream_close_result_sequence`: `u64`
+- `mob_event_stream_terminal_sequence`: `u64`
+- `active_mob_event_streams`: `Set<String>`
+- `closed_mob_event_streams`: `Set<String>`
 - `known_surfaces`: `Set<String>`
 - `active_surfaces`: `Set<String>`
 - `visible_surfaces`: `Set<String>`
@@ -331,6 +342,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FinishSurfaceRequestUnpublished`(request_key: String)
 - `RecordLiveRefreshQueued`(channel_id: String, queue_acceptance_sequence: u64)
 - `RecordLiveCloseClosed`(channel_id: String, close_observation_sequence: u64)
+- `RecordSessionEventStreamOpened`(stream_id: String, session_id: String)
+- `RecordSessionEventStreamTerminated`(stream_id: String, reason: RpcEventStreamTerminalReason, detail: Option<String>)
+- `ResolveSessionEventStreamClose`(stream_id: String)
+- `RecordMobEventStreamOpened`(stream_id: String)
+- `RecordMobEventStreamTerminated`(stream_id: String, reason: RpcEventStreamTerminalReason, detail: Option<String>)
+- `ResolveMobEventStreamClose`(stream_id: String)
 - `RecordLiveChannelStatus`(channel_id: String, status: LiveChannelPublicStatus, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
 - `SpawnDrain`(mode: DrainMode)
 - `StopDrain`
@@ -491,6 +508,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SurfaceRequestSupersededByCancel`(request_key: String)
 - `LiveRefreshResultResolved`(channel_id: String, status: LiveRefreshPublicStatus, refresh_enqueued: Bool, sequence: u64, queue_acceptance_sequence: u64)
 - `LiveCloseResultResolved`(channel_id: String, status: LiveClosePublicStatus, closed: Bool, sequence: u64, close_observation_sequence: u64)
+- `SessionEventStreamOpenResolved`(stream_id: String, session_id: String, opened: Bool, sequence: u64)
+- `SessionEventStreamTerminalResolved`(stream_id: String, session_id: String, reason: RpcEventStreamTerminalReason, detail: Option<String>, sequence: u64)
+- `SessionEventStreamCloseResolved`(stream_id: String, closed: Bool, already_closed: Bool, sequence: u64)
+- `MobEventStreamOpenResolved`(stream_id: String, opened: Bool, sequence: u64)
+- `MobEventStreamTerminalResolved`(stream_id: String, reason: RpcEventStreamTerminalReason, detail: Option<String>, sequence: u64)
+- `MobEventStreamCloseResolved`(stream_id: String, closed: Bool, already_closed: Bool, sequence: u64)
 - `LiveChannelStatusResolved`(channel_id: String, status: LiveChannelPublicStatus, sequence: u64, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
 - `EnqueueClassifiedEntry`
 - `PeerIngressClassified`(class: PeerIngressInputClass, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
@@ -7552,6 +7575,401 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `close_observation_sequence_present`
   - `close_observation_sequence_advances`
 - Emits: `LiveCloseResultResolved`
+- To: `Stopped`
+
+### `RecordSessionEventStreamOpenedIdle`
+- From: `Idle`
+- On: `RecordSessionEventStreamOpened`(stream_id, session_id)
+- Guards:
+  - `stream_id_present`
+  - `session_id_present`
+  - `stream_not_active`
+  - `stream_not_closed`
+- Emits: `SessionEventStreamOpenResolved`
+- To: `Idle`
+
+### `RecordSessionEventStreamOpenedAttached`
+- From: `Attached`
+- On: `RecordSessionEventStreamOpened`(stream_id, session_id)
+- Guards:
+  - `stream_id_present`
+  - `session_id_present`
+  - `stream_not_active`
+  - `stream_not_closed`
+- Emits: `SessionEventStreamOpenResolved`
+- To: `Attached`
+
+### `RecordSessionEventStreamOpenedRunning`
+- From: `Running`
+- On: `RecordSessionEventStreamOpened`(stream_id, session_id)
+- Guards:
+  - `stream_id_present`
+  - `session_id_present`
+  - `stream_not_active`
+  - `stream_not_closed`
+- Emits: `SessionEventStreamOpenResolved`
+- To: `Running`
+
+### `RecordSessionEventStreamOpenedRetired`
+- From: `Retired`
+- On: `RecordSessionEventStreamOpened`(stream_id, session_id)
+- Guards:
+  - `stream_id_present`
+  - `session_id_present`
+  - `stream_not_active`
+  - `stream_not_closed`
+- Emits: `SessionEventStreamOpenResolved`
+- To: `Retired`
+
+### `RecordSessionEventStreamOpenedStopped`
+- From: `Stopped`
+- On: `RecordSessionEventStreamOpened`(stream_id, session_id)
+- Guards:
+  - `stream_id_present`
+  - `session_id_present`
+  - `stream_not_active`
+  - `stream_not_closed`
+- Emits: `SessionEventStreamOpenResolved`
+- To: `Stopped`
+
+### `RecordSessionEventStreamTerminatedIdle`
+- From: `Idle`
+- On: `RecordSessionEventStreamTerminated`(stream_id, reason, detail)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+  - `session_binding_recorded`
+- Emits: `SessionEventStreamTerminalResolved`
+- To: `Idle`
+
+### `RecordSessionEventStreamTerminatedAttached`
+- From: `Attached`
+- On: `RecordSessionEventStreamTerminated`(stream_id, reason, detail)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+  - `session_binding_recorded`
+- Emits: `SessionEventStreamTerminalResolved`
+- To: `Attached`
+
+### `RecordSessionEventStreamTerminatedRunning`
+- From: `Running`
+- On: `RecordSessionEventStreamTerminated`(stream_id, reason, detail)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+  - `session_binding_recorded`
+- Emits: `SessionEventStreamTerminalResolved`
+- To: `Running`
+
+### `RecordSessionEventStreamTerminatedRetired`
+- From: `Retired`
+- On: `RecordSessionEventStreamTerminated`(stream_id, reason, detail)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+  - `session_binding_recorded`
+- Emits: `SessionEventStreamTerminalResolved`
+- To: `Retired`
+
+### `RecordSessionEventStreamTerminatedStopped`
+- From: `Stopped`
+- On: `RecordSessionEventStreamTerminated`(stream_id, reason, detail)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+  - `session_binding_recorded`
+- Emits: `SessionEventStreamTerminalResolved`
+- To: `Stopped`
+
+### `ResolveSessionEventStreamCloseActiveIdle`
+- From: `Idle`
+- On: `ResolveSessionEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+  - `session_binding_recorded`
+- Emits: `SessionEventStreamCloseResolved`, `SessionEventStreamTerminalResolved`
+- To: `Idle`
+
+### `ResolveSessionEventStreamCloseActiveAttached`
+- From: `Attached`
+- On: `ResolveSessionEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+  - `session_binding_recorded`
+- Emits: `SessionEventStreamCloseResolved`, `SessionEventStreamTerminalResolved`
+- To: `Attached`
+
+### `ResolveSessionEventStreamCloseActiveRunning`
+- From: `Running`
+- On: `ResolveSessionEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+  - `session_binding_recorded`
+- Emits: `SessionEventStreamCloseResolved`, `SessionEventStreamTerminalResolved`
+- To: `Running`
+
+### `ResolveSessionEventStreamCloseActiveRetired`
+- From: `Retired`
+- On: `ResolveSessionEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+  - `session_binding_recorded`
+- Emits: `SessionEventStreamCloseResolved`, `SessionEventStreamTerminalResolved`
+- To: `Retired`
+
+### `ResolveSessionEventStreamCloseActiveStopped`
+- From: `Stopped`
+- On: `ResolveSessionEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+  - `session_binding_recorded`
+- Emits: `SessionEventStreamCloseResolved`, `SessionEventStreamTerminalResolved`
+- To: `Stopped`
+
+### `ResolveSessionEventStreamCloseAlreadyClosedIdle`
+- From: `Idle`
+- On: `ResolveSessionEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_closed`
+- Emits: `SessionEventStreamCloseResolved`
+- To: `Idle`
+
+### `ResolveSessionEventStreamCloseAlreadyClosedAttached`
+- From: `Attached`
+- On: `ResolveSessionEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_closed`
+- Emits: `SessionEventStreamCloseResolved`
+- To: `Attached`
+
+### `ResolveSessionEventStreamCloseAlreadyClosedRunning`
+- From: `Running`
+- On: `ResolveSessionEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_closed`
+- Emits: `SessionEventStreamCloseResolved`
+- To: `Running`
+
+### `ResolveSessionEventStreamCloseAlreadyClosedRetired`
+- From: `Retired`
+- On: `ResolveSessionEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_closed`
+- Emits: `SessionEventStreamCloseResolved`
+- To: `Retired`
+
+### `ResolveSessionEventStreamCloseAlreadyClosedStopped`
+- From: `Stopped`
+- On: `ResolveSessionEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_closed`
+- Emits: `SessionEventStreamCloseResolved`
+- To: `Stopped`
+
+### `RecordMobEventStreamOpenedIdle`
+- From: `Idle`
+- On: `RecordMobEventStreamOpened`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_not_closed`
+- Emits: `MobEventStreamOpenResolved`
+- To: `Idle`
+
+### `RecordMobEventStreamOpenedAttached`
+- From: `Attached`
+- On: `RecordMobEventStreamOpened`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_not_closed`
+- Emits: `MobEventStreamOpenResolved`
+- To: `Attached`
+
+### `RecordMobEventStreamOpenedRunning`
+- From: `Running`
+- On: `RecordMobEventStreamOpened`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_not_closed`
+- Emits: `MobEventStreamOpenResolved`
+- To: `Running`
+
+### `RecordMobEventStreamOpenedRetired`
+- From: `Retired`
+- On: `RecordMobEventStreamOpened`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_not_closed`
+- Emits: `MobEventStreamOpenResolved`
+- To: `Retired`
+
+### `RecordMobEventStreamOpenedStopped`
+- From: `Stopped`
+- On: `RecordMobEventStreamOpened`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_not_closed`
+- Emits: `MobEventStreamOpenResolved`
+- To: `Stopped`
+
+### `RecordMobEventStreamTerminatedIdle`
+- From: `Idle`
+- On: `RecordMobEventStreamTerminated`(stream_id, reason, detail)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+- Emits: `MobEventStreamTerminalResolved`
+- To: `Idle`
+
+### `RecordMobEventStreamTerminatedAttached`
+- From: `Attached`
+- On: `RecordMobEventStreamTerminated`(stream_id, reason, detail)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+- Emits: `MobEventStreamTerminalResolved`
+- To: `Attached`
+
+### `RecordMobEventStreamTerminatedRunning`
+- From: `Running`
+- On: `RecordMobEventStreamTerminated`(stream_id, reason, detail)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+- Emits: `MobEventStreamTerminalResolved`
+- To: `Running`
+
+### `RecordMobEventStreamTerminatedRetired`
+- From: `Retired`
+- On: `RecordMobEventStreamTerminated`(stream_id, reason, detail)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+- Emits: `MobEventStreamTerminalResolved`
+- To: `Retired`
+
+### `RecordMobEventStreamTerminatedStopped`
+- From: `Stopped`
+- On: `RecordMobEventStreamTerminated`(stream_id, reason, detail)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+- Emits: `MobEventStreamTerminalResolved`
+- To: `Stopped`
+
+### `ResolveMobEventStreamCloseActiveIdle`
+- From: `Idle`
+- On: `ResolveMobEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+- Emits: `MobEventStreamCloseResolved`, `MobEventStreamTerminalResolved`
+- To: `Idle`
+
+### `ResolveMobEventStreamCloseActiveAttached`
+- From: `Attached`
+- On: `ResolveMobEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+- Emits: `MobEventStreamCloseResolved`, `MobEventStreamTerminalResolved`
+- To: `Attached`
+
+### `ResolveMobEventStreamCloseActiveRunning`
+- From: `Running`
+- On: `ResolveMobEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+- Emits: `MobEventStreamCloseResolved`, `MobEventStreamTerminalResolved`
+- To: `Running`
+
+### `ResolveMobEventStreamCloseActiveRetired`
+- From: `Retired`
+- On: `ResolveMobEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+- Emits: `MobEventStreamCloseResolved`, `MobEventStreamTerminalResolved`
+- To: `Retired`
+
+### `ResolveMobEventStreamCloseActiveStopped`
+- From: `Stopped`
+- On: `ResolveMobEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_active`
+- Emits: `MobEventStreamCloseResolved`, `MobEventStreamTerminalResolved`
+- To: `Stopped`
+
+### `ResolveMobEventStreamCloseAlreadyClosedIdle`
+- From: `Idle`
+- On: `ResolveMobEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_closed`
+- Emits: `MobEventStreamCloseResolved`
+- To: `Idle`
+
+### `ResolveMobEventStreamCloseAlreadyClosedAttached`
+- From: `Attached`
+- On: `ResolveMobEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_closed`
+- Emits: `MobEventStreamCloseResolved`
+- To: `Attached`
+
+### `ResolveMobEventStreamCloseAlreadyClosedRunning`
+- From: `Running`
+- On: `ResolveMobEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_closed`
+- Emits: `MobEventStreamCloseResolved`
+- To: `Running`
+
+### `ResolveMobEventStreamCloseAlreadyClosedRetired`
+- From: `Retired`
+- On: `ResolveMobEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_closed`
+- Emits: `MobEventStreamCloseResolved`
+- To: `Retired`
+
+### `ResolveMobEventStreamCloseAlreadyClosedStopped`
+- From: `Stopped`
+- On: `ResolveMobEventStreamClose`(stream_id)
+- Guards:
+  - `stream_id_present`
+  - `stream_not_active`
+  - `stream_closed`
+- Emits: `MobEventStreamCloseResolved`
 - To: `Stopped`
 
 ### `RecordLiveChannelStatusIdle`

@@ -15821,6 +15821,293 @@ fn live_close_result_is_machine_owned() {
 }
 
 #[test]
+fn session_event_stream_close_result_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    let open = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordSessionEventStreamOpened {
+            stream_id: "session-stream-1".to_string(),
+            session_id: "session-1".to_string(),
+        },
+    )
+    .expect("machine authority should accept session stream open");
+    assert!(
+        authority
+            .state()
+            .active_session_event_streams
+            .contains("session-stream-1")
+    );
+    assert!(open.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::SessionEventStreamOpenResolved {
+            stream_id,
+            session_id,
+            opened: true,
+            sequence: 1,
+        } if stream_id == "session-stream-1" && session_id == "session-1"
+    )));
+
+    let close = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveSessionEventStreamClose {
+            stream_id: "session-stream-1".to_string(),
+        },
+    )
+    .expect("machine authority should close an active session stream");
+    assert!(
+        !authority
+            .state()
+            .active_session_event_streams
+            .contains("session-stream-1")
+    );
+    assert!(
+        authority
+            .state()
+            .closed_session_event_streams
+            .contains("session-stream-1")
+    );
+    assert!(close.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::SessionEventStreamCloseResolved {
+            stream_id,
+            closed: true,
+            already_closed: false,
+            sequence: 1,
+        } if stream_id == "session-stream-1"
+    )));
+    assert!(close.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::SessionEventStreamTerminalResolved {
+            stream_id,
+            session_id,
+            reason: mm_dsl::RpcEventStreamTerminalReason::ExplicitClose,
+            detail: None,
+            sequence: 1,
+        } if stream_id == "session-stream-1" && session_id == "session-1"
+    )));
+
+    let close_again = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveSessionEventStreamClose {
+            stream_id: "session-stream-1".to_string(),
+        },
+    )
+    .expect("machine authority should classify an already closed stream");
+    assert!(close_again.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::SessionEventStreamCloseResolved {
+            stream_id,
+            closed: true,
+            already_closed: true,
+            sequence: 2,
+        } if stream_id == "session-stream-1"
+    )));
+    assert!(
+        !close_again.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::SessionEventStreamTerminalResolved { .. }
+        )),
+        "idempotent close should not emit another terminal notification"
+    );
+
+    let terminal_open = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordSessionEventStreamOpened {
+            stream_id: "session-stream-2".to_string(),
+            session_id: "session-1".to_string(),
+        },
+    );
+    assert!(terminal_open.is_ok());
+    let terminal = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordSessionEventStreamTerminated {
+            stream_id: "session-stream-2".to_string(),
+            reason: mm_dsl::RpcEventStreamTerminalReason::RemoteEnd,
+            detail: None,
+        },
+    )
+    .expect("machine authority should accept remote terminal observation");
+    assert!(terminal.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::SessionEventStreamTerminalResolved {
+            stream_id,
+            reason: mm_dsl::RpcEventStreamTerminalReason::RemoteEnd,
+            ..
+        } if stream_id == "session-stream-2"
+    )));
+    let close_after_terminal = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveSessionEventStreamClose {
+            stream_id: "session-stream-2".to_string(),
+        },
+    )
+    .expect("terminal stream close should be machine-classified as already closed");
+    assert!(close_after_terminal.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::SessionEventStreamCloseResolved {
+            stream_id,
+            closed: true,
+            already_closed: true,
+            ..
+        } if stream_id == "session-stream-2"
+    )));
+
+    let unknown = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveSessionEventStreamClose {
+            stream_id: "session-stream-missing".to_string(),
+        },
+    );
+    assert!(
+        unknown.is_err(),
+        "machine authority must reject close result classification without a stream witness"
+    );
+}
+
+#[test]
+fn mob_event_stream_close_result_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    let open = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordMobEventStreamOpened {
+            stream_id: "mob-stream-1".to_string(),
+        },
+    )
+    .expect("machine authority should accept mob stream open");
+    assert!(
+        authority
+            .state()
+            .active_mob_event_streams
+            .contains("mob-stream-1")
+    );
+    assert!(open.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::MobEventStreamOpenResolved {
+            stream_id,
+            opened: true,
+            sequence: 1,
+        } if stream_id == "mob-stream-1"
+    )));
+
+    let close = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveMobEventStreamClose {
+            stream_id: "mob-stream-1".to_string(),
+        },
+    )
+    .expect("machine authority should close an active mob stream");
+    assert!(
+        !authority
+            .state()
+            .active_mob_event_streams
+            .contains("mob-stream-1")
+    );
+    assert!(
+        authority
+            .state()
+            .closed_mob_event_streams
+            .contains("mob-stream-1")
+    );
+    assert!(close.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::MobEventStreamCloseResolved {
+            stream_id,
+            closed: true,
+            already_closed: false,
+            sequence: 1,
+        } if stream_id == "mob-stream-1"
+    )));
+    assert!(close.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::MobEventStreamTerminalResolved {
+            stream_id,
+            reason: mm_dsl::RpcEventStreamTerminalReason::ExplicitClose,
+            detail: None,
+            sequence: 1,
+        } if stream_id == "mob-stream-1"
+    )));
+
+    let close_again = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveMobEventStreamClose {
+            stream_id: "mob-stream-1".to_string(),
+        },
+    )
+    .expect("machine authority should classify an already closed mob stream");
+    assert!(close_again.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::MobEventStreamCloseResolved {
+            stream_id,
+            closed: true,
+            already_closed: true,
+            sequence: 2,
+        } if stream_id == "mob-stream-1"
+    )));
+    assert!(
+        !close_again.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::MobEventStreamTerminalResolved { .. }
+        )),
+        "idempotent mob close should not emit another terminal notification"
+    );
+
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordMobEventStreamOpened {
+            stream_id: "mob-stream-2".to_string(),
+        },
+    )
+    .expect("machine authority should accept second mob stream open");
+    let terminal = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordMobEventStreamTerminated {
+            stream_id: "mob-stream-2".to_string(),
+            reason: mm_dsl::RpcEventStreamTerminalReason::TerminalError,
+            detail: Some("queue overflow".to_string()),
+        },
+    )
+    .expect("machine authority should accept mob terminal observation");
+    assert!(terminal.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::MobEventStreamTerminalResolved {
+            stream_id,
+            reason: mm_dsl::RpcEventStreamTerminalReason::TerminalError,
+            detail: Some(detail),
+            ..
+        } if stream_id == "mob-stream-2" && detail == "queue overflow"
+    )));
+    let close_after_terminal = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveMobEventStreamClose {
+            stream_id: "mob-stream-2".to_string(),
+        },
+    )
+    .expect("terminal mob stream close should be already closed");
+    assert!(close_after_terminal.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::MobEventStreamCloseResolved {
+            stream_id,
+            closed: true,
+            already_closed: true,
+            ..
+        } if stream_id == "mob-stream-2"
+    )));
+
+    let unknown = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveMobEventStreamClose {
+            stream_id: "mob-stream-missing".to_string(),
+        },
+    );
+    assert!(
+        unknown.is_err(),
+        "machine authority must reject mob close result classification without a stream witness"
+    );
+}
+
+#[test]
 fn live_channel_status_result_is_machine_owned() {
     let mut authority = registered_dsl_authority_for_visibility_tests();
 

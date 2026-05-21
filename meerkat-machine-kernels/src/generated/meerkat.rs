@@ -5112,6 +5112,62 @@ impl std::fmt::Display for RoutingSwitchTurnTerminal {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RpcEventStreamTerminalReason {
+    #[default]
+    #[serde(rename = "RemoteEnd")]
+    RemoteEnd,
+    #[serde(rename = "TerminalError")]
+    TerminalError,
+    #[serde(rename = "ExplicitClose")]
+    ExplicitClose,
+}
+impl RpcEventStreamTerminalReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RemoteEnd => "RemoteEnd",
+            Self::TerminalError => "TerminalError",
+            Self::ExplicitClose => "ExplicitClose",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RpcEventStreamTerminalReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RemoteEnd" => Ok(Self::RemoteEnd),
+            "TerminalError" => Ok(Self::TerminalError),
+            "ExplicitClose" => Ok(Self::ExplicitClose),
+            other => Err(format!(
+                "invalid RpcEventStreamTerminalReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RpcEventStreamTerminalReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RpcEventStreamTerminalReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -6948,6 +7004,17 @@ pub struct State {
     pub live_channel_status_observation_sequence_by_channel:
         std::collections::BTreeMap<String, u64>,
     pub live_channel_status_by_channel: std::collections::BTreeMap<String, LiveChannelPublicStatus>,
+    pub session_event_stream_open_result_sequence: u64,
+    pub session_event_stream_close_result_sequence: u64,
+    pub session_event_stream_terminal_sequence: u64,
+    pub active_session_event_streams: std::collections::BTreeSet<String>,
+    pub closed_session_event_streams: std::collections::BTreeSet<String>,
+    pub session_event_stream_session_ids: std::collections::BTreeMap<String, String>,
+    pub mob_event_stream_open_result_sequence: u64,
+    pub mob_event_stream_close_result_sequence: u64,
+    pub mob_event_stream_terminal_sequence: u64,
+    pub active_mob_event_streams: std::collections::BTreeSet<String>,
+    pub closed_mob_event_streams: std::collections::BTreeSet<String>,
     pub known_surfaces: std::collections::BTreeSet<String>,
     pub active_surfaces: std::collections::BTreeSet<String>,
     pub visible_surfaces: std::collections::BTreeSet<String>,
@@ -7756,6 +7823,35 @@ pub mod inputs {
         pub close_observation_sequence: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordSessionEventStreamOpened {
+        pub stream_id: String,
+        pub session_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordSessionEventStreamTerminated {
+        pub stream_id: String,
+        pub reason: RpcEventStreamTerminalReason,
+        pub detail: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSessionEventStreamClose {
+        pub stream_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordMobEventStreamOpened {
+        pub stream_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordMobEventStreamTerminated {
+        pub stream_id: String,
+        pub reason: RpcEventStreamTerminalReason,
+        pub detail: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMobEventStreamClose {
+        pub stream_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordLiveChannelStatus {
         pub channel_id: String,
         pub status: LiveChannelPublicStatus,
@@ -8166,6 +8262,12 @@ pub enum Input {
     FinishSurfaceRequestUnpublished(inputs::FinishSurfaceRequestUnpublished),
     RecordLiveRefreshQueued(inputs::RecordLiveRefreshQueued),
     RecordLiveCloseClosed(inputs::RecordLiveCloseClosed),
+    RecordSessionEventStreamOpened(inputs::RecordSessionEventStreamOpened),
+    RecordSessionEventStreamTerminated(inputs::RecordSessionEventStreamTerminated),
+    ResolveSessionEventStreamClose(inputs::ResolveSessionEventStreamClose),
+    RecordMobEventStreamOpened(inputs::RecordMobEventStreamOpened),
+    RecordMobEventStreamTerminated(inputs::RecordMobEventStreamTerminated),
+    ResolveMobEventStreamClose(inputs::ResolveMobEventStreamClose),
     RecordLiveChannelStatus(inputs::RecordLiveChannelStatus),
     SpawnDrain(inputs::SpawnDrain),
     StopDrain(inputs::StopDrain),
@@ -8396,6 +8498,14 @@ impl Input {
             Self::FinishSurfaceRequestUnpublished(_) => InputKind::FinishSurfaceRequestUnpublished,
             Self::RecordLiveRefreshQueued(_) => InputKind::RecordLiveRefreshQueued,
             Self::RecordLiveCloseClosed(_) => InputKind::RecordLiveCloseClosed,
+            Self::RecordSessionEventStreamOpened(_) => InputKind::RecordSessionEventStreamOpened,
+            Self::RecordSessionEventStreamTerminated(_) => {
+                InputKind::RecordSessionEventStreamTerminated
+            }
+            Self::ResolveSessionEventStreamClose(_) => InputKind::ResolveSessionEventStreamClose,
+            Self::RecordMobEventStreamOpened(_) => InputKind::RecordMobEventStreamOpened,
+            Self::RecordMobEventStreamTerminated(_) => InputKind::RecordMobEventStreamTerminated,
+            Self::ResolveMobEventStreamClose(_) => InputKind::ResolveMobEventStreamClose,
             Self::RecordLiveChannelStatus(_) => InputKind::RecordLiveChannelStatus,
             Self::SpawnDrain(_) => InputKind::SpawnDrain,
             Self::StopDrain(_) => InputKind::StopDrain,
@@ -8607,6 +8717,12 @@ pub enum InputKind {
     FinishSurfaceRequestUnpublished,
     RecordLiveRefreshQueued,
     RecordLiveCloseClosed,
+    RecordSessionEventStreamOpened,
+    RecordSessionEventStreamTerminated,
+    ResolveSessionEventStreamClose,
+    RecordMobEventStreamOpened,
+    RecordMobEventStreamTerminated,
+    ResolveMobEventStreamClose,
     RecordLiveChannelStatus,
     SpawnDrain,
     StopDrain,
@@ -9113,6 +9229,48 @@ pub mod effects {
         pub close_observation_sequence: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionEventStreamOpenResolved {
+        pub stream_id: String,
+        pub session_id: String,
+        pub opened: bool,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionEventStreamTerminalResolved {
+        pub stream_id: String,
+        pub session_id: String,
+        pub reason: RpcEventStreamTerminalReason,
+        pub detail: Option<String>,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionEventStreamCloseResolved {
+        pub stream_id: String,
+        pub closed: bool,
+        pub already_closed: bool,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MobEventStreamOpenResolved {
+        pub stream_id: String,
+        pub opened: bool,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MobEventStreamTerminalResolved {
+        pub stream_id: String,
+        pub reason: RpcEventStreamTerminalReason,
+        pub detail: Option<String>,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MobEventStreamCloseResolved {
+        pub stream_id: String,
+        pub closed: bool,
+        pub already_closed: bool,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveChannelStatusResolved {
         pub channel_id: String,
         pub status: LiveChannelPublicStatus,
@@ -9332,6 +9490,12 @@ pub enum Effect {
     SurfaceRequestSupersededByCancel(effects::SurfaceRequestSupersededByCancel),
     LiveRefreshResultResolved(effects::LiveRefreshResultResolved),
     LiveCloseResultResolved(effects::LiveCloseResultResolved),
+    SessionEventStreamOpenResolved(effects::SessionEventStreamOpenResolved),
+    SessionEventStreamTerminalResolved(effects::SessionEventStreamTerminalResolved),
+    SessionEventStreamCloseResolved(effects::SessionEventStreamCloseResolved),
+    MobEventStreamOpenResolved(effects::MobEventStreamOpenResolved),
+    MobEventStreamTerminalResolved(effects::MobEventStreamTerminalResolved),
+    MobEventStreamCloseResolved(effects::MobEventStreamCloseResolved),
     LiveChannelStatusResolved(effects::LiveChannelStatusResolved),
     EnqueueClassifiedEntry(effects::EnqueueClassifiedEntry),
     PeerIngressClassified(effects::PeerIngressClassified),
@@ -9443,6 +9607,12 @@ pub enum EffectKind {
     SurfaceRequestSupersededByCancel,
     LiveRefreshResultResolved,
     LiveCloseResultResolved,
+    SessionEventStreamOpenResolved,
+    SessionEventStreamTerminalResolved,
+    SessionEventStreamCloseResolved,
+    MobEventStreamOpenResolved,
+    MobEventStreamTerminalResolved,
+    MobEventStreamCloseResolved,
     LiveChannelStatusResolved,
     EnqueueClassifiedEntry,
     PeerIngressClassified,
@@ -10283,6 +10453,46 @@ pub enum TransitionId {
     RecordLiveCloseClosedRunning,
     RecordLiveCloseClosedRetired,
     RecordLiveCloseClosedStopped,
+    RecordSessionEventStreamOpenedIdle,
+    RecordSessionEventStreamOpenedAttached,
+    RecordSessionEventStreamOpenedRunning,
+    RecordSessionEventStreamOpenedRetired,
+    RecordSessionEventStreamOpenedStopped,
+    RecordSessionEventStreamTerminatedIdle,
+    RecordSessionEventStreamTerminatedAttached,
+    RecordSessionEventStreamTerminatedRunning,
+    RecordSessionEventStreamTerminatedRetired,
+    RecordSessionEventStreamTerminatedStopped,
+    ResolveSessionEventStreamCloseActiveIdle,
+    ResolveSessionEventStreamCloseActiveAttached,
+    ResolveSessionEventStreamCloseActiveRunning,
+    ResolveSessionEventStreamCloseActiveRetired,
+    ResolveSessionEventStreamCloseActiveStopped,
+    ResolveSessionEventStreamCloseAlreadyClosedIdle,
+    ResolveSessionEventStreamCloseAlreadyClosedAttached,
+    ResolveSessionEventStreamCloseAlreadyClosedRunning,
+    ResolveSessionEventStreamCloseAlreadyClosedRetired,
+    ResolveSessionEventStreamCloseAlreadyClosedStopped,
+    RecordMobEventStreamOpenedIdle,
+    RecordMobEventStreamOpenedAttached,
+    RecordMobEventStreamOpenedRunning,
+    RecordMobEventStreamOpenedRetired,
+    RecordMobEventStreamOpenedStopped,
+    RecordMobEventStreamTerminatedIdle,
+    RecordMobEventStreamTerminatedAttached,
+    RecordMobEventStreamTerminatedRunning,
+    RecordMobEventStreamTerminatedRetired,
+    RecordMobEventStreamTerminatedStopped,
+    ResolveMobEventStreamCloseActiveIdle,
+    ResolveMobEventStreamCloseActiveAttached,
+    ResolveMobEventStreamCloseActiveRunning,
+    ResolveMobEventStreamCloseActiveRetired,
+    ResolveMobEventStreamCloseActiveStopped,
+    ResolveMobEventStreamCloseAlreadyClosedIdle,
+    ResolveMobEventStreamCloseAlreadyClosedAttached,
+    ResolveMobEventStreamCloseAlreadyClosedRunning,
+    ResolveMobEventStreamCloseAlreadyClosedRetired,
+    ResolveMobEventStreamCloseAlreadyClosedStopped,
     RecordLiveChannelStatusIdle,
     RecordLiveChannelStatusAttached,
     RecordLiveChannelStatusRunning,
@@ -10715,6 +10925,17 @@ pub fn initial_state() -> State {
         live_channel_status_result_sequence: 0,
         live_channel_status_observation_sequence_by_channel: Default::default(),
         live_channel_status_by_channel: Default::default(),
+        session_event_stream_open_result_sequence: 0,
+        session_event_stream_close_result_sequence: 0,
+        session_event_stream_terminal_sequence: 0,
+        active_session_event_streams: Default::default(),
+        closed_session_event_streams: Default::default(),
+        session_event_stream_session_ids: Default::default(),
+        mob_event_stream_open_result_sequence: 0,
+        mob_event_stream_close_result_sequence: 0,
+        mob_event_stream_terminal_sequence: 0,
+        active_mob_event_streams: Default::default(),
+        closed_mob_event_streams: Default::default(),
         known_surfaces: Default::default(),
         active_surfaces: Default::default(),
         visible_surfaces: Default::default(),

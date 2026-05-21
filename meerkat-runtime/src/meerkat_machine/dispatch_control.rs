@@ -876,36 +876,75 @@ impl MeerkatMachine {
             } => {
                 let operation_key = image_operation_key(operation_id);
                 let state = self.session_dsl_state(&session_id).await?;
-                let terminal = state
+                let operation_phase = state
+                    .model_routing_image_operation_phases
+                    .get(&operation_key)
+                    .copied()
+                    .ok_or_else(|| {
+                        RuntimeControlPlaneError::Internal(format!(
+                            "image operation restore missing machine phase for {operation_key}"
+                        ))
+                    })?;
+                if operation_phase
+                    != super::dsl::RoutingImageOperationPhase::RestoringScopedOverride
+                {
+                    return Err(RuntimeControlPlaneError::Internal(format!(
+                        "image operation restore requires machine restoring phase for {operation_key}: {operation_phase:?}"
+                    )));
+                }
+                let machine_terminal = state
+                    .model_routing_image_terminals
+                    .get(&operation_key)
+                    .copied()
+                    .ok_or_else(|| {
+                        RuntimeControlPlaneError::Internal(format!(
+                            "image operation restore missing machine terminal for {operation_key}"
+                        ))
+                    })?;
+                let terminal_payload = state
                     .model_routing_image_terminal_payloads
                     .get(&operation_key)
-                    .and_then(|payload| serde_json::from_str(payload).ok())
-                    .or_else(|| {
-                        state
-                            .model_routing_image_terminals
-                            .get(&operation_key)
-                            .copied()
-                            .map(|terminal| {
-                                image_terminal_from_routing(
-                                    terminal,
-                                    state
-                                        .model_routing_image_denials
-                                        .get(&operation_key)
-                                        .copied()
-                                        .map(|reason| image_denial_from_routing(reason, None)),
-                                )
-                            })
-                    })
-                    .unwrap_or(meerkat_core::image_generation::ImageOperationTerminalClass::Failed);
+                    .ok_or_else(|| {
+                        RuntimeControlPlaneError::Internal(format!(
+                            "image operation restore missing machine terminal payload for {operation_key}"
+                        ))
+                    })?;
+                let terminal: meerkat_core::image_generation::ImageOperationTerminalClass =
+                    serde_json::from_str(terminal_payload).map_err(|err| {
+                        RuntimeControlPlaneError::Internal(format!(
+                            "image operation restore machine terminal payload is invalid for {operation_key}: {err}"
+                        ))
+                    })?;
+                let payload_terminal = routing_image_terminal(terminal.clone());
+                if payload_terminal != machine_terminal {
+                    return Err(RuntimeControlPlaneError::Internal(format!(
+                        "image operation restore terminal payload disagrees with machine terminal for {operation_key}: payload={payload_terminal:?}, machine={machine_terminal:?}"
+                    )));
+                }
                 self.apply_session_dsl_input(
                     &session_id,
                     crate::meerkat_machine::dsl::MeerkatMachineInput::RestoreImageOperationOverride {
-                        operation_id: operation_key,
+                        operation_id: operation_key.clone(),
                     },
                     "RestoreImageOperationOverride",
                 )
                 .await
                 .map_err(RuntimeControlPlaneError::Internal)?;
+                let restored_state = self.session_dsl_state(&session_id).await?;
+                let restored_phase = restored_state
+                    .model_routing_image_operation_phases
+                    .get(&operation_key)
+                    .copied()
+                    .ok_or_else(|| {
+                        RuntimeControlPlaneError::Internal(format!(
+                            "image operation restore missing terminal machine phase for {operation_key}"
+                        ))
+                    })?;
+                if restored_phase != super::dsl::RoutingImageOperationPhase::Terminal {
+                    return Err(RuntimeControlPlaneError::Internal(format!(
+                        "image operation restore did not terminalize {operation_key}: {restored_phase:?}"
+                    )));
+                }
                 Ok(MeerkatMachineCommandResult::ImageOperationPhase(
                     meerkat_core::image_generation::ImageOperationPhase::Terminal { terminal },
                 ))
@@ -1068,38 +1107,6 @@ fn routing_image_terminal(
         ImageOperationTerminalClass::Timeout => super::dsl::RoutingImageTerminal::Timeout,
         ImageOperationTerminalClass::ScopedRestoreFailed { .. } => {
             super::dsl::RoutingImageTerminal::ScopedRestoreFailed
-        }
-    }
-}
-
-fn image_terminal_from_routing(
-    terminal: super::dsl::RoutingImageTerminal,
-    denial_reason: Option<meerkat_core::image_generation::ImageOperationDenialReason>,
-) -> meerkat_core::image_generation::ImageOperationTerminalClass {
-    use meerkat_core::image_generation::{ImageOperationTerminalClass, ProviderTextDisposition};
-    match terminal {
-        super::dsl::RoutingImageTerminal::Generated => ImageOperationTerminalClass::Generated,
-        super::dsl::RoutingImageTerminal::EmptyResult => ImageOperationTerminalClass::EmptyResult {
-            provider_text: ProviderTextDisposition::NotEmitted,
-        },
-        super::dsl::RoutingImageTerminal::Denied => ImageOperationTerminalClass::Denied {
-            reason: denial_reason.unwrap_or(
-                meerkat_core::image_generation::ImageOperationDenialReason::CapabilityPolicy,
-            ),
-        },
-        super::dsl::RoutingImageTerminal::RefusedByProvider => {
-            ImageOperationTerminalClass::RefusedByProvider
-        }
-        super::dsl::RoutingImageTerminal::SafetyFiltered => {
-            ImageOperationTerminalClass::SafetyFiltered
-        }
-        super::dsl::RoutingImageTerminal::Failed => ImageOperationTerminalClass::Failed,
-        super::dsl::RoutingImageTerminal::Cancelled => ImageOperationTerminalClass::Cancelled,
-        super::dsl::RoutingImageTerminal::Timeout => ImageOperationTerminalClass::Timeout,
-        super::dsl::RoutingImageTerminal::ScopedRestoreFailed => {
-            ImageOperationTerminalClass::ScopedRestoreFailed {
-                trigger: meerkat_core::image_generation::PostActivationImageTerminal::Failed,
-            }
         }
     }
 }

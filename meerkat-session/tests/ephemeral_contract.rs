@@ -155,6 +155,14 @@ impl SessionAgent for MockAgent {
         session
     }
 
+    fn observed_session_tail(
+        &self,
+    ) -> meerkat_core::pending_continuation_admission::ObservedSessionTailKind {
+        meerkat_core::pending_continuation_admission::observe_session_tail(
+            self.session_clone().messages(),
+        )
+    }
+
     fn apply_runtime_system_context(
         &mut self,
         appends: &[meerkat_core::PendingSystemContextAppend],
@@ -556,6 +564,12 @@ impl SessionAgent for RealSessionAgent {
         session_clone_with_system_context(&self.session, &self.system_context_state)
     }
 
+    fn observed_session_tail(
+        &self,
+    ) -> meerkat_core::pending_continuation_admission::ObservedSessionTailKind {
+        meerkat_core::pending_continuation_admission::observe_session_tail(self.session.messages())
+    }
+
     fn apply_runtime_system_context(
         &mut self,
         appends: &[meerkat_core::PendingSystemContextAppend],
@@ -663,6 +677,12 @@ impl SessionAgent for CompactionSessionAgent {
 
     fn session_clone(&self) -> meerkat_core::Session {
         session_clone_with_system_context(&self.session, &self.system_context_state)
+    }
+
+    fn observed_session_tail(
+        &self,
+    ) -> meerkat_core::pending_continuation_admission::ObservedSessionTailKind {
+        meerkat_core::pending_continuation_admission::observe_session_tail(self.session.messages())
     }
 
     fn apply_runtime_system_context(

@@ -7,5 +7,6 @@
 
 pub mod auth_lease_transition_authority_sources;
 pub mod comms_trust_authority_sources;
+pub mod pending_continuation_admission;
 pub mod protocol_ops_barrier_satisfaction;
 pub mod terminal_surface_mapping;

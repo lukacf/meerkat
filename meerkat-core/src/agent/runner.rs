@@ -6,6 +6,10 @@ use crate::event::AgentEvent;
 use crate::hooks::{HookInvocation, HookPoint};
 use crate::lifecycle::run_primitive::{ConversationAppend, ConversationAppendRole, CoreRenderable};
 use crate::ops::{ToolDispatchOutcome, ToolDispatchTimeoutPolicy};
+use crate::pending_continuation_admission::{
+    ObservedSessionTailKind, PendingContinuationDisposition, PendingContinuationPublicTerminal,
+    observe_session_tail, resolve_pending_continuation,
+};
 use crate::retry::RetryPolicy;
 use crate::service::TurnToolOverlay;
 use crate::session::{PendingSystemContextAppend, Session};
@@ -41,6 +45,28 @@ fn user_message_from_operator_renderable(
         | CoreRenderable::Reference { .. } => Err(AgentError::ConfigError(
             "role=user transcript append only accepts operator text or content blocks".to_string(),
         )),
+    }
+}
+
+fn prompt_from_admitted_pending_tail(
+    messages: &[Message],
+    admitted_tail: ObservedSessionTailKind,
+) -> Result<ContentInput, AgentError> {
+    match (admitted_tail, messages.last()) {
+        (ObservedSessionTailKind::User, Some(Message::User(user)))
+            if user.has_non_text_content() =>
+        {
+            Ok(ContentInput::Blocks(user.content.clone()))
+        }
+        (ObservedSessionTailKind::User, Some(Message::User(user))) => {
+            Ok(ContentInput::Text(user.text_content()))
+        }
+        (ObservedSessionTailKind::ToolResults, Some(Message::ToolResults { .. })) => {
+            Ok(ContentInput::Text(String::new()))
+        }
+        _ => Err(AgentError::InternalError(format!(
+            "generated pending-continuation authority admitted tail {admitted_tail:?}, but transcript tail no longer matches"
+        ))),
     }
 }
 
@@ -908,8 +934,8 @@ where
     /// tool results). Unlike `run()`, this method does NOT add a new user message;
     /// it runs directly from the session's current state.
     ///
-    /// Returns an error if the session doesn't end at a resumable continuation
-    /// boundary (`User` or `ToolResults`).
+    /// Returns `NoPendingBoundary` when generated pending-continuation
+    /// authority does not admit the current transcript tail.
     pub async fn run_pending(&mut self) -> Result<RunResult, AgentError> {
         self.run_pending_inner(None).await
     }
@@ -1103,20 +1129,41 @@ where
     ) -> Result<RunResult, AgentError> {
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
 
-        let pending_prompt = self.session.messages().last().and_then(|m| match m {
-            Message::User(u) if u.has_non_text_content() => {
-                Some(ContentInput::Blocks(u.content.clone()))
+        let session_tail = observe_session_tail(self.session.messages());
+        let pending_resolution =
+            resolve_pending_continuation(session_tail, 0).map_err(|error| {
+                AgentError::InternalError(format!(
+                    "generated pending-continuation authority rejected run_pending: {error}"
+                ))
+            })?;
+        let prompt = match pending_resolution.disposition {
+            PendingContinuationDisposition::RunPending => {
+                if let Some(terminal) = pending_resolution.public_terminal {
+                    self.clear_runtime_execution_kind();
+                    return Err(AgentError::InternalError(format!(
+                        "generated pending-continuation authority emitted terminal {terminal:?} for runnable continuation"
+                    )));
+                }
+                match prompt_from_admitted_pending_tail(self.session.messages(), session_tail) {
+                    Ok(prompt) => prompt,
+                    Err(error) => {
+                        self.clear_runtime_execution_kind();
+                        return Err(error);
+                    }
+                }
             }
-            Message::User(u) => Some(ContentInput::Text(u.text_content())),
-            Message::ToolResults { .. } => Some(ContentInput::Text(String::new())),
-            _ => None,
-        });
-
-        let Some(prompt) = pending_prompt else {
-            self.clear_runtime_execution_kind();
-            return Err(AgentError::ConfigError(
-                "run_pending requires a pending user or tool-results continuation boundary in the session".to_string(),
-            ));
+            PendingContinuationDisposition::NoPendingBoundary => {
+                self.clear_runtime_execution_kind();
+                return if pending_resolution.public_terminal
+                    == Some(PendingContinuationPublicTerminal::NoPendingBoundary)
+                {
+                    Err(AgentError::NoPendingBoundary)
+                } else {
+                    Err(AgentError::InternalError(
+                        "generated pending-continuation authority omitted NoPendingBoundary terminal witness".to_string(),
+                    ))
+                };
+            }
         };
 
         self.require_runtime_execution_kind()?;

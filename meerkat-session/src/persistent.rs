@@ -3705,7 +3705,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 mod tests {
     use super::*;
     use crate::ephemeral::{
-        EphemeralSessionService, SessionAgent, SessionAgentBuilder, SessionSnapshot,
+        EphemeralSessionService, ObservedSessionTailKind, SessionAgent, SessionAgentBuilder,
+        SessionSnapshot,
     };
     use crate::event_store::{EVENT_SCHEMA_VERSION, EventStoreError, StoredEvent};
     use meerkat_core::ToolDispatchOutcome;
@@ -4315,6 +4316,14 @@ mod tests {
             }
         }
 
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            let session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            meerkat_core::pending_continuation_admission::observe_session_tail(session.messages())
+        }
+
         fn update_keep_alive(&mut self, keep_alive: bool) {
             let mut session = match self.session.lock() {
                 Ok(guard) => guard,
@@ -4498,6 +4507,10 @@ mod tests {
             self.inner.session_clone()
         }
 
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            self.inner.observed_session_tail()
+        }
+
         fn update_keep_alive(&mut self, keep_alive: bool) {
             self.inner.update_keep_alive(keep_alive);
         }
@@ -4663,6 +4676,10 @@ mod tests {
 
         fn session_clone(&self) -> Session {
             self.inner.session_clone()
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            self.inner.observed_session_tail()
         }
 
         fn update_keep_alive(&mut self, keep_alive: bool) {
@@ -5021,6 +5038,10 @@ mod tests {
             self.inner.session_clone()
         }
 
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            self.inner.observed_session_tail()
+        }
+
         fn update_keep_alive(&mut self, keep_alive: bool) {
             self.inner.update_keep_alive(keep_alive);
         }
@@ -5260,6 +5281,14 @@ mod tests {
                 Ok(guard) => guard.clone(),
                 Err(poisoned) => poisoned.into_inner().clone(),
             }
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            let session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            meerkat_core::pending_continuation_admission::observe_session_tail(session.messages())
         }
 
         fn session_id(&self) -> SessionId {
@@ -5522,6 +5551,14 @@ mod tests {
                 Ok(guard) => guard.clone(),
                 Err(poisoned) => poisoned.into_inner().clone(),
             }
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            let session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            meerkat_core::pending_continuation_admission::observe_session_tail(session.messages())
         }
 
         fn apply_runtime_system_context(

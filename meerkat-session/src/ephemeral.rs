@@ -610,9 +610,7 @@ pub trait SessionAgent: Send {
     /// This is deliberately a typed observation, not a pending-boundary
     /// decision. Generated turn-admission authority owns which tail kinds can
     /// admit pending continuation.
-    fn observed_session_tail(&self) -> ObservedSessionTailKind {
-        ObservedSessionTailKind::Empty
-    }
+    fn observed_session_tail(&self) -> ObservedSessionTailKind;
 
     /// Update the `keep_alive` flag in the session's durable metadata.
     ///
@@ -4069,6 +4067,10 @@ mod runtime_turn_metadata_tests {
             meerkat_core::Session::new()
         }
 
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            ObservedSessionTailKind::Empty
+        }
+
         fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]) {
             self.observed_context_texts
                 .lock()
@@ -4583,6 +4585,10 @@ mod admission_window_tests {
             meerkat_core::Session::new()
         }
 
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            ObservedSessionTailKind::Empty
+        }
+
         fn apply_runtime_system_context(&mut self, _appends: &[PendingSystemContextAppend]) {}
 
         fn system_context_state(&self) -> Arc<Mutex<SessionSystemContextState>> {
@@ -4960,6 +4966,10 @@ mod inline_video_admission_tests {
 
         fn session_clone(&self) -> meerkat_core::Session {
             meerkat_core::Session::new()
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            ObservedSessionTailKind::Empty
         }
 
         fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {

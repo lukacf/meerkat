@@ -401,15 +401,9 @@ impl SessionAgent for FactoryAgent {
     }
 
     fn observed_session_tail(&self) -> ObservedSessionTailKind {
-        match self.agent.session().messages().last() {
-            None => ObservedSessionTailKind::Empty,
-            Some(Message::System(_)) => ObservedSessionTailKind::System,
-            Some(Message::SystemNotice(_)) => ObservedSessionTailKind::SystemNotice,
-            Some(Message::User(_)) => ObservedSessionTailKind::User,
-            Some(Message::Assistant(_)) => ObservedSessionTailKind::Assistant,
-            Some(Message::BlockAssistant(_)) => ObservedSessionTailKind::BlockAssistant,
-            Some(Message::ToolResults { .. }) => ObservedSessionTailKind::ToolResults,
-        }
+        meerkat_core::pending_continuation_admission::observe_session_tail(
+            self.agent.session().messages(),
+        )
     }
 
     fn apply_runtime_system_context(

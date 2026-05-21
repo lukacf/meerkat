@@ -12,24 +12,13 @@ use meerkat_machine_dsl::machine;
 
 mod authority {
     use super::machine;
+    use meerkat_core::pending_continuation_admission::PendingContinuationDisposition;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
     pub(crate) enum StartTurnExecutionKind {
         #[default]
         ContentTurn,
         ResumePending,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-    pub enum ObservedSessionTailKind {
-        #[default]
-        Empty,
-        System,
-        SystemNotice,
-        User,
-        Assistant,
-        BlockAssistant,
-        ToolResults,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -98,8 +87,7 @@ mod authority {
                     execution_kind: Enum<StartTurnExecutionKind>,
                     prompt_trimmed_text_byte_count: u64,
                     prompt_non_text_block_count: u64,
-                    session_tail: Enum<ObservedSessionTailKind>,
-                    staged_tool_result_count: u64,
+                    pending_continuation: Enum<PendingContinuationDisposition>,
                 },
             }
 
@@ -123,14 +111,6 @@ mod authority {
 
             helper prompt_has_content(prompt_trimmed_text_byte_count: u64, prompt_non_text_block_count: u64) -> bool {
                 prompt_trimmed_text_byte_count > 0 || prompt_non_text_block_count > 0
-            }
-
-            helper tail_has_pending_boundary(session_tail: Enum<ObservedSessionTailKind>) -> bool {
-                session_tail == ObservedSessionTailKind::User || session_tail == ObservedSessionTailKind::ToolResults
-            }
-
-            helper has_effective_pending_boundary(session_tail: Enum<ObservedSessionTailKind>, staged_tool_result_count: u64) -> bool {
-                tail_has_pending_boundary(session_tail) || staged_tool_result_count > 0
             }
 
             invariant shutdown_phase_is_not_active {
@@ -420,8 +400,7 @@ mod authority {
                     execution_kind,
                     prompt_trimmed_text_byte_count,
                     prompt_non_text_block_count,
-                    session_tail,
-                    staged_tool_result_count
+                    pending_continuation
                 }
                 guard {
                     self.lifecycle_phase == Phase::Admitted
@@ -441,14 +420,13 @@ mod authority {
                     execution_kind,
                     prompt_trimmed_text_byte_count,
                     prompt_non_text_block_count,
-                    session_tail,
-                    staged_tool_result_count
+                    pending_continuation
                 }
                 guard {
                     self.lifecycle_phase == Phase::Admitted
                     && execution_kind_present
                     && execution_kind == StartTurnExecutionKind::ResumePending
-                    && has_effective_pending_boundary(session_tail, staged_tool_result_count)
+                    && pending_continuation == PendingContinuationDisposition::RunPending
                 }
                 update {
                     self.last_public_terminal = None;
@@ -463,14 +441,13 @@ mod authority {
                     execution_kind,
                     prompt_trimmed_text_byte_count,
                     prompt_non_text_block_count,
-                    session_tail,
-                    staged_tool_result_count
+                    pending_continuation
                 }
                 guard {
                     self.lifecycle_phase == Phase::Admitted
                     && execution_kind_present
                     && execution_kind == StartTurnExecutionKind::ResumePending
-                    && has_effective_pending_boundary(session_tail, staged_tool_result_count) == false
+                    && pending_continuation == PendingContinuationDisposition::NoPendingBoundary
                 }
                 update {
                     self.last_public_terminal = Some(StartTurnPublicTerminal::NoPendingBoundary);
@@ -486,8 +463,7 @@ mod authority {
                     execution_kind,
                     prompt_trimmed_text_byte_count,
                     prompt_non_text_block_count,
-                    session_tail,
-                    staged_tool_result_count
+                    pending_continuation
                 }
                 guard {
                     self.lifecycle_phase == Phase::Admitted
@@ -507,14 +483,13 @@ mod authority {
                     execution_kind,
                     prompt_trimmed_text_byte_count,
                     prompt_non_text_block_count,
-                    session_tail,
-                    staged_tool_result_count
+                    pending_continuation
                 }
                 guard {
                     self.lifecycle_phase == Phase::Admitted
                     && execution_kind_present == false
                     && prompt_has_content(prompt_trimmed_text_byte_count, prompt_non_text_block_count) == false
-                    && has_effective_pending_boundary(session_tail, staged_tool_result_count)
+                    && pending_continuation == PendingContinuationDisposition::RunPending
                 }
                 update {
                     self.last_public_terminal = None;
@@ -529,14 +504,13 @@ mod authority {
                     execution_kind,
                     prompt_trimmed_text_byte_count,
                     prompt_non_text_block_count,
-                    session_tail,
-                    staged_tool_result_count
+                    pending_continuation
                 }
                 guard {
                     self.lifecycle_phase == Phase::Admitted
                     && execution_kind_present == false
                     && prompt_has_content(prompt_trimmed_text_byte_count, prompt_non_text_block_count) == false
-                    && has_effective_pending_boundary(session_tail, staged_tool_result_count) == false
+                    && pending_continuation == PendingContinuationDisposition::NoPendingBoundary
                 }
                 update {
                     self.last_public_terminal = Some(StartTurnPublicTerminal::NoPendingBoundary);
@@ -558,11 +532,11 @@ mod authority {
     }
 }
 
-pub use authority::ObservedSessionTailKind;
 pub(crate) use authority::StartTurnDispatchAuthorization;
 pub(crate) use authority::StartTurnDisposition;
 pub(crate) use authority::StartTurnPublicTerminal;
 pub(crate) use authority::TurnAdmissionPhase;
+pub use meerkat_core::pending_continuation_admission::ObservedSessionTailKind;
 
 /// Generated projection of the session-visible turn-admission state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -813,6 +787,27 @@ impl TurnAdmissionSlot {
             None => (false, authority::StartTurnExecutionKind::ContentTurn),
         };
         let prompt_observation = observe_start_turn_prompt(prompt);
+        let pending_resolution =
+            meerkat_core::pending_continuation_admission::resolve_pending_continuation(
+                session_tail,
+                staged_tool_result_count,
+            )
+            .map_err(|_| TurnAdmissionError {
+                from: self.phase(),
+                op: "resolve_pending_continuation",
+            })?;
+        if pending_resolution.disposition
+            == meerkat_core::pending_continuation_admission::PendingContinuationDisposition::NoPendingBoundary
+            && pending_resolution.public_terminal
+                != Some(
+                    meerkat_core::pending_continuation_admission::PendingContinuationPublicTerminal::NoPendingBoundary,
+                )
+        {
+            return Err(TurnAdmissionError {
+                from: self.phase(),
+                op: "resolve_pending_continuation_terminal",
+            });
+        }
         let from = self.phase();
         let transition = authority::SessionTurnAdmissionMachineMutator::apply(
             &mut self.authority,
@@ -821,8 +816,7 @@ impl TurnAdmissionSlot {
                 execution_kind,
                 prompt_trimmed_text_byte_count: prompt_observation.trimmed_text_byte_count,
                 prompt_non_text_block_count: prompt_observation.non_text_block_count,
-                session_tail,
-                staged_tool_result_count,
+                pending_continuation: pending_resolution.disposition,
             },
         )
         .map_err(|_| TurnAdmissionError {

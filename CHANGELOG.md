@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.22] - 2026-05-21
+
+Meerkat 0.6.22 is a mob runtime hotfix release for turn-completion caller
+semantics and actor-loop responsiveness.
+
+### Fixed
+
+- **TurnCompleted actor-loop responsiveness** (#737) — preserves
+  `TurnCompleted` caller semantics while moving the runtime-completion wait out
+  of the serialized mob actor command loop, allowing same-mob observation and
+  mutation commands such as member listing and spawn to proceed while the
+  turn-driven runtime call is still in flight.
+
 ## [0.6.21] - 2026-05-20
 
 Meerkat 0.6.21 is a runtime hotfix release for interrupt-yielding live steer

@@ -32,6 +32,7 @@ impl<T: Clone + Default> OptionValueExt<T> for Option<&T> {
     }
 }
 
+pub mod approval_lifecycle;
 pub mod auth_machine;
 pub mod meerkat_machine;
 pub mod mob_machine;
@@ -68,6 +69,8 @@ impl MachineSchemaMetadata {
 
 pub const AUTH_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
 pub const AUTH_MACHINE_PRODUCTION_RUST_MODULE: &str = "auth_machine::dsl";
+pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
+pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "generated::approval_lifecycle";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_MODULE: &str = "meerkat_machine::dsl";
 pub const MOB_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
@@ -162,6 +165,44 @@ pub fn dsl_auth_machine_production_schema() -> MachineSchema {
         dsl_auth_machine(),
         AUTH_MACHINE_PRODUCTION_RUST_CRATE,
         AUTH_MACHINE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn dsl_approval_lifecycle_machine() -> MachineSchema {
+    approval_lifecycle_schema_metadata()
+        .attach_to(approval_lifecycle::ApprovalLifecycleMachineState::schema())
+}
+
+pub fn dsl_approval_lifecycle_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_approval_lifecycle_machine(),
+        APPROVAL_LIFECYCLE_PRODUCTION_RUST_CRATE,
+        APPROVAL_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn approval_lifecycle_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "ApprovalLifecycleStatus",
+                &["Pending", "Approved", "Denied", "Expired", "Cancelled"],
+            ),
+            NamedTypeBinding::string_enum("ApprovalLifecycleDecision", &["Approve", "Deny"]),
+            NamedTypeBinding::string_enum(
+                "ApprovalLifecycleRejectionReason",
+                &[
+                    "NotFound",
+                    "AlreadyExists",
+                    "AlreadyDecided",
+                    "Expired",
+                    "InvalidDecision",
+                    "EmptyAllowedDecisions",
+                    "InvalidRestoredRecord",
+                ],
+            ),
+        ],
+        Vec::new(),
     )
 }
 

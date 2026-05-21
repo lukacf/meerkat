@@ -6,9 +6,9 @@ use super::{
         schedule_mob_bundle_composition, schedule_runtime_bundle_composition,
     },
     dsl::{
-        dsl_auth_machine, dsl_meerkat_machine, dsl_mob_machine, dsl_occurrence_lifecycle_machine,
-        dsl_pending_continuation_admission_machine, dsl_schedule_lifecycle_machine,
-        dsl_workgraph_lifecycle_machine,
+        dsl_approval_lifecycle_machine, dsl_auth_machine, dsl_meerkat_machine, dsl_mob_machine,
+        dsl_occurrence_lifecycle_machine, dsl_pending_continuation_admission_machine,
+        dsl_schedule_lifecycle_machine, dsl_workgraph_lifecycle_machine,
     },
 };
 
@@ -238,6 +238,32 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 scenario(
                     "oauth_device_flow_lifecycle",
                     "OAuth device flow admit, verify, begin poll, finish poll, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority",
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &dsl_approval_lifecycle_machine(),
+            &[anchor(
+                "approval_lifecycle_authority",
+                "meerkat-core/src/generated/approval_lifecycle.rs",
+                "generated ApprovalLifecycleMachine owner for CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, CreatePending, RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, RestoreRejectedInvalidRecord, ObserveExpiryRejectedMissing, ObserveExpiryExpiresPending, ObserveExpiryPendingNoop, ObserveExpiryApprovedNoop, ObserveExpiryDeniedNoop, ObserveExpiryExpiredNoop, ObserveExpiryCancelledNoop, DecideRejectedMissing, DecideRejectedExpired, DecideRejectedAlreadyDecided, DecideRejectedApproveNotAllowed, DecideRejectedDenyNotAllowed, DecideApprove, DecideDeny, ApprovalStatusResolved, and ApprovalLifecycleRejected",
+            )],
+            &[
+                scenario(
+                    "approval_request_pending",
+                    "CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, and CreatePending keep request creation and Pending status projection under ApprovalStatusResolved or ApprovalLifecycleRejected",
+                ),
+                scenario(
+                    "approval_decide_terminal",
+                    "DecideRejectedMissing, DecideRejectedExpired, DecideRejectedAlreadyDecided, DecideRejectedApproveNotAllowed, DecideRejectedDenyNotAllowed, DecideApprove, and DecideDeny move Pending approvals to Approved or Denied only when generated allowed-decision state admits the terminal decision",
+                ),
+                scenario(
+                    "approval_expiry_feedback",
+                    "ObserveExpiryRejectedMissing, ObserveExpiryExpiresPending, ObserveExpiryPendingNoop, ObserveExpiryApprovedNoop, ObserveExpiryDeniedNoop, ObserveExpiryExpiredNoop, and ObserveExpiryCancelledNoop consume typed time observation and emit Expired or unchanged status without handwritten status mutation",
+                ),
+                scenario(
+                    "approval_restore_consistency",
+                    "RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, and RestoreRejectedInvalidRecord validate persisted status, decision audit consistency, and allowed-decision compatibility before rehydrating approval lifecycle truth",
                 ),
             ],
         ),

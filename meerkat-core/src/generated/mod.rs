@@ -5,6 +5,7 @@
 // `pub mod` index, and `xtask audit-generated-headers` forbids the
 // codegen marker here to keep that honest.
 
+pub mod approval_lifecycle;
 pub mod auth_lease_durable_lifecycle_marker;
 pub mod auth_lease_transition_authority_sources;
 pub mod comms_trust_authority_sources;

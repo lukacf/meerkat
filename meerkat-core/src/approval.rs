@@ -1,10 +1,14 @@
 //! Durable approval records and service contracts.
 //!
-//! The approval service owns approval record state for this first slice. Public
-//! surfaces may request, list, read, and decide approvals, but they do not own
-//! approval status transitions.
+//! Generated approval lifecycle authority owns approval status transitions.
+//! Public surfaces may request, list, read, and decide approvals; the service
+//! stores and projects the generated lifecycle decisions.
 
 use crate::SurfaceMetadata;
+use crate::generated::approval_lifecycle::{
+    ApprovalLifecycleDecision, ApprovalLifecycleMachineAuthority, ApprovalLifecycleOutcome,
+    ApprovalLifecycleRejectionReason, ApprovalLifecycleStatus,
+};
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -259,8 +263,7 @@ pub enum ApprovalError {
 
 /// Durable approval store mechanics.
 ///
-/// The service owns approval transitions; stores persist full records and do
-/// not decide status legality.
+/// Stores persist full records and do not decide status legality.
 pub trait ApprovalStore: Send + Sync {
     fn load_all(&self) -> Result<Vec<ApprovalRecord>, ApprovalStoreError>;
     fn put(&self, record: &ApprovalRecord) -> Result<(), ApprovalStoreError>;
@@ -310,10 +313,158 @@ impl ApprovalStore for InMemoryApprovalStore {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ApprovalServiceState {
+    records: BTreeMap<ApprovalId, ApprovalRecord>,
+    authority: ApprovalLifecycleMachineAuthority,
+}
+
+impl ApprovalServiceState {
+    fn empty() -> Self {
+        Self {
+            records: BTreeMap::new(),
+            authority: ApprovalLifecycleMachineAuthority::new(),
+        }
+    }
+
+    fn from_records(records: Vec<ApprovalRecord>) -> Result<Self, ApprovalError> {
+        let mut state = Self::empty();
+        for record in records {
+            if state.records.contains_key(&record.approval_id) {
+                return Err(ApprovalError::Store(format!(
+                    "duplicate approval id in store: {}",
+                    record.approval_id
+                )));
+            }
+            restore_record_into_authority(&mut state.authority, &record)?;
+            state.records.insert(record.approval_id.clone(), record);
+        }
+        Ok(state)
+    }
+}
+
+fn approval_lifecycle_status(status: ApprovalStatus) -> ApprovalLifecycleStatus {
+    match status {
+        ApprovalStatus::Pending => ApprovalLifecycleStatus::Pending,
+        ApprovalStatus::Approved => ApprovalLifecycleStatus::Approved,
+        ApprovalStatus::Denied => ApprovalLifecycleStatus::Denied,
+        ApprovalStatus::Expired => ApprovalLifecycleStatus::Expired,
+        ApprovalStatus::Cancelled => ApprovalLifecycleStatus::Cancelled,
+    }
+}
+
+fn approval_status_from_lifecycle(status: ApprovalLifecycleStatus) -> ApprovalStatus {
+    match status {
+        ApprovalLifecycleStatus::Pending => ApprovalStatus::Pending,
+        ApprovalLifecycleStatus::Approved => ApprovalStatus::Approved,
+        ApprovalLifecycleStatus::Denied => ApprovalStatus::Denied,
+        ApprovalLifecycleStatus::Expired => ApprovalStatus::Expired,
+        ApprovalLifecycleStatus::Cancelled => ApprovalStatus::Cancelled,
+    }
+}
+
+fn approval_lifecycle_decision(decision: ApprovalDecision) -> ApprovalLifecycleDecision {
+    match decision {
+        ApprovalDecision::Approve => ApprovalLifecycleDecision::Approve,
+        ApprovalDecision::Deny => ApprovalLifecycleDecision::Deny,
+    }
+}
+
+fn allowed_decision_flags(allowed_decisions: &BTreeSet<ApprovalDecision>) -> (bool, bool) {
+    (
+        allowed_decisions.contains(&ApprovalDecision::Approve),
+        allowed_decisions.contains(&ApprovalDecision::Deny),
+    )
+}
+
+fn lifecycle_rejection_error(
+    approval_id: &ApprovalId,
+    reason: ApprovalLifecycleRejectionReason,
+    decision: Option<ApprovalDecision>,
+) -> ApprovalError {
+    match reason {
+        ApprovalLifecycleRejectionReason::NotFound => ApprovalError::NotFound {
+            approval_id: approval_id.clone(),
+        },
+        ApprovalLifecycleRejectionReason::AlreadyDecided => ApprovalError::AlreadyDecided {
+            approval_id: approval_id.clone(),
+        },
+        ApprovalLifecycleRejectionReason::Expired => ApprovalError::Expired {
+            approval_id: approval_id.clone(),
+        },
+        ApprovalLifecycleRejectionReason::InvalidDecision => ApprovalError::InvalidDecision {
+            decision: decision.unwrap_or(ApprovalDecision::Approve),
+        },
+        ApprovalLifecycleRejectionReason::EmptyAllowedDecisions => {
+            ApprovalError::EmptyAllowedDecisions
+        }
+        ApprovalLifecycleRejectionReason::AlreadyExists
+        | ApprovalLifecycleRejectionReason::InvalidRestoredRecord => ApprovalError::Store(format!(
+            "generated approval lifecycle authority rejected {} with {:?}",
+            approval_id, reason
+        )),
+    }
+}
+
+fn lifecycle_status_from_outcome(
+    approval_id: &ApprovalId,
+    outcome: ApprovalLifecycleOutcome,
+    decision: Option<ApprovalDecision>,
+) -> Result<ApprovalStatus, ApprovalError> {
+    match outcome {
+        ApprovalLifecycleOutcome::Status(status) => Ok(approval_status_from_lifecycle(status)),
+        ApprovalLifecycleOutcome::Rejected(reason) => {
+            Err(lifecycle_rejection_error(approval_id, reason, decision))
+        }
+    }
+}
+
+fn lifecycle_error(error: impl std::fmt::Display) -> ApprovalError {
+    ApprovalError::Store(format!(
+        "generated approval lifecycle authority failed: {error}"
+    ))
+}
+
+fn restored_lifecycle_decision(record: &ApprovalRecord) -> Option<ApprovalLifecycleDecision> {
+    record
+        .decision
+        .as_ref()
+        .map(|decision| approval_lifecycle_decision(decision.decision))
+}
+
+fn restore_record_into_authority(
+    authority: &mut ApprovalLifecycleMachineAuthority,
+    record: &ApprovalRecord,
+) -> Result<(), ApprovalError> {
+    let (approve_allowed, deny_allowed) = allowed_decision_flags(&record.allowed_decisions);
+    let outcome = authority
+        .restore_approval(
+            record.approval_id.to_string(),
+            approval_lifecycle_status(record.status),
+            approve_allowed,
+            deny_allowed,
+            record.expires_at.is_some(),
+            restored_lifecycle_decision(record),
+        )
+        .map_err(lifecycle_error)?;
+    let restored_status = lifecycle_status_from_outcome(
+        &record.approval_id,
+        outcome,
+        record.decision.as_ref().map(|decision| decision.decision),
+    )?;
+    if restored_status != record.status {
+        return Err(ApprovalError::Store(format!(
+            "generated approval lifecycle restored {} as {:?}, stored {:?}",
+            record.approval_id, restored_status, record.status
+        )));
+    }
+    Ok(())
+}
+
 /// In-process approval service.
 #[derive(Clone)]
 pub struct ApprovalService {
-    records: Arc<RwLock<BTreeMap<ApprovalId, ApprovalRecord>>>,
+    state: Arc<RwLock<ApprovalServiceState>>,
     store: Arc<dyn ApprovalStore>,
 }
 
@@ -321,19 +472,15 @@ impl ApprovalService {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            records: Arc::new(RwLock::new(BTreeMap::new())),
+            state: Arc::new(RwLock::new(ApprovalServiceState::empty())),
             store: Arc::new(InMemoryApprovalStore::new()),
         }
     }
 
     pub fn with_store(store: Arc<dyn ApprovalStore>) -> Result<Self, ApprovalError> {
-        let records = store
-            .load_all()?
-            .into_iter()
-            .map(|record| (record.approval_id.clone(), record))
-            .collect();
+        let state = ApprovalServiceState::from_records(store.load_all()?)?;
         Ok(Self {
-            records: Arc::new(RwLock::new(records)),
+            state: Arc::new(RwLock::new(state)),
             store,
         })
     }
@@ -344,17 +491,27 @@ impl ApprovalService {
     }
 
     pub fn request(&self, request: ApprovalRequest) -> Result<ApprovalRecord, ApprovalError> {
-        if request.allowed_decisions.is_empty() {
-            return Err(ApprovalError::EmptyAllowedDecisions);
-        }
         if request.requester.as_str().trim().is_empty() {
             return Err(ApprovalError::InvalidPrincipal);
         }
         request.metadata.validate_public()?;
         let now = Utc::now();
+        let approval_id = ApprovalId::new();
+        let (approve_allowed, deny_allowed) = allowed_decision_flags(&request.allowed_decisions);
+        let mut state = self.state.write();
+        let mut authority = state.authority.clone();
+        let outcome = authority
+            .create_approval(
+                approval_id.to_string(),
+                approve_allowed,
+                deny_allowed,
+                request.expires_at.is_some(),
+            )
+            .map_err(lifecycle_error)?;
+        let status = lifecycle_status_from_outcome(&approval_id, outcome, None)?;
         let record = ApprovalRecord {
-            approval_id: ApprovalId::new(),
-            status: ApprovalStatus::Pending,
+            approval_id,
+            status,
             requester: request.requester,
             owner: request.owner,
             resource: request.resource,
@@ -370,16 +527,18 @@ impl ApprovalService {
             decision: None,
         };
         self.store.put(&record)?;
-        self.records
-            .write()
+        state.authority = authority;
+        state
+            .records
             .insert(record.approval_id.clone(), record.clone());
         Ok(record)
     }
 
     pub fn get(&self, approval_id: &ApprovalId) -> Result<ApprovalRecord, ApprovalError> {
         self.refresh_expiry(approval_id)?;
-        self.records
+        self.state
             .read()
+            .records
             .get(approval_id)
             .cloned()
             .ok_or_else(|| ApprovalError::NotFound {
@@ -390,8 +549,9 @@ impl ApprovalService {
     pub fn list(&self, filter: ApprovalListFilter) -> Result<Vec<ApprovalRecord>, ApprovalError> {
         self.refresh_all_expiry()?;
         Ok(self
-            .records
+            .state
             .read()
+            .records
             .values()
             .filter(|record| filter.status.is_none_or(|status| record.status == status))
             .cloned()
@@ -410,52 +570,49 @@ impl ApprovalService {
             return Err(ApprovalError::InvalidPrincipal);
         }
         let now = Utc::now();
-        let mut records = self.records.write();
-        let record = records
-            .get(approval_id)
-            .cloned()
-            .ok_or_else(|| ApprovalError::NotFound {
-                approval_id: approval_id.clone(),
-            })?;
-
-        if record.status == ApprovalStatus::Pending
-            && record
-                .expires_at
-                .is_some_and(|expires_at| expires_at <= now)
-        {
-            let mut expired_record = record;
-            expired_record.status = ApprovalStatus::Expired;
-            expired_record.updated_at = now;
-            self.store.put(&expired_record)?;
-            records.insert(approval_id.clone(), expired_record);
-            return Err(ApprovalError::Expired {
-                approval_id: approval_id.clone(),
-            });
+        let mut state = self.state.write();
+        if !state.records.contains_key(approval_id) {
+            let mut authority = state.authority.clone();
+            let outcome = authority
+                .decide_approval(
+                    approval_id.to_string(),
+                    approval_lifecycle_decision(decision),
+                )
+                .map_err(lifecycle_error)?;
+            return match outcome {
+                ApprovalLifecycleOutcome::Rejected(reason) => Err(lifecycle_rejection_error(
+                    approval_id,
+                    reason,
+                    Some(decision),
+                )),
+                ApprovalLifecycleOutcome::Status(status) => Err(ApprovalError::Store(format!(
+                    "generated approval lifecycle emitted {:?} for missing approval {}",
+                    status, approval_id
+                ))),
+            };
         }
 
-        match record.status {
-            ApprovalStatus::Pending => {}
-            ApprovalStatus::Expired => {
-                return Err(ApprovalError::Expired {
+        self.refresh_expiry_locked(&mut state, approval_id, now)?;
+        let record =
+            state
+                .records
+                .get(approval_id)
+                .cloned()
+                .ok_or_else(|| ApprovalError::NotFound {
                     approval_id: approval_id.clone(),
-                });
-            }
-            ApprovalStatus::Approved | ApprovalStatus::Denied | ApprovalStatus::Cancelled => {
-                return Err(ApprovalError::AlreadyDecided {
-                    approval_id: approval_id.clone(),
-                });
-            }
-        }
+                })?;
 
-        if !record.allowed_decisions.contains(&decision) {
-            return Err(ApprovalError::InvalidDecision { decision });
-        }
+        let mut authority = state.authority.clone();
+        let outcome = authority
+            .decide_approval(
+                approval_id.to_string(),
+                approval_lifecycle_decision(decision),
+            )
+            .map_err(lifecycle_error)?;
+        let status = lifecycle_status_from_outcome(approval_id, outcome, Some(decision))?;
 
         let mut decided_record = record;
-        decided_record.status = match decision {
-            ApprovalDecision::Approve => ApprovalStatus::Approved,
-            ApprovalDecision::Deny => ApprovalStatus::Denied,
-        };
+        decided_record.status = status;
         decided_record.updated_at = now;
         decided_record.decision = Some(ApprovalDecisionRecord {
             decision,
@@ -465,30 +622,57 @@ impl ApprovalService {
             provenance,
         });
         self.store.put(&decided_record)?;
-        records.insert(approval_id.clone(), decided_record.clone());
+        state.authority = authority;
+        state
+            .records
+            .insert(approval_id.clone(), decided_record.clone());
         Ok(decided_record)
     }
 
     fn refresh_expiry(&self, approval_id: &ApprovalId) -> Result<(), ApprovalError> {
         let now = Utc::now();
-        let mut records = self.records.write();
-        if let Some(record) = records.get(approval_id).cloned()
-            && record.status == ApprovalStatus::Pending
-            && record
-                .expires_at
-                .is_some_and(|expires_at| expires_at <= now)
-        {
+        let mut state = self.state.write();
+        self.refresh_expiry_locked(&mut state, approval_id, now)
+    }
+
+    fn refresh_expiry_locked(
+        &self,
+        state: &mut ApprovalServiceState,
+        approval_id: &ApprovalId,
+        now: DateTime<Utc>,
+    ) -> Result<(), ApprovalError> {
+        let Some(record) = state.records.get(approval_id).cloned() else {
+            return Ok(());
+        };
+        let expired = record
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= now);
+        let mut authority = state.authority.clone();
+        let outcome = authority
+            .observe_approval_expiry(approval_id.to_string(), expired)
+            .map_err(lifecycle_error)?;
+        let status = lifecycle_status_from_outcome(approval_id, outcome, None)?;
+        if status != record.status {
             let mut expired_record = record;
-            expired_record.status = ApprovalStatus::Expired;
+            expired_record.status = status;
             expired_record.updated_at = now;
             self.store.put(&expired_record)?;
-            records.insert(approval_id.clone(), expired_record);
+            state.authority = authority;
+            state.records.insert(approval_id.clone(), expired_record);
+        } else {
+            state.authority = authority;
         }
         Ok(())
     }
 
     fn refresh_all_expiry(&self) -> Result<(), ApprovalError> {
-        let ids = self.records.read().keys().cloned().collect::<Vec<_>>();
+        let ids = self
+            .state
+            .read()
+            .records
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
         for id in ids {
             self.refresh_expiry(&id)?;
         }
@@ -652,6 +836,15 @@ mod tests {
     }
 
     #[test]
+    fn empty_allowed_decisions_are_rejected_by_generated_authority() {
+        let service = ApprovalService::new();
+        let err = service
+            .request(request_with_allowed(BTreeSet::new()))
+            .expect_err("empty allowed decisions rejected");
+        assert!(matches!(err, ApprovalError::EmptyAllowedDecisions));
+    }
+
+    #[test]
     fn duplicate_decision_is_rejected() {
         let service = ApprovalService::new();
         let record = service.request(request()).expect("request accepted");
@@ -710,6 +903,23 @@ mod tests {
             )
             .expect("retry should decide approval");
         assert_eq!(retried.status, ApprovalStatus::Denied);
+    }
+
+    #[test]
+    fn restore_rejects_inconsistent_persisted_status() {
+        let store = Arc::new(TestApprovalStore::new(None));
+        let mut record = ApprovalService::new()
+            .request(request())
+            .expect("request accepted");
+        record.status = ApprovalStatus::Approved;
+        record.updated_at = Utc::now();
+        store
+            .records
+            .write()
+            .insert(record.approval_id.clone(), record);
+
+        let restored = ApprovalService::with_store(store);
+        assert!(matches!(restored, Err(ApprovalError::Store(_))));
     }
 
     #[test]

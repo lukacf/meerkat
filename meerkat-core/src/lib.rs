@@ -52,6 +52,7 @@ pub mod ops;
 pub mod ops_lifecycle;
 pub mod peer_correlation;
 pub mod peer_meta;
+pub use generated::approval_lifecycle;
 pub use generated::pending_continuation_admission;
 pub mod placement;
 #[cfg(not(target_arch = "wasm32"))]

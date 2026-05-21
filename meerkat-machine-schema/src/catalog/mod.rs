@@ -43,6 +43,7 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         dsl::dsl_schedule_lifecycle_machine(),
         dsl::dsl_occurrence_lifecycle_machine(),
         dsl::dsl_auth_machine(),
+        dsl::dsl_approval_lifecycle_machine(),
         dsl::dsl_workgraph_lifecycle_machine(),
         dsl::dsl_pending_continuation_admission_machine(),
     ]
@@ -69,6 +70,11 @@ pub fn canonical_machine_production_owner_relations() -> Vec<MachineProductionOw
             "AuthMachine",
             dsl::AUTH_MACHINE_PRODUCTION_RUST_CRATE,
             dsl::AUTH_MACHINE_PRODUCTION_RUST_MODULE,
+        ),
+        MachineProductionOwnerRelation::new(
+            "ApprovalLifecycleMachine",
+            dsl::APPROVAL_LIFECYCLE_PRODUCTION_RUST_CRATE,
+            dsl::APPROVAL_LIFECYCLE_PRODUCTION_RUST_MODULE,
         ),
         MachineProductionOwnerRelation::new(
             "MobMachine",

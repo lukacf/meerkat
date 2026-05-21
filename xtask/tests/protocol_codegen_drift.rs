@@ -241,6 +241,26 @@ fn pending_continuation_admission_matches_codegen_output() {
     );
 }
 
+#[test]
+fn approval_lifecycle_matches_codegen_output() {
+    use meerkat_machine_schema::catalog::dsl;
+
+    let machine = dsl::dsl_approval_lifecycle_machine_production_schema();
+    let rendered = xtask::protocol_codegen::render_approval_lifecycle_authority(&machine)
+        .expect("render approval_lifecycle");
+    let rendered = rustfmt(&rendered);
+
+    let committed_path = repo_root().join("meerkat-core/src/generated/approval_lifecycle.rs");
+    let committed = std::fs::read_to_string(&committed_path)
+        .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
+
+    assert_eq!(
+        normalize(&committed),
+        normalize(&rendered),
+        "approval_lifecycle.rs diverged from codegen output. If this is intentional, run `cargo xtask protocol-codegen` and commit the result."
+    );
+}
+
 /// Compile canary for generated protocol helper ownership: every helper
 /// emitted by protocol-codegen must land in an owning crate's checked
 /// `src/generated/` module tree, not in an ad-hoc bridge path outside a

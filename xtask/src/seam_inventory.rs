@@ -1144,6 +1144,22 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         //
         // =========================================================================
+        // ApprovalLifecycleMachine
+        // =========================================================================
+        (
+            "ApprovalLifecycleMachine",
+            "ApprovalStatusResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Approval public status projection must align with generated ApprovalLifecycleMachine truth",
+        ),
+        (
+            "ApprovalLifecycleMachine",
+            "ApprovalLifecycleRejected",
+            SeamClassification::SurfaceResultAlignment,
+            "Approval public rejection projection must align with generated ApprovalLifecycleMachine rejection truth",
+        ),
+        //
+        // =========================================================================
         // AuthMachine — per-binding auth lease lifecycle (dogma #43/#44 resolved)
         // =========================================================================
         (

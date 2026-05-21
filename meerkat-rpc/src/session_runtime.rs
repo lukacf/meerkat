@@ -1315,7 +1315,7 @@ pub struct SessionRuntime {
     pub builder_agent_llm_client_decorator_slot:
         Arc<StdRwLock<Option<meerkat_core::AgentLlmClientDecorator>>>,
     /// Runtime-owned approval records. Surfaces only project decisions into
-    /// this service; approval status is service-owned.
+    /// this service; approval status is generated-authority-owned.
     approval_service: meerkat_core::ApprovalService,
     /// P1#5: live adapter host, attached when the surface wires
     /// `with_live_ws`. Held as an interior-mutable slot so it can be set

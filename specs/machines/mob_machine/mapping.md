@@ -192,6 +192,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RetireMember`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `AdmitDestroyMemberRetireLiveRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `AdmitDestroyMemberRetireLiveStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `AdmitDestroyMemberRetireAlreadyRetiringRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `AdmitDestroyMemberRetireAlreadyRetiringStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
 - `ObserveRuntimeRetired`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
@@ -217,6 +229,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `ObserveMemberRetirementArchivedAlreadyClearedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ObserveDestroyMemberRetirementArchivedLiveRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ObserveDestroyMemberRetirementArchivedLiveStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ObserveDestroyMemberRetirementArchivedRetiredRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ObserveDestroyMemberRetirementArchivedRetiredStopped`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `ResetMember`

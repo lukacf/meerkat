@@ -436,8 +436,10 @@ macro_rules! mob_catalog_machine_dsl {
         signal MobMachineSignal {
             ObserveRuntimeReady { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             RetireMember { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId },
+            AdmitDestroyMemberRetire { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId },
             ObserveRuntimeRetired { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             ObserveMemberRetirementArchived { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            ObserveDestroyMemberRetirementArchived { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
             ResetMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
             RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
             ResolveRespawnTopologyRestore { agent_identity: AgentIdentity, failed_peer_ids: Seq<RespawnTopologyPeerId> },
@@ -1342,6 +1344,50 @@ macro_rules! mob_catalog_machine_dsl {
             emit RequestRuntimeRetire { session_id: session_id }
         }
 
+        transition AdmitDestroyMemberRetireLiveRunning {
+            on signal AdmitDestroyMemberRetire { agent_runtime_id, fence_token, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+            }
+            to Running
+            emit RequestRuntimeRetire { session_id: session_id }
+        }
+
+        transition AdmitDestroyMemberRetireLiveStopped {
+            on signal AdmitDestroyMemberRetire { agent_runtime_id, fence_token, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+            }
+            to Stopped
+            emit RequestRuntimeRetire { session_id: session_id }
+        }
+
+        transition AdmitDestroyMemberRetireAlreadyRetiringRunning {
+            on signal AdmitDestroyMemberRetire { agent_runtime_id, fence_token, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            update {}
+            to Running
+        }
+
+        transition AdmitDestroyMemberRetireAlreadyRetiringStopped {
+            on signal AdmitDestroyMemberRetire { agent_runtime_id, fence_token, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            update {}
+            to Stopped
+        }
+
         transition ObserveRuntimeRetired {
             on signal ObserveRuntimeRetired { agent_runtime_id, fence_token }
             guard { self.lifecycle_phase == Phase::Running }
@@ -1464,6 +1510,130 @@ macro_rules! mob_catalog_machine_dsl {
             guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
             update {}
             to Stopped
+        }
+
+        transition ObserveDestroyMemberRetirementArchivedLiveRunning {
+            on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            update {
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
+                self.member_session_bindings.remove(agent_identity);
+                self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.active_run_count = 0;
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: Some(session_id)
+            }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(session_id), new_session_id: None }
+        }
+
+        transition ObserveDestroyMemberRetirementArchivedLiveStopped {
+            on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            update {
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
+                self.member_session_bindings.remove(agent_identity);
+                self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.active_run_count = 0;
+                self.topology_epoch += 1;
+            }
+            to Stopped
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: Some(session_id)
+            }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(session_id), new_session_id: None }
+        }
+
+        transition ObserveDestroyMemberRetirementArchivedRetiredRunning {
+            on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            update {
+                self.member_state_markers.remove(agent_runtime_id);
+                self.member_session_bindings.remove(agent_identity);
+                self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: Some(session_id)
+            }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(session_id), new_session_id: None }
+        }
+
+        transition ObserveDestroyMemberRetirementArchivedRetiredStopped {
+            on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            update {
+                self.member_state_markers.remove(agent_runtime_id);
+                self.member_session_bindings.remove(agent_identity);
+                self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.topology_epoch += 1;
+            }
+            to Stopped
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: Some(session_id)
+            }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(session_id), new_session_id: None }
         }
 
         transition ResetMember {

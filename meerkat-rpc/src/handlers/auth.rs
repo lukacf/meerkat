@@ -1754,38 +1754,14 @@ pub async fn handle_auth_status_get(
             format!("AuthMachine freshness observation failed: {err}"),
         );
     }
-    let mut snapshot = auth_lease.snapshot(&lease_key);
+    let snapshot = auth_lease.snapshot(&lease_key);
     let expected_mode = persisted_auth_mode_for_auth_method(&auth_profile.auth_method);
     let source_uses_store = credential_source_uses_persisted_store(&auth_profile.source);
     let oauth_mode = expected_mode
         .map(persisted_auth_mode_is_oauth_login)
         .unwrap_or(false);
-    let mut phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
-    let rehydrated = if phase == meerkat_core::AuthStatusPhase::Unknown && source_uses_store {
-        if let (Some(expected_mode), Some(store)) = (expected_mode, runtime.token_store()) {
-            meerkat_core::rehydrate_marked_tokens_for_status(
-                store.as_ref(),
-                auth_lease.as_ref(),
-                &auth_binding,
-                expected_mode,
-                now,
-            )
-            .await
-            .ok()
-            .flatten()
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    if rehydrated.is_some() {
-        snapshot = auth_lease.snapshot(&lease_key);
-        phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
-    }
-    let stored = if rehydrated.is_some() {
-        rehydrated
-    } else if phase == meerkat_core::AuthStatusPhase::Unknown {
+    let phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
+    let stored = if phase == meerkat_core::AuthStatusPhase::Unknown {
         None
     } else if let Some(store) = runtime.token_store() {
         store

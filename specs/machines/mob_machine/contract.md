@@ -197,8 +197,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `RetireMember`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId)
+- `AdmitDestroyMemberRetire`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId)
 - `ObserveRuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `ObserveMemberRetirementArchived`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `ObserveDestroyMemberRetirementArchived`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId)
 - `ResetMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, session_id: SessionId)
 - `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, session_id: SessionId)
 - `ResolveRespawnTopologyRestore`(agent_identity: AgentIdentity, failed_peer_ids: Seq<RespawnTopologyPeerId>)
@@ -754,6 +756,42 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RequestRuntimeRetire`
 - To: `Running`
 
+### `AdmitDestroyMemberRetireLiveRunning`
+- From: `Running`
+- On: `AdmitDestroyMemberRetire`(agent_runtime_id, fence_token, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `current_binding_matches`
+  - `fence_token_matches`
+- Emits: `RequestRuntimeRetire`
+- To: `Running`
+
+### `AdmitDestroyMemberRetireLiveStopped`
+- From: `Stopped`
+- On: `AdmitDestroyMemberRetire`(agent_runtime_id, fence_token, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `current_binding_matches`
+  - `fence_token_matches`
+- Emits: `RequestRuntimeRetire`
+- To: `Stopped`
+
+### `AdmitDestroyMemberRetireAlreadyRetiringRunning`
+- From: `Running`
+- On: `AdmitDestroyMemberRetire`(agent_runtime_id, fence_token, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `member_retiring`
+- To: `Running`
+
+### `AdmitDestroyMemberRetireAlreadyRetiringStopped`
+- From: `Stopped`
+- On: `AdmitDestroyMemberRetire`(agent_runtime_id, fence_token, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `member_retiring`
+- To: `Stopped`
+
 ### `ObserveRuntimeRetired`
 - From: `Running`
 - On: `ObserveRuntimeRetired`(agent_runtime_id, fence_token)
@@ -833,6 +871,50 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `runtime_not_live`
   - `member_not_retiring`
+- To: `Stopped`
+
+### `ObserveDestroyMemberRetirementArchivedLiveRunning`
+- From: `Running`
+- On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+- Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`, `MemberSessionBindingChanged`
+- To: `Running`
+
+### `ObserveDestroyMemberRetirementArchivedLiveStopped`
+- From: `Stopped`
+- On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+- Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`, `MemberSessionBindingChanged`
+- To: `Stopped`
+
+### `ObserveDestroyMemberRetirementArchivedRetiredRunning`
+- From: `Running`
+- On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `runtime_not_live`
+  - `member_retiring`
+- Emits: `AppendLifecycleJournal`, `MemberSessionBindingChanged`
+- To: `Running`
+
+### `ObserveDestroyMemberRetirementArchivedRetiredStopped`
+- From: `Stopped`
+- On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `runtime_not_live`
+  - `member_retiring`
+- Emits: `AppendLifecycleJournal`, `MemberSessionBindingChanged`
 - To: `Stopped`
 
 ### `ResetMember`

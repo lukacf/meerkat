@@ -2887,16 +2887,27 @@ impl MobActor {
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
         let current_bridge_session_id =
             self.machine_bridge_session_id_for_identity(&domain_identity);
-        let machine_runtime = self
+        let machine_lifecycle = self
+            .dsl_authority
+            .state()
+            .member_lifecycle_for_identity(&dsl_identity);
+        let machine_runtime = match self
             .dsl_authority
             .state()
             .member_runtime_material_for_identity(&dsl_identity)
             .map(|material| material.to_domain_for_identity(&domain_identity))
-            .ok_or_else(|| {
-                MobError::Internal(format!(
+        {
+            Some(material) => material,
+            None if machine_lifecycle.status == mob_dsl::MobMemberLifecycleStatus::Unknown => (
+                crate::ids::AgentRuntimeId::initial(domain_identity.clone()),
+                crate::ids::FenceToken::new(0),
+            ),
+            None => {
+                return Err(MobError::Internal(format!(
                     "MobMachine runtime material is absent for '{domain_identity}'"
-                ))
-            })?;
+                )));
+            }
+        };
         let member_present = roster_entry.is_some();
 
         let (output_preview, tokens_used) = match current_bridge_session_id.as_ref() {
@@ -2922,10 +2933,6 @@ impl MobActor {
             }
             Some(_) => (None, 0),
         };
-        let machine_lifecycle = self
-            .dsl_authority
-            .state()
-            .member_lifecycle_for_identity(&dsl_identity);
         let kickoff = kickoff_snapshot_from_machine_state(
             agent_identity.as_str(),
             self.dsl_authority.state(),
@@ -9924,6 +9931,19 @@ impl MobActor {
         let agent_identity = &entry.agent_identity;
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
         let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+        let session_id_for_route = self
+            .dsl_authority
+            .state()
+            .member_session_bindings
+            .get(&dsl_identity)
+            .cloned()
+            .or_else(|| {
+                entry
+                    .member_ref
+                    .bridge_session_id()
+                    .map(mob_dsl::SessionId::from_domain)
+            })
+            .unwrap_or_default();
         let releasing = self
             .dsl_authority
             .state()
@@ -9981,56 +10001,14 @@ impl MobActor {
             return self.flush_routed_effects().await;
         }
 
-        let session_id_for_route = releasing
-            .clone()
-            .unwrap_or_else(mob_dsl::SessionId::default);
-        let prepared_retire = self.prepare_dsl_input_transition(
-            mob_dsl::MobMachineInput::Retire {
-                mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
-                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
-                agent_identity: dsl_identity,
-                generation: mob_dsl::Generation::from_domain(entry.generation),
-                releasing: releasing.clone(),
-                session_id: session_id_for_route.clone(),
+        self.apply_dsl_signal(
+            mob_dsl::MobMachineSignal::AdmitDestroyMemberRetire {
+                agent_runtime_id: dsl_runtime_id,
+                fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
+                session_id: session_id_for_route,
             },
             "destroy_mark_member_retiring",
         )?;
-        Self::require_member_lifecycle_journal_effect(
-            &prepared_retire.transition,
-            mob_dsl::MobLifecycleJournalKind::MemberRetired,
-            &entry.agent_identity,
-            &entry.agent_runtime_id,
-            None,
-            entry.generation,
-            Some(session_id_for_route),
-            "destroy_mark_member_retiring",
-        )?;
-        if !self
-            .retire_event_exists(&entry.agent_identity, &entry.member_ref)
-            .await?
-        {
-            self.append_retire_event_for_entry(entry).await?;
-        }
-
-        let mut detach_obligations =
-            crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(
-                &prepared_retire.transition,
-            );
-        self.commit_prepared_dsl_transition(prepared_retire);
-        if let Some(obligation) = detach_obligations.pop() {
-            if let Some(detach_session_id) =
-                Self::destroy_ingress_detach_session_id(entry, releasing.as_ref())?
-            {
-                self.detach_session_ingress_for_mob_destroy(&detach_session_id, obligation)
-                    .await?;
-            } else {
-                self.acknowledge_absent_session_ingress_for_mob_destroy(
-                    agent_identity,
-                    obligation,
-                )?;
-            }
-        }
-
         self.flush_routed_effects().await
     }
 
@@ -10847,6 +10825,11 @@ impl MobActor {
                 }
             }
         }
+        if report.completed.contains(&DisposalStep::ArchiveSession)
+            && let Err(error) = self.record_destroy_member_retirement_archived(ctx).await
+        {
+            report.aborted_at = Some((DisposalStep::ArchiveSession, error));
+        }
         report
     }
 
@@ -11259,6 +11242,55 @@ impl MobActor {
             .delete_external_binding_overlay(&self.definition.id, agent_identity, generation)
             .await
             .map_err(MobError::from)
+    }
+
+    async fn record_destroy_member_retirement_archived(
+        &mut self,
+        ctx: &DisposalContext,
+    ) -> Result<(), MobError> {
+        let session_id_for_journal = self
+            .dsl_authority
+            .state()
+            .member_session_bindings
+            .get(&mob_dsl::AgentIdentity::from_domain(
+                &ctx.entry.agent_identity,
+            ))
+            .cloned()
+            .or_else(|| {
+                ctx.entry
+                    .member_ref
+                    .bridge_session_id()
+                    .map(mob_dsl::SessionId::from_domain)
+            })
+            .unwrap_or_default();
+        let prepared = self.prepare_dsl_signal_transition(
+            mob_dsl::MobMachineSignal::ObserveDestroyMemberRetirementArchived {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&ctx.entry.agent_identity),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&ctx.entry.agent_runtime_id),
+                fence_token: mob_dsl::FenceToken::from_domain(ctx.entry.fence_token),
+                generation: mob_dsl::Generation::from_domain(ctx.entry.generation),
+                session_id: session_id_for_journal.clone(),
+            },
+            "destroy_member_archive_completed",
+        )?;
+        Self::require_member_lifecycle_journal_effect(
+            &prepared.transition,
+            mob_dsl::MobLifecycleJournalKind::MemberRetired,
+            &ctx.entry.agent_identity,
+            &ctx.entry.agent_runtime_id,
+            None,
+            ctx.entry.generation,
+            Some(session_id_for_journal),
+            "destroy_member_archive_completed",
+        )?;
+        if !self
+            .retire_event_exists(&ctx.entry.agent_identity, &ctx.entry.member_ref)
+            .await?
+        {
+            self.append_retire_event_for_entry(&ctx.entry).await?;
+        }
+        self.commit_prepared_dsl_transition(prepared);
+        Ok(())
     }
 
     async fn record_destroy_member_retired_event(
@@ -11796,16 +11828,6 @@ impl MobActor {
                 error,
             )
         })?;
-        if destroy_input_needed {
-            self.apply_dsl_input(mob_dsl::MobMachineInput::Destroy, "destroy_input")
-                .map_err(|error| {
-                    Self::incomplete_destroy_error(
-                        report.clone(),
-                        "destroy machine transition failed",
-                        error,
-                    )
-                })?;
-        }
         if !self.pending_routed_effects.is_empty() {
             self.flush_routed_effects().await.map_err(|error| {
                 Self::incomplete_destroy_error(
@@ -11844,6 +11866,16 @@ impl MobActor {
             || !report.errors.is_empty()
         {
             return Err(MobDestroyError::Incomplete { report });
+        }
+        if destroy_input_needed {
+            self.apply_dsl_input(mob_dsl::MobMachineInput::Destroy, "destroy_input")
+                .map_err(|error| {
+                    Self::incomplete_destroy_error(
+                        report.clone(),
+                        "destroy machine transition failed",
+                        error,
+                    )
+                })?;
         }
         self.ensure_pending_spawn_alignment("handle_destroy completion")
             .map_err(|error| {

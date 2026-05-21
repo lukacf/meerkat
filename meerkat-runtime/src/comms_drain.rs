@@ -2703,6 +2703,37 @@ mod tests {
         }
     }
 
+    fn running_test_peer_comms_handle() -> Arc<dyn meerkat_core::handles::PeerCommsHandle> {
+        let authority = Arc::new(crate::handles::HandleDslAuthority::ephemeral());
+        let session_id = SessionId::new();
+        authority
+            .apply_signal(
+                crate::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
+                "running_test_peer_comms_handle_initialize",
+            )
+            .expect("test peer-comms authority should initialize");
+        authority
+            .apply_input(
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                },
+                "running_test_peer_comms_handle_register",
+            )
+            .expect("test peer-comms authority should register a session");
+        authority
+            .apply_input(
+                crate::meerkat_machine::dsl::MeerkatMachineInput::Prepare {
+                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                    run_id: crate::meerkat_machine::dsl::RunId::from_domain(
+                        &meerkat_core::lifecycle::RunId::new(),
+                    ),
+                },
+                "running_test_peer_comms_handle_prepare",
+            )
+            .expect("test peer-comms authority should enter Running");
+        Arc::new(crate::handles::RuntimePeerCommsHandle::new(authority))
+    }
+
     fn test_pubkey(seed: u8) -> meerkat_comms::PubKey {
         assert_ne!(seed, 0, "test pubkey seed must be non-zero");
         meerkat_comms::PubKey::new([seed; 32])
@@ -3769,7 +3800,7 @@ mod tests {
                 Arc::new(crate::handles::RuntimeInteractionStreamHandle::ephemeral()),
             ),
         );
-        supervisor_runtime.install_peer_comms_handle(crate::test_peer_comms_handle());
+        supervisor_runtime.install_peer_comms_handle(running_test_peer_comms_handle());
 
         let supervisor_pubkey = supervisor_runtime.public_key();
         let supervisor_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
@@ -3800,6 +3831,7 @@ mod tests {
             "supervisor should trust member",
         )
         .await;
+        supervisor_runtime.install_peer_comms_handle(running_test_peer_comms_handle());
 
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();

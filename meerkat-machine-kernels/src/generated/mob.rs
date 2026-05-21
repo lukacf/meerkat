@@ -2777,6 +2777,12 @@ pub mod signals {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitDestroyMemberRetire {
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ObserveRuntimeRetired {
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
@@ -2786,6 +2792,14 @@ pub mod signals {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveDestroyMemberRetirementArchived {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResetMember {
@@ -2932,8 +2946,10 @@ pub mod signals {
 pub enum Signal {
     ObserveRuntimeReady(signals::ObserveRuntimeReady),
     RetireMember(signals::RetireMember),
+    AdmitDestroyMemberRetire(signals::AdmitDestroyMemberRetire),
     ObserveRuntimeRetired(signals::ObserveRuntimeRetired),
     ObserveMemberRetirementArchived(signals::ObserveMemberRetirementArchived),
+    ObserveDestroyMemberRetirementArchived(signals::ObserveDestroyMemberRetirementArchived),
     ResetMember(signals::ResetMember),
     RespawnMember(signals::RespawnMember),
     ResolveRespawnTopologyRestore(signals::ResolveRespawnTopologyRestore),
@@ -2978,8 +2994,12 @@ impl Signal {
         match self {
             Self::ObserveRuntimeReady(_) => SignalKind::ObserveRuntimeReady,
             Self::RetireMember(_) => SignalKind::RetireMember,
+            Self::AdmitDestroyMemberRetire(_) => SignalKind::AdmitDestroyMemberRetire,
             Self::ObserveRuntimeRetired(_) => SignalKind::ObserveRuntimeRetired,
             Self::ObserveMemberRetirementArchived(_) => SignalKind::ObserveMemberRetirementArchived,
+            Self::ObserveDestroyMemberRetirementArchived(_) => {
+                SignalKind::ObserveDestroyMemberRetirementArchived
+            }
             Self::ResetMember(_) => SignalKind::ResetMember,
             Self::RespawnMember(_) => SignalKind::RespawnMember,
             Self::ResolveRespawnTopologyRestore(_) => SignalKind::ResolveRespawnTopologyRestore,
@@ -3025,8 +3045,10 @@ impl Signal {
 pub enum SignalKind {
     ObserveRuntimeReady,
     RetireMember,
+    AdmitDestroyMemberRetire,
     ObserveRuntimeRetired,
     ObserveMemberRetirementArchived,
+    ObserveDestroyMemberRetirementArchived,
     ResetMember,
     RespawnMember,
     ResolveRespawnTopologyRestore,
@@ -3400,6 +3422,10 @@ pub enum TransitionId {
     ResolveSubmitWorkRejectionRetiringAsMemberNotFound,
     ResolveSubmitWorkRejectionNotExternallyAddressable,
     RetireMember,
+    AdmitDestroyMemberRetireLiveRunning,
+    AdmitDestroyMemberRetireLiveStopped,
+    AdmitDestroyMemberRetireAlreadyRetiringRunning,
+    AdmitDestroyMemberRetireAlreadyRetiringStopped,
     ObserveRuntimeRetired,
     ObserveMemberRetirementArchivedLive,
     ObserveMemberRetirementArchivedLiveStopped,
@@ -3409,6 +3435,10 @@ pub enum TransitionId {
     ObserveMemberRetirementArchivedStaleRuntimeStopped,
     ObserveMemberRetirementArchivedAlreadyCleared,
     ObserveMemberRetirementArchivedAlreadyClearedStopped,
+    ObserveDestroyMemberRetirementArchivedLiveRunning,
+    ObserveDestroyMemberRetirementArchivedLiveStopped,
+    ObserveDestroyMemberRetirementArchivedRetiredRunning,
+    ObserveDestroyMemberRetirementArchivedRetiredStopped,
     ResetMember,
     RespawnMember,
     ResolveRespawnTopologyRestoreCompleted,

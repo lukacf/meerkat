@@ -349,23 +349,6 @@ impl AgentRuntimeId {
     pub fn from_domain(rid: &crate::ids::AgentRuntimeId) -> Self {
         Self(rid.to_string()) // "identity:generation"
     }
-
-    /// Project this machine-owned runtime key back into the domain type for
-    /// the identity it is currently bound to.
-    pub fn to_domain_for_identity(
-        &self,
-        identity: &crate::ids::AgentIdentity,
-    ) -> Option<crate::ids::AgentRuntimeId> {
-        let (runtime_identity, generation) = self.0.rsplit_once(':')?;
-        if runtime_identity != identity.as_str() {
-            return None;
-        }
-        let generation = generation.parse::<u64>().ok()?;
-        Some(crate::ids::AgentRuntimeId::new(
-            identity.clone(),
-            crate::ids::Generation::new(generation),
-        ))
-    }
 }
 
 impl AgentIdentity {
@@ -1033,6 +1016,41 @@ meerkat_machine_schema::mob_catalog_machine_dsl!("meerkat-mob", "machines::mob_m
 // ---------------------------------------------------------------------------
 // MobMachine-owned projection helpers
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct MobMemberRuntimeMaterial {
+    pub agent_runtime_id: AgentRuntimeId,
+    pub generation: Generation,
+    pub fence_token: FenceToken,
+}
+
+impl MobMemberRuntimeMaterial {
+    pub fn to_domain_for_identity(
+        &self,
+        identity: &crate::ids::AgentIdentity,
+    ) -> (crate::ids::AgentRuntimeId, crate::ids::FenceToken) {
+        (
+            crate::ids::AgentRuntimeId::new(
+                identity.clone(),
+                crate::ids::Generation::new(self.generation.0),
+            ),
+            crate::ids::FenceToken::new(self.fence_token.0),
+        )
+    }
+}
+
+impl MobMachineState {
+    pub fn member_runtime_material_for_identity(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<MobMemberRuntimeMaterial> {
+        Some(MobMemberRuntimeMaterial {
+            agent_runtime_id: self.identity_to_runtime.get(agent_identity)?.clone(),
+            generation: *self.identity_runtime_generations.get(agent_identity)?,
+            fence_token: *self.identity_runtime_fence_tokens.get(agent_identity)?,
+        })
+    }
+}
 
 /// Machine-owned lifecycle status for a mob member.
 ///

@@ -14,6 +14,8 @@ macro_rules! mob_catalog_machine_dsl {
             live_runtime_ids: Set<AgentRuntimeId>,
             externally_addressable_runtime_ids: Set<AgentRuntimeId>,
             runtime_fence_tokens: Map<AgentRuntimeId, FenceToken>,
+            identity_runtime_generations: Map<AgentIdentity, Generation>,
+            identity_runtime_fence_tokens: Map<AgentIdentity, FenceToken>,
             active_run_count: u64,
             run_status: Map<RunId, Enum<FlowRunStatus>>,
             run_ordered_steps: Map<RunId, Seq<StepId>>,
@@ -143,6 +145,8 @@ macro_rules! mob_catalog_machine_dsl {
             live_runtime_ids = EmptySet,
             externally_addressable_runtime_ids = EmptySet,
             runtime_fence_tokens = EmptyMap,
+            identity_runtime_generations = EmptyMap,
+            identity_runtime_fence_tokens = EmptyMap,
             active_run_count = 0,
             run_status = EmptyMap,
             run_ordered_steps = EmptyMap,
@@ -438,9 +442,9 @@ macro_rules! mob_catalog_machine_dsl {
             RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
             DestroyMob { session_id: SessionId },
             ObserveRuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
-            RecoverRosterMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, external_addressable: bool },
+            RecoverRosterMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool },
             RecoverMemberSessionBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, replacing: Option<SessionId> },
-            RecoverRosterMemberReset { agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            RecoverRosterMemberReset { agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             RecoverRosterMemberRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
             RecoverRosterWiring { edge: WiringEdge },
             RecoverRosterUnwire { edge: WiringEdge },
@@ -589,6 +593,13 @@ macro_rules! mob_catalog_machine_dsl {
             for_all(id in self.member_session_bindings.keys(), self.identity_to_runtime.contains_key(id))
         }
 
+        invariant identity_runtime_material_matches_runtime_binding {
+            for_all(id in self.identity_to_runtime.keys(), self.identity_runtime_generations.contains_key(id))
+            && for_all(id in self.identity_to_runtime.keys(), self.identity_runtime_fence_tokens.contains_key(id))
+            && for_all(id in self.identity_runtime_generations.keys(), self.identity_to_runtime.contains_key(id))
+            && for_all(id in self.identity_runtime_fence_tokens.keys(), self.identity_to_runtime.contains_key(id))
+        }
+
         invariant external_peer_edges_are_keyed_coherently {
             for_all(key in self.external_peer_edges_by_key.keys(),
                 mob_machine_external_peer_key_matches_edge(key, self.external_peer_edges_by_key.get_cloned(key).get("value"))
@@ -635,6 +646,8 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.identity_runtime_generations.insert(agent_identity, generation);
+                self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_startup_binding_requested.insert(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
@@ -672,6 +685,8 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.identity_runtime_generations.insert(agent_identity, generation);
+                self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_startup_binding_requested.insert(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
@@ -712,7 +727,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition RecoverRosterMemberRunning {
-            on signal RecoverRosterMember { agent_identity, agent_runtime_id, fence_token, external_addressable }
+            on signal RecoverRosterMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
             guard { self.lifecycle_phase == Phase::Running }
             guard "identity_not_recovered" { self.identity_to_runtime.contains_key(agent_identity) == false }
             guard "runtime_not_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == false }
@@ -725,6 +740,8 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.identity_runtime_generations.insert(agent_identity, generation);
+                self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_restore_failures.remove(agent_identity);
                 self.topology_epoch += 1;
             }
@@ -732,11 +749,12 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition RecoverRosterMemberAddressabilityRunning {
-            on signal RecoverRosterMember { agent_identity, agent_runtime_id, fence_token, external_addressable }
+            on signal RecoverRosterMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
             guard { self.lifecycle_phase == Phase::Running }
             guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
             update {
                 if external_addressable {
                     self.externally_addressable_runtime_ids.insert(agent_runtime_id);
@@ -793,7 +811,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition RecoverRosterMemberResetRunning {
-            on signal RecoverRosterMemberReset { agent_identity, previous_agent_runtime_id, agent_runtime_id, fence_token }
+            on signal RecoverRosterMemberReset { agent_identity, previous_agent_runtime_id, agent_runtime_id, fence_token, generation }
             guard { self.lifecycle_phase == Phase::Running }
             guard "previous_runtime_recovered" { self.live_runtime_ids.contains(previous_agent_runtime_id) == true }
             guard "identity_recovered" { self.identity_to_runtime.get_cloned(agent_identity) == Some(previous_agent_runtime_id) }
@@ -813,6 +831,8 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.identity_runtime_generations.insert(agent_identity, generation);
+                self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_restore_failures.remove(agent_identity);
                 self.topology_epoch += 1;
             }
@@ -832,6 +852,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_runtime_generations.remove(agent_identity);
+                self.identity_runtime_fence_tokens.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
@@ -847,6 +869,8 @@ macro_rules! mob_catalog_machine_dsl {
             guard "runtime_not_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             update {
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_runtime_generations.remove(agent_identity);
+                self.identity_runtime_fence_tokens.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
@@ -1354,6 +1378,8 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.identity_runtime_generations.insert(agent_identity, generation);
+                self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_startup_binding_requested.insert(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
@@ -1379,6 +1405,8 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.identity_runtime_generations.insert(agent_identity, generation);
+                self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_startup_binding_requested.insert(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
@@ -1479,6 +1507,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.external_peer_edges = EmptySet;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.identity_to_runtime = EmptyMap;
+                self.identity_runtime_generations = EmptyMap;
+                self.identity_runtime_fence_tokens = EmptyMap;
                 self.member_session_bindings = EmptyMap;
                 self.member_peer_ids = EmptyMap;
                 self.member_peer_endpoints = EmptyMap;
@@ -3838,6 +3868,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.external_peer_edges = EmptySet;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.identity_to_runtime = EmptyMap;
+                self.identity_runtime_generations = EmptyMap;
+                self.identity_runtime_fence_tokens = EmptyMap;
                 self.member_session_bindings = EmptyMap;
                 self.member_peer_ids = EmptyMap;
                 self.member_peer_endpoints = EmptyMap;

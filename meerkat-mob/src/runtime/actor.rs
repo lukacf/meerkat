@@ -2863,36 +2863,25 @@ impl MobActor {
         &mut self,
         agent_identity: &MeerkatId,
         include_session_details: bool,
-    ) -> CanonicalMemberSnapshotMaterial {
+    ) -> Result<CanonicalMemberSnapshotMaterial, MobError> {
         let roster_entry = {
             let roster = self.roster.read().await;
             roster.get(agent_identity).cloned()
         };
         let domain_identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
-        let machine_projection = self.machine_projection_for_identity(&domain_identity);
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
         let current_bridge_session_id =
             self.machine_bridge_session_id_for_identity(&domain_identity);
-        let machine_runtime = machine_projection
-            .runtime_id
-            .as_ref()
-            .and_then(|runtime_id| {
-                let generation = runtime_id
-                    .0
-                    .strip_prefix(&format!("{domain_identity}:"))
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .map(crate::ids::Generation::new)?;
-                let fence_token = self
-                    .dsl_authority
-                    .state()
-                    .runtime_fence_tokens
-                    .get(runtime_id)
-                    .map(|token| crate::ids::FenceToken::new(token.0))?;
-                Some((
-                    crate::ids::AgentRuntimeId::new(domain_identity.clone(), generation),
-                    fence_token,
+        let machine_runtime = self
+            .dsl_authority
+            .state()
+            .member_runtime_material_for_identity(&dsl_identity)
+            .map(|material| material.to_domain_for_identity(&domain_identity))
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "MobMachine runtime material is absent for '{domain_identity}'"
                 ))
-            });
+            })?;
         let member_present = roster_entry.is_some();
 
         let (output_preview, tokens_used) = match current_bridge_session_id.as_ref() {
@@ -2923,37 +2912,19 @@ impl MobActor {
             .state()
             .member_lifecycle_for_identity(&dsl_identity);
 
-        MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
-            member_present,
-            machine_lifecycle,
-            output_preview,
-            tokens_used,
-            agent_runtime_id: roster_entry
-                .as_ref()
-                .map(|entry| entry.agent_runtime_id.clone())
-                .or_else(|| {
-                    machine_runtime
-                        .as_ref()
-                        .map(|(agent_runtime_id, _)| agent_runtime_id.clone())
-                })
-                .unwrap_or_else(|| {
-                    crate::ids::AgentRuntimeId::initial(crate::ids::AgentIdentity::from(
-                        agent_identity.as_str(),
-                    ))
-                }),
-            fence_token: roster_entry
-                .as_ref()
-                .map(|entry| entry.fence_token)
-                .or_else(|| {
-                    machine_runtime
-                        .as_ref()
-                        .map(|(_, fence_token)| *fence_token)
-                })
-                .unwrap_or(crate::ids::FenceToken::new(0)),
-            current_bridge_session_id,
-            peer_connectivity: None,
-            kickoff: roster_entry.and_then(|entry| entry.kickoff),
-        })
+        Ok(MobMemberLifecycleProjection::materialize(
+            MobMemberLifecycleInput {
+                member_present,
+                machine_lifecycle,
+                output_preview,
+                tokens_used,
+                agent_runtime_id: machine_runtime.0,
+                fence_token: machine_runtime.1,
+                current_bridge_session_id,
+                peer_connectivity: None,
+                kickoff: roster_entry.and_then(|entry| entry.kickoff),
+            },
+        ))
     }
 
     fn machine_roster_state_for_entry(&self, entry: &RosterEntry) -> crate::roster::MemberState {
@@ -3046,9 +3017,20 @@ impl MobActor {
         };
         let mut projected = Vec::with_capacity(entries.len());
         for entry in entries {
-            let material = self
+            let material = match self
                 .machine_member_material(&entry.agent_identity, false)
-                .await;
+                .await
+            {
+                Ok(material) => material,
+                Err(error) => {
+                    tracing::warn!(
+                        agent_identity = %entry.agent_identity,
+                        error = %error,
+                        "skipping member list projection without MobMachine runtime material"
+                    );
+                    continue;
+                }
+            };
             let state = material.roster_state();
             if !include_retiring && state == crate::roster::MemberState::Retiring {
                 continue;
@@ -3059,8 +3041,8 @@ impl MobActor {
             projected.push(
                 MobMemberListEntry {
                     agent_identity: entry.agent_identity,
-                    agent_runtime_id: entry.agent_runtime_id,
-                    fence_token: entry.fence_token,
+                    agent_runtime_id: snapshot.agent_runtime_id,
+                    fence_token: snapshot.fence_token,
                     role: entry.role,
                     runtime_mode: entry.runtime_mode,
                     peer_id: entry.peer_id,
@@ -5051,7 +5033,7 @@ impl MobActor {
                     let _ = reply_tx.send(
                         self.machine_member_material(&MeerkatId::from(&agent_identity), true)
                             .await
-                            .to_snapshot(),
+                            .map(|material| material.to_snapshot()),
                     );
                 }
                 MobCommand::MemberMachineProjection {
@@ -7327,8 +7309,9 @@ impl MobActor {
                     return None;
                 }
                 let agent_identity = AgentIdentity::from(identity.0.as_str());
-                let runtime_id = dsl.identity_to_runtime.get(identity)?;
-                let agent_runtime_id = runtime_id.to_domain_for_identity(&agent_identity)?;
+                let (agent_runtime_id, _) = dsl
+                    .member_runtime_material_for_identity(identity)?
+                    .to_domain_for_identity(&agent_identity);
                 Some((agent_identity, agent_runtime_id))
             })
     }

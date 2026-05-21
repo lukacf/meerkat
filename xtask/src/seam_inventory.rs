@@ -336,6 +336,228 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::NoOwnerRealization,
             "Local finite model-routing override restoration consumed by the runtime kernel",
         ),
+        (
+            "MeerkatMachine",
+            "AdmissionResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local typed admission result retained inside the input-lifecycle region",
+        ),
+        (
+            "MeerkatMachine",
+            "AdmissionValidationResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local typed admission validation result retained inside the input-lifecycle region",
+        ),
+        (
+            "MeerkatMachine",
+            "AdmissionIdempotencyResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local typed idempotency result retained inside the input-lifecycle region",
+        ),
+        (
+            "MeerkatMachine",
+            "RecoveredInputLifecycleNormalized",
+            SeamClassification::NoOwnerRealization,
+            "Local recovered-input lifecycle normalization retained inside the recovery region",
+        ),
+        (
+            "MeerkatMachine",
+            "RecoveredInputDurabilityClassified",
+            SeamClassification::NoOwnerRealization,
+            "Local recovered-input durability classification retained inside the recovery region",
+        ),
+        (
+            "MeerkatMachine",
+            "InputPublicLifecycleResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Public input lifecycle projection must align with canonical input-lifecycle machine truth",
+        ),
+        (
+            "MeerkatMachine",
+            "InputPublicTerminalOutcomeResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Public input terminal outcome projection must align with canonical terminal-outcome machine truth",
+        ),
+        (
+            "MeerkatMachine",
+            "InputBehavioralTerminalityResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Behavioral terminality projection must align with canonical input lifecycle and terminality truth",
+        ),
+        (
+            "MeerkatMachine",
+            "RuntimeLifecycleStateClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "Runtime lifecycle classification must align with canonical runtime lifecycle state",
+        ),
+        (
+            "MeerkatMachine",
+            "RuntimeLifecycleDurabilityClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "Runtime lifecycle durability classification must align with canonical runtime durability truth",
+        ),
+        (
+            "MeerkatMachine",
+            "RuntimeLoopQueueAdmissionClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "Runtime loop queue admission classification must align with canonical runtime admission truth",
+        ),
+        (
+            "MeerkatMachine",
+            "DiscardRecoveredOperationRecord",
+            SeamClassification::NoOwnerRealization,
+            "Local recovered-operation discard record retained inside the ops lifecycle region",
+        ),
+        (
+            "MeerkatMachine",
+            "OperationTerminal",
+            SeamClassification::SurfaceResultAlignment,
+            "Operation terminal classification must align with canonical ops lifecycle truth",
+        ),
+        (
+            "MeerkatMachine",
+            "OperationNonTerminal",
+            SeamClassification::SurfaceResultAlignment,
+            "Operation non-terminal classification must align with canonical ops lifecycle truth",
+        ),
+        (
+            "MeerkatMachine",
+            "AgentCompletionCursorAdvanced",
+            SeamClassification::NoOwnerRealization,
+            "Local agent completion cursor advancement retained inside the completion-feed region",
+        ),
+        (
+            "MeerkatMachine",
+            "RuntimeObservedCompletionCursorAdvanced",
+            SeamClassification::NoOwnerRealization,
+            "Local runtime-observed completion cursor advancement retained inside the completion-feed region",
+        ),
+        (
+            "MeerkatMachine",
+            "RuntimeInjectedCompletionCursorAdvanced",
+            SeamClassification::NoOwnerRealization,
+            "Local runtime-injected completion cursor advancement retained inside the completion-feed region",
+        ),
+        (
+            "MeerkatMachine",
+            "OpRegistrationAdmissionResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local operation registration admission result retained inside the ops lifecycle region",
+        ),
+        (
+            "MeerkatMachine",
+            "OpLifecycleTransitionRejected",
+            SeamClassification::SurfaceResultAlignment,
+            "Operation lifecycle rejection projection must align with canonical ops lifecycle truth",
+        ),
+        (
+            "MeerkatMachine",
+            "WaitAllAdmissionResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local wait-all admission result retained inside the ops barrier region",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestAdmissionAccepted",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request admission acceptance must align with canonical surface request state",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestAdmissionDuplicate",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request duplicate admission must align with canonical surface request state",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestNotFound",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request not-found result must align with canonical surface request state",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestTerminalPublish",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request terminal publish result must align with canonical surface request terminal truth",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestTerminalRespondWithoutPublish",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request terminal response-without-publish result must align with canonical terminal truth",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestCancelled",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request cancellation result must align with canonical surface request state",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestAlreadyCancelled",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request already-cancelled result must align with canonical surface request state",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestAlreadyPublished",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request already-published result must align with canonical surface request state",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestAlreadyCompleted",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request already-completed result must align with canonical surface request state",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestPublished",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request published result must align with canonical surface request state",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestAlreadyTerminal",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request already-terminal result must align with canonical terminal truth",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestCancelledBeforePublish",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request cancelled-before-publish result must align with canonical surface request state",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestCompleted",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request completed result must align with canonical surface request state",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestSupersededByCancel",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface request superseded-by-cancel result must align with canonical surface request state",
+        ),
+        (
+            "MeerkatMachine",
+            "LiveRefreshResultResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Live refresh result projection must align with canonical live channel truth",
+        ),
+        (
+            "MeerkatMachine",
+            "LiveChannelStatusResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Live channel status projection must align with canonical live channel truth",
+        ),
+        (
+            "MeerkatMachine",
+            "PeerResponseReplyClassified",
+            SeamClassification::NoOwnerRealization,
+            "Local peer response reply classification consumed synchronously by the peer-comms handle",
+        ),
         //
         // External effects that carry surface truth back to callers must align
         // the surface representation with the kernel state they were derived
@@ -634,6 +856,84 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::OwnerRealizationOnly,
             "External kickoff lifecycle notice realized by the mob event stream",
         ),
+        (
+            "MobMachine",
+            "SubmitWorkRejected",
+            SeamClassification::SurfaceResultAlignment,
+            "Submit-work rejection result must align with canonical mob admission truth",
+        ),
+        (
+            "MobMachine",
+            "CancelAllWorkRejected",
+            SeamClassification::SurfaceResultAlignment,
+            "Cancel-all-work rejection result must align with canonical mob admission truth",
+        ),
+        (
+            "MobMachine",
+            "AppendLifecycleJournal",
+            SeamClassification::NoOwnerRealization,
+            "Local lifecycle journal append retained inside the mob event store projection path",
+        ),
+        (
+            "MobMachine",
+            "AppendOperatorActionProvenance",
+            SeamClassification::NoOwnerRealization,
+            "Local operator-action provenance append retained inside the mob audit path",
+        ),
+        (
+            "MobMachine",
+            "SpawnPolicyResolutionRecorded",
+            SeamClassification::NoOwnerRealization,
+            "Local spawn-policy resolution record retained inside the mob policy region",
+        ),
+        (
+            "MobMachine",
+            "MemberTrustWiringRequested",
+            SeamClassification::OwnerRealizationOnly,
+            "External member trust-wiring request realized by the mob comms trust owner",
+        ),
+        (
+            "MobMachine",
+            "MemberTrustUnwiringRequested",
+            SeamClassification::OwnerRealizationOnly,
+            "External member trust-unwiring request realized by the mob comms trust owner",
+        ),
+        (
+            "MobMachine",
+            "WiringTrustRepairRequested",
+            SeamClassification::NoOwnerRealization,
+            "Local wiring trust-repair marker retained inside the mob trust-repair path",
+        ),
+        (
+            "MobMachine",
+            "ExternalPeerTrustWiringRequested",
+            SeamClassification::OwnerRealizationOnly,
+            "External peer trust-wiring request realized by the mob comms trust owner",
+        ),
+        (
+            "MobMachine",
+            "ExternalPeerTrustUnwiringRequested",
+            SeamClassification::OwnerRealizationOnly,
+            "External peer trust-unwiring request realized by the mob comms trust owner",
+        ),
+        (
+            "MobMachine",
+            "ExternalPeerTrustRepairRequested",
+            SeamClassification::OwnerRealizationOnly,
+            "External peer trust-repair request realized by the mob comms trust owner",
+        ),
+        (
+            "MobMachine",
+            "MemberPeerRegistered",
+            SeamClassification::NoOwnerRealization,
+            "Local member peer registration retained inside the mob peer registry",
+        ),
+        (
+            "MobMachine",
+            "ExternalPeerReciprocalTrustRequested",
+            SeamClassification::OwnerRealizationOnly,
+            "External peer reciprocal trust request realized by the mob comms trust owner",
+        ),
         //
         // =========================================================================
         // ScheduleLifecycleMachine
@@ -708,6 +1008,30 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::SurfaceResultAlignment,
             "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
         ),
+        (
+            "OccurrenceLifecycleMachine",
+            "DueNoAction",
+            SeamClassification::NoOwnerRealization,
+            "Local due-occurrence no-action classification retained inside the occurrence scheduler",
+        ),
+        (
+            "OccurrenceLifecycleMachine",
+            "DueClaimEligible",
+            SeamClassification::NoOwnerRealization,
+            "Local due-occurrence claim eligibility classification retained inside the occurrence scheduler",
+        ),
+        (
+            "OccurrenceLifecycleMachine",
+            "DueMisfireRequired",
+            SeamClassification::NoOwnerRealization,
+            "Local due-occurrence misfire classification retained inside the occurrence scheduler",
+        ),
+        (
+            "OccurrenceLifecycleMachine",
+            "DueLeaseExpired",
+            SeamClassification::NoOwnerRealization,
+            "Local due-occurrence lease-expired classification retained inside the occurrence scheduler",
+        ),
         //
         // =========================================================================
         // WorkGraphLifecycleMachine
@@ -759,6 +1083,64 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "EvidenceAdded",
             SeamClassification::NoOwnerRealization,
             "Local WorkGraph evidence-reference effect retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "BlockerSatisfied",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph blocker-satisfied classification retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "BlockerUnsatisfied",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph blocker-unsatisfied classification retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "LifecycleTerminal",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph terminal lifecycle classification must align with canonical WorkGraph item truth",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "LifecycleNonTerminal",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph non-terminal lifecycle classification must align with canonical WorkGraph item truth",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "WorkReady",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph ready classification must align with canonical dependency and lifecycle truth",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "WorkNotReady",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph not-ready classification must align with canonical dependency and lifecycle truth",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "PublicErrorClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph public error classification must align with canonical WorkGraph error truth",
+        ),
+        //
+        // =========================================================================
+        // PendingContinuationAdmissionMachine
+        // =========================================================================
+        (
+            "PendingContinuationAdmissionMachine",
+            "PendingContinuationResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local pending-continuation admission result retained inside the continuation admission region",
+        ),
+        (
+            "PendingContinuationAdmissionMachine",
+            "PendingContinuationPublicTerminalResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Pending-continuation public terminal result must align with canonical admission truth",
         ),
         //
         // =========================================================================

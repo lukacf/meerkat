@@ -11,6 +11,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_runtime_ids`: `Set<AgentRuntimeId>`
 - `externally_addressable_runtime_ids`: `Set<AgentRuntimeId>`
 - `runtime_fence_tokens`: `Map<AgentRuntimeId, FenceToken>`
+- `identity_runtime_generations`: `Map<AgentIdentity, Generation>`
+- `identity_runtime_fence_tokens`: `Map<AgentIdentity, FenceToken>`
 - `active_run_count`: `u64`
 - `run_status`: `Map<RunId, FlowRunStatus>`
 - `run_ordered_steps`: `Map<RunId, Seq<StepId>>`
@@ -201,9 +203,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, session_id: SessionId)
 - `DestroyMob`(session_id: SessionId)
 - `ObserveRuntimeDestroyed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `RecoverRosterMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, external_addressable: Bool)
+- `RecoverRosterMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool)
 - `RecoverMemberSessionBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, replacing: Option<SessionId>)
-- `RecoverRosterMemberReset`(agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `RecoverRosterMemberReset`(agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `RecoverRosterMemberRetired`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 - `RecoverRosterWiring`(edge: WiringEdge)
 - `RecoverRosterUnwire`(edge: WiringEdge)
@@ -274,6 +276,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Invariants
 - `bindings_require_known_identity`
+- `identity_runtime_material_matches_runtime_binding`
 - `external_peer_edges_are_keyed_coherently`
 
 ## Transitions
@@ -316,7 +319,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverRosterMemberRunning`
 - From: `Running`
-- On: `RecoverRosterMember`(agent_identity, agent_runtime_id, fence_token, external_addressable)
+- On: `RecoverRosterMember`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable)
 - Guards:
   - `identity_not_recovered`
   - `runtime_not_recovered`
@@ -324,11 +327,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverRosterMemberAddressabilityRunning`
 - From: `Running`
-- On: `RecoverRosterMember`(agent_identity, agent_runtime_id, fence_token, external_addressable)
+- On: `RecoverRosterMember`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable)
 - Guards:
   - `identity_runtime_matches`
   - `runtime_recovered`
   - `fence_token_matches`
+  - `generation_matches`
 - To: `Running`
 
 ### `RecoverMemberSessionBindingFreshRunning`
@@ -368,7 +372,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverRosterMemberResetRunning`
 - From: `Running`
-- On: `RecoverRosterMemberReset`(agent_identity, previous_agent_runtime_id, agent_runtime_id, fence_token)
+- On: `RecoverRosterMemberReset`(agent_identity, previous_agent_runtime_id, agent_runtime_id, fence_token, generation)
 - Guards:
   - `previous_runtime_recovered`
   - `identity_recovered`

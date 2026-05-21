@@ -348,7 +348,7 @@ pub(super) enum MobCommand {
     },
     ProjectMemberStatus {
         agent_identity: crate::ids::AgentIdentity,
-        reply_tx: oneshot::Sender<super::MobMemberSnapshot>,
+        reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
     },
     MemberMachineProjection {
         agent_identity: crate::ids::AgentIdentity,

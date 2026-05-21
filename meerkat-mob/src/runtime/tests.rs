@@ -10981,24 +10981,16 @@ async fn test_list_members_returns_after_respawn_without_hanging() {
 }
 
 #[tokio::test]
-async fn test_wait_one_returns_terminal_unknown_for_missing_member() {
+async fn test_wait_one_fails_closed_for_missing_member_without_machine_material() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
-    let snapshot = handle
+    let error = handle
         .wait_one(&AgentIdentity::from("missing-helper"))
         .await
-        .expect("wait_one should succeed for missing member");
+        .expect_err("wait_one should fail closed for missing member");
 
-    assert_eq!(
-        snapshot.status,
-        crate::runtime::handle::MobMemberStatus::Unknown
-    );
     assert!(
-        snapshot.is_final,
-        "wait_one should classify a missing member as terminal"
-    );
-    assert!(
-        snapshot.current_session_id.is_none(),
-        "missing-member wait result must not invent a session bridge"
+        matches!(error, crate::MobError::Internal(message) if message.contains("MobMachine runtime material is absent")),
+        "missing-member wait must not invent runtime material"
     );
 }
 
@@ -11063,30 +11055,21 @@ async fn test_wait_one_observes_retiring_member_as_non_terminal_until_archive() 
 }
 
 #[tokio::test]
-async fn test_wait_all_preserves_input_order_for_missing_members() {
+async fn test_wait_all_fails_closed_for_missing_members_without_machine_material() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let ids = vec![
         AgentIdentity::from("missing-a"),
         AgentIdentity::from("missing-b"),
     ];
 
-    let snapshots = handle
+    let error = handle
         .wait_all(&ids)
         .await
-        .expect("wait_all should succeed for missing members");
+        .expect_err("wait_all should fail closed for missing members");
 
-    assert_eq!(snapshots.len(), 2);
-    assert_eq!(
-        snapshots[0].status,
-        crate::runtime::handle::MobMemberStatus::Unknown
-    );
-    assert_eq!(
-        snapshots[1].status,
-        crate::runtime::handle::MobMemberStatus::Unknown
-    );
     assert!(
-        snapshots.iter().all(|snapshot| snapshot.is_final),
-        "wait_all should classify all missing members as terminal"
+        matches!(error, crate::MobError::Internal(message) if message.contains("MobMachine runtime material is absent")),
+        "missing-member wait must not invent runtime material"
     );
 }
 

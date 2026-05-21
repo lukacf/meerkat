@@ -1969,6 +1969,8 @@ pub struct State {
     pub live_runtime_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub externally_addressable_runtime_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub runtime_fence_tokens: std::collections::BTreeMap<AgentRuntimeId, FenceToken>,
+    pub identity_runtime_generations: std::collections::BTreeMap<AgentIdentity, Generation>,
+    pub identity_runtime_fence_tokens: std::collections::BTreeMap<AgentIdentity, FenceToken>,
     pub active_run_count: u64,
     pub run_status: std::collections::BTreeMap<RunId, FlowRunStatus>,
     pub run_ordered_steps: std::collections::BTreeMap<RunId, Vec<StepId>>,
@@ -2737,6 +2739,7 @@ pub mod signals {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
+        pub generation: Generation,
         pub external_addressable: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2752,6 +2755,7 @@ pub mod signals {
         pub previous_agent_runtime_id: AgentRuntimeId,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
+        pub generation: Generation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverRosterMemberRetired {
@@ -3540,6 +3544,8 @@ pub fn initial_state() -> State {
         live_runtime_ids: Default::default(),
         externally_addressable_runtime_ids: Default::default(),
         runtime_fence_tokens: Default::default(),
+        identity_runtime_generations: Default::default(),
+        identity_runtime_fence_tokens: Default::default(),
         active_run_count: 0,
         run_status: Default::default(),
         run_ordered_steps: Default::default(),

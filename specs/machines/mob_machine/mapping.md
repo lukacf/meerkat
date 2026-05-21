@@ -823,6 +823,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `bindings_require_known_identity`
   - anchors: `mob_handle_surface`
   - scenarios: `wiring-and-session-binding`
+- `identity_runtime_material_matches_runtime_binding`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
 - `external_peer_edges_are_keyed_coherently`
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`

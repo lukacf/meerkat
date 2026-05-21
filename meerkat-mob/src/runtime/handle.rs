@@ -1643,7 +1643,7 @@ impl MobHandle {
                         agent_identity: AgentIdentity::from(agent_identity.as_str()),
                         reply_tx,
                     })
-                    .await?;
+                    .await??;
                 Ok(MobMachineCommandResult::MemberStatus(snapshot))
             }
             MobMachineCommand::SubscribeAgentEvents { agent_identity } => {
@@ -1964,10 +1964,13 @@ impl MobHandle {
     ) -> Vec<MobMemberListEntry> {
         entries
             .into_iter()
-            .map(|entry| {
+            .filter_map(|entry| {
                 let domain_identity =
                     crate::ids::AgentIdentity::from(entry.agent_identity.as_str());
                 let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
+                let machine_runtime = machine_state
+                    .member_runtime_material_for_identity(&dsl_identity)?
+                    .to_domain_for_identity(&domain_identity);
                 let current_bridge_session_id =
                     Self::machine_bridge_session_id_for_identity(&domain_identity, machine_state);
                 let wired_to = Self::machine_wired_to_for_identity(&domain_identity, machine_state);
@@ -1976,8 +1979,8 @@ impl MobHandle {
                     machine_lifecycle: machine_state.member_lifecycle_for_identity(&dsl_identity),
                     output_preview: None,
                     tokens_used: 0,
-                    agent_runtime_id: entry.agent_runtime_id.clone(),
-                    fence_token: entry.fence_token,
+                    agent_runtime_id: machine_runtime.0,
+                    fence_token: machine_runtime.1,
                     current_bridge_session_id,
                     peer_connectivity: None,
                     kickoff: entry.kickoff.clone(),
@@ -1985,26 +1988,28 @@ impl MobHandle {
                 let state = material.roster_state();
                 let snapshot = material.to_snapshot();
                 let current_bridge_session_id = snapshot.current_bridge_session_id().cloned();
-                MobMemberListEntry {
-                    agent_identity: entry.agent_identity,
-                    agent_runtime_id: entry.agent_runtime_id,
-                    fence_token: entry.fence_token,
-                    role: entry.role,
-                    runtime_mode: entry.runtime_mode,
-                    peer_id: entry.peer_id,
-                    transport_public_key: entry.transport_public_key,
-                    state,
-                    wired_to,
-                    external_peer_specs: entry.external_peer_specs,
-                    labels: entry.labels,
-                    status: snapshot.status,
-                    error: snapshot.error,
-                    is_final: snapshot.is_final,
-                    current_session_id: None,
-                    current_bridge_session_id: None,
-                    kickoff: snapshot.kickoff,
-                }
-                .with_current_bridge_session_id(current_bridge_session_id)
+                Some(
+                    MobMemberListEntry {
+                        agent_identity: entry.agent_identity,
+                        agent_runtime_id: snapshot.agent_runtime_id,
+                        fence_token: snapshot.fence_token,
+                        role: entry.role,
+                        runtime_mode: entry.runtime_mode,
+                        peer_id: entry.peer_id,
+                        transport_public_key: entry.transport_public_key,
+                        state,
+                        wired_to,
+                        external_peer_specs: entry.external_peer_specs,
+                        labels: entry.labels,
+                        status: snapshot.status,
+                        error: snapshot.error,
+                        is_final: snapshot.is_final,
+                        current_session_id: None,
+                        current_bridge_session_id: None,
+                        kickoff: snapshot.kickoff,
+                    }
+                    .with_current_bridge_session_id(current_bridge_session_id),
+                )
             })
             .collect()
     }
@@ -2119,23 +2124,8 @@ impl MobHandle {
             Self::machine_bridge_session_id_for_identity(identity, &machine_state);
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
         let machine_runtime = machine_state
-            .identity_to_runtime
-            .get(&dsl_identity)
-            .and_then(|runtime_id| {
-                let generation = runtime_id
-                    .0
-                    .strip_prefix(&format!("{identity}:"))
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .map(crate::ids::Generation::new)?;
-                let fence_token = machine_state
-                    .runtime_fence_tokens
-                    .get(runtime_id)
-                    .map(|token| crate::ids::FenceToken::new(token.0))?;
-                Some((
-                    crate::ids::AgentRuntimeId::new(identity.clone(), generation),
-                    fence_token,
-                ))
-            });
+            .member_runtime_material_for_identity(&dsl_identity)
+            .map(|material| material.to_domain_for_identity(identity))?;
 
         Some(
             MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
@@ -2143,24 +2133,8 @@ impl MobHandle {
                 machine_lifecycle: lifecycle,
                 output_preview: None,
                 tokens_used: 0,
-                agent_runtime_id: entry
-                    .as_ref()
-                    .map(|entry| entry.agent_runtime_id.clone())
-                    .or_else(|| {
-                        machine_runtime
-                            .as_ref()
-                            .map(|(agent_runtime_id, _)| agent_runtime_id.clone())
-                    })
-                    .unwrap_or_else(|| crate::ids::AgentRuntimeId::initial(identity.clone())),
-                fence_token: entry
-                    .as_ref()
-                    .map(|entry| entry.fence_token)
-                    .or_else(|| {
-                        machine_runtime
-                            .as_ref()
-                            .map(|(_, fence_token)| *fence_token)
-                    })
-                    .unwrap_or(crate::ids::FenceToken::new(0)),
+                agent_runtime_id: machine_runtime.0,
+                fence_token: machine_runtime.1,
                 current_bridge_session_id,
                 peer_connectivity: None,
                 kickoff: entry.and_then(|entry| entry.kickoff),
@@ -3707,7 +3681,7 @@ impl MobHandle {
                     agent_identity: identity.clone(),
                     reply_tx,
                 })
-                .await?
+                .await??
             }
         };
         snapshot.peer_connectivity = match tokio::time::timeout(

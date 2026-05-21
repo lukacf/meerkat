@@ -439,6 +439,7 @@ fn apply_seeded_member_addressability(
             agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
             agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
             fence_token: mob_dsl::FenceToken::from_domain(fence_token),
+            generation: mob_dsl::Generation::from_domain(agent_runtime_id.generation),
             external_addressable,
         },
         context,
@@ -619,6 +620,9 @@ fn seed_mob_authority_sync_from_events(
                             &member_spawned.agent_runtime_id,
                         ),
                         fence_token: mob_dsl::FenceToken::from_domain(member_spawned.fence_token),
+                        generation: mob_dsl::Generation::from_domain(
+                            member_spawned.agent_runtime_id.generation,
+                        ),
                         external_addressable: inline_external_addressable(
                             definition,
                             &member_spawned.role,
@@ -658,6 +662,7 @@ fn seed_mob_authority_sync_from_events(
                         ),
                         agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
                         fence_token: mob_dsl::FenceToken::from_domain(*fence_token),
+                        generation: mob_dsl::Generation::from_domain(agent_runtime_id.generation),
                     },
                     "recover_member_reset",
                 )?;

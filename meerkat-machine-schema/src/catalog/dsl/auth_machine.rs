@@ -97,16 +97,9 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_present: bool,
                     credential_generation: u64,
                     credential_published_at_millis: Option<u64>,
-                    oauth_browser_flow_ids: Set<String>,
-                    oauth_browser_flow_providers: Map<String, String>,
-                    oauth_browser_flow_redirect_uris: Map<String, String>,
-                    oauth_browser_flow_expires_at_millis: Map<String, u64>,
-                    oauth_device_flow_ids: Set<String>,
-                    oauth_device_flow_providers: Map<String, String>,
-                    oauth_device_flow_expires_at_millis: Map<String, u64>,
-                    oauth_device_poll_ids: Set<String>,
-                    oauth_outstanding_flow_count: u64,
                 },
+                RestoreOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64 },
+                RestoreOAuthDeviceFlow { flow_id: String, provider: String, expires_at_millis: u64, poll_active: bool },
                 AdmitOAuthBrowserFlow {
                     flow_id: String,
                     provider: String,
@@ -147,6 +140,16 @@ macro_rules! auth_catalog_machine_dsl {
 
             disposition EmitLifecycleEvent => external handoff auth_lease_lifecycle_publication,
             disposition WakeRefreshLoop => local,
+
+            invariant oauth_flow_membership_consistent {
+                self.oauth_browser_flow_providers.keys() == self.oauth_browser_flow_ids
+                && self.oauth_browser_flow_redirect_uris.keys() == self.oauth_browser_flow_ids
+                && self.oauth_browser_flow_expires_at_millis.keys() == self.oauth_browser_flow_ids
+                && self.oauth_device_flow_providers.keys() == self.oauth_device_flow_ids
+                && self.oauth_device_flow_expires_at_millis.keys() == self.oauth_device_flow_ids
+                && for_all(flow_id in self.oauth_device_poll_ids, self.oauth_device_flow_ids.contains(flow_id))
+                && self.oauth_outstanding_flow_count == self.oauth_browser_flow_ids.len() + self.oauth_device_flow_ids.len()
+            }
 
             // --- Transitions ---
 
@@ -333,16 +336,7 @@ macro_rules! auth_catalog_machine_dsl {
                     refresh_attempt,
                     credential_present,
                     credential_generation,
-                    credential_published_at_millis,
-                    oauth_browser_flow_ids,
-                    oauth_browser_flow_providers,
-                    oauth_browser_flow_redirect_uris,
-                    oauth_browser_flow_expires_at_millis,
-                    oauth_device_flow_ids,
-                    oauth_device_flow_providers,
-                    oauth_device_flow_expires_at_millis,
-                    oauth_device_poll_ids,
-                    oauth_outstanding_flow_count
+                    credential_published_at_millis
                 }
                 guard { lifecycle_phase == Phase::Valid && credential_present && credential_published_at_millis != None }
                 update {
@@ -354,15 +348,6 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
-                    self.oauth_browser_flow_ids = oauth_browser_flow_ids;
-                    self.oauth_browser_flow_providers = oauth_browser_flow_providers;
-                    self.oauth_browser_flow_redirect_uris = oauth_browser_flow_redirect_uris;
-                    self.oauth_browser_flow_expires_at_millis = oauth_browser_flow_expires_at_millis;
-                    self.oauth_device_flow_ids = oauth_device_flow_ids;
-                    self.oauth_device_flow_providers = oauth_device_flow_providers;
-                    self.oauth_device_flow_expires_at_millis = oauth_device_flow_expires_at_millis;
-                    self.oauth_device_poll_ids = oauth_device_poll_ids;
-                    self.oauth_outstanding_flow_count = oauth_outstanding_flow_count;
                 }
                 to Valid
                 emit EmitLifecycleEvent {
@@ -380,16 +365,7 @@ macro_rules! auth_catalog_machine_dsl {
                     refresh_attempt,
                     credential_present,
                     credential_generation,
-                    credential_published_at_millis,
-                    oauth_browser_flow_ids,
-                    oauth_browser_flow_providers,
-                    oauth_browser_flow_redirect_uris,
-                    oauth_browser_flow_expires_at_millis,
-                    oauth_device_flow_ids,
-                    oauth_device_flow_providers,
-                    oauth_device_flow_expires_at_millis,
-                    oauth_device_poll_ids,
-                    oauth_outstanding_flow_count
+                    credential_published_at_millis
                 }
                 guard { lifecycle_phase == Phase::Expiring && credential_present && credential_published_at_millis != None }
                 update {
@@ -401,15 +377,6 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
-                    self.oauth_browser_flow_ids = oauth_browser_flow_ids;
-                    self.oauth_browser_flow_providers = oauth_browser_flow_providers;
-                    self.oauth_browser_flow_redirect_uris = oauth_browser_flow_redirect_uris;
-                    self.oauth_browser_flow_expires_at_millis = oauth_browser_flow_expires_at_millis;
-                    self.oauth_device_flow_ids = oauth_device_flow_ids;
-                    self.oauth_device_flow_providers = oauth_device_flow_providers;
-                    self.oauth_device_flow_expires_at_millis = oauth_device_flow_expires_at_millis;
-                    self.oauth_device_poll_ids = oauth_device_poll_ids;
-                    self.oauth_outstanding_flow_count = oauth_outstanding_flow_count;
                 }
                 to Expiring
                 emit EmitLifecycleEvent {
@@ -427,16 +394,7 @@ macro_rules! auth_catalog_machine_dsl {
                     refresh_attempt,
                     credential_present,
                     credential_generation,
-                    credential_published_at_millis,
-                    oauth_browser_flow_ids,
-                    oauth_browser_flow_providers,
-                    oauth_browser_flow_redirect_uris,
-                    oauth_browser_flow_expires_at_millis,
-                    oauth_device_flow_ids,
-                    oauth_device_flow_providers,
-                    oauth_device_flow_expires_at_millis,
-                    oauth_device_poll_ids,
-                    oauth_outstanding_flow_count
+                    credential_published_at_millis
                 }
                 guard { lifecycle_phase == Phase::Refreshing && credential_present && credential_published_at_millis != None }
                 update {
@@ -448,15 +406,6 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
-                    self.oauth_browser_flow_ids = oauth_browser_flow_ids;
-                    self.oauth_browser_flow_providers = oauth_browser_flow_providers;
-                    self.oauth_browser_flow_redirect_uris = oauth_browser_flow_redirect_uris;
-                    self.oauth_browser_flow_expires_at_millis = oauth_browser_flow_expires_at_millis;
-                    self.oauth_device_flow_ids = oauth_device_flow_ids;
-                    self.oauth_device_flow_providers = oauth_device_flow_providers;
-                    self.oauth_device_flow_expires_at_millis = oauth_device_flow_expires_at_millis;
-                    self.oauth_device_poll_ids = oauth_device_poll_ids;
-                    self.oauth_outstanding_flow_count = oauth_outstanding_flow_count;
                 }
                 to Refreshing
                 emit EmitLifecycleEvent {
@@ -474,16 +423,7 @@ macro_rules! auth_catalog_machine_dsl {
                     refresh_attempt,
                     credential_present,
                     credential_generation,
-                    credential_published_at_millis,
-                    oauth_browser_flow_ids,
-                    oauth_browser_flow_providers,
-                    oauth_browser_flow_redirect_uris,
-                    oauth_browser_flow_expires_at_millis,
-                    oauth_device_flow_ids,
-                    oauth_device_flow_providers,
-                    oauth_device_flow_expires_at_millis,
-                    oauth_device_poll_ids,
-                    oauth_outstanding_flow_count
+                    credential_published_at_millis
                 }
                 guard { lifecycle_phase == Phase::ReauthRequired && (credential_present == false || credential_published_at_millis != None) }
                 update {
@@ -495,15 +435,6 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
-                    self.oauth_browser_flow_ids = oauth_browser_flow_ids;
-                    self.oauth_browser_flow_providers = oauth_browser_flow_providers;
-                    self.oauth_browser_flow_redirect_uris = oauth_browser_flow_redirect_uris;
-                    self.oauth_browser_flow_expires_at_millis = oauth_browser_flow_expires_at_millis;
-                    self.oauth_device_flow_ids = oauth_device_flow_ids;
-                    self.oauth_device_flow_providers = oauth_device_flow_providers;
-                    self.oauth_device_flow_expires_at_millis = oauth_device_flow_expires_at_millis;
-                    self.oauth_device_poll_ids = oauth_device_poll_ids;
-                    self.oauth_outstanding_flow_count = oauth_outstanding_flow_count;
                 }
                 to ReauthRequired
                 emit EmitLifecycleEvent {
@@ -521,18 +452,9 @@ macro_rules! auth_catalog_machine_dsl {
                     refresh_attempt,
                     credential_present,
                     credential_generation,
-                    credential_published_at_millis,
-                    oauth_browser_flow_ids,
-                    oauth_browser_flow_providers,
-                    oauth_browser_flow_redirect_uris,
-                    oauth_browser_flow_expires_at_millis,
-                    oauth_device_flow_ids,
-                    oauth_device_flow_providers,
-                    oauth_device_flow_expires_at_millis,
-                    oauth_device_poll_ids,
-                    oauth_outstanding_flow_count
+                    credential_published_at_millis
                 }
-                guard { lifecycle_phase == Phase::Released && credential_present == false && credential_published_at_millis == None && oauth_outstanding_flow_count == 0 }
+                guard { lifecycle_phase == Phase::Released && credential_present == false && credential_published_at_millis == None && self.oauth_outstanding_flow_count == 0 }
                 update {
                     self.expires_at = expires_at;
                     self.last_refresh = last_refresh;
@@ -542,17 +464,52 @@ macro_rules! auth_catalog_machine_dsl {
                         self.credential_generation = credential_generation;
                     }
                     self.credential_published_at_millis = credential_published_at_millis;
-                    self.oauth_browser_flow_ids = oauth_browser_flow_ids;
-                    self.oauth_browser_flow_providers = oauth_browser_flow_providers;
-                    self.oauth_browser_flow_redirect_uris = oauth_browser_flow_redirect_uris;
-                    self.oauth_browser_flow_expires_at_millis = oauth_browser_flow_expires_at_millis;
-                    self.oauth_device_flow_ids = oauth_device_flow_ids;
-                    self.oauth_device_flow_providers = oauth_device_flow_providers;
-                    self.oauth_device_flow_expires_at_millis = oauth_device_flow_expires_at_millis;
-                    self.oauth_device_poll_ids = oauth_device_poll_ids;
-                    self.oauth_outstanding_flow_count = oauth_outstanding_flow_count;
                 }
                 to Released
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition RestoreOAuthBrowserFlow {
+                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                on input RestoreOAuthBrowserFlow { flow_id, provider, redirect_uri, expires_at_millis }
+                update {
+                    if self.oauth_browser_flow_ids.contains(flow_id) == false {
+                        self.oauth_outstanding_flow_count = self.oauth_outstanding_flow_count + 1;
+                    }
+                    self.oauth_browser_flow_ids.insert(flow_id);
+                    self.oauth_browser_flow_providers.insert(flow_id, provider);
+                    self.oauth_browser_flow_redirect_uris.insert(flow_id, redirect_uri);
+                    self.oauth_browser_flow_expires_at_millis.insert(flow_id, expires_at_millis);
+                }
+                to Valid
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition RestoreOAuthDeviceFlow {
+                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                on input RestoreOAuthDeviceFlow { flow_id, provider, expires_at_millis, poll_active }
+                update {
+                    if self.oauth_device_flow_ids.contains(flow_id) == false {
+                        self.oauth_outstanding_flow_count = self.oauth_outstanding_flow_count + 1;
+                    }
+                    self.oauth_device_flow_ids.insert(flow_id);
+                    self.oauth_device_flow_providers.insert(flow_id, provider);
+                    self.oauth_device_flow_expires_at_millis.insert(flow_id, expires_at_millis);
+                    if poll_active {
+                        self.oauth_device_poll_ids.insert(flow_id);
+                    } else {
+                        self.oauth_device_poll_ids.remove(flow_id);
+                    }
+                }
+                to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
                     credential_generation: self.credential_generation,

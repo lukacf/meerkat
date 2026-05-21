@@ -151,15 +151,20 @@ pub mod inputs {
         pub credential_present: bool,
         pub credential_generation: u64,
         pub credential_published_at_millis: Option<u64>,
-        pub oauth_browser_flow_ids: std::collections::BTreeSet<String>,
-        pub oauth_browser_flow_providers: std::collections::BTreeMap<String, String>,
-        pub oauth_browser_flow_redirect_uris: std::collections::BTreeMap<String, String>,
-        pub oauth_browser_flow_expires_at_millis: std::collections::BTreeMap<String, u64>,
-        pub oauth_device_flow_ids: std::collections::BTreeSet<String>,
-        pub oauth_device_flow_providers: std::collections::BTreeMap<String, String>,
-        pub oauth_device_flow_expires_at_millis: std::collections::BTreeMap<String, u64>,
-        pub oauth_device_poll_ids: std::collections::BTreeSet<String>,
-        pub oauth_outstanding_flow_count: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreOAuthBrowserFlow {
+        pub flow_id: String,
+        pub provider: String,
+        pub redirect_uri: String,
+        pub expires_at_millis: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreOAuthDeviceFlow {
+        pub flow_id: String,
+        pub provider: String,
+        pub expires_at_millis: u64,
+        pub poll_active: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitOAuthBrowserFlow {
@@ -241,6 +246,8 @@ pub enum Input {
     ClearCredentialLifecycle(inputs::ClearCredentialLifecycle),
     Release(inputs::Release),
     RestoreAuthoritySnapshot(inputs::RestoreAuthoritySnapshot),
+    RestoreOAuthBrowserFlow(inputs::RestoreOAuthBrowserFlow),
+    RestoreOAuthDeviceFlow(inputs::RestoreOAuthDeviceFlow),
     AdmitOAuthBrowserFlow(inputs::AdmitOAuthBrowserFlow),
     VerifyOAuthBrowserFlow(inputs::VerifyOAuthBrowserFlow),
     ConsumeOAuthBrowserFlow(inputs::ConsumeOAuthBrowserFlow),
@@ -266,6 +273,8 @@ impl Input {
             Self::ClearCredentialLifecycle(_) => InputKind::ClearCredentialLifecycle,
             Self::Release(_) => InputKind::Release,
             Self::RestoreAuthoritySnapshot(_) => InputKind::RestoreAuthoritySnapshot,
+            Self::RestoreOAuthBrowserFlow(_) => InputKind::RestoreOAuthBrowserFlow,
+            Self::RestoreOAuthDeviceFlow(_) => InputKind::RestoreOAuthDeviceFlow,
             Self::AdmitOAuthBrowserFlow(_) => InputKind::AdmitOAuthBrowserFlow,
             Self::VerifyOAuthBrowserFlow(_) => InputKind::VerifyOAuthBrowserFlow,
             Self::ConsumeOAuthBrowserFlow(_) => InputKind::ConsumeOAuthBrowserFlow,
@@ -292,6 +301,8 @@ pub enum InputKind {
     ClearCredentialLifecycle,
     Release,
     RestoreAuthoritySnapshot,
+    RestoreOAuthBrowserFlow,
+    RestoreOAuthDeviceFlow,
     AdmitOAuthBrowserFlow,
     VerifyOAuthBrowserFlow,
     ConsumeOAuthBrowserFlow,
@@ -349,6 +360,14 @@ pub enum TransitionId {
     RestoreAuthoritySnapshotRefreshing,
     RestoreAuthoritySnapshotReauthRequired,
     RestoreAuthoritySnapshotReleased,
+    RestoreOAuthBrowserFlowValid,
+    RestoreOAuthBrowserFlowExpiring,
+    RestoreOAuthBrowserFlowRefreshing,
+    RestoreOAuthBrowserFlowReauthRequired,
+    RestoreOAuthDeviceFlowValid,
+    RestoreOAuthDeviceFlowExpiring,
+    RestoreOAuthDeviceFlowRefreshing,
+    RestoreOAuthDeviceFlowReauthRequired,
     AdmitOAuthBrowserFlowValid,
     AdmitOAuthBrowserFlowExpiring,
     AdmitOAuthBrowserFlowRefreshing,

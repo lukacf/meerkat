@@ -69,6 +69,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RestoreAuthoritySnapshotReleased`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `RestoreOAuthBrowserFlowValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `RestoreOAuthBrowserFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `RestoreOAuthBrowserFlowRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `RestoreOAuthBrowserFlowReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `RestoreOAuthDeviceFlowValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDeviceFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDeviceFlowRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDeviceFlowReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
 - `AdmitOAuthBrowserFlowValid`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`
@@ -217,7 +241,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `reauth_release_and_publication`
 
 ### Invariants
-- `(none)`
+- `oauth_flow_membership_consistent`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
 
 
 <!-- GENERATED_COVERAGE_END -->

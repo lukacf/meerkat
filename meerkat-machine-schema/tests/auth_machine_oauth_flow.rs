@@ -33,6 +33,8 @@ fn auth_machine_declares_oauth_flow_lifecycle_inputs() {
         .variant_named("ClearCredentialLifecycle")
         .expect("AuthMachine must declare credential-only lifecycle clear input");
     for input in [
+        "RestoreOAuthBrowserFlow",
+        "RestoreOAuthDeviceFlow",
         "AdmitOAuthBrowserFlow",
         "VerifyOAuthBrowserFlow",
         "ConsumeOAuthBrowserFlow",
@@ -89,9 +91,73 @@ fn auth_machine_declares_oauth_flow_lifecycle_inputs() {
 }
 
 #[test]
+fn auth_machine_restore_snapshot_routes_oauth_membership_per_flow() {
+    let schema = dsl_auth_machine();
+    let restore = schema
+        .inputs
+        .variant_named("RestoreAuthoritySnapshot")
+        .expect("AuthMachine must declare lifecycle restore input");
+    assert!(
+        restore
+            .fields
+            .iter()
+            .all(|field| !field.name.as_str().starts_with("oauth_")),
+        "bulk lifecycle restore must not carry OAuth membership maps"
+    );
+
+    let browser = schema
+        .inputs
+        .variant_named("RestoreOAuthBrowserFlow")
+        .expect("AuthMachine must declare browser flow restore input");
+    assert_eq!(
+        browser
+            .field_named("expires_at_millis")
+            .expect("browser flow restore must carry expiry")
+            .ty,
+        TypeRef::U64
+    );
+
+    let device = schema
+        .inputs
+        .variant_named("RestoreOAuthDeviceFlow")
+        .expect("AuthMachine must declare device flow restore input");
+    assert_eq!(
+        device
+            .field_named("poll_active")
+            .expect("device flow restore must carry poll membership")
+            .ty,
+        TypeRef::Bool
+    );
+
+    for input in [
+        "RestoreAuthoritySnapshot",
+        "RestoreOAuthBrowserFlow",
+        "RestoreOAuthDeviceFlow",
+    ] {
+        assert!(
+            schema
+                .runtime_internal_inputs
+                .iter()
+                .any(|candidate| candidate.as_str() == input),
+            "`{input}` must be runtime-internal generated authority"
+        );
+    }
+
+    assert!(
+        schema
+            .invariants
+            .iter()
+            .any(|invariant| invariant.name == "oauth_flow_membership_consistent"),
+        "AuthMachine must keep OAuth membership maps/count consistent"
+    );
+}
+
+#[test]
 fn auth_machine_routes_oauth_flow_lifecycle_transitions() {
     let schema = dsl_auth_machine();
     let transition_prefixes = [
+        "RestoreOAuthBrowserFlow",
+        "RestoreOAuthDeviceFlow",
         "AdmitOAuthBrowserFlow",
         "VerifyOAuthBrowserFlow",
         "ConsumeOAuthBrowserFlow",
@@ -211,6 +277,8 @@ fn auth_machine_oauth_flow_lifecycle_transitions_preserve_credential_phase() {
     let schema = dsl_auth_machine();
     for transition in schema.transitions.iter().filter(|transition| {
         [
+            "RestoreOAuthBrowserFlow",
+            "RestoreOAuthDeviceFlow",
             "AdmitOAuthBrowserFlow",
             "VerifyOAuthBrowserFlow",
             "ConsumeOAuthBrowserFlow",

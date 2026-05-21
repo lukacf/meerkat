@@ -173,7 +173,11 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
                 "Released",
             ],
         )],
-        vec![],
+        vec![
+            InputVariantId::from_trusted_catalog_literal("RestoreAuthoritySnapshot"),
+            InputVariantId::from_trusted_catalog_literal("RestoreOAuthBrowserFlow"),
+            InputVariantId::from_trusted_catalog_literal("RestoreOAuthDeviceFlow"),
+        ],
     )
 }
 

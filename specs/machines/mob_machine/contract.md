@@ -200,7 +200,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdmitDestroyMemberRetire`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId)
 - `ObserveRuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `ObserveMemberRetirementArchived`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `ObserveDestroyMemberRetirementArchived`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId)
+- `ObserveDestroyMemberRetirementArchived`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>)
 - `ResetMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, session_id: SessionId)
 - `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, session_id: SessionId)
 - `ResolveRespawnTopologyRestore`(agent_identity: AgentIdentity, failed_peer_ids: Seq<RespawnTopologyPeerId>)
@@ -879,6 +879,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `destroy_admitted`
   - `identity_binding_matches`
+  - `generation_matches`
+  - `session_binding_matches`
   - `runtime_live`
   - `fence_token_matches`
 - Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`, `MemberSessionBindingChanged`
@@ -890,6 +892,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `destroy_admitted`
   - `identity_binding_matches`
+  - `generation_matches`
+  - `session_binding_matches`
   - `runtime_live`
   - `fence_token_matches`
 - Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`, `MemberSessionBindingChanged`
@@ -901,6 +905,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `destroy_admitted`
   - `identity_binding_matches`
+  - `generation_matches`
+  - `session_binding_matches`
   - `runtime_not_live`
   - `member_retiring`
 - Emits: `AppendLifecycleJournal`, `MemberSessionBindingChanged`
@@ -912,6 +918,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `destroy_admitted`
   - `identity_binding_matches`
+  - `generation_matches`
+  - `session_binding_matches`
   - `runtime_not_live`
   - `member_retiring`
 - Emits: `AppendLifecycleJournal`, `MemberSessionBindingChanged`

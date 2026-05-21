@@ -2897,11 +2897,8 @@ impl MobActor {
             .member_runtime_material_for_identity(&dsl_identity)
             .map(|material| material.to_domain_for_identity(&domain_identity))
         {
-            Some(material) => material,
-            None if machine_lifecycle.status == mob_dsl::MobMemberLifecycleStatus::Unknown => (
-                crate::ids::AgentRuntimeId::initial(domain_identity.clone()),
-                crate::ids::FenceToken::new(0),
-            ),
+            Some(material) => Some(material),
+            None if machine_lifecycle.status == mob_dsl::MobMemberLifecycleStatus::Unknown => None,
             None => {
                 return Err(MobError::Internal(format!(
                     "MobMachine runtime material is absent for '{domain_identity}'"
@@ -2947,8 +2944,11 @@ impl MobActor {
                 machine_lifecycle,
                 output_preview,
                 tokens_used,
-                agent_runtime_id: machine_runtime.0,
-                fence_token: machine_runtime.1,
+                agent_identity: domain_identity,
+                agent_runtime_id: machine_runtime
+                    .as_ref()
+                    .map(|(agent_runtime_id, _)| agent_runtime_id.clone()),
+                fence_token: machine_runtime.map(|(_, fence_token)| fence_token),
                 current_bridge_session_id,
                 peer_connectivity: None,
                 kickoff,
@@ -3067,11 +3067,18 @@ impl MobActor {
             let snapshot = material.to_snapshot();
             let current_bridge_session_id = snapshot.current_bridge_session_id().cloned();
             let wired_to = self.machine_wired_peer_identities_for(&entry.agent_identity);
+            let Some((agent_runtime_id, fence_token)) = snapshot.runtime_identity_fields() else {
+                tracing::warn!(
+                    agent_identity = %entry.agent_identity,
+                    "skipping member list projection without MobMachine runtime binding"
+                );
+                continue;
+            };
             projected.push(
                 MobMemberListEntry {
                     agent_identity: entry.agent_identity,
-                    agent_runtime_id: snapshot.agent_runtime_id,
-                    fence_token: snapshot.fence_token,
+                    agent_runtime_id: agent_runtime_id.clone(),
+                    fence_token,
                     role: entry.role,
                     runtime_mode: entry.runtime_mode,
                     peer_id: entry.peer_id,
@@ -11255,14 +11262,7 @@ impl MobActor {
             .get(&mob_dsl::AgentIdentity::from_domain(
                 &ctx.entry.agent_identity,
             ))
-            .cloned()
-            .or_else(|| {
-                ctx.entry
-                    .member_ref
-                    .bridge_session_id()
-                    .map(mob_dsl::SessionId::from_domain)
-            })
-            .unwrap_or_default();
+            .cloned();
         let prepared = self.prepare_dsl_signal_transition(
             mob_dsl::MobMachineSignal::ObserveDestroyMemberRetirementArchived {
                 agent_identity: mob_dsl::AgentIdentity::from_domain(&ctx.entry.agent_identity),
@@ -11280,7 +11280,7 @@ impl MobActor {
             &ctx.entry.agent_runtime_id,
             None,
             ctx.entry.generation,
-            Some(session_id_for_journal),
+            session_id_for_journal,
             "destroy_member_archive_completed",
         )?;
         if !self
@@ -11687,15 +11687,6 @@ impl MobActor {
                 report: report.clone(),
             });
         }
-        if let Err(error) = self
-            .delete_external_binding_overlay_for_member(&entry.agent_identity, entry.generation)
-            .await
-        {
-            report.push_error(error.to_string());
-            return Err(super::handle::MobDestroyError::Incomplete {
-                report: report.clone(),
-            });
-        }
         if let Err(error) = self.record_destroy_member_retired_event(&entry).await {
             report.push_error(format!(
                 "{}: durable retire event append failed: {error}",
@@ -11707,6 +11698,15 @@ impl MobActor {
         }
         self.dispose_prune_edge_locks(&ctx).await;
         self.dispose_remove_from_roster(&ctx).await;
+        if let Err(error) = self
+            .delete_external_binding_overlay_for_member(&entry.agent_identity, entry.generation)
+            .await
+        {
+            report.push_error(error.to_string());
+            return Err(super::handle::MobDestroyError::Incomplete {
+                report: report.clone(),
+            });
+        }
         Ok(())
     }
 

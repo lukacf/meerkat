@@ -2643,6 +2643,7 @@ struct FaultInjectedRuntimeMetadataStore {
     conflict_compare_supervisor_countdown: AtomicUsize,
     fail_list_overlays: AtomicBool,
     fail_upsert_overlay: AtomicBool,
+    fail_delete_overlay: AtomicBool,
 }
 
 impl FaultInjectedRuntimeMetadataStore {
@@ -2654,6 +2655,7 @@ impl FaultInjectedRuntimeMetadataStore {
             conflict_compare_supervisor_countdown: AtomicUsize::new(0),
             fail_list_overlays: AtomicBool::new(false),
             fail_upsert_overlay: AtomicBool::new(false),
+            fail_delete_overlay: AtomicBool::new(false),
         }
     }
 
@@ -2683,6 +2685,10 @@ impl FaultInjectedRuntimeMetadataStore {
 
     fn fail_next_upsert_overlay(&self) {
         self.fail_upsert_overlay.store(true, Ordering::Relaxed);
+    }
+
+    fn fail_next_delete_overlay(&self) {
+        self.fail_delete_overlay.store(true, Ordering::Relaxed);
     }
 
     fn maybe_fail_supervisor_write(&self) -> Result<(), MobStoreError> {
@@ -2827,6 +2833,11 @@ impl MobRuntimeMetadataStore for FaultInjectedRuntimeMetadataStore {
         agent_identity: &AgentIdentity,
         generation: crate::ids::Generation,
     ) -> Result<(), MobStoreError> {
+        if self.fail_delete_overlay.swap(false, Ordering::Relaxed) {
+            return Err(MobStoreError::WriteFailed(
+                "fault-injected runtime overlay delete failure".to_string(),
+            ));
+        }
         self.inner
             .delete_external_binding_overlay(mob_id, agent_identity, generation)
             .await
@@ -6198,6 +6209,101 @@ async fn test_destroy_event_clear_failure_restores_runtime_metadata_for_retry() 
             .expect("events after complete retry")
             .is_empty(),
         "complete retry should clear events"
+    );
+}
+
+#[tokio::test]
+async fn test_destroy_overlay_delete_failure_does_not_keep_roster_retry_authority() {
+    let definition = with_unique_mob_id(sample_definition(), "destroy-overlay-delete-order");
+    let mob_id = definition.id.clone();
+    let events = Arc::new(InMemoryMobEventStore::new());
+    let runtime_metadata = Arc::new(FaultInjectedRuntimeMetadataStore::new());
+    let storage =
+        MobStorage::with_events_and_runtime_metadata(events.clone(), runtime_metadata.clone());
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let worker = AgentIdentity::from("destroy-overlay-delete-worker");
+    let bridge_session_id = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from(worker.as_str()),
+            None,
+        )
+        .await
+        .expect("spawn worker before partial destroy")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed worker");
+
+    runtime_metadata.fail_next_delete_overlay();
+    let err = handle
+        .destroy()
+        .await
+        .expect_err("per-member overlay delete failure should make destroy incomplete");
+    let report = match err {
+        crate::runtime::handle::MobDestroyError::Incomplete { report } => report,
+        other => panic!("expected incomplete destroy, got {other:?}"),
+    };
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("fault-injected runtime overlay delete failure")),
+        "report should surface the overlay delete failure: {report:?}"
+    );
+    assert!(
+        handle.list_members_including_retiring().await.is_empty(),
+        "successful generated member retirement must remove the roster retry anchor before later overlay delete failure"
+    );
+    assert!(
+        !service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("check worker session after overlay delete failure"),
+        "member archive must complete before the later overlay delete failure"
+    );
+    assert!(
+        events
+            .replay_all()
+            .await
+            .expect("replay retained events")
+            .iter()
+            .any(|event| matches!(
+                &event.kind,
+                MobEventKind::MemberRetired {
+                    agent_identity,
+                    ..
+                } if agent_identity == &worker
+            )),
+        "generated member-retired authority must be durable before the retry anchor is removed"
+    );
+
+    let retry_report = handle
+        .destroy()
+        .await
+        .expect("retry should complete without re-running member cleanup from roster");
+    assert!(retry_report.metadata_scrubbed);
+    assert!(retry_report.events_cleared);
+    assert!(
+        runtime_metadata
+            .load_supervisor_authority(&mob_id)
+            .await
+            .expect("load metadata after retry")
+            .is_none(),
+        "complete retry should scrub runtime metadata"
+    );
+    assert!(
+        events
+            .replay_all()
+            .await
+            .expect("events after retry")
+            .is_empty(),
+        "complete retry should clear durable destroy events"
     );
 }
 
@@ -10597,6 +10703,9 @@ async fn test_respawn_contract_aligns_receipt_with_canonical_member_state() {
         .member_status(&AgentIdentity::from(member_id.as_str()))
         .await
         .expect("original member snapshot");
+    let (original_runtime_id, original_fence_token) = original_snapshot
+        .runtime_identity_fields()
+        .expect("original member should have runtime identity");
 
     let receipt = handle
         .respawn(
@@ -10607,14 +10716,14 @@ async fn test_respawn_contract_aligns_receipt_with_canonical_member_state() {
         .expect("respawn succeeds");
 
     assert_eq!(receipt.identity, AgentIdentity::from(member_id.as_str()));
-    assert_eq!(receipt.previous_fence_token, original_snapshot.fence_token);
+    assert_eq!(receipt.previous_fence_token, original_fence_token);
     assert_eq!(
         receipt.agent_runtime_id.identity,
         AgentIdentity::from(member_id.as_str())
     );
     assert_eq!(
         receipt.agent_runtime_id.generation,
-        original_snapshot.agent_runtime_id.generation.next()
+        original_runtime_id.generation.next()
     );
     let snapshot = handle
         .member_status(&receipt.identity)
@@ -10630,8 +10739,11 @@ async fn test_respawn_contract_aligns_receipt_with_canonical_member_state() {
         "respawn must archive the retired session before returning"
     );
 
-    assert_eq!(snapshot.agent_runtime_id, receipt.agent_runtime_id);
-    assert_eq!(snapshot.fence_token, receipt.fence_token);
+    let (snapshot_runtime_id, snapshot_fence_token) = snapshot
+        .runtime_identity_fields()
+        .expect("respawned member should have runtime identity");
+    assert_eq!(snapshot_runtime_id, &receipt.agent_runtime_id);
+    assert_eq!(snapshot_fence_token, receipt.fence_token);
     assert_eq!(
         snapshot.current_session_id,
         Some(new_bridge_session_id.clone())
@@ -10681,6 +10793,9 @@ async fn test_respawn_success_restores_existing_peer_wiring() {
         .member_status(&AgentIdentity::from(left.as_str()))
         .await
         .expect("left snapshot before respawn");
+    let (original_left_runtime_id, original_left_fence_token) = original_left_snapshot
+        .runtime_identity_fields()
+        .expect("left member should have runtime identity before respawn");
 
     let old_session_id = original_left
         .bridge_session_id()
@@ -10694,13 +10809,10 @@ async fn test_respawn_success_restores_existing_peer_wiring() {
         .await
         .expect("respawn succeeds");
 
-    assert_eq!(
-        receipt.previous_fence_token,
-        original_left_snapshot.fence_token
-    );
+    assert_eq!(receipt.previous_fence_token, original_left_fence_token);
     assert_eq!(
         receipt.agent_runtime_id.generation,
-        original_left_snapshot.agent_runtime_id.generation.next()
+        original_left_runtime_id.generation.next()
     );
     assert!(
         service.read(&old_session_id).await.is_err(),
@@ -10917,10 +11029,13 @@ async fn test_respawn_archive_failure_returns_cleanup_ambiguous_report() {
         }
         other => panic!("expected PreviousMemberCleanupAmbiguous, got {other:?}"),
     };
+    let (original_runtime_id, original_fence_token) = original_snapshot
+        .runtime_identity_fields()
+        .expect("original member should have runtime identity before archive failure");
 
     assert_eq!(report.identity, AgentIdentity::from(member_id.as_str()));
-    assert_eq!(report.agent_runtime_id, original_snapshot.agent_runtime_id);
-    assert_eq!(report.fence_token, original_snapshot.fence_token);
+    assert_eq!(&report.agent_runtime_id, original_runtime_id);
+    assert_eq!(report.fence_token, original_fence_token);
     assert!(
         report.retire_attempted,
         "respawn should have attempted retire"
@@ -12545,8 +12660,11 @@ async fn test_respawn_broken_member_clears_restore_diagnostic() {
         snapshot.status,
         crate::runtime::handle::MobMemberStatus::Active
     );
-    assert_eq!(snapshot.agent_runtime_id, receipt.agent_runtime_id);
-    assert_eq!(snapshot.fence_token, receipt.fence_token);
+    let (snapshot_runtime_id, snapshot_fence_token) = snapshot
+        .runtime_identity_fields()
+        .expect("repaired member should have runtime identity");
+    assert_eq!(snapshot_runtime_id, &receipt.agent_runtime_id);
+    assert_eq!(snapshot_fence_token, receipt.fence_token);
     assert_eq!(snapshot.current_session_id, Some(new_sid.clone()));
     assert!(
         snapshot.error.is_none(),
@@ -28051,7 +28169,9 @@ async fn test_submit_work_marks_missing_bridge_session_broken_without_prior_stat
         .member_status(&AgentIdentity::from("w-1"))
         .await
         .expect("initial member status");
-    let (runtime_id, fence_token) = active.runtime_identity_fields();
+    let (runtime_id, fence_token) = active
+        .runtime_identity_fields()
+        .expect("active member should have runtime identity");
     let runtime_id = runtime_id.clone();
 
     service

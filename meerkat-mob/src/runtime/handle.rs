@@ -43,20 +43,27 @@ const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 pub struct MobMemberSnapshot {
     /// Current lifecycle status.
     pub status: MobMemberStatus,
+    /// Canonical member identity.
+    ///
+    /// Kept as bridge-internal projection state because existing public
+    /// surfaces wrap snapshots with their own explicit identity fields.
+    #[serde(skip)]
+    pub(crate) agent_identity: AgentIdentity,
     /// Identity-native runtime ID for this incarnation.
     ///
     /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`
-    /// so external consumers use `agent_identity()` (derived from
-    /// `agent_runtime_id.identity`) as the public identity contract.
+    /// so external consumers use `agent_identity()` as the public identity
+    /// contract. Absent when MobMachine has no current runtime binding.
     #[serde(skip)]
-    pub(crate) agent_runtime_id: AgentRuntimeId,
+    pub(crate) agent_runtime_id: Option<AgentRuntimeId>,
     /// Fence token for the current incarnation.
     ///
     /// Binding-era atom used by the bridge for stale-command rejection.
     /// `pub(crate)` + `#[serde(skip)]` so it does not leak into
-    /// app-facing payloads.
+    /// app-facing payloads. Absent when MobMachine has no current runtime
+    /// binding.
     #[serde(skip)]
-    pub(crate) fence_token: FenceToken,
+    pub(crate) fence_token: Option<FenceToken>,
     /// Preview of the current bridge session's last committed assistant text.
     pub output_preview: Option<String>,
     /// Error description (if the member errored).
@@ -108,11 +115,10 @@ impl MobMemberSnapshot {
     }
 
     /// Convenience accessor for the canonical member identity. Equivalent to
-    /// `&self.agent_runtime_id.identity` but saves every consumer from
-    /// reaching through the runtime-id wrapper.
+    /// the identity supplied by MobMachine-backed projection material.
     #[must_use]
     pub fn agent_identity(&self) -> &AgentIdentity {
-        &self.agent_runtime_id.identity
+        &self.agent_identity
     }
 
     /// Runtime incarnation identity for diagnostic/control projections.
@@ -122,8 +128,23 @@ impl MobMemberSnapshot {
     /// control contract, such as `mob/member_status`, must opt in through this
     /// accessor and project the fields explicitly.
     #[must_use]
-    pub fn runtime_identity_fields(&self) -> (&AgentRuntimeId, FenceToken) {
-        (&self.agent_runtime_id, self.fence_token)
+    pub fn runtime_identity_fields(&self) -> Option<(&AgentRuntimeId, FenceToken)> {
+        match (&self.agent_runtime_id, self.fence_token) {
+            (Some(agent_runtime_id), Some(fence_token)) => Some((agent_runtime_id, fence_token)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn require_runtime_identity_fields(
+        &self,
+        context: &str,
+    ) -> Result<(&AgentRuntimeId, FenceToken), MobError> {
+        self.runtime_identity_fields().ok_or_else(|| {
+            MobError::Internal(format!(
+                "{context} requires MobMachine runtime binding for '{}'",
+                self.agent_identity
+            ))
+        })
     }
 }
 
@@ -1979,8 +2000,9 @@ impl MobHandle {
                     machine_lifecycle: machine_state.member_lifecycle_for_identity(&dsl_identity),
                     output_preview: None,
                     tokens_used: 0,
-                    agent_runtime_id: machine_runtime.0,
-                    fence_token: machine_runtime.1,
+                    agent_identity: domain_identity,
+                    agent_runtime_id: Some(machine_runtime.0.clone()),
+                    fence_token: Some(machine_runtime.1),
                     current_bridge_session_id,
                     peer_connectivity: None,
                     kickoff: kickoff_snapshot_from_machine_state(
@@ -1995,8 +2017,8 @@ impl MobHandle {
                 Some(
                     MobMemberListEntry {
                         agent_identity: entry.agent_identity,
-                        agent_runtime_id: snapshot.agent_runtime_id,
-                        fence_token: snapshot.fence_token,
+                        agent_runtime_id: machine_runtime.0,
+                        fence_token: machine_runtime.1,
                         role: entry.role,
                         runtime_mode: entry.runtime_mode,
                         peer_id: entry.peer_id,
@@ -2149,8 +2171,9 @@ impl MobHandle {
                 machine_lifecycle: lifecycle,
                 output_preview: None,
                 tokens_used: 0,
-                agent_runtime_id: machine_runtime.0,
-                fence_token: machine_runtime.1,
+                agent_identity: identity.clone(),
+                agent_runtime_id: Some(machine_runtime.0),
+                fence_token: Some(machine_runtime.1),
                 current_bridge_session_id,
                 peer_connectivity: None,
                 kickoff,
@@ -3152,10 +3175,12 @@ impl MobHandle {
         self.internal_turn_for_member(meerkat_id.clone(), message.into())
             .await?;
         let snapshot = self.member_status(&identity).await?;
+        let (agent_runtime_id, fence_token) =
+            snapshot.require_runtime_identity_fields("internal_turn receipt")?;
         Ok(MemberDeliveryReceipt {
             identity,
-            agent_runtime_id: snapshot.agent_runtime_id,
-            fence_token: snapshot.fence_token,
+            agent_runtime_id: agent_runtime_id.clone(),
+            fence_token,
             handling_mode: HandlingMode::Queue,
         })
     }
@@ -3170,9 +3195,11 @@ impl MobHandle {
         let snapshot = self
             .member_status(&AgentIdentity::from(agent_identity.as_str()))
             .await?;
+        let (runtime_id, fence_token) =
+            snapshot.require_runtime_identity_fields("external_turn_for_member")?;
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
-            runtime_id: snapshot.agent_runtime_id,
-            fence_token: snapshot.fence_token,
+            runtime_id: runtime_id.clone(),
+            fence_token,
             work_ref: WorkRef::new(),
             spec: WorkSpec::new(message, WorkOrigin::External),
             handling_mode,
@@ -3192,9 +3219,11 @@ impl MobHandle {
         let snapshot = self
             .member_status(&AgentIdentity::from(agent_identity.as_str()))
             .await?;
+        let (runtime_id, fence_token) =
+            snapshot.require_runtime_identity_fields("internal_turn_for_member")?;
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
-            runtime_id: snapshot.agent_runtime_id,
-            fence_token: snapshot.fence_token,
+            runtime_id: runtime_id.clone(),
+            fence_token,
             work_ref: WorkRef::new(),
             spec: WorkSpec::new(message, WorkOrigin::Internal),
             handling_mode: HandlingMode::Queue,
@@ -3987,14 +4016,18 @@ impl MobHandle {
         self.spawn_spec_internal_with_source(spec, SpawnSource::HelperSpawn)
             .await?;
         let helper_snapshot = self.member_status(&identity).await?;
+        let (agent_runtime_id, fence_token) =
+            helper_snapshot.require_runtime_identity_fields("spawn_helper result")?;
+        let agent_identity = helper_snapshot.agent_identity().clone();
+        let agent_runtime_id = agent_runtime_id.clone();
         let _ = self.retire(identity).await;
 
         Ok(HelperResult {
             output: helper_snapshot.output_preview,
             tokens_used: helper_snapshot.tokens_used,
-            agent_identity: helper_snapshot.agent_runtime_id.identity.clone(),
-            agent_runtime_id: helper_snapshot.agent_runtime_id,
-            fence_token: helper_snapshot.fence_token,
+            agent_identity,
+            agent_runtime_id,
+            fence_token,
         })
     }
 
@@ -4042,14 +4075,18 @@ impl MobHandle {
         self.spawn_spec_internal_with_source(spec, SpawnSource::Fork)
             .await?;
         let helper_snapshot = self.member_status(&identity).await?;
+        let (agent_runtime_id, fence_token) =
+            helper_snapshot.require_runtime_identity_fields("fork_helper result")?;
+        let agent_identity = helper_snapshot.agent_identity().clone();
+        let agent_runtime_id = agent_runtime_id.clone();
         let _ = self.retire(identity).await;
 
         Ok(HelperResult {
             output: helper_snapshot.output_preview,
             tokens_used: helper_snapshot.tokens_used,
-            agent_identity: helper_snapshot.agent_runtime_id.identity.clone(),
-            agent_runtime_id: helper_snapshot.agent_runtime_id,
-            fence_token: helper_snapshot.fence_token,
+            agent_identity,
+            agent_runtime_id,
+            fence_token,
         })
     }
 
@@ -4165,10 +4202,12 @@ impl MemberHandle {
             .mob
             .member_status(&AgentIdentity::from(self.agent_identity.as_str()))
             .await?;
+        let (agent_runtime_id, fence_token) =
+            snapshot.require_runtime_identity_fields("member send receipt")?;
         Ok(MemberDeliveryReceipt {
             identity: self.identity(),
-            agent_runtime_id: snapshot.agent_runtime_id,
-            fence_token: snapshot.fence_token,
+            agent_runtime_id: agent_runtime_id.clone(),
+            fence_token,
             handling_mode,
         })
     }
@@ -4200,10 +4239,12 @@ impl MemberHandle {
             .mob
             .member_status(&AgentIdentity::from(self.agent_identity.as_str()))
             .await?;
+        let (agent_runtime_id, fence_token) =
+            snapshot.require_runtime_identity_fields("member internal_turn receipt")?;
         Ok(MemberDeliveryReceipt {
             identity: self.identity(),
-            agent_runtime_id: snapshot.agent_runtime_id,
-            fence_token: snapshot.fence_token,
+            agent_runtime_id: agent_runtime_id.clone(),
+            fence_token,
             handling_mode: HandlingMode::Queue,
         })
     }
@@ -4238,8 +4279,9 @@ mod tests {
 
         let snapshot = MobMemberSnapshot {
             status: MobMemberStatus::Active,
-            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("worker")),
-            fence_token: FenceToken::new(0),
+            agent_identity: AgentIdentity::from("worker"),
+            agent_runtime_id: Some(AgentRuntimeId::initial(AgentIdentity::from("worker"))),
+            fence_token: Some(FenceToken::new(0)),
             output_preview: None,
             error: None,
             tokens_used: 0,
@@ -4260,7 +4302,6 @@ mod tests {
         // `pub(crate)` + `#[serde(skip)]` per the struct definition — they
         // are bridge-internal and must NOT leak into app-facing serialized
         // payloads. The public identity contract is `agent_identity()`
-        // (derived from `agent_runtime_id.identity`).
         assert!(snapshot_value.get("agent_runtime_id").is_none());
         assert!(snapshot_value.get("fence_token").is_none());
     }
@@ -4270,8 +4311,9 @@ mod tests {
         let runtime_id = AgentRuntimeId::new(AgentIdentity::from("worker"), Generation::new(3));
         let snapshot = MobMemberSnapshot {
             status: MobMemberStatus::Active,
-            agent_runtime_id: runtime_id.clone(),
-            fence_token: FenceToken::new(9),
+            agent_identity: AgentIdentity::from("worker"),
+            agent_runtime_id: Some(runtime_id.clone()),
+            fence_token: Some(FenceToken::new(9)),
             output_preview: None,
             error: None,
             tokens_used: 0,
@@ -4289,7 +4331,9 @@ mod tests {
         assert!(snapshot_value.get("agent_runtime_id").is_none());
         assert!(snapshot_value.get("fence_token").is_none());
 
-        let (projected_runtime_id, projected_fence_token) = snapshot.runtime_identity_fields();
+        let (projected_runtime_id, projected_fence_token) = snapshot
+            .runtime_identity_fields()
+            .expect("runtime identity fields should be present");
         assert_eq!(projected_runtime_id, &runtime_id);
         assert_eq!(projected_fence_token, FenceToken::new(9));
     }
@@ -4298,11 +4342,12 @@ mod tests {
     fn mob_member_snapshot_exposes_agent_identity_convenience() {
         // Regression for DELETE_ME C9: every consumer used to reach through
         // `snapshot.agent_runtime_id.identity`; the snapshot now exposes a
-        // direct accessor.
+        // direct accessor even when runtime material is absent.
         let snapshot = MobMemberSnapshot {
             status: MobMemberStatus::Active,
-            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("singer")),
-            fence_token: FenceToken::new(0),
+            agent_identity: AgentIdentity::from("singer"),
+            agent_runtime_id: None,
+            fence_token: None,
             output_preview: None,
             error: None,
             tokens_used: 0,
@@ -4331,8 +4376,9 @@ mod tests {
             error: None,
             output_preview: None,
             tokens_used: 0,
-            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("worker")),
-            fence_token: FenceToken::new(0),
+            agent_identity: AgentIdentity::from("worker"),
+            agent_runtime_id: Some(AgentRuntimeId::initial(AgentIdentity::from("worker"))),
+            fence_token: Some(FenceToken::new(0)),
             current_bridge_session_id: Some(sid.clone()),
             peer_connectivity: None,
             kickoff: None,

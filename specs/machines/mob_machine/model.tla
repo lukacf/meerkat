@@ -1259,6 +1259,8 @@ ObserveDestroyMemberRetirementArchivedLiveRunning(agent_identity, agent_runtime_
     /\ phase = "Running"
     /\ (destroy_admitted = TRUE)
     /\ ((IF (agent_identity \in DOMAIN identity_to_runtime) THEN Some((IF agent_identity \in DOMAIN identity_to_runtime THEN identity_to_runtime[agent_identity] ELSE "None")) ELSE None) = Some(agent_runtime_id))
+    /\ ((IF (agent_identity \in DOMAIN identity_runtime_generations) THEN Some((IF agent_identity \in DOMAIN identity_runtime_generations THEN identity_runtime_generations[agent_identity] ELSE "None")) ELSE None) = Some(generation))
+    /\ ((IF (agent_identity \in DOMAIN member_session_bindings) THEN Some((IF agent_identity \in DOMAIN member_session_bindings THEN member_session_bindings[agent_identity] ELSE "None")) ELSE None) = session_id)
     /\ (agent_runtime_id \in live_runtime_ids)
     /\ ((IF (agent_runtime_id \in DOMAIN runtime_fence_tokens) THEN Some((IF agent_runtime_id \in DOMAIN runtime_fence_tokens THEN runtime_fence_tokens[agent_runtime_id] ELSE "None")) ELSE None) = Some(fence_token))
     /\ phase' = "Running"
@@ -1283,6 +1285,8 @@ ObserveDestroyMemberRetirementArchivedLiveStopped(agent_identity, agent_runtime_
     /\ phase = "Stopped"
     /\ (destroy_admitted = TRUE)
     /\ ((IF (agent_identity \in DOMAIN identity_to_runtime) THEN Some((IF agent_identity \in DOMAIN identity_to_runtime THEN identity_to_runtime[agent_identity] ELSE "None")) ELSE None) = Some(agent_runtime_id))
+    /\ ((IF (agent_identity \in DOMAIN identity_runtime_generations) THEN Some((IF agent_identity \in DOMAIN identity_runtime_generations THEN identity_runtime_generations[agent_identity] ELSE "None")) ELSE None) = Some(generation))
+    /\ ((IF (agent_identity \in DOMAIN member_session_bindings) THEN Some((IF agent_identity \in DOMAIN member_session_bindings THEN member_session_bindings[agent_identity] ELSE "None")) ELSE None) = session_id)
     /\ (agent_runtime_id \in live_runtime_ids)
     /\ ((IF (agent_runtime_id \in DOMAIN runtime_fence_tokens) THEN Some((IF agent_runtime_id \in DOMAIN runtime_fence_tokens THEN runtime_fence_tokens[agent_runtime_id] ELSE "None")) ELSE None) = Some(fence_token))
     /\ phase' = "Stopped"
@@ -1307,6 +1311,8 @@ ObserveDestroyMemberRetirementArchivedRetiredRunning(agent_identity, agent_runti
     /\ phase = "Running"
     /\ (destroy_admitted = TRUE)
     /\ ((IF (agent_identity \in DOMAIN identity_to_runtime) THEN Some((IF agent_identity \in DOMAIN identity_to_runtime THEN identity_to_runtime[agent_identity] ELSE "None")) ELSE None) = Some(agent_runtime_id))
+    /\ ((IF (agent_identity \in DOMAIN identity_runtime_generations) THEN Some((IF agent_identity \in DOMAIN identity_runtime_generations THEN identity_runtime_generations[agent_identity] ELSE "None")) ELSE None) = Some(generation))
+    /\ ((IF (agent_identity \in DOMAIN member_session_bindings) THEN Some((IF agent_identity \in DOMAIN member_session_bindings THEN member_session_bindings[agent_identity] ELSE "None")) ELSE None) = session_id)
     /\ ((agent_runtime_id \in live_runtime_ids) = FALSE)
     /\ ((IF (agent_runtime_id \in DOMAIN member_state_markers) THEN Some((IF agent_runtime_id \in DOMAIN member_state_markers THEN member_state_markers[agent_runtime_id] ELSE "None")) ELSE None) = Some("Retiring"))
     /\ phase' = "Running"
@@ -1324,6 +1330,8 @@ ObserveDestroyMemberRetirementArchivedRetiredStopped(agent_identity, agent_runti
     /\ phase = "Stopped"
     /\ (destroy_admitted = TRUE)
     /\ ((IF (agent_identity \in DOMAIN identity_to_runtime) THEN Some((IF agent_identity \in DOMAIN identity_to_runtime THEN identity_to_runtime[agent_identity] ELSE "None")) ELSE None) = Some(agent_runtime_id))
+    /\ ((IF (agent_identity \in DOMAIN identity_runtime_generations) THEN Some((IF agent_identity \in DOMAIN identity_runtime_generations THEN identity_runtime_generations[agent_identity] ELSE "None")) ELSE None) = Some(generation))
+    /\ ((IF (agent_identity \in DOMAIN member_session_bindings) THEN Some((IF agent_identity \in DOMAIN member_session_bindings THEN member_session_bindings[agent_identity] ELSE "None")) ELSE None) = session_id)
     /\ ((agent_runtime_id \in live_runtime_ids) = FALSE)
     /\ ((IF (agent_runtime_id \in DOMAIN member_state_markers) THEN Some((IF agent_runtime_id \in DOMAIN member_state_markers THEN member_state_markers[agent_runtime_id] ELSE "None")) ELSE None) = Some("Retiring"))
     /\ phase' = "Stopped"
@@ -3418,10 +3426,10 @@ Next ==
     \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveMemberRetirementArchivedStaleRuntimeStopped(agent_identity, agent_runtime_id, fence_token)
     \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveMemberRetirementArchivedAlreadyCleared(agent_identity, agent_runtime_id, fence_token)
     \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveMemberRetirementArchivedAlreadyClearedStopped(agent_identity, agent_runtime_id, fence_token)
-    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E session_id \in SessionIdValues : ObserveDestroyMemberRetirementArchivedLiveRunning(agent_identity, agent_runtime_id, fence_token, generation, session_id)
-    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E session_id \in SessionIdValues : ObserveDestroyMemberRetirementArchivedLiveStopped(agent_identity, agent_runtime_id, fence_token, generation, session_id)
-    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E session_id \in SessionIdValues : ObserveDestroyMemberRetirementArchivedRetiredRunning(agent_identity, agent_runtime_id, fence_token, generation, session_id)
-    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E session_id \in SessionIdValues : ObserveDestroyMemberRetirementArchivedRetiredStopped(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E session_id \in OptionSessionIdValues : ObserveDestroyMemberRetirementArchivedLiveRunning(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E session_id \in OptionSessionIdValues : ObserveDestroyMemberRetirementArchivedLiveStopped(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E session_id \in OptionSessionIdValues : ObserveDestroyMemberRetirementArchivedRetiredRunning(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E session_id \in OptionSessionIdValues : ObserveDestroyMemberRetirementArchivedRetiredStopped(agent_identity, agent_runtime_id, fence_token, generation, session_id)
     \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : \E session_id \in SessionIdValues : ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id)
     \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : \E session_id \in SessionIdValues : RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id)
     \/ \E agent_identity \in AgentIdentityValues : \E failed_peer_ids \in SeqOfRespawnTopologyPeerIdValues : ResolveRespawnTopologyRestoreCompleted(agent_identity, failed_peer_ids)

@@ -439,7 +439,7 @@ macro_rules! mob_catalog_machine_dsl {
             AdmitDestroyMemberRetire { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId },
             ObserveRuntimeRetired { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             ObserveMemberRetirementArchived { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
-            ObserveDestroyMemberRetirementArchived { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
+            ObserveDestroyMemberRetirementArchived { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId> },
             ResetMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
             RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
             ResolveRespawnTopologyRestore { agent_identity: AgentIdentity, failed_peer_ids: Seq<RespawnTopologyPeerId> },
@@ -1517,6 +1517,8 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             update {
@@ -1541,10 +1543,10 @@ macro_rules! mob_catalog_machine_dsl {
                 agent_runtime_id: Some(agent_runtime_id),
                 fence_token: None,
                 generation: Some(generation),
-                session_id: Some(session_id)
+                session_id: session_id
             }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
-            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(session_id), new_session_id: None }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: None }
         }
 
         transition ObserveDestroyMemberRetirementArchivedLiveStopped {
@@ -1552,6 +1554,8 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             update {
@@ -1576,10 +1580,10 @@ macro_rules! mob_catalog_machine_dsl {
                 agent_runtime_id: Some(agent_runtime_id),
                 fence_token: None,
                 generation: Some(generation),
-                session_id: Some(session_id)
+                session_id: session_id
             }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
-            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(session_id), new_session_id: None }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: None }
         }
 
         transition ObserveDestroyMemberRetirementArchivedRetiredRunning {
@@ -1587,6 +1591,8 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
             update {
@@ -1604,9 +1610,9 @@ macro_rules! mob_catalog_machine_dsl {
                 agent_runtime_id: Some(agent_runtime_id),
                 fence_token: None,
                 generation: Some(generation),
-                session_id: Some(session_id)
+                session_id: session_id
             }
-            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(session_id), new_session_id: None }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: None }
         }
 
         transition ObserveDestroyMemberRetirementArchivedRetiredStopped {
@@ -1614,6 +1620,8 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
             update {
@@ -1631,9 +1639,9 @@ macro_rules! mob_catalog_machine_dsl {
                 agent_runtime_id: Some(agent_runtime_id),
                 fence_token: None,
                 generation: Some(generation),
-                session_id: Some(session_id)
+                session_id: session_id
             }
-            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(session_id), new_session_id: None }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: None }
         }
 
         transition ResetMember {

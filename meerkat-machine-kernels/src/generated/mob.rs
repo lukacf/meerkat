@@ -2799,7 +2799,7 @@ pub mod signals {
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
         pub generation: Generation,
-        pub session_id: SessionId,
+        pub session_id: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResetMember {

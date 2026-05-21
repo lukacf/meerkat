@@ -1681,6 +1681,16 @@ pub enum RpcEventStreamTerminalReason {
     ExplicitClose,
 }
 
+/// Typed transport observation for RPC event-stream termination. The router
+/// submits this non-public observation; generated authority derives the public
+/// terminal reason and error code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RpcEventStreamTerminalObservationKind {
+    #[default]
+    TransportEnded,
+    NotificationQueueOverflow,
+}
+
 /// Typed public error code for RPC event-stream terminal notifications. The
 /// RPC surface may only project this value from a generated
 /// `*EventStreamTerminalResolved` effect.

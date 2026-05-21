@@ -563,6 +563,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["RemoteEnd", "TerminalError", "ExplicitClose"],
             ),
             NamedTypeBinding::string_enum(
+                "RpcEventStreamTerminalObservationKind",
+                &["TransportEnded", "NotificationQueueOverflow"],
+            ),
+            NamedTypeBinding::string_enum(
                 "RpcEventStreamTerminalErrorCode",
                 &["StreamQueueOverflow"],
             ),

@@ -5174,6 +5174,58 @@ impl std::fmt::Display for RpcEventStreamTerminalErrorCode {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RpcEventStreamTerminalObservationKind {
+    #[default]
+    #[serde(rename = "TransportEnded")]
+    TransportEnded,
+    #[serde(rename = "NotificationQueueOverflow")]
+    NotificationQueueOverflow,
+}
+impl RpcEventStreamTerminalObservationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TransportEnded => "TransportEnded",
+            Self::NotificationQueueOverflow => "NotificationQueueOverflow",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RpcEventStreamTerminalObservationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "TransportEnded" => Ok(Self::TransportEnded),
+            "NotificationQueueOverflow" => Ok(Self::NotificationQueueOverflow),
+            other => Err(format!(
+                "invalid RpcEventStreamTerminalObservationKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RpcEventStreamTerminalObservationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RpcEventStreamTerminalObservationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RpcEventStreamTerminalReason {
     #[default]
     #[serde(rename = "RemoteEnd")]
@@ -7878,8 +7930,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordSessionEventStreamTerminated {
         pub stream_id: String,
-        pub reason: RpcEventStreamTerminalReason,
-        pub error_code: Option<RpcEventStreamTerminalErrorCode>,
+        pub observation: RpcEventStreamTerminalObservationKind,
         pub detail: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -7893,8 +7944,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordMobEventStreamTerminated {
         pub stream_id: String,
-        pub reason: RpcEventStreamTerminalReason,
-        pub error_code: Option<RpcEventStreamTerminalErrorCode>,
+        pub observation: RpcEventStreamTerminalObservationKind,
         pub detail: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

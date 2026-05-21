@@ -15924,8 +15924,7 @@ fn session_event_stream_close_result_is_machine_owned() {
         &mut authority,
         mm_dsl::MeerkatMachineInput::RecordSessionEventStreamTerminated {
             stream_id: "session-stream-2".to_string(),
-            reason: mm_dsl::RpcEventStreamTerminalReason::RemoteEnd,
-            error_code: None,
+            observation: mm_dsl::RpcEventStreamTerminalObservationKind::TransportEnded,
             detail: None,
         },
     )
@@ -16067,8 +16066,7 @@ fn mob_event_stream_close_result_is_machine_owned() {
         &mut authority,
         mm_dsl::MeerkatMachineInput::RecordMobEventStreamTerminated {
             stream_id: "mob-stream-2".to_string(),
-            reason: mm_dsl::RpcEventStreamTerminalReason::TerminalError,
-            error_code: Some(mm_dsl::RpcEventStreamTerminalErrorCode::StreamQueueOverflow),
+            observation: mm_dsl::RpcEventStreamTerminalObservationKind::NotificationQueueOverflow,
             detail: Some("queue overflow".to_string()),
         },
     )

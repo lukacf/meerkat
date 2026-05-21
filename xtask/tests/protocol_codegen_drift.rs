@@ -197,6 +197,27 @@ fn auth_lease_transition_authority_sources_matches_codegen_output() {
     );
 }
 
+#[test]
+fn pending_continuation_admission_matches_codegen_output() {
+    use meerkat_machine_schema::catalog::dsl;
+
+    let machine = dsl::dsl_pending_continuation_admission_machine_production_schema();
+    let rendered = xtask::protocol_codegen::render_pending_continuation_admission(&machine)
+        .expect("render pending_continuation_admission");
+    let rendered = rustfmt(&rendered);
+
+    let committed_path =
+        repo_root().join("meerkat-core/src/generated/pending_continuation_admission.rs");
+    let committed = std::fs::read_to_string(&committed_path)
+        .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
+
+    assert_eq!(
+        normalize(&committed),
+        normalize(&rendered),
+        "pending_continuation_admission.rs diverged from codegen output. If this is intentional, run `cargo xtask protocol-codegen` and commit the result."
+    );
+}
+
 /// Compile canary for generated protocol helper ownership: every helper
 /// emitted by protocol-codegen must land in an owning crate's checked
 /// `src/generated/` module tree, not in an ad-hoc bridge path outside a

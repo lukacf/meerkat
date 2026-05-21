@@ -36,6 +36,7 @@ pub mod auth_machine;
 pub mod meerkat_machine;
 pub mod mob_machine;
 pub mod occurrence_lifecycle;
+pub mod pending_continuation_admission;
 pub mod schedule_lifecycle;
 pub mod workgraph_lifecycle;
 
@@ -75,6 +76,9 @@ pub const SCHEDULE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
 pub const SCHEDULE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::schedule_lifecycle";
 pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
 pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::occurrence_lifecycle";
+pub const PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
+pub const PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_MODULE: &str =
+    "generated::pending_continuation_admission";
 pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
 pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::workgraph_lifecycle";
 
@@ -184,6 +188,48 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
 
 pub fn dsl_meerkat_machine() -> MachineSchema {
     meerkat_machine_schema_metadata().attach_to(meerkat_machine::MeerkatMachineState::schema())
+}
+
+pub fn dsl_pending_continuation_admission_machine() -> MachineSchema {
+    pending_continuation_admission_schema_metadata().attach_to(
+        pending_continuation_admission::PendingContinuationAdmissionMachineState::schema(),
+    )
+}
+
+pub fn dsl_pending_continuation_admission_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_pending_continuation_admission_machine(),
+        PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_CRATE,
+        PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn pending_continuation_admission_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "ObservedSessionTailKind",
+                &[
+                    "Empty",
+                    "System",
+                    "SystemNotice",
+                    "User",
+                    "Assistant",
+                    "BlockAssistant",
+                    "ToolResults",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "PendingContinuationDisposition",
+                &["RunPending", "NoPendingBoundary"],
+            ),
+            NamedTypeBinding::string_enum(
+                "PendingContinuationPublicTerminal",
+                &["NoPendingBoundary"],
+            ),
+        ],
+        Vec::new(),
+    )
 }
 
 pub fn dsl_meerkat_machine_production_schema() -> MachineSchema {

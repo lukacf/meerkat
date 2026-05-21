@@ -52,6 +52,9 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             // WorkGraph: realm-scoped commitment graph lifecycle,
             // readiness, claim state, and topology validation.
             "WorkGraphLifecycleMachine",
+            // Pending continuation: public run-pending admission and
+            // NoPendingBoundary terminality belong to generated authority.
+            "PendingContinuationAdmissionMachine",
         ]
     );
 

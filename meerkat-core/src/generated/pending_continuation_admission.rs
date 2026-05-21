@@ -31,6 +31,25 @@ pub enum PendingContinuationPublicTerminal {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingContinuationAdmissionInput {
+    ResolvePendingContinuation {
+        session_tail: ObservedSessionTailKind,
+        staged_tool_result_count: u64,
+    },
+    ResolveLastPendingContinuationPublicTerminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingContinuationAdmissionEffect {
+    PendingContinuationResolved {
+        disposition: PendingContinuationDisposition,
+    },
+    PendingContinuationPublicTerminalResolved {
+        terminal: PendingContinuationPublicTerminal,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PendingContinuationResolution {
     pub disposition: PendingContinuationDisposition,
     pub public_terminal: Option<PendingContinuationPublicTerminal>,
@@ -73,12 +92,10 @@ pub struct PendingContinuationAdmissionMachineAuthority {
 impl PendingContinuationAdmissionMachineAuthority {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            state: PendingContinuationAdmissionMachineState {
-                lifecycle_phase: PendingContinuationAdmissionPhase::Ready,
-                last_public_terminal: None,
-            },
-        }
+        let mut state = PendingContinuationAdmissionMachineState::default();
+        state.lifecycle_phase = PendingContinuationAdmissionPhase::Ready;
+        state.last_public_terminal = None;
+        Self { state }
     }
 
     #[must_use]
@@ -86,40 +103,114 @@ impl PendingContinuationAdmissionMachineAuthority {
         &self.state
     }
 
+    fn apply_input(
+        &mut self,
+        input: PendingContinuationAdmissionInput,
+    ) -> Result<Vec<PendingContinuationAdmissionEffect>, PendingContinuationAdmissionError> {
+        match input {
+            PendingContinuationAdmissionInput::ResolvePendingContinuation {
+                session_tail,
+                staged_tool_result_count,
+            } => {
+                if (self.state.lifecycle_phase == PendingContinuationAdmissionPhase::Ready)
+                    && (has_effective_pending_boundary(session_tail, staged_tool_result_count))
+                {
+                    self.state.last_public_terminal = None;
+                    self.state.lifecycle_phase = PendingContinuationAdmissionPhase::Ready;
+                    return Ok(vec![
+                        PendingContinuationAdmissionEffect::PendingContinuationResolved {
+                            disposition: PendingContinuationDisposition::RunPending,
+                        },
+                    ]);
+                }
+                if (self.state.lifecycle_phase == PendingContinuationAdmissionPhase::Ready)
+                    && (has_effective_pending_boundary(session_tail, staged_tool_result_count)
+                        == false)
+                {
+                    self.state.last_public_terminal =
+                        Some(PendingContinuationPublicTerminal::NoPendingBoundary);
+                    self.state.lifecycle_phase = PendingContinuationAdmissionPhase::Ready;
+                    return Ok(vec![
+                        PendingContinuationAdmissionEffect::PendingContinuationResolved { disposition: PendingContinuationDisposition::NoPendingBoundary, },
+                        PendingContinuationAdmissionEffect::PendingContinuationPublicTerminalResolved { terminal: PendingContinuationPublicTerminal::NoPendingBoundary, },
+                    ]);
+                }
+                Err(PendingContinuationAdmissionError {
+                    op: "ResolvePendingContinuation",
+                })
+            }
+            PendingContinuationAdmissionInput::ResolveLastPendingContinuationPublicTerminal => {
+                if (self.state.lifecycle_phase == PendingContinuationAdmissionPhase::Ready)
+                    && (self.state.last_public_terminal
+                        == Some(PendingContinuationPublicTerminal::NoPendingBoundary))
+                {
+                    self.state.lifecycle_phase = PendingContinuationAdmissionPhase::Ready;
+                    return Ok(vec![
+                        PendingContinuationAdmissionEffect::PendingContinuationPublicTerminalResolved { terminal: PendingContinuationPublicTerminal::NoPendingBoundary, },
+                    ]);
+                }
+                Err(PendingContinuationAdmissionError {
+                    op: "ResolveLastPendingContinuationPublicTerminal",
+                })
+            }
+        }
+    }
+
     pub fn resolve_pending_continuation(
         &mut self,
         session_tail: ObservedSessionTailKind,
         staged_tool_result_count: u64,
     ) -> Result<PendingContinuationResolution, PendingContinuationAdmissionError> {
-        if self.state.lifecycle_phase != PendingContinuationAdmissionPhase::Ready {
+        let effects = self.apply_input(
+            PendingContinuationAdmissionInput::ResolvePendingContinuation {
+                session_tail,
+                staged_tool_result_count,
+            },
+        )?;
+        let mut disposition = None;
+        let mut public_terminal = None;
+        for effect in effects {
+            match effect {
+                PendingContinuationAdmissionEffect::PendingContinuationResolved {
+                    disposition: value,
+                } => {
+                    disposition = Some(value);
+                }
+                PendingContinuationAdmissionEffect::PendingContinuationPublicTerminalResolved {
+                    terminal,
+                } => {
+                    public_terminal = Some(terminal);
+                }
+            }
+        }
+        let Some(disposition) = disposition else {
             return Err(PendingContinuationAdmissionError {
-                op: "resolve_pending_continuation",
+                op: "pending_continuation_resolution_effect",
             });
-        }
-        if has_effective_pending_boundary(session_tail, staged_tool_result_count) {
-            self.state.last_public_terminal = None;
-            Ok(PendingContinuationResolution {
-                disposition: PendingContinuationDisposition::RunPending,
-                public_terminal: None,
-            })
-        } else {
-            self.state.last_public_terminal =
-                Some(PendingContinuationPublicTerminal::NoPendingBoundary);
-            Ok(PendingContinuationResolution {
-                disposition: PendingContinuationDisposition::NoPendingBoundary,
-                public_terminal: Some(PendingContinuationPublicTerminal::NoPendingBoundary),
-            })
-        }
+        };
+        Ok(PendingContinuationResolution {
+            disposition,
+            public_terminal,
+        })
     }
 
     pub fn resolve_last_public_terminal(
-        &self,
+        &mut self,
     ) -> Result<PendingContinuationPublicTerminal, PendingContinuationAdmissionError> {
-        self.state
-            .last_public_terminal
-            .ok_or(PendingContinuationAdmissionError {
-                op: "resolve_last_pending_continuation_public_terminal",
-            })
+        let effects = self.apply_input(
+            PendingContinuationAdmissionInput::ResolveLastPendingContinuationPublicTerminal,
+        )?;
+        for effect in effects {
+            if let PendingContinuationAdmissionEffect::PendingContinuationPublicTerminalResolved {
+                terminal,
+            } = effect
+            {
+                return Ok(terminal);
+            }
+        }
+        Err(PendingContinuationAdmissionError {
+            op: "pending_continuation_public_terminal_effect",
+        })
     }
 }
 

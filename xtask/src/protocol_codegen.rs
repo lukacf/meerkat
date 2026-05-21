@@ -6,9 +6,10 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use meerkat_machine_schema::{
-    ClosurePolicy, CommsTrustAuthorityOperation, CompositionSchema, EffectHandoffProtocol, Expr,
-    FeedbackFieldSource, HelperSchema, MachineSchema, ProtocolGenerationMode, TypeRef,
-    canonical_composition_schemas, canonical_machine_schemas, catalog::dsl,
+    ClosurePolicy, CommsTrustAuthorityOperation, CompositionSchema, EffectEmit,
+    EffectHandoffProtocol, Expr, FeedbackFieldSource, HelperSchema, MachineSchema,
+    ProtocolGenerationMode, RustTypeAtom, TransitionSchema, TriggerMatch, TypeRef, Update,
+    VariantSchema, canonical_composition_schemas, canonical_machine_schemas, catalog::dsl,
     compat_composition_schemas,
 };
 
@@ -1709,32 +1710,15 @@ fn generate_pending_continuation_admission(machine: &MachineSchema) -> Result<St
     writeln!(&mut out, "use crate::types::Message;")?;
     writeln!(&mut out)?;
 
-    emit_string_enum(
-        &mut out,
+    for enum_name in [
         "ObservedSessionTailKind",
-        &[
-            "Empty",
-            "System",
-            "SystemNotice",
-            "User",
-            "Assistant",
-            "BlockAssistant",
-            "ToolResults",
-        ],
-        Some("Empty"),
-    )?;
-    emit_string_enum(
-        &mut out,
         "PendingContinuationDisposition",
-        &["RunPending", "NoPendingBoundary"],
-        Some("NoPendingBoundary"),
-    )?;
-    emit_string_enum(
-        &mut out,
         "PendingContinuationPublicTerminal",
-        &["NoPendingBoundary"],
-        Some("NoPendingBoundary"),
-    )?;
+    ] {
+        emit_pending_named_string_enum(&mut out, machine, enum_name)?;
+    }
+    emit_pending_input_enum(&mut out, machine)?;
+    emit_pending_effect_enum(&mut out, machine)?;
 
     writeln!(&mut out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
     writeln!(&mut out, "pub struct PendingContinuationResolution {{")?;
@@ -1775,30 +1759,8 @@ fn generate_pending_continuation_admission(machine: &MachineSchema) -> Result<St
     )?;
     writeln!(&mut out)?;
 
-    emit_string_enum(
-        &mut out,
-        "PendingContinuationAdmissionPhase",
-        &["Ready"],
-        Some("Ready"),
-    )?;
-    writeln!(
-        &mut out,
-        "#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]"
-    )?;
-    writeln!(
-        &mut out,
-        "pub struct PendingContinuationAdmissionMachineState {{"
-    )?;
-    writeln!(
-        &mut out,
-        "    lifecycle_phase: PendingContinuationAdmissionPhase,"
-    )?;
-    writeln!(
-        &mut out,
-        "    last_public_terminal: Option<PendingContinuationPublicTerminal>,"
-    )?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
+    emit_pending_phase_enum(&mut out, machine)?;
+    emit_pending_state_struct(&mut out, machine)?;
 
     writeln!(&mut out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
     writeln!(
@@ -1811,102 +1773,7 @@ fn generate_pending_continuation_admission(machine: &MachineSchema) -> Result<St
     )?;
     writeln!(&mut out, "}}")?;
     writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "impl PendingContinuationAdmissionMachineAuthority {{"
-    )?;
-    writeln!(&mut out, "    #[must_use]")?;
-    writeln!(&mut out, "    pub fn new() -> Self {{")?;
-    writeln!(&mut out, "        Self {{")?;
-    writeln!(
-        &mut out,
-        "            state: PendingContinuationAdmissionMachineState {{"
-    )?;
-    writeln!(
-        &mut out,
-        "                lifecycle_phase: PendingContinuationAdmissionPhase::Ready,"
-    )?;
-    writeln!(&mut out, "                last_public_terminal: None,")?;
-    writeln!(&mut out, "            }},")?;
-    writeln!(&mut out, "        }}")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "    #[must_use]")?;
-    writeln!(
-        &mut out,
-        "    pub fn state(&self) -> &PendingContinuationAdmissionMachineState {{"
-    )?;
-    writeln!(&mut out, "        &self.state")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "    pub fn resolve_pending_continuation(")?;
-    writeln!(&mut out, "        &mut self,")?;
-    writeln!(&mut out, "        session_tail: ObservedSessionTailKind,")?;
-    writeln!(&mut out, "        staged_tool_result_count: u64,")?;
-    writeln!(
-        &mut out,
-        "    ) -> Result<PendingContinuationResolution, PendingContinuationAdmissionError> {{"
-    )?;
-    writeln!(
-        &mut out,
-        "        if self.state.lifecycle_phase != PendingContinuationAdmissionPhase::Ready {{"
-    )?;
-    writeln!(
-        &mut out,
-        "            return Err(PendingContinuationAdmissionError {{ op: \"resolve_pending_continuation\" }});"
-    )?;
-    writeln!(&mut out, "        }}")?;
-    writeln!(
-        &mut out,
-        "        if has_effective_pending_boundary(session_tail, staged_tool_result_count) {{"
-    )?;
-    writeln!(
-        &mut out,
-        "            self.state.last_public_terminal = None;"
-    )?;
-    writeln!(&mut out, "            Ok(PendingContinuationResolution {{")?;
-    writeln!(
-        &mut out,
-        "                disposition: PendingContinuationDisposition::RunPending,"
-    )?;
-    writeln!(&mut out, "                public_terminal: None,")?;
-    writeln!(&mut out, "            }})")?;
-    writeln!(&mut out, "        }} else {{")?;
-    writeln!(
-        &mut out,
-        "            self.state.last_public_terminal = Some(PendingContinuationPublicTerminal::NoPendingBoundary);"
-    )?;
-    writeln!(&mut out, "            Ok(PendingContinuationResolution {{")?;
-    writeln!(
-        &mut out,
-        "                disposition: PendingContinuationDisposition::NoPendingBoundary,"
-    )?;
-    writeln!(
-        &mut out,
-        "                public_terminal: Some(PendingContinuationPublicTerminal::NoPendingBoundary),"
-    )?;
-    writeln!(&mut out, "            }})")?;
-    writeln!(&mut out, "        }}")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "    pub fn resolve_last_public_terminal(")?;
-    writeln!(&mut out, "        &self,")?;
-    writeln!(
-        &mut out,
-        "    ) -> Result<PendingContinuationPublicTerminal, PendingContinuationAdmissionError> {{"
-    )?;
-    writeln!(
-        &mut out,
-        "        self.state.last_public_terminal.ok_or(PendingContinuationAdmissionError {{"
-    )?;
-    writeln!(
-        &mut out,
-        "            op: \"resolve_last_pending_continuation_public_terminal\","
-    )?;
-    writeln!(&mut out, "        }})")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
+    emit_pending_authority_impl(&mut out, machine)?;
     writeln!(
         &mut out,
         "impl Default for PendingContinuationAdmissionMachineAuthority {{"
@@ -2066,28 +1933,409 @@ fn generate_pending_continuation_admission(machine: &MachineSchema) -> Result<St
 fn emit_string_enum(
     out: &mut String,
     name: &str,
-    variants: &[&str],
-    default_variant: Option<&str>,
+    variants: &[String],
+    default_variant: &str,
 ) -> Result<()> {
-    if default_variant.is_some() {
-        writeln!(
-            out,
-            "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]"
-        )?;
-    } else {
-        writeln!(
-            out,
-            "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]"
-        )?;
-    }
+    writeln!(
+        out,
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]"
+    )?;
     writeln!(out, "pub enum {name} {{")?;
     for variant in variants {
-        if default_variant.is_some_and(|default| default == *variant) {
+        if variant == default_variant {
             writeln!(out, "    #[default]")?;
         }
         writeln!(out, "    {variant},")?;
     }
     writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_pending_named_string_enum(
+    out: &mut String,
+    machine: &MachineSchema,
+    name: &str,
+) -> Result<()> {
+    let variants = pending_named_string_enum_variants(machine, name)?;
+    let default_variant = pending_default_variant(name, &variants)?;
+    emit_string_enum(out, name, &variants, default_variant)
+}
+
+fn pending_named_string_enum_variants(machine: &MachineSchema, name: &str) -> Result<Vec<String>> {
+    let binding = machine
+        .named_types
+        .iter()
+        .find(|binding| binding.name.as_str() == name)
+        .with_context(|| {
+            format!("PendingContinuationAdmissionMachine missing named type `{name}`")
+        })?;
+    let RustTypeAtom::StringEnum { variants } = &binding.rust else {
+        bail!("PendingContinuationAdmissionMachine named type `{name}` must be a string enum");
+    };
+    Ok(variants
+        .iter()
+        .map(|variant| variant.as_str().to_owned())
+        .collect())
+}
+
+fn pending_default_variant<'a>(name: &str, variants: &'a [String]) -> Result<&'a str> {
+    let wanted = match name {
+        "ObservedSessionTailKind" => "Empty",
+        "PendingContinuationDisposition" => "NoPendingBoundary",
+        "PendingContinuationPublicTerminal" => "NoPendingBoundary",
+        other => bail!("unknown PendingContinuationAdmissionMachine enum `{other}`"),
+    };
+    if variants.iter().any(|variant| variant == wanted) {
+        Ok(wanted)
+    } else {
+        bail!(
+            "PendingContinuationAdmissionMachine enum `{name}` missing default variant `{wanted}`"
+        );
+    }
+}
+
+fn emit_pending_phase_enum(out: &mut String, machine: &MachineSchema) -> Result<()> {
+    let variants = machine
+        .state
+        .phase
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str().to_owned())
+        .collect::<Vec<_>>();
+    emit_string_enum(
+        out,
+        "PendingContinuationAdmissionPhase",
+        &variants,
+        machine.state.init.phase.as_str(),
+    )
+}
+
+fn emit_pending_state_struct(out: &mut String, machine: &MachineSchema) -> Result<()> {
+    writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]")?;
+    writeln!(
+        out,
+        "pub struct PendingContinuationAdmissionMachineState {{"
+    )?;
+    writeln!(
+        out,
+        "    lifecycle_phase: PendingContinuationAdmissionPhase,"
+    )?;
+    for field in &machine.state.fields {
+        writeln!(
+            out,
+            "    {}: {},",
+            field.name,
+            render_pending_type_ref(&field.ty)?
+        )?;
+    }
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_pending_input_enum(out: &mut String, machine: &MachineSchema) -> Result<()> {
+    writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
+    writeln!(out, "pub enum PendingContinuationAdmissionInput {{")?;
+    for variant in &machine.inputs.variants {
+        emit_pending_variant(out, variant)?;
+    }
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_pending_effect_enum(out: &mut String, machine: &MachineSchema) -> Result<()> {
+    writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
+    writeln!(out, "pub enum PendingContinuationAdmissionEffect {{")?;
+    for variant in &machine.effects.variants {
+        emit_pending_variant(out, variant)?;
+    }
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_pending_variant(out: &mut String, variant: &VariantSchema) -> Result<()> {
+    if variant.fields.is_empty() {
+        writeln!(out, "    {},", variant.name)?;
+        return Ok(());
+    }
+    writeln!(out, "    {} {{", variant.name)?;
+    for field in &variant.fields {
+        writeln!(
+            out,
+            "        {}: {},",
+            field.name,
+            render_pending_type_ref(&field.ty)?
+        )?;
+    }
+    writeln!(out, "    }},")?;
+    Ok(())
+}
+
+fn emit_pending_authority_impl(out: &mut String, machine: &MachineSchema) -> Result<()> {
+    writeln!(out, "impl PendingContinuationAdmissionMachineAuthority {{")?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(out, "    pub fn new() -> Self {{")?;
+    writeln!(
+        out,
+        "        let mut state = PendingContinuationAdmissionMachineState::default();"
+    )?;
+    writeln!(
+        out,
+        "        state.lifecycle_phase = PendingContinuationAdmissionPhase::{};",
+        machine.state.init.phase
+    )?;
+    for init in &machine.state.init.fields {
+        writeln!(
+            out,
+            "        state.{} = {};",
+            init.field,
+            render_pending_expr(&init.expr)?
+        )?;
+    }
+    writeln!(out, "        Self {{ state }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(
+        out,
+        "    pub fn state(&self) -> &PendingContinuationAdmissionMachineState {{"
+    )?;
+    writeln!(out, "        &self.state")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    emit_pending_apply_input(out, machine)?;
+    emit_pending_resolve_pending_method(out)?;
+    emit_pending_resolve_last_terminal_method(out)?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_pending_apply_input(out: &mut String, machine: &MachineSchema) -> Result<()> {
+    writeln!(out, "    fn apply_input(")?;
+    writeln!(out, "        &mut self,")?;
+    writeln!(out, "        input: PendingContinuationAdmissionInput,")?;
+    writeln!(
+        out,
+        "    ) -> Result<Vec<PendingContinuationAdmissionEffect>, PendingContinuationAdmissionError> {{"
+    )?;
+    writeln!(out, "        match input {{")?;
+    for input_variant in &machine.inputs.variants {
+        emit_pending_apply_input_arm(out, machine, input_variant)?;
+    }
+    writeln!(out, "        }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_pending_apply_input_arm(
+    out: &mut String,
+    machine: &MachineSchema,
+    input_variant: &VariantSchema,
+) -> Result<()> {
+    write!(
+        out,
+        "            PendingContinuationAdmissionInput::{}",
+        input_variant.name
+    )?;
+    if input_variant.fields.is_empty() {
+        writeln!(out, " => {{")?;
+    } else {
+        writeln!(out, " {{")?;
+        for field in &input_variant.fields {
+            writeln!(out, "                {},", field.name)?;
+        }
+        writeln!(out, "            }} => {{")?;
+    }
+    for transition in machine.transitions.iter().filter(|transition| {
+        matches!(
+            &transition.on,
+            TriggerMatch::Input { variant, .. } if variant.as_str() == input_variant.name.as_str()
+        )
+    }) {
+        emit_pending_transition_block(out, transition)?;
+    }
+    writeln!(
+        out,
+        "                Err(PendingContinuationAdmissionError {{ op: \"{}\" }})",
+        input_variant.name
+    )?;
+    writeln!(out, "            }}")?;
+    Ok(())
+}
+
+fn emit_pending_transition_block(out: &mut String, transition: &TransitionSchema) -> Result<()> {
+    writeln!(
+        out,
+        "                if {} {{",
+        render_pending_transition_condition(transition)?
+    )?;
+    for update in &transition.updates {
+        writeln!(
+            out,
+            "                    {}",
+            render_pending_update(update)?
+        )?;
+    }
+    writeln!(
+        out,
+        "                    self.state.lifecycle_phase = PendingContinuationAdmissionPhase::{};",
+        transition.to
+    )?;
+    if transition.emit.is_empty() {
+        writeln!(out, "                    return Ok(Vec::new());")?;
+    } else {
+        writeln!(out, "                    return Ok(vec![")?;
+        for effect in &transition.emit {
+            writeln!(
+                out,
+                "                        {},",
+                render_pending_effect_emit(effect)?
+            )?;
+        }
+        writeln!(out, "                    ]);")?;
+    }
+    writeln!(out, "                }}")?;
+    Ok(())
+}
+
+fn render_pending_transition_condition(transition: &TransitionSchema) -> Result<String> {
+    let mut conditions = Vec::new();
+    if transition.from.len() == 1 {
+        conditions.push(format!(
+            "self.state.lifecycle_phase == PendingContinuationAdmissionPhase::{}",
+            transition.from[0]
+        ));
+    } else if !transition.from.is_empty() {
+        conditions.push(format!(
+            "matches!(self.state.lifecycle_phase, {})",
+            transition
+                .from
+                .iter()
+                .map(|phase| format!("PendingContinuationAdmissionPhase::{phase}"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ));
+    }
+    for guard in &transition.guards {
+        conditions.push(render_pending_expr(&guard.expr)?);
+    }
+    if conditions.is_empty() {
+        Ok("true".to_string())
+    } else {
+        Ok(conditions
+            .into_iter()
+            .map(|condition| format!("({condition})"))
+            .collect::<Vec<_>>()
+            .join(" && "))
+    }
+}
+
+fn render_pending_update(update: &Update) -> Result<String> {
+    match update {
+        Update::Assign { field, expr } => Ok(format!(
+            "self.state.{field} = {};",
+            render_pending_expr(expr)?
+        )),
+        other => bail!("unsupported PendingContinuationAdmissionMachine update `{other:?}`"),
+    }
+}
+
+fn render_pending_effect_emit(effect: &EffectEmit) -> Result<String> {
+    if effect.fields.is_empty() {
+        return Ok(format!(
+            "PendingContinuationAdmissionEffect::{}",
+            effect.variant
+        ));
+    }
+    let mut rendered = format!("PendingContinuationAdmissionEffect::{} {{", effect.variant);
+    for (idx, (field, expr)) in effect.fields.iter().enumerate() {
+        if idx > 0 {
+            rendered.push(' ');
+        }
+        write!(&mut rendered, " {field}: {},", render_pending_expr(expr)?)?;
+    }
+    rendered.push_str(" }");
+    Ok(rendered)
+}
+
+fn emit_pending_resolve_pending_method(out: &mut String) -> Result<()> {
+    writeln!(out, "    pub fn resolve_pending_continuation(")?;
+    writeln!(out, "        &mut self,")?;
+    writeln!(out, "        session_tail: ObservedSessionTailKind,")?;
+    writeln!(out, "        staged_tool_result_count: u64,")?;
+    writeln!(
+        out,
+        "    ) -> Result<PendingContinuationResolution, PendingContinuationAdmissionError> {{"
+    )?;
+    writeln!(
+        out,
+        "        let effects = self.apply_input(PendingContinuationAdmissionInput::ResolvePendingContinuation {{"
+    )?;
+    writeln!(out, "            session_tail,")?;
+    writeln!(out, "            staged_tool_result_count,")?;
+    writeln!(out, "        }})?;")?;
+    writeln!(out, "        let mut disposition = None;")?;
+    writeln!(out, "        let mut public_terminal = None;")?;
+    writeln!(out, "        for effect in effects {{")?;
+    writeln!(out, "            match effect {{")?;
+    writeln!(
+        out,
+        "                PendingContinuationAdmissionEffect::PendingContinuationResolved {{ disposition: value }} => {{"
+    )?;
+    writeln!(out, "                    disposition = Some(value);")?;
+    writeln!(out, "                }}")?;
+    writeln!(
+        out,
+        "                PendingContinuationAdmissionEffect::PendingContinuationPublicTerminalResolved {{ terminal }} => {{"
+    )?;
+    writeln!(out, "                    public_terminal = Some(terminal);")?;
+    writeln!(out, "                }}")?;
+    writeln!(out, "            }}")?;
+    writeln!(out, "        }}")?;
+    writeln!(out, "        let Some(disposition) = disposition else {{")?;
+    writeln!(
+        out,
+        "            return Err(PendingContinuationAdmissionError {{ op: \"pending_continuation_resolution_effect\" }});"
+    )?;
+    writeln!(out, "        }};")?;
+    writeln!(out, "        Ok(PendingContinuationResolution {{")?;
+    writeln!(out, "            disposition,")?;
+    writeln!(out, "            public_terminal,")?;
+    writeln!(out, "        }})")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_pending_resolve_last_terminal_method(out: &mut String) -> Result<()> {
+    writeln!(out, "    pub fn resolve_last_public_terminal(")?;
+    writeln!(out, "        &mut self,")?;
+    writeln!(
+        out,
+        "    ) -> Result<PendingContinuationPublicTerminal, PendingContinuationAdmissionError> {{"
+    )?;
+    writeln!(
+        out,
+        "        let effects = self.apply_input(PendingContinuationAdmissionInput::ResolveLastPendingContinuationPublicTerminal)?;"
+    )?;
+    writeln!(out, "        for effect in effects {{")?;
+    writeln!(
+        out,
+        "            if let PendingContinuationAdmissionEffect::PendingContinuationPublicTerminalResolved {{ terminal }} = effect {{"
+    )?;
+    writeln!(out, "                return Ok(terminal);")?;
+    writeln!(out, "            }}")?;
+    writeln!(out, "        }}")?;
+    writeln!(
+        out,
+        "        Err(PendingContinuationAdmissionError {{ op: \"pending_continuation_public_terminal_effect\" }})"
+    )?;
+    writeln!(out, "    }}")?;
     writeln!(out)?;
     Ok(())
 }
@@ -2123,6 +2371,7 @@ fn render_pending_type_ref(ty: &TypeRef) -> Result<String> {
         TypeRef::Bool => Ok("bool".to_string()),
         TypeRef::U64 => Ok("u64".to_string()),
         TypeRef::Enum(enum_name) => Ok(enum_name.as_str().to_string()),
+        TypeRef::Option(inner) => Ok(format!("Option<{}>", render_pending_type_ref(inner)?)),
         other => bail!("unsupported PendingContinuationAdmissionMachine type `{other:?}`"),
     }
 }
@@ -2134,9 +2383,21 @@ fn render_pending_expr(expr: &Expr) -> Result<String> {
         Expr::NamedVariant { enum_name, variant } => {
             Ok(format!("{}::{}", enum_name.as_str(), variant.as_str()))
         }
+        Expr::Field(field) => Ok(format!("self.state.{field}")),
+        Expr::CurrentPhase => Ok("self.state.lifecycle_phase".to_string()),
         Expr::Binding(binding) => Ok(binding.clone()),
+        Expr::Phase(phase) => Ok(format!("PendingContinuationAdmissionPhase::{phase}")),
+        Expr::Variant(variant) => Ok(variant.clone()),
+        Expr::None => Ok("None".to_string()),
+        Expr::Some(inner) => Ok(format!("Some({})", render_pending_expr(inner)?)),
+        Expr::Not(inner) => Ok(format!("!({})", render_pending_expr(inner)?)),
         Expr::Eq(left, right) => Ok(format!(
             "{} == {}",
+            render_pending_expr(left)?,
+            render_pending_expr(right)?
+        )),
+        Expr::Neq(left, right) => Ok(format!(
+            "{} != {}",
             render_pending_expr(left)?,
             render_pending_expr(right)?
         )),
@@ -2179,6 +2440,9 @@ fn pending_helper<'a>(machine: &'a MachineSchema, name: &str) -> Result<&'a Help
 }
 
 fn validate_pending_continuation_admission_schema(machine: &MachineSchema) -> Result<()> {
+    machine
+        .validate()
+        .context("validate PendingContinuationAdmissionMachine schema")?;
     if machine.machine.as_str() != "PendingContinuationAdmissionMachine" {
         bail!(
             "pending continuation generator received unexpected machine `{}`",
@@ -2201,17 +2465,28 @@ fn validate_pending_continuation_admission_schema(machine: &MachineSchema) -> Re
             format!("PendingContinuationAdmissionMachine missing effect `{required}`")
         })?;
     }
-    for required in [
-        "ResolveWithBoundary",
-        "ResolveWithoutBoundary",
-        "ResolveLastNoPendingTerminal",
-    ] {
-        if !machine
-            .transitions
-            .iter()
-            .any(|transition| transition.name.as_str() == required)
-        {
-            bail!("PendingContinuationAdmissionMachine missing transition `{required}`");
+    for transition in &machine.transitions {
+        render_pending_transition_condition(transition).with_context(|| {
+            format!(
+                "PendingContinuationAdmissionMachine transition `{}` has unsupported guard",
+                transition.name
+            )
+        })?;
+        for update in &transition.updates {
+            render_pending_update(update).with_context(|| {
+                format!(
+                    "PendingContinuationAdmissionMachine transition `{}` has unsupported update",
+                    transition.name
+                )
+            })?;
+        }
+        for effect in &transition.emit {
+            render_pending_effect_emit(effect).with_context(|| {
+                format!(
+                    "PendingContinuationAdmissionMachine transition `{}` has unsupported effect",
+                    transition.name
+                )
+            })?;
         }
     }
     Ok(())

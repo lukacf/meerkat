@@ -335,7 +335,11 @@ pub enum MobMachineCatalogInput {
     SubscribeAgentEvents,
     SubscribeAllAgentEvents,
     SubscribeMobEvents,
+    SubscribeStructuralEvents,
+    AuthorizeMobEventRouterMemberSubscription,
+    AuthorizeMobEventRouterMemberRemoval,
     PollEvents,
+    PollEventsStrict,
     ReplayAllEvents,
     RecordOperatorActionProvenance,
     GetMember,
@@ -405,7 +409,11 @@ impl MobMachineCatalogInput {
         Self::SubscribeAgentEvents,
         Self::SubscribeAllAgentEvents,
         Self::SubscribeMobEvents,
+        Self::SubscribeStructuralEvents,
+        Self::AuthorizeMobEventRouterMemberSubscription,
+        Self::AuthorizeMobEventRouterMemberRemoval,
         Self::PollEvents,
+        Self::PollEventsStrict,
         Self::ReplayAllEvents,
         Self::RecordOperatorActionProvenance,
         Self::GetMember,
@@ -490,7 +498,15 @@ impl MobMachineCatalogInput {
             Self::SubscribeAgentEvents => MobMachineInputVariant::SubscribeAgentEvents,
             Self::SubscribeAllAgentEvents => MobMachineInputVariant::SubscribeAllAgentEvents,
             Self::SubscribeMobEvents => MobMachineInputVariant::SubscribeMobEvents,
+            Self::SubscribeStructuralEvents => MobMachineInputVariant::SubscribeStructuralEvents,
+            Self::AuthorizeMobEventRouterMemberSubscription => {
+                MobMachineInputVariant::AuthorizeMobEventRouterMemberSubscription
+            }
+            Self::AuthorizeMobEventRouterMemberRemoval => {
+                MobMachineInputVariant::AuthorizeMobEventRouterMemberRemoval
+            }
             Self::PollEvents => MobMachineInputVariant::PollEvents,
+            Self::PollEventsStrict => MobMachineInputVariant::PollEventsStrict,
             Self::ReplayAllEvents => MobMachineInputVariant::ReplayAllEvents,
             Self::RecordOperatorActionProvenance => {
                 MobMachineInputVariant::RecordOperatorActionProvenance
@@ -584,7 +600,13 @@ impl MobMachineCatalogInput {
             Self::SubscribeAgentEvents => "SubscribeAgentEvents",
             Self::SubscribeAllAgentEvents => "SubscribeAllAgentEvents",
             Self::SubscribeMobEvents => "SubscribeMobEvents",
+            Self::SubscribeStructuralEvents => "SubscribeStructuralEvents",
+            Self::AuthorizeMobEventRouterMemberSubscription => {
+                "AuthorizeMobEventRouterMemberSubscription"
+            }
+            Self::AuthorizeMobEventRouterMemberRemoval => "AuthorizeMobEventRouterMemberRemoval",
             Self::PollEvents => "PollEvents",
+            Self::PollEventsStrict => "PollEventsStrict",
             Self::ReplayAllEvents => "ReplayAllEvents",
             Self::RecordOperatorActionProvenance => "RecordOperatorActionProvenance",
             Self::GetMember => "GetMember",
@@ -696,6 +718,7 @@ pub enum MobMachineShellMechanicReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MobMachineRuntimeInternalReason {
+    EventObservationAuthority,
     FlowProjectionAuthority,
     RuntimeRejectionFeedback,
     SpawnPolicyFeedbackAuthority,
@@ -720,6 +743,22 @@ pub struct MobMachineRuntimeInternalClassificationRecord {
 
 const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     &[MobMachineRuntimeInternalClassificationRecord] = &[
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::SubscribeStructuralEvents,
+        reason: MobMachineRuntimeInternalReason::EventObservationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeMobEventRouterMemberSubscription,
+        reason: MobMachineRuntimeInternalReason::EventObservationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeMobEventRouterMemberRemoval,
+        reason: MobMachineRuntimeInternalReason::EventObservationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::PollEventsStrict,
+        reason: MobMachineRuntimeInternalReason::EventObservationAuthority,
+    },
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::AuthorizeFlowFrameReducerCommand,
         reason: MobMachineRuntimeInternalReason::FlowProjectionAuthority,

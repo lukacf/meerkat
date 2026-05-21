@@ -2028,6 +2028,58 @@ mod tests {
     }
 
     #[test]
+    fn kickoff_cancelled_outcome_uses_machine_cancelled_truth() {
+        let mut authority = MobMachineAuthority::new();
+        let member_id = "worker".to_string();
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::KickoffMarkPending {
+                member_id: member_id.clone(),
+            },
+        )
+        .expect("kickoff should enter pending state");
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::KickoffMarkStarting {
+                member_id: member_id.clone(),
+            },
+        )
+        .expect("kickoff should enter starting state");
+
+        let cancelled = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::KickoffCancelRequested {
+                member_id: member_id.clone(),
+            },
+        )
+        .expect("generated kickoff cancellation should be accepted");
+
+        assert!(cancelled.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                MobMachineEffect::PersistKickoffUpdate {
+                    member_id: effect_member_id,
+                    phase: KickoffPhase::Cancelled,
+                } if effect_member_id == &member_id
+            )
+        }));
+        assert!(
+            authority
+                .state()
+                .member_kickoff_cancelled
+                .contains(&member_id)
+        );
+        assert!(!authority.state().member_kickoff_failed.contains(&member_id));
+        assert!(
+            !authority
+                .state()
+                .member_kickoff_error
+                .contains_key(&member_id)
+        );
+    }
+
+    #[test]
     fn respawn_topology_restore_result_class_is_machine_owned() {
         let mut authority = MobMachineAuthority::new();
         let identity = AgentIdentity::from("worker");

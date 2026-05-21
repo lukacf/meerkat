@@ -8753,6 +8753,50 @@
     "title": "LiveChannelParams",
     "type": "object"
   },
+  "LiveCloseResult": {
+    "$defs": {
+      "LiveCloseStatus": {
+        "description": "Typed public result class for `live/close`.\n\nToday generated runtime authority emits only `Closed`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
+        "oneOf": [
+          {
+            "const": "closed",
+            "description": "The host has accepted the close handoff and released channel transport\nresources on a best-effort basis.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `live/close`.\n\nThe boolean `closed` field is preserved for back-compat alongside the typed\n`status` discriminator. New code should route on `status`.",
+    "properties": {
+      "closed": {
+        "description": "Back-compat mirror of the generated close-authority result. Always\n`true` when paired with `status: closed`.",
+        "type": "boolean"
+      },
+      "status": {
+        "$ref": "#/$defs/LiveCloseStatus",
+        "description": "Typed close status emitted by generated runtime authority.\nToday: always [`LiveCloseStatus::Closed`]."
+      }
+    },
+    "required": [
+      "status",
+      "closed"
+    ],
+    "title": "LiveCloseResult",
+    "type": "object"
+  },
+  "LiveCloseStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed public result class for `live/close`.\n\nToday generated runtime authority emits only `Closed`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
+    "oneOf": [
+      {
+        "const": "closed",
+        "description": "The host has accepted the close handoff and released channel transport\nresources on a best-effort basis.",
+        "type": "string"
+      }
+    ],
+    "title": "LiveCloseStatus"
+  },
   "LiveCommitInputParams": {
     "$defs": {
       "WireLiveResponseModality": {

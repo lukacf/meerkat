@@ -1805,6 +1805,13 @@ export interface LiveRefreshResult {
   status: "queued";
 }
 
+export type LiveCloseStatus = "closed";
+
+export interface LiveCloseResult {
+  closed: boolean;
+  status: "closed";
+}
+
 export interface LiveInputChunkWireAudio {
   channels: number;
   data: string;

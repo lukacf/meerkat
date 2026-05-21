@@ -128,6 +128,8 @@ pub use wire::{
     HookParams,
     ListSchedulesParams,
     LiveChannelParams,
+    LiveCloseResult,
+    LiveCloseStatus,
     LiveCommitInputParams,
     LiveInputChunkWire,
     LiveOpenParams,

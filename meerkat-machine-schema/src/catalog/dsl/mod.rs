@@ -557,6 +557,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum("LiveRefreshPublicStatus", &["Queued"]),
+            NamedTypeBinding::string_enum("LiveClosePublicStatus", &["Closed"]),
             NamedTypeBinding::string_enum(
                 "LiveChannelPublicStatus",
                 &["Idle", "Opening", "Ready", "Degraded", "Closing", "Closed"],
@@ -1104,6 +1105,7 @@ runtime_internal_inputs!(
         QueueAccepted,
         RecordBoundarySeq,
         RecordLiveChannelStatus,
+        RecordLiveCloseClosed,
         RecordLiveRefreshQueued,
         RecoverAdmittedInput,
         PrioritizeInput,

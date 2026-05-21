@@ -38,6 +38,8 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.types import (
+    LiveCloseResult,
+    LiveCloseStatus,
     LiveRefreshResult,
     LiveRefreshStatus,
     McpServerConfig,
@@ -2666,9 +2668,22 @@ class MeerkatClient:
         """
         return await self._request("live/status", {"channel_id": channel_id})
 
-    async def live_close(self, channel_id: str) -> dict[str, Any]:
+    async def live_close(self, channel_id: str) -> LiveCloseResult:
         """Close a live channel. Wraps `live/close`."""
-        return await self._request("live/close", {"channel_id": channel_id})
+        raw = await self._request("live/close", {"channel_id": channel_id})
+        context = "Invalid live/close response"
+        raw = self._require_dict(raw, "result", context)
+        closed = self._require_bool_field(raw, "closed", context)
+        status = self._require_string_field(raw, "status", context)
+        if status != "closed":
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported status {status!r}",
+            )
+        return LiveCloseResult(
+            closed=closed,
+            status=cast("LiveCloseStatus", status),
+        )
 
     async def live_send_input_text(
         self, channel_id: str, text: str

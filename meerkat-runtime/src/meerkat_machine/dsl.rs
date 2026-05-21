@@ -1661,6 +1661,15 @@ pub enum LiveRefreshPublicStatus {
     Queued,
 }
 
+/// Typed public result class for `live/close` after the live host accepts a
+/// close handoff. The RPC surface may only project this value from a generated
+/// `LiveCloseResultResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveClosePublicStatus {
+    #[default]
+    Closed,
+}
+
 /// Typed public status class for `live/status` after the live host has
 /// observed the adapter transport state. RPC/SDK surfaces may only project
 /// these values from generated `LiveChannelStatusResolved` effects.

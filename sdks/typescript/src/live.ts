@@ -34,6 +34,7 @@
 
 import type {
   LiveChannelParams,
+  LiveCloseResult,
   LiveCommitInputParams,
   LiveOpenParams,
   LiveOpenResult,
@@ -127,8 +128,8 @@ export class LiveChannel {
    *
    * @throws if the channel has not been opened yet.
    */
-  async close(): Promise<void> {
-    await this.client.liveClose(this.requireChannelParams());
+  async close(): Promise<LiveCloseResult> {
+    return await this.client.liveClose(this.requireChannelParams());
   }
 
   /**

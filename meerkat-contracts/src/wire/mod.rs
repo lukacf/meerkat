@@ -79,12 +79,13 @@ pub use image_generation::{
     WireSwitchTurnControlResult, WireSwitchTurnIntent, WireSwitchTurnPhase,
 };
 pub use live::{
-    LiveChannelParams, LiveCommitInputParams, LiveInputChunkWire, LiveOpenParams, LiveOpenResult,
-    LiveOpenTransport, LiveRefreshResult, LiveRefreshStatus, LiveSendInputParams, LiveStatusResult,
-    LiveTruncateParams, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, WireLiveAdapterErrorCode,
-    WireLiveAdapterObservation, WireLiveAdapterStatus, WireLiveChannelCapabilities,
-    WireLiveConfigRejectionReason, WireLiveContinuityMode, WireLiveDegradationReason,
-    WireLiveResponseModality, WireLiveTransportBootstrap, WireProvider,
+    LiveChannelParams, LiveCloseResult, LiveCloseStatus, LiveCommitInputParams, LiveInputChunkWire,
+    LiveOpenParams, LiveOpenResult, LiveOpenTransport, LiveRefreshResult, LiveRefreshStatus,
+    LiveSendInputParams, LiveStatusResult, LiveTruncateParams, LiveWebrtcAnswerParams,
+    LiveWebrtcAnswerResult, WireLiveAdapterErrorCode, WireLiveAdapterObservation,
+    WireLiveAdapterStatus, WireLiveChannelCapabilities, WireLiveConfigRejectionReason,
+    WireLiveContinuityMode, WireLiveDegradationReason, WireLiveResponseModality,
+    WireLiveTransportBootstrap, WireProvider,
 };
 pub use mcp_live::{
     McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,

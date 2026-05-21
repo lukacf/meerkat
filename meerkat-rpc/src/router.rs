@@ -1612,7 +1612,13 @@ impl MethodRouter {
                 .await
             }
             "live/close" if self.live_enabled() => {
-                handlers::live::handle_live_close(id, params, &self.live_adapter_host).await
+                handlers::live::handle_live_close(
+                    id,
+                    params,
+                    &self.live_adapter_host,
+                    &self.runtime,
+                )
+                .await
             }
             // P1#5: push a fresh projection snapshot into an already-open
             // live adapter (model switch via `config/patch`, snapshot drift

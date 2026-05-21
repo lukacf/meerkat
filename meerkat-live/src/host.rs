@@ -125,6 +125,43 @@ impl LiveRefreshQueueAcceptance {
     }
 }
 
+/// Typed evidence that a live channel close handoff was accepted by the host.
+///
+/// This is host-minted observation evidence, not the public close result.
+/// External crates can read it and submit it to MeerkatMachine, but cannot
+/// forge it because the constructor is private to `meerkat-live`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveChannelCloseObservation {
+    channel_id: String,
+    close_sequence: u64,
+}
+
+impl LiveChannelCloseObservation {
+    #[must_use]
+    pub fn channel_id(&self) -> &str {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn close_sequence(&self) -> u64 {
+        self.close_sequence
+    }
+
+    fn from_host_close_observation(
+        channel_id: impl Into<String>,
+        close_sequence: u64,
+    ) -> Option<Self> {
+        let channel_id = channel_id.into();
+        if channel_id.is_empty() || close_sequence == 0 {
+            return None;
+        }
+        Some(Self {
+            channel_id,
+            close_sequence,
+        })
+    }
+}
+
 /// Host-minted observation of the adapter transport status.
 ///
 /// The host owns transport mechanics and observed adapter health; generated
@@ -636,6 +673,7 @@ struct ChannelState {
     status_observation_sequence: u64,
     snapshot_version: u64,
     refresh_acceptance_sequence: u64,
+    close_observation_sequence: u64,
     adapter: Option<Arc<dyn LiveAdapter>>,
     /// When `Some`, the channel was closed and is retained until this instant
     /// (G42). Reads are still serviced; commands are rejected.
@@ -1000,6 +1038,7 @@ impl LiveAdapterHost {
                 status_observation_sequence: 0,
                 snapshot_version: 0,
                 refresh_acceptance_sequence: 0,
+                close_observation_sequence: 0,
                 adapter: None,
                 retire_at: None,
                 bound_llm_identity: None,
@@ -1741,15 +1780,15 @@ impl LiveAdapterHost {
         self.close_channel(channel_id).await
     }
 
-    pub async fn close_channel(
+    pub async fn close_channel_observed(
         &self,
         channel_id: &LiveChannelId,
-    ) -> Result<(), LiveAdapterHostError> {
+    ) -> Result<LiveChannelCloseObservation, LiveAdapterHostError> {
         // G42: keep the channel reachable for `live/status` until the TTL
         // elapses. We unbind the adapter (releasing transport resources) and
         // mark the channel as `Closed`, but leave the entry in `channels`
         // so post-close reads can report the terminal status.
-        let adapter = {
+        let (adapter, observation) = {
             let mut inner = self.inner.lock().await;
             Self::reap_retired_locked(&mut inner);
             let channel = inner
@@ -1759,12 +1798,26 @@ impl LiveAdapterHost {
             let adapter = channel.adapter.take();
             channel.status = LiveAdapterStatus::Closed;
             channel.retire_at = Some(std::time::Instant::now() + CLOSED_CHANNEL_TTL);
-            adapter
+            channel.close_observation_sequence =
+                channel.close_observation_sequence.saturating_add(1);
+            let observation = LiveChannelCloseObservation::from_host_close_observation(
+                channel_id.as_str().to_owned(),
+                channel.close_observation_sequence,
+            )
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+            (adapter, observation)
         };
         if let Some(adapter) = adapter {
             let _ = adapter.close().await;
         }
-        Ok(())
+        Ok(observation)
+    }
+
+    pub async fn close_channel(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<(), LiveAdapterHostError> {
+        self.close_channel_observed(channel_id).await.map(|_| ())
     }
 
     /// Return the host's raw adapter-status cache.
@@ -2137,6 +2190,23 @@ mod tests {
         // G42: post-close status is `Closed`, not `ChannelNotFound`.
         let status = host.channel_status(&ch).await.unwrap();
         assert_eq!(status, LiveAdapterStatus::Closed);
+    }
+
+    #[tokio::test]
+    async fn close_channel_observation_advances_per_channel() {
+        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
+        let ch = host.open_channel(test_session_id()).await.unwrap();
+
+        let first = host.close_channel_observed(&ch).await.unwrap();
+        let second = host.close_channel_observed(&ch).await.unwrap();
+
+        assert_eq!(first.channel_id(), ch.as_str());
+        assert_eq!(first.close_sequence(), 1);
+        assert_eq!(second.close_sequence(), 2);
+        assert_eq!(
+            host.channel_status(&ch).await.unwrap(),
+            LiveAdapterStatus::Closed
+        );
     }
 
     #[tokio::test]

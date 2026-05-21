@@ -13,8 +13,8 @@ pub mod transport;
 pub mod webrtc;
 
 pub use host::{
-    DEFAULT_LIVE_TOOL_TIMEOUT, LiveAdapterHost, LiveAdapterHostError, LiveChannelId,
-    LiveChannelStatusObservation, LiveProjectionError, LiveProjectionSink,
+    DEFAULT_LIVE_TOOL_TIMEOUT, LiveAdapterHost, LiveAdapterHostError, LiveChannelCloseObservation,
+    LiveChannelId, LiveChannelStatusObservation, LiveProjectionError, LiveProjectionSink,
     LiveRefreshQueueAcceptance, LiveToolDispatchError, LiveToolDispatcher, LiveTranscriptIdentity,
     NoOpProjectionSink, ObservationOutcome, ObservationRouting, ToolDispatchSkipReason,
 };

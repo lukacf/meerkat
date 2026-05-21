@@ -120,6 +120,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_refresh_result_sequence`: `u64`
 - `live_refresh_queue_acceptance_sequence_by_channel`: `Map<String, u64>`
 - `live_refresh_status_by_channel`: `Map<String, LiveRefreshPublicStatus>`
+- `live_close_result_sequence`: `u64`
+- `live_close_observation_sequence_by_channel`: `Map<String, u64>`
+- `live_close_status_by_channel`: `Map<String, LiveClosePublicStatus>`
 - `live_channel_status_result_sequence`: `u64`
 - `live_channel_status_observation_sequence_by_channel`: `Map<String, u64>`
 - `live_channel_status_by_channel`: `Map<String, LiveChannelPublicStatus>`
@@ -327,6 +330,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PublishOrCancelSurfaceRequest`(request_key: String)
 - `FinishSurfaceRequestUnpublished`(request_key: String)
 - `RecordLiveRefreshQueued`(channel_id: String, queue_acceptance_sequence: u64)
+- `RecordLiveCloseClosed`(channel_id: String, close_observation_sequence: u64)
 - `RecordLiveChannelStatus`(channel_id: String, status: LiveChannelPublicStatus, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
 - `SpawnDrain`(mode: DrainMode)
 - `StopDrain`
@@ -486,6 +490,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SurfaceRequestCompleted`(request_key: String)
 - `SurfaceRequestSupersededByCancel`(request_key: String)
 - `LiveRefreshResultResolved`(channel_id: String, status: LiveRefreshPublicStatus, refresh_enqueued: Bool, sequence: u64, queue_acceptance_sequence: u64)
+- `LiveCloseResultResolved`(channel_id: String, status: LiveClosePublicStatus, closed: Bool, sequence: u64, close_observation_sequence: u64)
 - `LiveChannelStatusResolved`(channel_id: String, status: LiveChannelPublicStatus, sequence: u64, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
 - `EnqueueClassifiedEntry`
 - `PeerIngressClassified`(class: PeerIngressInputClass, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
@@ -7497,6 +7502,56 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `queue_acceptance_sequence_present`
   - `queue_acceptance_sequence_advances`
 - Emits: `LiveRefreshResultResolved`
+- To: `Stopped`
+
+### `RecordLiveCloseClosedIdle`
+- From: `Idle`
+- On: `RecordLiveCloseClosed`(channel_id, close_observation_sequence)
+- Guards:
+  - `channel_id_present`
+  - `close_observation_sequence_present`
+  - `close_observation_sequence_advances`
+- Emits: `LiveCloseResultResolved`
+- To: `Idle`
+
+### `RecordLiveCloseClosedAttached`
+- From: `Attached`
+- On: `RecordLiveCloseClosed`(channel_id, close_observation_sequence)
+- Guards:
+  - `channel_id_present`
+  - `close_observation_sequence_present`
+  - `close_observation_sequence_advances`
+- Emits: `LiveCloseResultResolved`
+- To: `Attached`
+
+### `RecordLiveCloseClosedRunning`
+- From: `Running`
+- On: `RecordLiveCloseClosed`(channel_id, close_observation_sequence)
+- Guards:
+  - `channel_id_present`
+  - `close_observation_sequence_present`
+  - `close_observation_sequence_advances`
+- Emits: `LiveCloseResultResolved`
+- To: `Running`
+
+### `RecordLiveCloseClosedRetired`
+- From: `Retired`
+- On: `RecordLiveCloseClosed`(channel_id, close_observation_sequence)
+- Guards:
+  - `channel_id_present`
+  - `close_observation_sequence_present`
+  - `close_observation_sequence_advances`
+- Emits: `LiveCloseResultResolved`
+- To: `Retired`
+
+### `RecordLiveCloseClosedStopped`
+- From: `Stopped`
+- On: `RecordLiveCloseClosed`(channel_id, close_observation_sequence)
+- Guards:
+  - `channel_id_present`
+  - `close_observation_sequence_present`
+  - `close_observation_sequence_advances`
+- Emits: `LiveCloseResultResolved`
 - To: `Stopped`
 
 ### `RecordLiveChannelStatusIdle`

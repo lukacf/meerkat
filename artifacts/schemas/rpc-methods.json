@@ -388,7 +388,7 @@
       "description": "Close a live channel",
       "name": "live/close",
       "params_type": "LiveChannelParams",
-      "result_type": "Value"
+      "result_type": "LiveCloseResult"
     },
     {
       "description": "Send an input chunk (audio/text) to a live channel",

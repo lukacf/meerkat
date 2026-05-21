@@ -98,6 +98,54 @@ impl MeerkatMachine {
     }
 
     #[cfg(feature = "live")]
+    pub async fn resolve_live_close_result(
+        &self,
+        session_id: &SessionId,
+        observation: &meerkat_live::LiveChannelCloseObservation,
+    ) -> Result<LiveCloseResultAuthority, RuntimeDriverError> {
+        let channel_id = observation.channel_id().to_string();
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+                    channel_id: channel_id.clone(),
+                    close_observation_sequence: observation.close_sequence(),
+                },
+                "RecordLiveCloseClosed",
+            )
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+
+        effects
+            .as_slice()
+            .iter()
+            .find_map(|effect| match effect {
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveCloseResultResolved {
+                    channel_id: effect_channel_id,
+                    status,
+                    closed,
+                    sequence,
+                    close_observation_sequence,
+                } if *effect_channel_id == channel_id
+                    && *close_observation_sequence == observation.close_sequence() =>
+                {
+                    Some(LiveCloseResultAuthority {
+                        status: *status,
+                        closed: *closed,
+                        sequence: *sequence,
+                        close_observation_sequence: *close_observation_sequence,
+                    })
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "RecordLiveCloseClosed for channel '{channel_id}' emitted no LiveCloseResultResolved effect"
+                ))
+            })
+    }
+
+    #[cfg(feature = "live")]
     pub async fn resolve_live_channel_status_result(
         &self,
         session_id: &SessionId,

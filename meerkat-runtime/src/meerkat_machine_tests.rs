@@ -15760,6 +15760,67 @@ fn live_refresh_queued_result_is_machine_owned() {
 }
 
 #[test]
+fn live_close_result_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    let transition = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+            channel_id: "live-channel-1".to_string(),
+            close_observation_sequence: 5,
+        },
+    )
+    .expect("machine authority should accept live-close observation");
+
+    assert_eq!(
+        authority.state().live_close_result_sequence,
+        1,
+        "machine authority should assign the public close result sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_close_observation_sequence_by_channel
+            .get("live-channel-1"),
+        Some(&5),
+        "machine state should retain the host close-observation sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_close_status_by_channel
+            .get("live-channel-1"),
+        Some(&mm_dsl::LiveClosePublicStatus::Closed),
+        "machine state should retain the public close result class by channel"
+    );
+    assert!(
+        transition.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::LiveCloseResultResolved {
+                channel_id,
+                status: mm_dsl::LiveClosePublicStatus::Closed,
+                closed: true,
+                sequence: 1,
+                close_observation_sequence: 5,
+            } if channel_id == "live-channel-1"
+        )),
+        "machine authority must emit the typed public close result effect"
+    );
+
+    let stale = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+            channel_id: "live-channel-1".to_string(),
+            close_observation_sequence: 5,
+        },
+    );
+    assert!(
+        stale.is_err(),
+        "machine authority must reject reused host close-observation evidence"
+    );
+}
+
+#[test]
 fn live_channel_status_result_is_machine_owned() {
     let mut authority = registered_dsl_authority_for_visibility_tests();
 

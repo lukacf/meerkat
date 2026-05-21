@@ -778,6 +778,15 @@ pub enum LiveRefreshPublicStatus {
     Queued,
 }
 
+/// Typed public result class for `live/close` after the live host accepts a
+/// close handoff. The RPC surface may only project this value from a generated
+/// `LiveCloseResultResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveClosePublicStatus {
+    #[default]
+    Closed,
+}
+
 /// Typed public status class for `live/status` after the live host has
 /// observed the adapter transport state. RPC/SDK surfaces may only project
 /// these values from generated `LiveChannelStatusResolved` effects.
@@ -1842,6 +1851,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_refresh_result_sequence: u64,
             live_refresh_queue_acceptance_sequence_by_channel: Map<String, u64>,
             live_refresh_status_by_channel: Map<String, Enum<LiveRefreshPublicStatus>>,
+            live_close_result_sequence: u64,
+            live_close_observation_sequence_by_channel: Map<String, u64>,
+            live_close_status_by_channel: Map<String, Enum<LiveClosePublicStatus>>,
             live_channel_status_result_sequence: u64,
             live_channel_status_observation_sequence_by_channel: Map<String, u64>,
             live_channel_status_by_channel: Map<String, Enum<LiveChannelPublicStatus>>,
@@ -2135,6 +2147,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_refresh_result_sequence = 0,
             live_refresh_queue_acceptance_sequence_by_channel = EmptyMap,
             live_refresh_status_by_channel = EmptyMap,
+            live_close_result_sequence = 0,
+            live_close_observation_sequence_by_channel = EmptyMap,
+            live_close_status_by_channel = EmptyMap,
             live_channel_status_result_sequence = 0,
             live_channel_status_observation_sequence_by_channel = EmptyMap,
             live_channel_status_by_channel = EmptyMap,
@@ -2579,6 +2594,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             PublishOrCancelSurfaceRequest { request_key: String },
             FinishSurfaceRequestUnpublished { request_key: String },
             RecordLiveRefreshQueued { channel_id: String, queue_acceptance_sequence: u64 },
+            RecordLiveCloseClosed { channel_id: String, close_observation_sequence: u64 },
             RecordLiveChannelStatus {
                 channel_id: String,
                 status: Enum<LiveChannelPublicStatus>,
@@ -2992,6 +3008,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 sequence: u64,
                 queue_acceptance_sequence: u64,
             },
+            LiveCloseResultResolved {
+                channel_id: String,
+                status: Enum<LiveClosePublicStatus>,
+                closed: bool,
+                sequence: u64,
+                close_observation_sequence: u64,
+            },
             LiveChannelStatusResolved {
                 channel_id: String,
                 status: Enum<LiveChannelPublicStatus>,
@@ -3172,6 +3195,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition SurfaceRequestCompleted => local,
         disposition SurfaceRequestSupersededByCancel => local,
         disposition LiveRefreshResultResolved => local,
+        disposition LiveCloseResultResolved => local,
         disposition LiveChannelStatusResolved => local,
         disposition EnqueueClassifiedEntry => local,
         disposition PeerIngressClassified => local,
@@ -11472,6 +11496,41 @@ macro_rules! meerkat_catalog_machine_dsl {
                 refresh_enqueued: true,
                 sequence: self.live_refresh_result_sequence,
                 queue_acceptance_sequence: queue_acceptance_sequence
+            }
+        }
+
+        // RecordLiveCloseClosed: generated public-result authority for
+        // `live/close` once the live host has accepted the close handoff and
+        // supplied typed observation evidence. The host may close transport
+        // resources, but it cannot construct the public `closed` result
+        // class without this generated effect.
+        transition RecordLiveCloseClosed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveCloseClosed { channel_id, close_observation_sequence }
+            guard "channel_id_present" { channel_id != "" }
+            guard "close_observation_sequence_present" { close_observation_sequence > 0 }
+            guard "close_observation_sequence_advances" {
+                !self.live_close_observation_sequence_by_channel.contains_key(channel_id)
+                || close_observation_sequence > self.live_close_observation_sequence_by_channel.get_copied(channel_id).get("value")
+            }
+            update {
+                self.live_close_result_sequence += 1;
+                self.live_close_observation_sequence_by_channel.insert(
+                    channel_id,
+                    close_observation_sequence
+                );
+                self.live_close_status_by_channel.insert(
+                    channel_id,
+                    LiveClosePublicStatus::Closed
+                );
+            }
+            to Idle
+            emit LiveCloseResultResolved {
+                channel_id: channel_id,
+                status: LiveClosePublicStatus::Closed,
+                closed: true,
+                sequence: self.live_close_result_sequence,
+                close_observation_sequence: close_observation_sequence
             }
         }
 

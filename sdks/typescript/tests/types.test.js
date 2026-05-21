@@ -2761,6 +2761,46 @@ describe("Mob ready wait wrappers", () => {
 });
 
 describe("Live wrappers", () => {
+  it("returns generated live/close result only when required fields are present", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return { status: "closed", closed: true };
+    };
+
+    const result = await client.liveClose({ channel_id: "live_channel_41" });
+
+    assert.deepEqual(calls, [
+      { method: "live/close", params: { channel_id: "live_channel_41" } },
+    ]);
+    assert.deepEqual(result, { status: "closed", closed: true });
+  });
+
+  it("rejects missing or unknown live/close generated status", async () => {
+    const malformedResponses = [
+      { closed: true },
+      { status: "closed" },
+      { status: "already_closed", closed: true },
+    ];
+
+    for (const response of malformedResponses) {
+      const client = new MeerkatClient();
+      client.request = async (method) => {
+        assert.equal(method, "live/close");
+        return response;
+      };
+
+      await assert.rejects(
+        () => client.liveClose({ channel_id: "live_channel_41" }),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          String(error.message).includes("Invalid live/close response"),
+      );
+    }
+  });
+
   it("returns generated live/refresh result only when required fields are present", async () => {
     const client = new MeerkatClient();
     const calls = [];

@@ -1238,6 +1238,19 @@ pub struct LiveRefreshResultAuthority {
     pub queue_acceptance_sequence: u64,
 }
 
+/// Generated authority output for the public `live/close` success result.
+///
+/// Constructed only from a `MeerkatMachineEffect::LiveCloseResultResolved`
+/// emitted after the live host supplies typed close-observation evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "live")]
+pub struct LiveCloseResultAuthority {
+    pub status: dsl::LiveClosePublicStatus,
+    pub closed: bool,
+    pub sequence: u64,
+    pub close_observation_sequence: u64,
+}
+
 /// Generated authority output for the public `live/status` result.
 ///
 /// Constructed only from a `MeerkatMachineEffect::LiveChannelStatusResolved`

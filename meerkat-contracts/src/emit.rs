@@ -146,6 +146,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         // back to opaque `Value` / `Any` / `unknown`.
         "LiveRefreshResult": schema_for!(crate::wire::LiveRefreshResult),
         "LiveRefreshStatus": schema_for!(crate::wire::LiveRefreshStatus),
+        "LiveCloseResult": schema_for!(crate::wire::LiveCloseResult),
+        "LiveCloseStatus": schema_for!(crate::wire::LiveCloseStatus),
         // CC5/CC6: emit the typed wire mirrors at the top level so SDK
         // codegen produces named typed shapes (TypedDict / interface /
         // discriminated union) instead of inlining them as anonymous `Any`

@@ -1004,6 +1004,15 @@ async function liveChannelStatusShape(ch: LiveChannel) {
 }
 void liveChannelStatusShape;
 
+// close() returns Promise<LiveCloseResult>.
+async function liveChannelCloseShape(ch: LiveChannel) {
+  const result = await ch.close();
+  const closed: "closed" = result.status;
+  void closed;
+  return result;
+}
+void liveChannelCloseShape;
+
 // refresh() returns Promise<LiveRefreshResult>.
 async function liveChannelRefreshShape(ch: LiveChannel) {
   const result = await ch.refresh();

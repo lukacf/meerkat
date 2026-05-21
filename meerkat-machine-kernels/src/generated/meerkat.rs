@@ -2311,6 +2311,52 @@ impl std::fmt::Display for LiveChannelPublicStatus {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveClosePublicStatus {
+    #[default]
+    #[serde(rename = "Closed")]
+    Closed,
+}
+impl LiveClosePublicStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Closed => "Closed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveClosePublicStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Closed" => Ok(Self::Closed),
+            other => Err(format!("invalid LiveClosePublicStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveClosePublicStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveClosePublicStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveRefreshPublicStatus {
     #[default]
     #[serde(rename = "Queued")]
@@ -6895,6 +6941,9 @@ pub struct State {
     pub live_refresh_result_sequence: u64,
     pub live_refresh_queue_acceptance_sequence_by_channel: std::collections::BTreeMap<String, u64>,
     pub live_refresh_status_by_channel: std::collections::BTreeMap<String, LiveRefreshPublicStatus>,
+    pub live_close_result_sequence: u64,
+    pub live_close_observation_sequence_by_channel: std::collections::BTreeMap<String, u64>,
+    pub live_close_status_by_channel: std::collections::BTreeMap<String, LiveClosePublicStatus>,
     pub live_channel_status_result_sequence: u64,
     pub live_channel_status_observation_sequence_by_channel:
         std::collections::BTreeMap<String, u64>,
@@ -7702,6 +7751,11 @@ pub mod inputs {
         pub queue_acceptance_sequence: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveCloseClosed {
+        pub channel_id: String,
+        pub close_observation_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordLiveChannelStatus {
         pub channel_id: String,
         pub status: LiveChannelPublicStatus,
@@ -8111,6 +8165,7 @@ pub enum Input {
     PublishOrCancelSurfaceRequest(inputs::PublishOrCancelSurfaceRequest),
     FinishSurfaceRequestUnpublished(inputs::FinishSurfaceRequestUnpublished),
     RecordLiveRefreshQueued(inputs::RecordLiveRefreshQueued),
+    RecordLiveCloseClosed(inputs::RecordLiveCloseClosed),
     RecordLiveChannelStatus(inputs::RecordLiveChannelStatus),
     SpawnDrain(inputs::SpawnDrain),
     StopDrain(inputs::StopDrain),
@@ -8340,6 +8395,7 @@ impl Input {
             Self::PublishOrCancelSurfaceRequest(_) => InputKind::PublishOrCancelSurfaceRequest,
             Self::FinishSurfaceRequestUnpublished(_) => InputKind::FinishSurfaceRequestUnpublished,
             Self::RecordLiveRefreshQueued(_) => InputKind::RecordLiveRefreshQueued,
+            Self::RecordLiveCloseClosed(_) => InputKind::RecordLiveCloseClosed,
             Self::RecordLiveChannelStatus(_) => InputKind::RecordLiveChannelStatus,
             Self::SpawnDrain(_) => InputKind::SpawnDrain,
             Self::StopDrain(_) => InputKind::StopDrain,
@@ -8550,6 +8606,7 @@ pub enum InputKind {
     PublishOrCancelSurfaceRequest,
     FinishSurfaceRequestUnpublished,
     RecordLiveRefreshQueued,
+    RecordLiveCloseClosed,
     RecordLiveChannelStatus,
     SpawnDrain,
     StopDrain,
@@ -9048,6 +9105,14 @@ pub mod effects {
         pub queue_acceptance_sequence: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveCloseResultResolved {
+        pub channel_id: String,
+        pub status: LiveClosePublicStatus,
+        pub closed: bool,
+        pub sequence: u64,
+        pub close_observation_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveChannelStatusResolved {
         pub channel_id: String,
         pub status: LiveChannelPublicStatus,
@@ -9266,6 +9331,7 @@ pub enum Effect {
     SurfaceRequestCompleted(effects::SurfaceRequestCompleted),
     SurfaceRequestSupersededByCancel(effects::SurfaceRequestSupersededByCancel),
     LiveRefreshResultResolved(effects::LiveRefreshResultResolved),
+    LiveCloseResultResolved(effects::LiveCloseResultResolved),
     LiveChannelStatusResolved(effects::LiveChannelStatusResolved),
     EnqueueClassifiedEntry(effects::EnqueueClassifiedEntry),
     PeerIngressClassified(effects::PeerIngressClassified),
@@ -9376,6 +9442,7 @@ pub enum EffectKind {
     SurfaceRequestCompleted,
     SurfaceRequestSupersededByCancel,
     LiveRefreshResultResolved,
+    LiveCloseResultResolved,
     LiveChannelStatusResolved,
     EnqueueClassifiedEntry,
     PeerIngressClassified,
@@ -10211,6 +10278,11 @@ pub enum TransitionId {
     RecordLiveRefreshQueuedRunning,
     RecordLiveRefreshQueuedRetired,
     RecordLiveRefreshQueuedStopped,
+    RecordLiveCloseClosedIdle,
+    RecordLiveCloseClosedAttached,
+    RecordLiveCloseClosedRunning,
+    RecordLiveCloseClosedRetired,
+    RecordLiveCloseClosedStopped,
     RecordLiveChannelStatusIdle,
     RecordLiveChannelStatusAttached,
     RecordLiveChannelStatusRunning,
@@ -10637,6 +10709,9 @@ pub fn initial_state() -> State {
         live_refresh_result_sequence: 0,
         live_refresh_queue_acceptance_sequence_by_channel: Default::default(),
         live_refresh_status_by_channel: Default::default(),
+        live_close_result_sequence: 0,
+        live_close_observation_sequence_by_channel: Default::default(),
+        live_close_status_by_channel: Default::default(),
         live_channel_status_result_sequence: 0,
         live_channel_status_observation_sequence_by_channel: Default::default(),
         live_channel_status_by_channel: Default::default(),

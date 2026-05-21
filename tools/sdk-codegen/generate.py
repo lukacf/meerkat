@@ -1069,6 +1069,16 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         wire_schema,
         "Response payload for live/refresh: typed `status` plus back-compat `refresh_enqueued` boolean.",
     )
+    append_python_alias(
+        "LiveCloseStatus",
+        wire_schema,
+        "Wire projection of LiveCloseStatus (today: only `closed`).",
+    )
+    append_python_dataclass(
+        "LiveCloseResult",
+        wire_schema,
+        "Response payload for live/close: typed `status` plus back-compat `closed` boolean.",
+    )
     # FIX-SDK-OBS: typed wire mirrors for adapter observations and their
     # tagged-payload helpers. Aliases (not dataclasses) because each is a
     # discriminated union (internally tagged on `observation` / `status` /
@@ -1506,6 +1516,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     # composes status with the back-compat `refresh_enqueued` boolean.
     append_typescript_alias("LiveRefreshStatus", wire_schema)
     append_typescript_interface("LiveRefreshResult", wire_schema)
+    append_typescript_alias("LiveCloseStatus", wire_schema)
+    append_typescript_interface("LiveCloseResult", wire_schema)
     append_typescript_alias("LiveInputChunkWire", wire_schema)
     # FIX-SDK-OBS: typed adapter observation discriminated unions. Aliases
     # because each is a serde-tagged enum. `RealtimeTranscriptEvent` is

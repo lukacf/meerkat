@@ -3362,6 +3362,49 @@ async def test_client_live_refresh_rejects_missing_or_unknown_generated_status()
 
 
 @pytest.mark.asyncio
+async def test_client_live_close_returns_typed_result():
+    from meerkat.generated.types import LiveCloseResult
+
+    client = MeerkatClient()
+
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method, params):
+        captured.append((method, params))
+        return {"status": "closed", "closed": True}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    result = await client.live_close("live_channel_44")
+
+    assert captured == [("live/close", {"channel_id": "live_channel_44"})]
+    assert isinstance(result, LiveCloseResult)
+    assert result.status == "closed"
+    assert result.closed is True
+
+
+@pytest.mark.asyncio
+async def test_client_live_close_rejects_missing_or_unknown_generated_status():
+    malformed_responses = [
+        {"closed": True},
+        {"status": "closed"},
+        {"status": "already_closed", "closed": True},
+    ]
+
+    for response in malformed_responses:
+        client = MeerkatClient()
+
+        async def fake_request(method, params, response=response):
+            assert method == "live/close"
+            return response
+
+        client._request = fake_request  # type: ignore[method-assign]
+
+        with pytest.raises(MeerkatError, match="Invalid live/close response"):
+            await client.live_close("live_channel_45")
+
+
+@pytest.mark.asyncio
 async def test_client_live_open_omits_turning_mode_when_default():
     """R4-2 (P2): when the caller does not pass ``turning_mode``, the
     Python SDK must omit the field on the wire — the server's

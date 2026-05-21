@@ -44,6 +44,7 @@ import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js"
 import {
   CONTRACT_VERSION,
   type LiveChannelParams,
+  type LiveCloseResult,
   type LiveCommitInputParams,
   type LiveOpenParams,
   type LiveOpenResult,
@@ -2414,8 +2415,9 @@ export class MeerkatClient {
     return result as unknown as LiveStatusResult;
   }
 
-  async liveClose(params: LiveChannelParams): Promise<void> {
-    await this.request("live/close", params as unknown as Record<string, unknown>);
+  async liveClose(params: LiveChannelParams): Promise<LiveCloseResult> {
+    const result = await this.request("live/close", params as unknown as Record<string, unknown>);
+    return MeerkatClient.parseLiveCloseResult(result);
   }
 
   async liveSendInput(params: LiveSendInputParams): Promise<void> {
@@ -2878,6 +2880,23 @@ export class MeerkatClient {
     }
     return {
       refresh_enqueued: refreshEnqueued,
+      status,
+    };
+  }
+
+  private static parseLiveCloseResult(raw: unknown): LiveCloseResult {
+    const context = "Invalid live/close response";
+    const record = MeerkatClient.requireRecord(raw, "result", context);
+    const closed = MeerkatClient.requireBooleanField(record, "closed", context);
+    const status = MeerkatClient.requireStringField(record, "status", context);
+    if (status !== "closed") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: unsupported status ${JSON.stringify(status)}`,
+      );
+    }
+    return {
+      closed,
       status,
     };
   }

@@ -676,6 +676,46 @@ impl LiveRefreshResult {
     }
 }
 
+/// Typed public result class for `live/close`.
+///
+/// Today generated runtime authority emits only `Closed`. The enum is
+/// `#[non_exhaustive]` so future generated contracts can add explicit result
+/// classes without changing the object shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveCloseStatus {
+    /// The host has accepted the close handoff and released channel transport
+    /// resources on a best-effort basis.
+    Closed,
+}
+
+/// Response payload for `live/close`.
+///
+/// The boolean `closed` field is preserved for back-compat alongside the typed
+/// `status` discriminator. New code should route on `status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveCloseResult {
+    /// Typed close status emitted by generated runtime authority.
+    /// Today: always [`LiveCloseStatus::Closed`].
+    pub status: LiveCloseStatus,
+    /// Back-compat mirror of the generated close-authority result. Always
+    /// `true` when paired with `status: closed`.
+    pub closed: bool,
+}
+
+impl LiveCloseResult {
+    /// Project the generated `Closed` authority result to the wire shape.
+    pub fn closed() -> Self {
+        Self {
+            status: LiveCloseStatus::Closed,
+            closed: true,
+        }
+    }
+}
+
 /// Modality-tagged input chunk for `live/send_input`.
 ///
 /// Audio / image / video-frame payloads are base64 strings (`data`); the
@@ -2385,6 +2425,16 @@ mod tests {
             Some(&serde_json::Value::String("queued".into())),
             "typed `status: queued` must be present alongside the legacy field"
         );
+    }
+
+    #[test]
+    fn live_close_result_closed_round_trip() {
+        let v = LiveCloseResult::closed();
+        let j = serde_json::to_value(&v).expect("round-trip should succeed");
+        assert_eq!(j["status"], "closed");
+        assert_eq!(j["closed"], serde_json::Value::Bool(true));
+        let back: LiveCloseResult = serde_json::from_value(j).expect("round-trip should succeed");
+        assert_eq!(v, back);
     }
 
     // R5-3 (P3) — explicit Unknown variant fail-loud regression tests for

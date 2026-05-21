@@ -1702,6 +1702,23 @@ asynchronous adapter-pump application."""
     status: Literal['queued']
 
 
+# Typed public result class for `live/close`.
+#
+# Today generated runtime authority emits only `Closed`. The enum is
+# `#[non_exhaustive]` so future generated contracts can add explicit result
+# classes without changing the object shape.
+LiveCloseStatus = Literal['closed']
+
+@dataclass
+class LiveCloseResult:
+    """Response payload for `live/close`.
+
+The boolean `closed` field is preserved for back-compat alongside the typed
+`status` discriminator. New code should route on `status`."""
+    closed: bool
+    status: Literal['closed']
+
+
 # A typed, identity-bearing realtime transcript event consumed by the session.
 class RealtimeTranscriptEventItemObserved(TypedDict, total=False):
     item_id: Required[str]

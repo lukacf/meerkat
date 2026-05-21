@@ -198,6 +198,24 @@ fn auth_lease_transition_authority_sources_matches_codegen_output() {
 }
 
 #[test]
+fn auth_lease_durable_lifecycle_marker_matches_codegen_output() {
+    let rendered = xtask::protocol_codegen::render_auth_lease_durable_lifecycle_marker_contract()
+        .expect("render auth_lease_durable_lifecycle_marker");
+    let rendered = rustfmt(&rendered);
+
+    let committed_path =
+        repo_root().join("meerkat-core/src/generated/auth_lease_durable_lifecycle_marker.rs");
+    let committed = std::fs::read_to_string(&committed_path)
+        .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
+
+    assert_eq!(
+        normalize(&committed),
+        normalize(&rendered),
+        "auth_lease_durable_lifecycle_marker.rs diverged from codegen output. If this is intentional, run `cargo xtask protocol-codegen` and commit the result."
+    );
+}
+
+#[test]
 fn pending_continuation_admission_matches_codegen_output() {
     use meerkat_machine_schema::catalog::dsl;
 

@@ -321,7 +321,11 @@ fn restore_marked_token_lifecycle_if_absent(
     lease_key: &meerkat_core::handles::LeaseKey,
 ) -> Result<(), ProviderAuthError> {
     let snapshot = auth_lease.snapshot(lease_key);
-    if snapshot.phase.is_some() || snapshot.credential_present {
+    if snapshot.phase.is_some()
+        || snapshot.credential_present
+        || snapshot.generation != 0
+        || snapshot.credential_published_at_millis.is_some()
+    {
         return Ok(());
     }
     meerkat_core::restore_marked_token_lifecycle(auth_lease, binding.auth_binding_ref(), tokens)
@@ -1215,37 +1219,16 @@ mod tests {
         credential_published_at_millis: Option<u64>,
     ) -> PersistedTokens {
         let mut marked = tokens.clone();
-        let mut marker = serde_json::json!({
-            "published": true,
-            "version": 2,
-            "generation": generation,
-            "expires_at": meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
-        });
-        if let Some(credential_published_at_millis) = credential_published_at_millis
-            && let Some(marker) = marker.as_object_mut()
-        {
-            marker.insert(
-                "credential_published_at_millis".to_string(),
-                serde_json::json!(credential_published_at_millis),
+        marked.metadata =
+            meerkat_core::generated::auth_lease_durable_lifecycle_marker::metadata_with_marker(
+                &tokens.metadata,
+                meerkat_core::generated::auth_lease_durable_lifecycle_marker::DurableAuthLifecycleMarker {
+                    phase: AuthLeasePhase::Valid,
+                    expires_at: meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
+                    generation,
+                    credential_published_at_millis: credential_published_at_millis.unwrap_or(1),
+                },
             );
-        }
-        match &mut marked.metadata {
-            serde_json::Value::Object(map) => {
-                map.insert("meerkat_auth_lifecycle".to_string(), marker);
-            }
-            serde_json::Value::Null => {
-                let mut metadata = serde_json::Map::new();
-                metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
-                marked.metadata = serde_json::Value::Object(metadata);
-            }
-            _ => {
-                let previous = std::mem::replace(&mut marked.metadata, serde_json::Value::Null);
-                let mut metadata = serde_json::Map::new();
-                metadata.insert("meerkat_auth_lifecycle".to_string(), marker);
-                metadata.insert("meerkat_previous_metadata".to_string(), previous);
-                marked.metadata = serde_json::Value::Object(metadata);
-            }
-        }
         marked
     }
 
@@ -2026,7 +2009,7 @@ mod tests {
             .await
             .unwrap();
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
-            phase: None,
+            phase: Some(AuthLeasePhase::Released),
             expires_at: None,
             credential_present: false,
             generation: 1,
@@ -2779,16 +2762,16 @@ mod tests {
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
-        let initial_tokens = mark_tokens_lifecycle_published_for_test(
-            &chatgpt_oauth_tokens("expired-access"),
-            1,
-            None,
-        );
-        store.save(&key, &initial_tokens).await.unwrap();
+        let raw_initial_tokens = chatgpt_oauth_tokens("expired-access");
         let auth_lease = StaticAuthLeaseHandle::valid_generation_with_expiry(
             1,
-            meerkat_core::persisted_token_expires_at_epoch_secs(&initial_tokens),
+            meerkat_core::persisted_token_expires_at_epoch_secs(&raw_initial_tokens),
         );
+        let initial_tokens = mark_tokens_lifecycle_published_from_snapshot_for_test(
+            &raw_initial_tokens,
+            &auth_lease.snapshot(&default_test_lease_key()),
+        );
+        store.save(&key, &initial_tokens).await.unwrap();
         let env = ResolverEnvironment::testing()
             .with_token_store(Arc::clone(&store))
             .with_auth_lease_handle(auth_lease.generated());

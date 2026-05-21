@@ -1128,6 +1128,7 @@ impl AuthLeaseRestoreSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseTransition {
     lease_key: LeaseKey,
+    phase: AuthLeasePhase,
     expires_at: u64,
     generation: u64,
     credential_published_at_millis: Option<u64>,
@@ -1136,6 +1137,10 @@ pub struct AuthLeaseTransition {
 impl AuthLeaseTransition {
     pub fn lease_key(&self) -> &LeaseKey {
         &self.lease_key
+    }
+
+    pub fn phase(&self) -> AuthLeasePhase {
+        self.phase
     }
 
     pub fn expires_at(&self) -> u64 {
@@ -1153,12 +1158,14 @@ impl AuthLeaseTransition {
     #[cfg_attr(not(meerkat_internal_generated_authority_bridge), allow(dead_code))]
     fn from_generated_auth_lease_publication_parts(
         lease_key: LeaseKey,
+        phase: AuthLeasePhase,
         expires_at: u64,
         generation: u64,
         credential_published_at_millis: Option<u64>,
     ) -> Self {
         Self {
             lease_key,
+            phase,
             expires_at,
             generation,
             credential_published_at_millis,
@@ -1235,6 +1242,7 @@ unsafe extern "Rust" {
 pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
     token: &'static (dyn std::any::Any + Send + Sync),
     lease_key: LeaseKey,
+    phase: AuthLeasePhase,
     expires_at: u64,
     generation: u64,
     credential_published_at_millis: Option<u64>,
@@ -1243,6 +1251,7 @@ pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
     Ok(
         AuthLeaseTransition::from_generated_auth_lease_publication_parts(
             lease_key,
+            phase,
             expires_at,
             generation,
             credential_published_at_millis,
@@ -1415,12 +1424,14 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
     fn restore_published_credential_lifecycle(
         &self,
         lease_key: &LeaseKey,
+        phase: AuthLeasePhase,
         expires_at: u64,
         generation: u64,
         credential_published_at_millis: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
         let _ = (
             lease_key,
+            phase,
             expires_at,
             generation,
             credential_published_at_millis,

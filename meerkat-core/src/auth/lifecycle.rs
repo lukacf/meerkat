@@ -19,6 +19,7 @@ use super::token_store::{
     PersistedAuthMode, PersistedTokens, TokenKey, TokenStore, TokenStoreError,
 };
 use crate::connection::AuthBindingRef;
+use crate::generated::auth_lease_durable_lifecycle_marker as durable_marker;
 use crate::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot,
     AuthLeaseTransition, DslTransitionError, LeaseKey,
@@ -69,9 +70,6 @@ pub fn persisted_token_expires_at_epoch_secs(tokens: &PersistedTokens) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-const TOKEN_LIFECYCLE_METADATA_KEY: &str = "meerkat_auth_lifecycle";
-const TOKEN_LIFECYCLE_PREVIOUS_METADATA_KEY: &str = "meerkat_previous_metadata";
-
 pub fn persisted_auth_mode_uses_oauth_login_lifecycle(mode: PersistedAuthMode) -> bool {
     matches!(
         mode,
@@ -85,6 +83,7 @@ pub fn persisted_auth_mode_uses_oauth_login_lifecycle(mode: PersistedAuthMode) -
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenLifecyclePublication {
+    pub phase: Option<AuthLeasePhase>,
     pub generation: Option<u64>,
     pub expires_at: u64,
     pub credential_published_at_millis: Option<u64>,
@@ -106,55 +105,32 @@ pub enum TokenLifecycleMarkerError {
         token_expires_at: u64,
         transition_expires_at: u64,
     },
+    #[error("AuthMachine lifecycle transition did not carry a credential publication time")]
+    CredentialPublicationTimeMissing,
 }
 
 fn mark_tokens_lifecycle_published_inner(
     tokens: &PersistedTokens,
-    generation: Option<u64>,
-    credential_published_at_millis: Option<u64>,
+    phase: AuthLeasePhase,
+    generation: u64,
+    credential_published_at_millis: u64,
 ) -> PersistedTokens {
     let mut marked = tokens.clone();
-    let mut marker = serde_json::json!({
-        "published": true,
-        "version": 2,
-        "expires_at": persisted_token_expires_at_epoch_secs(tokens),
-    });
-    if let Some(generation) = generation
-        && let Some(marker) = marker.as_object_mut()
-    {
-        marker.insert("generation".to_string(), serde_json::json!(generation));
-    }
-    if let Some(credential_published_at_millis) = credential_published_at_millis
-        && let Some(marker) = marker.as_object_mut()
-    {
-        marker.insert(
-            "credential_published_at_millis".to_string(),
-            serde_json::json!(credential_published_at_millis),
-        );
-    }
-    match &mut marked.metadata {
-        serde_json::Value::Object(map) => {
-            map.insert(TOKEN_LIFECYCLE_METADATA_KEY.to_string(), marker);
-        }
-        serde_json::Value::Null => {
-            let mut metadata = serde_json::Map::new();
-            metadata.insert(TOKEN_LIFECYCLE_METADATA_KEY.to_string(), marker);
-            marked.metadata = serde_json::Value::Object(metadata);
-        }
-        _ => {
-            let previous = std::mem::replace(&mut marked.metadata, serde_json::Value::Null);
-            let mut metadata = serde_json::Map::new();
-            metadata.insert(TOKEN_LIFECYCLE_METADATA_KEY.to_string(), marker);
-            metadata.insert(TOKEN_LIFECYCLE_PREVIOUS_METADATA_KEY.to_string(), previous);
-            marked.metadata = serde_json::Value::Object(metadata);
-        }
-    }
+    marked.metadata = durable_marker::metadata_with_marker(
+        &marked.metadata,
+        durable_marker::DurableAuthLifecycleMarker {
+            phase,
+            expires_at: persisted_token_expires_at_epoch_secs(tokens),
+            generation,
+            credential_published_at_millis,
+        },
+    );
     marked
 }
 
 #[cfg(test)]
 fn mark_tokens_lifecycle_published(tokens: &PersistedTokens) -> PersistedTokens {
-    mark_tokens_lifecycle_published_inner(tokens, None, None)
+    mark_tokens_lifecycle_published_inner(tokens, AuthLeasePhase::Valid, 1, 1)
 }
 
 pub fn mark_tokens_lifecycle_published_for_transition(
@@ -177,20 +153,19 @@ pub fn mark_tokens_lifecycle_published_for_transition(
             transition_expires_at: transition.expires_at(),
         });
     }
+    let credential_published_at_millis = transition
+        .credential_published_at_millis()
+        .ok_or(TokenLifecycleMarkerError::CredentialPublicationTimeMissing)?;
     Ok(mark_tokens_lifecycle_published_inner(
         tokens,
-        Some(transition.generation()),
-        transition.credential_published_at_millis(),
+        transition.phase(),
+        transition.generation(),
+        credential_published_at_millis,
     ))
 }
 
 pub fn tokens_lifecycle_published(tokens: &PersistedTokens) -> bool {
-    tokens
-        .metadata
-        .get(TOKEN_LIFECYCLE_METADATA_KEY)
-        .and_then(|marker| marker.get("published"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
+    durable_marker::metadata_has_valid_marker(&tokens.metadata)
 }
 
 pub fn tokens_lifecycle_published_generation(tokens: &PersistedTokens) -> Option<u64> {
@@ -209,35 +184,20 @@ pub fn tokens_lifecycle_publication_with_explicit_expiry(
 
 fn tokens_lifecycle_publication_inner(
     tokens: &PersistedTokens,
-    require_explicit_expiry: bool,
+    _require_explicit_expiry: bool,
 ) -> Option<TokenLifecyclePublication> {
-    if !tokens_lifecycle_published(tokens) {
-        return None;
-    }
-    let marker = tokens.metadata.get(TOKEN_LIFECYCLE_METADATA_KEY)?;
-    let generation = marker.get("generation").and_then(serde_json::Value::as_u64);
-    let explicit_expires_at = marker.get("expires_at").and_then(serde_json::Value::as_u64);
-    let expires_at = match (explicit_expires_at, require_explicit_expiry) {
-        (Some(expires_at), _) => expires_at,
-        (None, true) => return None,
-        (None, false) => persisted_token_expires_at_epoch_secs(tokens),
-    };
-    let credential_published_at_millis = marker
-        .get("credential_published_at_millis")
-        .and_then(serde_json::Value::as_u64);
+    let marker = durable_marker::read_marker_from_metadata(&tokens.metadata)?;
     Some(TokenLifecyclePublication {
-        generation,
-        expires_at,
-        credential_published_at_millis,
+        phase: Some(marker.phase),
+        generation: Some(marker.generation),
+        expires_at: marker.expires_at,
+        credential_published_at_millis: Some(marker.credential_published_at_millis),
     })
 }
 
 pub fn tokens_lifecycle_published_credential_time(tokens: &PersistedTokens) -> Option<u64> {
-    tokens
-        .metadata
-        .get(TOKEN_LIFECYCLE_METADATA_KEY)
-        .and_then(|marker| marker.get("credential_published_at_millis"))
-        .and_then(serde_json::Value::as_u64)
+    durable_marker::read_marker_from_metadata(&tokens.metadata)
+        .map(|marker| marker.credential_published_at_millis)
 }
 
 pub fn publish_token_lifecycle_acquired(
@@ -390,6 +350,9 @@ pub fn restore_marked_token_lifecycle(
     if publication.expires_at != persisted_token_expires_at_epoch_secs(tokens) {
         return Ok(None);
     }
+    let Some(phase) = publication.phase else {
+        return Ok(None);
+    };
     let Some(generation) = publication.generation else {
         return Ok(None);
     };
@@ -400,6 +363,7 @@ pub fn restore_marked_token_lifecycle(
     auth_lease
         .restore_published_credential_lifecycle(
             &lease_key,
+            phase,
             publication.expires_at,
             generation,
             credential_published_at_millis,
@@ -510,6 +474,25 @@ mod tests {
 
         assert!(tokens_lifecycle_published(&marked));
         assert_eq!(marked.metadata["provider"], "openai");
+    }
+
+    #[test]
+    fn lifecycle_marker_rejects_wrong_schema_version() {
+        let oauth = oauth_tokens_with_metadata(serde_json::json!({
+            "meerkat_auth_lifecycle": {
+                "published": true,
+                "version": 2,
+                "authority": "auth_machine",
+                "protocol": "auth_lease_lifecycle_publication",
+                "phase": "valid",
+                "generation": 1,
+                "expires_at": u64::MAX,
+                "credential_published_at_millis": 1,
+            }
+        }));
+
+        assert!(!tokens_lifecycle_published(&oauth));
+        assert!(tokens_lifecycle_publication(&oauth).is_none());
     }
 
     #[test]

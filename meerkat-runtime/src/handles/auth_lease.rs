@@ -181,6 +181,17 @@ fn restore_input_from_state(state: &auth_dsl::AuthMachineState) -> auth_dsl::Aut
     )
 }
 
+fn restore_phase_to_dsl(phase: AuthLeasePhase) -> auth_dsl::AuthLifecyclePhase {
+    match phase {
+        AuthLeasePhase::Valid => auth_dsl::AuthLifecyclePhase::Valid,
+        AuthLeasePhase::Expiring => auth_dsl::AuthLifecyclePhase::Expiring,
+        AuthLeasePhase::Expired => auth_dsl::AuthLifecyclePhase::Expired,
+        AuthLeasePhase::Refreshing => auth_dsl::AuthLifecyclePhase::Refreshing,
+        AuthLeasePhase::ReauthRequired => auth_dsl::AuthLifecyclePhase::ReauthRequired,
+        AuthLeasePhase::Released => auth_dsl::AuthLifecyclePhase::Released,
+    }
+}
+
 fn restore_input_from_lifecycle(
     lifecycle_phase: auth_dsl::AuthLifecyclePhase,
     expires_at: Option<u64>,
@@ -1383,6 +1394,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
     fn restore_published_credential_lifecycle(
         &self,
         lease_key: &LeaseKey,
+        phase: AuthLeasePhase,
         expires_at: u64,
         generation: u64,
         credential_published_at_millis: u64,
@@ -1401,11 +1413,11 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             &mut guard,
             lease_key,
             restore_input_from_lifecycle(
-                auth_dsl::AuthLifecyclePhase::Valid,
+                restore_phase_to_dsl(phase),
                 (expires_at != u64::MAX).then_some(expires_at),
                 None,
                 0,
-                true,
+                phase != AuthLeasePhase::Released,
                 generation,
                 Some(credential_published_at_millis),
             ),
@@ -1891,6 +1903,7 @@ mod tests {
         restored
             .restore_published_credential_lifecycle(
                 &key,
+                transition.phase(),
                 transition.expires_at(),
                 transition.generation(),
                 published_at,

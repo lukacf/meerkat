@@ -223,6 +223,9 @@ pub fn live_emit_paths() -> BTreeSet<PathBuf> {
         "meerkat-core/src/generated/auth_lease_transition_authority_sources.rs",
     ));
     set.insert(PathBuf::from(
+        "meerkat-core/src/generated/auth_lease_durable_lifecycle_marker.rs",
+    ));
+    set.insert(PathBuf::from(
         "meerkat-core/src/generated/pending_continuation_admission.rs",
     ));
 

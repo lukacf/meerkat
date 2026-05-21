@@ -118,12 +118,23 @@ impl AuthLeaseLifecyclePublicationObligation {
             return Err("generated auth lease lifecycle publication was already consumed".into());
         }
         scope.validate_obligation(self)?;
+        let phase = match self.new_state {
+            AuthLifecyclePhase::Valid => meerkat_core::handles::AuthLeasePhase::Valid,
+            AuthLifecyclePhase::Expiring => meerkat_core::handles::AuthLeasePhase::Expiring,
+            AuthLifecyclePhase::Expired => meerkat_core::handles::AuthLeasePhase::Expired,
+            AuthLifecyclePhase::Refreshing => meerkat_core::handles::AuthLeasePhase::Refreshing,
+            AuthLifecyclePhase::ReauthRequired => {
+                meerkat_core::handles::AuthLeasePhase::ReauthRequired
+            }
+            AuthLifecyclePhase::Released => meerkat_core::handles::AuthLeasePhase::Released,
+        };
         #[allow(improper_ctypes_definitions, unsafe_code)]
         unsafe extern "Rust" {
             #[link_name = concat!("__meerkat_core_runtime_generated_auth_lease_transition_build_v1_", env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX"))]
             fn core_runtime_generated_auth_lease_transition_build(
                 token: &'static (dyn std::any::Any + Send + Sync),
                 lease_key: meerkat_core::handles::LeaseKey,
+                phase: meerkat_core::handles::AuthLeasePhase,
                 expires_at: u64,
                 generation: u64,
                 credential_published_at_millis: Option<u64>,
@@ -134,6 +145,7 @@ impl AuthLeaseLifecyclePublicationObligation {
             core_runtime_generated_auth_lease_transition_build(
                 generated_authority_bridge_token(),
                 scope.lease_key,
+                phase,
                 self.expires_at.unwrap_or(u64::MAX),
                 self.credential_generation,
                 self.credential_published_at_millis,

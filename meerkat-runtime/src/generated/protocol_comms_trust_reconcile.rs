@@ -1,7 +1,7 @@
 // @generated — protocol helpers for `comms_trust_reconcile`
 // Composition: meerkat_mob_seam, Producer: meerkat, Effect: CommsTrustReconcileRequested
-// Closure policy: AckRequired
-// Liveness: projection mutation is applied by the owning runtime after consuming this typed obligation
+// Closure policy: PublicationOnly
+// Liveness: generated authority publication is consumed by the owning runtime; no source-machine feedback is declared
 
 use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};
 

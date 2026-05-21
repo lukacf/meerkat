@@ -1,6 +1,6 @@
 // @generated — protocol helpers for `auth_lease_lifecycle_publication`
 // Composition: auth_lease_bundle, Producer: auth_machine, Effect: EmitLifecycleEvent
-// Closure policy: AckRequired
+// Closure policy: PublicationOnly
 // Liveness: informative publication: AuthMachine's own transitions carry the authoritative phase fact; runtime owner refreshes the lease-state projection under task-scheduling fairness
 
 use crate::auth_machine::dsl::{AuthLifecyclePhase, AuthMachineEffect, AuthMachineTransition};

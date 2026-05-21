@@ -1613,6 +1613,48 @@ mod handoff_binding {
     }
 
     #[test]
+    fn ack_required_closure_requires_feedback_input() {
+        let mut protocol = handle_bridge_protocol(ok_handle_binding());
+        protocol.allowed_feedback_inputs = vec![];
+        let composition = composition_with_protocol(protocol);
+
+        let err = composition
+            .validate()
+            .expect_err("AckRequired without feedback must be rejected");
+        match err {
+            CompositionSchemaError::InvalidHandoffClosurePolicy { protocol, detail } => {
+                assert_eq!(protocol, "test_handoff");
+                assert!(
+                    detail.contains("AckRequired"),
+                    "error detail should name AckRequired, got {detail}"
+                );
+            }
+            other => panic!("expected InvalidHandoffClosurePolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publication_only_closure_rejects_feedback_inputs() {
+        let mut protocol = handle_bridge_protocol(ok_handle_binding());
+        protocol.closure_policy = ClosurePolicy::PublicationOnly;
+        let composition = composition_with_protocol(protocol);
+
+        let err = composition
+            .validate()
+            .expect_err("PublicationOnly with feedback must be rejected");
+        match err {
+            CompositionSchemaError::InvalidHandoffClosurePolicy { protocol, detail } => {
+                assert_eq!(protocol, "test_handoff");
+                assert!(
+                    detail.contains("PublicationOnly"),
+                    "error detail should name PublicationOnly, got {detail}"
+                );
+            }
+            other => panic!("expected InvalidHandoffClosurePolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn validate_against_rejects_protocol_without_machine_owned_disposition() {
         let binding = ProtocolRustBinding {
             module_path: "crate-x/src/generated/proto.rs".into(),
@@ -1642,7 +1684,7 @@ mod handoff_binding {
             correlation_fields: vec![],
             obligation_fields: vec![],
             allowed_feedback_inputs: vec![],
-            closure_policy: ClosurePolicy::AckRequired,
+            closure_policy: ClosurePolicy::PublicationOnly,
             liveness_annotation: None,
             comms_trust_authority: None,
             durable_marker: None,

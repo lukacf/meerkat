@@ -4726,6 +4726,7 @@ fn closure_policy_label(policy: &ClosurePolicy) -> &'static str {
         ClosurePolicy::AckRequired => "AckRequired",
         ClosurePolicy::AckOrAbort => "AckOrAbort",
         ClosurePolicy::TerminalClosure => "TerminalClosure",
+        ClosurePolicy::PublicationOnly => "PublicationOnly",
     }
 }
 

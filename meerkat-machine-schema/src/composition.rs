@@ -531,6 +531,9 @@ pub enum ClosurePolicy {
     AckOrAbort,
     /// Obligation is closed when machine reaches terminal phase.
     TerminalClosure,
+    /// Generated publication/authority emission is the closure event; no
+    /// owner feedback input is part of the protocol.
+    PublicationOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -740,6 +743,21 @@ impl CompositionSchema {
                     protocol: protocol.name.as_str().to_owned(),
                     detail: "module_path must not be empty".into(),
                 });
+            }
+            match protocol.closure_policy {
+                ClosurePolicy::AckRequired if protocol.allowed_feedback_inputs.is_empty() => {
+                    return Err(CompositionSchemaError::InvalidHandoffClosurePolicy {
+                        protocol: protocol.name.as_str().to_owned(),
+                        detail: "AckRequired requires at least one generated feedback input".into(),
+                    });
+                }
+                ClosurePolicy::PublicationOnly if !protocol.allowed_feedback_inputs.is_empty() => {
+                    return Err(CompositionSchemaError::InvalidHandoffClosurePolicy {
+                        protocol: protocol.name.as_str().to_owned(),
+                        detail: "PublicationOnly protocols must not declare feedback inputs".into(),
+                    });
+                }
+                _ => {}
             }
             validate_generation_mode_binding(protocol, &protocol.rust.generation_mode)?;
             // Stacked modes must be distinct and not repeat the primary.
@@ -2487,6 +2505,10 @@ pub enum CompositionSchemaError {
         protocol: String,
         detail: String,
     },
+    InvalidHandoffClosurePolicy {
+        protocol: String,
+        detail: String,
+    },
     DirectRouteBypassesHandoffProtocol {
         protocol: String,
         machine: String,
@@ -2871,6 +2893,10 @@ impl fmt::Display for CompositionSchemaError {
             Self::InvalidHandoffRustBinding { protocol, detail } => write!(
                 f,
                 "handoff protocol `{protocol}` has invalid Rust binding metadata: {detail}"
+            ),
+            Self::InvalidHandoffClosurePolicy { protocol, detail } => write!(
+                f,
+                "handoff protocol `{protocol}` has invalid closure policy: {detail}"
             ),
             Self::DirectRouteBypassesHandoffProtocol {
                 protocol,

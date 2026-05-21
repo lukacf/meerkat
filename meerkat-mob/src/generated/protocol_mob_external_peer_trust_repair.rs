@@ -1,7 +1,7 @@
 // @generated — protocol helpers for `mob_external_peer_trust_repair`
 // Composition: meerkat_mob_seam, Producer: mob, Effect: ExternalPeerTrustRepairRequested
-// Closure policy: AckRequired
-// Liveness: projection mutation is applied by the owning runtime after consuming this typed obligation
+// Closure policy: PublicationOnly
+// Liveness: generated authority publication is consumed by the owning runtime; no source-machine feedback is declared
 
 use crate::machines::mob_machine::{
     ExternalPeerEdge, MobMachineEffect, MobMachineTransition, PeerId,

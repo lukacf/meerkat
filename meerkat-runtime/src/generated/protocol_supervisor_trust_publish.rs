@@ -1,7 +1,7 @@
 // @generated — protocol helpers for `supervisor_trust_publish`
 // Composition: meerkat_mob_seam, Producer: meerkat, Effect: PublishSupervisorTrustEdge
-// Closure policy: AckRequired
-// Liveness: eventual feedback under comms transport liveness — `send_bridge_response` surfaces the typed outcome
+// Closure policy: PublicationOnly
+// Liveness: generated supervisor trust authority publication is consumed under comms transport liveness
 
 use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};
 

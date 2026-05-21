@@ -755,9 +755,9 @@ fn trust_handoff_protocol(spec: TrustHandoffProtocolSpec<'_>) -> EffectHandoffPr
             .map(|field| fld_id(field))
             .collect(),
         allowed_feedback_inputs: vec![],
-        closure_policy: ClosurePolicy::AckRequired,
+        closure_policy: ClosurePolicy::PublicationOnly,
         liveness_annotation: Some(
-            "projection mutation is applied by the owning runtime after consuming this typed obligation"
+            "generated authority publication is consumed by the owning runtime; no source-machine feedback is declared"
                 .into(),
         ),
         comms_trust_authority: Some(CommsTrustAuthorityProtocol {
@@ -1383,43 +1383,40 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
 /// today (see `meerkat-runtime/src/meerkat_machine/dsl.rs` DSL comment
 /// `:114-134` and `state-scope-audit.md` §3 row F2).
 ///
-/// C-F2 formalises the step-lock as a generated obligation pair so the
-/// companion trust-edge mutation crosses from the supervisor-binding
-/// authority back through acknowledged owner feedback, not via a raw
-/// shell call that the machine forgets about. The canonical
+/// C-F2 formalises the step-lock as a generated obligation publication
+/// so the companion trust-edge mutation crosses from the
+/// supervisor-binding authority through minted generated trust-mutation
+/// authority, not via a raw shell call that the machine forgets about. The canonical
 /// `MeerkatMachine` effects host the `handoff_protocol` annotations;
 /// the realising actor `supervisor_bridge_owner` corresponds to
 /// `meerkat-runtime::comms_drain`, which calls
-/// `meerkat-comms::Router::{add,remove}_trusted_peer(...)` and emits
-/// the typed feedback ack through the generated protocol helper.
+/// `meerkat-comms::Router::{add,remove}_trusted_peer(...)` only with a
+/// generated `CommsTrustMutationAuthority`.
 ///
 /// Two protocols:
 ///
 /// * `supervisor_trust_publish` — publish trust edge (add trusted
 ///   peer). Emitted alongside `BindSupervisor` and
-///   `AuthorizeSupervisor`. Feedback: `SupervisorTrustEdgePublished`
-///   or `SupervisorTrustEdgePublishFailed` (the latter triggers a
-///   shell-side rollback of the supervisor-binding DSL commit —
-///   preserving the invariant that "trust edge is published iff
-///   `supervisor_binding_kind == Bound`").
+///   `AuthorizeSupervisor`. The generated obligation authorizes the
+///   private trust add/removal cleanup authority for the declared peer
+///   and epoch.
 /// * `supervisor_trust_revoke` — revoke trust edge (remove trusted
 ///   peer). Emitted alongside `RevokeSupervisor` and during the
-///   previous-supervisor cleanup half of `AuthorizeSupervisor`.
-///   Feedback: `SupervisorTrustEdgeRevoked` or
-///   `SupervisorTrustEdgeRevokeFailed`.
+///   previous-supervisor cleanup half of `AuthorizeSupervisor`. The
+///   generated obligation authorizes only the matching private trust
+///   removal.
 ///
-/// `closure_policy` is `AckRequired` for both: the shell must feed
-/// back success or failure. `liveness_annotation` documents that
-/// feedback is eventual under the comms transport's liveness guarantee
-/// (the existing `send_bridge_response` path already surfaces typed
-/// outcomes).
+/// `closure_policy` is `PublicationOnly` for both: the generated
+/// obligation mints the only trust-mutation authority the owning shell
+/// can spend, and there is no feedback input back into `MeerkatMachine`.
+/// `liveness_annotation` documents that publication is consumed under
+/// the comms transport's liveness guarantee.
 ///
 /// Mode: EffectExtractor. The owner (`comms_drain`) consumes the
 /// obligation via the generated extractor, calls `router.add_trusted_peer`
-/// / `remove_trusted_peer`, and submits feedback through the runtime's
-/// existing supervisor trust staging methods. Until those staging methods
-/// are lifted behind a sync handle bridge, the generated surface owns the
-/// obligation extraction and the hand-written owner owns the async ack.
+/// / `remove_trusted_peer` with the generated trust-mutation authority.
+/// The generated surface owns obligation extraction and authority minting;
+/// the hand-written owner can only spend that authority.
 fn supervisor_trust_bundle_composition() -> CompositionSchema {
     CompositionSchema {
         name: comp_id("supervisor_trust_bundle"),
@@ -1449,10 +1446,9 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     fld_id("epoch"),
                 ],
                 allowed_feedback_inputs: vec![],
-                closure_policy: ClosurePolicy::AckRequired,
+                closure_policy: ClosurePolicy::PublicationOnly,
                 liveness_annotation: Some(
-                    "eventual feedback under comms transport liveness — \
-                     `send_bridge_response` surfaces the typed outcome"
+                    "generated supervisor trust authority publication is consumed under comms transport liveness"
                         .into(),
                 ),
                 comms_trust_authority: Some(CommsTrustAuthorityProtocol {
@@ -1510,10 +1506,9 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     fld_id("epoch"),
                 ],
                 allowed_feedback_inputs: vec![],
-                closure_policy: ClosurePolicy::AckRequired,
+                closure_policy: ClosurePolicy::PublicationOnly,
                 liveness_annotation: Some(
-                    "eventual feedback under comms transport liveness — \
-                     `send_bridge_response` surfaces the typed outcome"
+                    "generated supervisor trust authority publication is consumed under comms transport liveness"
                         .into(),
                 ),
                 comms_trust_authority: Some(CommsTrustAuthorityProtocol {
@@ -1574,7 +1569,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     effect_variant: ev_id("PublishSupervisorTrustEdge"),
                     protocol_name: protocol_id("supervisor_trust_publish"),
                 },
-                statement: "supervisor trust-edge publication crosses from the supervisor-binding authority back into runtime acknowledgement only through the explicit `supervisor_trust_publish` protocol".into(),
+                statement: "supervisor trust-edge publication crosses from the supervisor-binding authority into runtime trust mutation only through the explicit `supervisor_trust_publish` protocol and its generated trust authority".into(),
                 references_machines: vec![mi_id("meerkat")],
                 references_actors: vec![act_id("meerkat_kernel"), act_id("supervisor_bridge_owner")],
             },
@@ -1585,7 +1580,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     effect_variant: ev_id("RevokeSupervisorTrustEdge"),
                     protocol_name: protocol_id("supervisor_trust_revoke"),
                 },
-                statement: "supervisor trust-edge revocation crosses from the supervisor-binding authority back into runtime acknowledgement only through the explicit `supervisor_trust_revoke` protocol".into(),
+                statement: "supervisor trust-edge revocation crosses from the supervisor-binding authority into runtime trust mutation only through the explicit `supervisor_trust_revoke` protocol and its generated trust authority".into(),
                 references_machines: vec![mi_id("meerkat")],
                 references_actors: vec![act_id("meerkat_kernel"), act_id("supervisor_bridge_owner")],
             },
@@ -1838,7 +1833,7 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
                 fld_id("credential_published_at_millis"),
             ],
             allowed_feedback_inputs: vec![],
-            closure_policy: ClosurePolicy::AckRequired,
+            closure_policy: ClosurePolicy::PublicationOnly,
             liveness_annotation: Some(
                 "informative publication: AuthMachine's own transitions carry the \
                  authoritative phase fact; runtime owner refreshes the lease-state \

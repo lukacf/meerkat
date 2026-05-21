@@ -354,7 +354,7 @@ fn default_protocol_feedback_constraints() -> Vec<ProtocolFeedbackConstraintRule
 /// Build terminal mapping constraint rules from canonical compositions.
 /// Only protocols with `TerminalClosure` policy whose producer has terminal
 /// phases generate a constraint — other closure policies (AckRequired,
-/// AckOrAbort) don't need terminal classification helpers.
+/// AckOrAbort, PublicationOnly) don't need terminal classification helpers.
 fn default_terminal_mapping_constraints() -> Vec<TerminalMappingConstraintRule> {
     use meerkat_machine_schema::{
         ClosurePolicy, canonical_composition_schemas, canonical_machine_schemas,

@@ -41,6 +41,7 @@ use crate::tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot,
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot, watch};
 
+pub use crate::turn_admission::ObservedSessionTailKind;
 use crate::turn_admission::{
     StartTurnDispatchAuthorization, StartTurnDisposition, StartTurnPublicTerminal,
     TurnAdmissionPhase, TurnAdmissionProjection, TurnAdmissionSlot,
@@ -604,12 +605,13 @@ pub trait SessionAgent: Send {
         None
     }
 
-    /// Whether the session has a pending user/tool-results boundary.
+    /// Observe the session transcript tail.
     ///
-    /// Lightweight check used by the ResumePending no-op guard to avoid
-    /// calling `session_clone()` just to inspect the last message.
-    fn has_pending_boundary(&self) -> bool {
-        false // default: no pending boundary
+    /// This is deliberately a typed observation, not a pending-boundary
+    /// decision. Generated turn-admission authority owns which tail kinds can
+    /// admit pending continuation.
+    fn observed_session_tail(&self) -> ObservedSessionTailKind {
+        ObservedSessionTailKind::Empty
     }
 
     /// Update the `keep_alive` flag in the session's durable metadata.
@@ -3365,17 +3367,17 @@ async fn session_task<A: SessionAgent>(
                     .flat_map(|pending| pending.results.clone())
                     .collect::<Vec<_>>();
 
-                let disposition = {
+                let resolution = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
                     slot.resolve_start_turn_disposition(
                         execution_kind,
                         &prompt,
-                        agent.has_pending_boundary(),
-                        !flattened_tool_results.is_empty(),
+                        agent.observed_session_tail(),
+                        u64::try_from(flattened_tool_results.len()).unwrap_or(u64::MAX),
                     )
                 };
-                let disposition = match disposition {
-                    Ok(disposition) => disposition,
+                let resolution = match resolution {
+                    Ok(resolution) => resolution,
                     Err(error) => {
                         restore_deferred_turn_inputs(
                             &deferred_turn_state,
@@ -3396,7 +3398,9 @@ async fn session_task<A: SessionAgent>(
                         continue;
                     }
                 };
+                let disposition = resolution.disposition;
                 if matches!(disposition, StartTurnDisposition::NoPendingBoundary) {
+                    let terminal = resolution.public_terminal;
                     restore_deferred_turn_inputs(
                         &deferred_turn_state,
                         restore_first_turn_pending,
@@ -3409,7 +3413,36 @@ async fn session_task<A: SessionAgent>(
                         admission.restore_staged_capacity();
                     }
                     abort_admitted_turn(&control);
-                    let _ = result_tx.send(Err(meerkat_core::error::AgentError::NoPendingBoundary));
+                    let result = if terminal == Some(StartTurnPublicTerminal::NoPendingBoundary) {
+                        Err(meerkat_core::error::AgentError::NoPendingBoundary)
+                    } else {
+                        Err(meerkat_core::error::AgentError::InternalError(
+                            "generated turn authority omitted NoPendingBoundary terminal witness"
+                                .to_string(),
+                        ))
+                    };
+                    let _ = result_tx.send(result);
+                    continue;
+                }
+                if let Some(terminal) = resolution.public_terminal {
+                    restore_deferred_turn_inputs(
+                        &deferred_turn_state,
+                        restore_first_turn_pending,
+                        pending_initial_prompt,
+                        pending_tool_results,
+                    );
+                    if restore_staged_capacity_on_pre_run_failure
+                        && let Some(admission) = active_admission.take()
+                    {
+                        admission.restore_staged_capacity();
+                    }
+                    abort_admitted_turn(&control);
+                    let _ =
+                        result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
+                            format!(
+                                "generated turn authority emitted terminal {terminal:?} for runnable disposition {disposition:?}"
+                            ),
+                        )));
                     continue;
                 }
 

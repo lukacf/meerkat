@@ -21,6 +21,18 @@ mod authority {
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+    pub enum ObservedSessionTailKind {
+        #[default]
+        Empty,
+        System,
+        SystemNotice,
+        User,
+        Assistant,
+        BlockAssistant,
+        ToolResults,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
     pub(crate) enum StartTurnDisposition {
         #[default]
         RunContentTurn,
@@ -84,9 +96,10 @@ mod authority {
                 ResolveStartTurnDisposition {
                     execution_kind_present: bool,
                     execution_kind: Enum<StartTurnExecutionKind>,
-                    prompt_has_content: bool,
-                    session_has_pending_boundary: bool,
-                    has_staged_tool_results: bool,
+                    prompt_trimmed_text_byte_count: u64,
+                    prompt_non_text_block_count: u64,
+                    session_tail: Enum<ObservedSessionTailKind>,
+                    staged_tool_result_count: u64,
                 },
             }
 
@@ -108,8 +121,16 @@ mod authority {
                 phase == Phase::Admitted || phase == Phase::Running || phase == Phase::Completing
             }
 
-            helper has_effective_pending_boundary(session_has_pending_boundary: bool, has_staged_tool_results: bool) -> bool {
-                session_has_pending_boundary || has_staged_tool_results
+            helper prompt_has_content(prompt_trimmed_text_byte_count: u64, prompt_non_text_block_count: u64) -> bool {
+                prompt_trimmed_text_byte_count > 0 || prompt_non_text_block_count > 0
+            }
+
+            helper tail_has_pending_boundary(session_tail: Enum<ObservedSessionTailKind>) -> bool {
+                session_tail == ObservedSessionTailKind::User || session_tail == ObservedSessionTailKind::ToolResults
+            }
+
+            helper has_effective_pending_boundary(session_tail: Enum<ObservedSessionTailKind>, staged_tool_result_count: u64) -> bool {
+                tail_has_pending_boundary(session_tail) || staged_tool_result_count > 0
             }
 
             invariant shutdown_phase_is_not_active {
@@ -397,9 +418,10 @@ mod authority {
                 on input ResolveStartTurnDisposition {
                     execution_kind_present,
                     execution_kind,
-                    prompt_has_content,
-                    session_has_pending_boundary,
-                    has_staged_tool_results
+                    prompt_trimmed_text_byte_count,
+                    prompt_non_text_block_count,
+                    session_tail,
+                    staged_tool_result_count
                 }
                 guard {
                     self.lifecycle_phase == Phase::Admitted
@@ -417,15 +439,16 @@ mod authority {
                 on input ResolveStartTurnDisposition {
                     execution_kind_present,
                     execution_kind,
-                    prompt_has_content,
-                    session_has_pending_boundary,
-                    has_staged_tool_results
+                    prompt_trimmed_text_byte_count,
+                    prompt_non_text_block_count,
+                    session_tail,
+                    staged_tool_result_count
                 }
                 guard {
                     self.lifecycle_phase == Phase::Admitted
                     && execution_kind_present
                     && execution_kind == StartTurnExecutionKind::ResumePending
-                    && has_effective_pending_boundary(session_has_pending_boundary, has_staged_tool_results)
+                    && has_effective_pending_boundary(session_tail, staged_tool_result_count)
                 }
                 update {
                     self.last_public_terminal = None;
@@ -438,15 +461,16 @@ mod authority {
                 on input ResolveStartTurnDisposition {
                     execution_kind_present,
                     execution_kind,
-                    prompt_has_content,
-                    session_has_pending_boundary,
-                    has_staged_tool_results
+                    prompt_trimmed_text_byte_count,
+                    prompt_non_text_block_count,
+                    session_tail,
+                    staged_tool_result_count
                 }
                 guard {
                     self.lifecycle_phase == Phase::Admitted
                     && execution_kind_present
                     && execution_kind == StartTurnExecutionKind::ResumePending
-                    && has_effective_pending_boundary(session_has_pending_boundary, has_staged_tool_results) == false
+                    && has_effective_pending_boundary(session_tail, staged_tool_result_count) == false
                 }
                 update {
                     self.last_public_terminal = Some(StartTurnPublicTerminal::NoPendingBoundary);
@@ -460,14 +484,15 @@ mod authority {
                 on input ResolveStartTurnDisposition {
                     execution_kind_present,
                     execution_kind,
-                    prompt_has_content,
-                    session_has_pending_boundary,
-                    has_staged_tool_results
+                    prompt_trimmed_text_byte_count,
+                    prompt_non_text_block_count,
+                    session_tail,
+                    staged_tool_result_count
                 }
                 guard {
                     self.lifecycle_phase == Phase::Admitted
                     && execution_kind_present == false
-                    && prompt_has_content
+                    && prompt_has_content(prompt_trimmed_text_byte_count, prompt_non_text_block_count)
                 }
                 update {
                     self.last_public_terminal = None;
@@ -480,15 +505,16 @@ mod authority {
                 on input ResolveStartTurnDisposition {
                     execution_kind_present,
                     execution_kind,
-                    prompt_has_content,
-                    session_has_pending_boundary,
-                    has_staged_tool_results
+                    prompt_trimmed_text_byte_count,
+                    prompt_non_text_block_count,
+                    session_tail,
+                    staged_tool_result_count
                 }
                 guard {
                     self.lifecycle_phase == Phase::Admitted
                     && execution_kind_present == false
-                    && prompt_has_content == false
-                    && has_effective_pending_boundary(session_has_pending_boundary, has_staged_tool_results)
+                    && prompt_has_content(prompt_trimmed_text_byte_count, prompt_non_text_block_count) == false
+                    && has_effective_pending_boundary(session_tail, staged_tool_result_count)
                 }
                 update {
                     self.last_public_terminal = None;
@@ -501,15 +527,16 @@ mod authority {
                 on input ResolveStartTurnDisposition {
                     execution_kind_present,
                     execution_kind,
-                    prompt_has_content,
-                    session_has_pending_boundary,
-                    has_staged_tool_results
+                    prompt_trimmed_text_byte_count,
+                    prompt_non_text_block_count,
+                    session_tail,
+                    staged_tool_result_count
                 }
                 guard {
                     self.lifecycle_phase == Phase::Admitted
                     && execution_kind_present == false
-                    && prompt_has_content == false
-                    && has_effective_pending_boundary(session_has_pending_boundary, has_staged_tool_results) == false
+                    && prompt_has_content(prompt_trimmed_text_byte_count, prompt_non_text_block_count) == false
+                    && has_effective_pending_boundary(session_tail, staged_tool_result_count) == false
                 }
                 update {
                     self.last_public_terminal = Some(StartTurnPublicTerminal::NoPendingBoundary);
@@ -531,6 +558,7 @@ mod authority {
     }
 }
 
+pub use authority::ObservedSessionTailKind;
 pub(crate) use authority::StartTurnDispatchAuthorization;
 pub(crate) use authority::StartTurnDisposition;
 pub(crate) use authority::StartTurnPublicTerminal;
@@ -567,6 +595,45 @@ impl std::error::Error for TurnAdmissionError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FinalizeOutcome {
     pub(crate) next_phase: TurnAdmissionPhase,
+}
+
+/// Generated start-turn admission feedback from a single authority transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StartTurnResolution {
+    pub(crate) disposition: StartTurnDisposition,
+    pub(crate) public_terminal: Option<StartTurnPublicTerminal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StartTurnPromptObservation {
+    trimmed_text_byte_count: u64,
+    non_text_block_count: u64,
+}
+
+fn observe_start_turn_prompt(
+    prompt: &meerkat_core::types::ContentInput,
+) -> StartTurnPromptObservation {
+    match prompt {
+        meerkat_core::types::ContentInput::Text(text) => StartTurnPromptObservation {
+            trimmed_text_byte_count: usize_to_u64(text.trim().len()),
+            non_text_block_count: 0,
+        },
+        meerkat_core::types::ContentInput::Blocks(blocks) => {
+            let text = meerkat_core::types::text_content(blocks);
+            let non_text_block_count = blocks
+                .iter()
+                .filter(|block| !matches!(block, meerkat_core::types::ContentBlock::Text { .. }))
+                .count();
+            StartTurnPromptObservation {
+                trimmed_text_byte_count: usize_to_u64(text.trim().len()),
+                non_text_block_count: usize_to_u64(non_text_block_count),
+            }
+        }
+    }
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 /// Serialized turn-admission state for a single session.
@@ -733,9 +800,9 @@ impl TurnAdmissionSlot {
         &mut self,
         execution_kind: Option<RuntimeExecutionKind>,
         prompt: &meerkat_core::types::ContentInput,
-        session_has_pending_boundary: bool,
-        has_staged_tool_results: bool,
-    ) -> Result<StartTurnDisposition, TurnAdmissionError> {
+        session_tail: ObservedSessionTailKind,
+        staged_tool_result_count: u64,
+    ) -> Result<StartTurnResolution, TurnAdmissionError> {
         let (execution_kind_present, execution_kind) = match execution_kind {
             Some(RuntimeExecutionKind::ContentTurn) => {
                 (true, authority::StartTurnExecutionKind::ContentTurn)
@@ -745,24 +812,24 @@ impl TurnAdmissionSlot {
             }
             None => (false, authority::StartTurnExecutionKind::ContentTurn),
         };
-        let prompt_has_content =
-            prompt.has_non_text_content() || !prompt.text_content().trim().is_empty();
+        let prompt_observation = observe_start_turn_prompt(prompt);
         let from = self.phase();
         let transition = authority::SessionTurnAdmissionMachineMutator::apply(
             &mut self.authority,
             authority::SessionTurnAdmissionInput::ResolveStartTurnDisposition {
                 execution_kind_present,
                 execution_kind,
-                prompt_has_content,
-                session_has_pending_boundary,
-                has_staged_tool_results,
+                prompt_trimmed_text_byte_count: prompt_observation.trimmed_text_byte_count,
+                prompt_non_text_block_count: prompt_observation.non_text_block_count,
+                session_tail,
+                staged_tool_result_count,
             },
         )
         .map_err(|_| TurnAdmissionError {
             from,
             op: "resolve_start_turn_disposition",
         })?;
-        transition
+        let disposition = transition
             .effects()
             .iter()
             .find_map(|effect| match effect {
@@ -774,7 +841,17 @@ impl TurnAdmissionSlot {
             .ok_or(TurnAdmissionError {
                 from,
                 op: "resolve_start_turn_disposition",
-            })
+            })?;
+        let public_terminal = transition.effects().iter().find_map(|effect| match effect {
+            authority::SessionTurnAdmissionEffect::StartTurnPublicTerminalResolved { terminal } => {
+                Some(*terminal)
+            }
+            _ => None,
+        });
+        Ok(StartTurnResolution {
+            disposition,
+            public_terminal,
+        })
     }
 
     pub(crate) fn resolve_last_start_turn_public_terminal(
@@ -869,18 +946,19 @@ mod tests {
     fn claimed_disposition(
         execution_kind: Option<RuntimeExecutionKind>,
         prompt: meerkat_core::types::ContentInput,
-        session_has_pending_boundary: bool,
-        has_staged_tool_results: bool,
+        session_tail: ObservedSessionTailKind,
+        staged_tool_result_count: u64,
     ) -> StartTurnDisposition {
         let mut slot = TurnAdmissionSlot::new();
         slot.claim().expect("claim should admit disposition check");
         slot.resolve_start_turn_disposition(
             execution_kind,
             &prompt,
-            session_has_pending_boundary,
-            has_staged_tool_results,
+            session_tail,
+            staged_tool_result_count,
         )
         .expect("generated disposition should resolve")
+        .disposition
     }
 
     #[test]
@@ -977,8 +1055,8 @@ mod tests {
         let disposition = claimed_disposition(
             Some(RuntimeExecutionKind::ContentTurn),
             meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            false,
+            ObservedSessionTailKind::Empty,
+            0,
         );
         assert_eq!(disposition, StartTurnDisposition::RunContentTurn);
     }
@@ -988,8 +1066,16 @@ mod tests {
         let disposition = claimed_disposition(
             Some(RuntimeExecutionKind::ResumePending),
             meerkat_core::types::ContentInput::Text(String::new()),
-            true,
-            false,
+            ObservedSessionTailKind::User,
+            0,
+        );
+        assert_eq!(disposition, StartTurnDisposition::RunPending);
+
+        let disposition = claimed_disposition(
+            Some(RuntimeExecutionKind::ResumePending),
+            meerkat_core::types::ContentInput::Text(String::new()),
+            ObservedSessionTailKind::ToolResults,
+            0,
         );
         assert_eq!(disposition, StartTurnDisposition::RunPending);
     }
@@ -999,8 +1085,8 @@ mod tests {
         let disposition = claimed_disposition(
             Some(RuntimeExecutionKind::ResumePending),
             meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            true,
+            ObservedSessionTailKind::Empty,
+            1,
         );
         assert_eq!(disposition, StartTurnDisposition::RunPending);
     }
@@ -1013,15 +1099,22 @@ mod tests {
             .resolve_start_turn_disposition(
                 Some(RuntimeExecutionKind::ResumePending),
                 &meerkat_core::types::ContentInput::Text(String::new()),
-                false,
-                false,
+                ObservedSessionTailKind::Assistant,
+                0,
             )
             .expect("generated disposition should resolve");
+        assert_eq!(
+            disposition.public_terminal,
+            Some(StartTurnPublicTerminal::NoPendingBoundary)
+        );
         let terminal = slot
             .resolve_last_start_turn_public_terminal()
             .expect("generated public terminal should be retained");
         assert_eq!(terminal, StartTurnPublicTerminal::NoPendingBoundary);
-        assert_eq!(disposition, StartTurnDisposition::NoPendingBoundary);
+        assert_eq!(
+            disposition.disposition,
+            StartTurnDisposition::NoPendingBoundary
+        );
     }
 
     #[test]
@@ -1032,11 +1125,15 @@ mod tests {
             .resolve_start_turn_disposition(
                 Some(RuntimeExecutionKind::ContentTurn),
                 &meerkat_core::types::ContentInput::Text(String::new()),
-                false,
-                false,
+                ObservedSessionTailKind::Empty,
+                0,
             )
             .expect("generated disposition should resolve");
-        assert_eq!(disposition, StartTurnDisposition::RunContentTurn);
+        assert_eq!(
+            disposition.disposition,
+            StartTurnDisposition::RunContentTurn
+        );
+        assert_eq!(disposition.public_terminal, None);
         assert!(slot.resolve_last_start_turn_public_terminal().is_err());
     }
 
@@ -1048,15 +1145,22 @@ mod tests {
             .resolve_start_turn_disposition(
                 None,
                 &meerkat_core::types::ContentInput::Text(String::new()),
-                false,
-                false,
+                ObservedSessionTailKind::Empty,
+                0,
             )
             .expect("generated disposition should resolve");
+        assert_eq!(
+            disposition.public_terminal,
+            Some(StartTurnPublicTerminal::NoPendingBoundary)
+        );
         let terminal = slot
             .resolve_last_start_turn_public_terminal()
             .expect("generated public terminal should be retained");
         assert_eq!(terminal, StartTurnPublicTerminal::NoPendingBoundary);
-        assert_eq!(disposition, StartTurnDisposition::NoPendingBoundary);
+        assert_eq!(
+            disposition.disposition,
+            StartTurnDisposition::NoPendingBoundary
+        );
     }
 
     #[test]
@@ -1064,8 +1168,8 @@ mod tests {
         let disposition = claimed_disposition(
             None,
             meerkat_core::types::ContentInput::Text("hello".into()),
-            false,
-            false,
+            ObservedSessionTailKind::Empty,
+            0,
         );
         assert_eq!(disposition, StartTurnDisposition::RunContentTurn);
     }
@@ -1075,8 +1179,8 @@ mod tests {
         let disposition = claimed_disposition(
             None,
             meerkat_core::types::ContentInput::Text(String::new()),
-            true,
-            false,
+            ObservedSessionTailKind::User,
+            0,
         );
         assert_eq!(disposition, StartTurnDisposition::RunPending);
     }
@@ -1086,8 +1190,8 @@ mod tests {
         let disposition = claimed_disposition(
             None,
             meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            false,
+            ObservedSessionTailKind::Empty,
+            0,
         );
         assert_eq!(disposition, StartTurnDisposition::NoPendingBoundary);
     }
@@ -1097,8 +1201,8 @@ mod tests {
         let disposition = claimed_disposition(
             None,
             meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            true,
+            ObservedSessionTailKind::Empty,
+            1,
         );
         assert_eq!(disposition, StartTurnDisposition::RunPending);
     }

@@ -15,7 +15,9 @@ use meerkat_core::types::{
     AssistantBlock, HandlingMode, Message, RenderMetadata, RunResult, SessionId, StopReason, Usage,
 };
 use meerkat_session::EphemeralSessionService;
-use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
+use meerkat_session::ephemeral::{
+    ObservedSessionTailKind, SessionAgent, SessionAgentBuilder, SessionSnapshot,
+};
 use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -398,8 +400,16 @@ impl SessionAgent for FactoryAgent {
             .map(|metadata| metadata.llm_identity())
     }
 
-    fn has_pending_boundary(&self) -> bool {
-        self.agent.session().has_pending_boundary()
+    fn observed_session_tail(&self) -> ObservedSessionTailKind {
+        match self.agent.session().messages().last() {
+            None => ObservedSessionTailKind::Empty,
+            Some(Message::System(_)) => ObservedSessionTailKind::System,
+            Some(Message::SystemNotice(_)) => ObservedSessionTailKind::SystemNotice,
+            Some(Message::User(_)) => ObservedSessionTailKind::User,
+            Some(Message::Assistant(_)) => ObservedSessionTailKind::Assistant,
+            Some(Message::BlockAssistant(_)) => ObservedSessionTailKind::BlockAssistant,
+            Some(Message::ToolResults { .. }) => ObservedSessionTailKind::ToolResults,
+        }
     }
 
     fn apply_runtime_system_context(

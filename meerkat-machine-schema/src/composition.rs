@@ -172,8 +172,45 @@ pub struct EffectHandoffProtocol {
     /// Generated machine-fact authority metadata for comms trust projection
     /// mutation handoffs.
     pub comms_trust_authority: Option<CommsTrustAuthorityProtocol>,
+    /// Generated durable-marker metadata for machine facts that must survive
+    /// process restart through the owning handoff protocol. When present, the
+    /// marker generator derives schema/provenance fields from this protocol
+    /// instead of carrying a separate handwritten contract.
+    pub durable_marker: Option<DurableMarkerProtocol>,
     /// Explicit Rust code generation metadata for the checked-in helper module.
     pub rust: ProtocolRustBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableMarkerProtocol {
+    pub metadata_key: String,
+    pub previous_metadata_key: String,
+    pub published_field: String,
+    pub version_field: String,
+    pub authority_field: String,
+    pub protocol_field: String,
+    pub schema_version: u64,
+    pub phase: DurableMarkerFieldBinding,
+    pub expires_at: DurableMarkerFieldBinding,
+    pub generation: DurableMarkerFieldBinding,
+    pub credential_published_at_millis: DurableMarkerFieldBinding,
+    pub relation: DurableMarkerRelationProtocol,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableMarkerFieldBinding {
+    pub marker_field: String,
+    pub obligation_field: FieldId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableMarkerRelationProtocol {
+    /// Compare generated durable marker publication time first. Equal
+    /// publication time must also match generated credential generation and
+    /// token expiry; when no snapshot publication exists, fall back to expiry
+    /// and generation. This is the generated AuthLease restore/admission
+    /// relation for `auth_lease_lifecycle_publication`.
+    AuthLeaseCredentialPublication,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

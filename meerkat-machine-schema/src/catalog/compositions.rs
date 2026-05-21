@@ -13,7 +13,8 @@ use crate::{
     CommsTrustAuthorityProtocol, CommsTrustAuthoritySourceKind, CompositionDriver,
     CompositionDriverRustBinding, CompositionInvariant, CompositionInvariantKind,
     CompositionSchema, CompositionStateLimits, CompositionTransactionPlan, CompositionWitness,
-    DriverDispatchRoute, EffectHandoffProtocol, EntryInput, FeedbackFieldBinding,
+    DriverDispatchRoute, DurableMarkerFieldBinding, DurableMarkerProtocol,
+    DurableMarkerRelationProtocol, EffectHandoffProtocol, EntryInput, FeedbackFieldBinding,
     FeedbackFieldSource, FeedbackInputRef, HandleBridgeFeedbackBinding, MachineInstance,
     ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding, Route,
     RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetKind,
@@ -764,6 +765,7 @@ fn trust_handoff_protocol(spec: TrustHandoffProtocolSpec<'_>) -> EffectHandoffPr
             row_owner_kind: spec.row_owner_kind,
             allowed_operations: spec.allowed_operations.to_vec(),
         }),
+        durable_marker: None,
         rust: effect_extractor_rust_binding(
             spec.module_path,
             spec.required_imports,
@@ -876,6 +878,7 @@ fn mob_bundle_composition() -> CompositionSchema {
                 "eventual feedback under task-scheduling fairness".into(),
             ),
             comms_trust_authority: None,
+            durable_marker: None,
             rust: ProtocolRustBinding {
                 module_path: "meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs"
                     .into(),
@@ -1031,6 +1034,7 @@ fn external_tool_bundle_composition() -> CompositionSchema {
                     "eventual feedback under surface connection liveness".into(),
                 ),
                 comms_trust_authority: None,
+                durable_marker: None,
                 rust: ProtocolRustBinding {
                     module_path: "meerkat-mcp/src/generated/protocol_surface_completion.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
@@ -1103,6 +1107,7 @@ fn external_tool_bundle_composition() -> CompositionSchema {
                     "eventual snapshot acknowledgement under surface host liveness".into(),
                 ),
                 comms_trust_authority: None,
+                durable_marker: None,
                 rust: ProtocolRustBinding {
                     module_path:
                         "meerkat-mcp/src/generated/protocol_surface_snapshot_alignment.rs".into(),
@@ -1458,6 +1463,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                         CommsTrustAuthorityOperation::PrivateRemove,
                     ],
                 }),
+                durable_marker: None,
                 rust: ProtocolRustBinding {
                     module_path:
                         "meerkat-runtime/src/generated/protocol_supervisor_trust_publish.rs".into(),
@@ -1517,6 +1523,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     ),
                     allowed_operations: vec![CommsTrustAuthorityOperation::PrivateRemove],
                 }),
+                durable_marker: None,
                 rust: ProtocolRustBinding {
                     module_path:
                         "meerkat-runtime/src/generated/protocol_supervisor_trust_revoke.rs".into(),
@@ -1710,6 +1717,7 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
                     .into(),
             ),
             comms_trust_authority: None,
+            durable_marker: None,
             rust: ProtocolRustBinding {
                 module_path:
                     "meerkat-mob/src/generated/protocol_mob_destroying_session_ingress.rs"
@@ -1838,6 +1846,32 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
                     .into(),
             ),
             comms_trust_authority: None,
+            durable_marker: Some(DurableMarkerProtocol {
+                metadata_key: "meerkat_auth_lifecycle".into(),
+                previous_metadata_key: "meerkat_previous_metadata".into(),
+                published_field: "published".into(),
+                version_field: "version".into(),
+                authority_field: "authority".into(),
+                protocol_field: "protocol".into(),
+                schema_version: 3,
+                phase: DurableMarkerFieldBinding {
+                    marker_field: "phase".into(),
+                    obligation_field: fld_id("new_state"),
+                },
+                expires_at: DurableMarkerFieldBinding {
+                    marker_field: "expires_at".into(),
+                    obligation_field: fld_id("expires_at"),
+                },
+                generation: DurableMarkerFieldBinding {
+                    marker_field: "generation".into(),
+                    obligation_field: fld_id("credential_generation"),
+                },
+                credential_published_at_millis: DurableMarkerFieldBinding {
+                    marker_field: "credential_published_at_millis".into(),
+                    obligation_field: fld_id("credential_published_at_millis"),
+                },
+                relation: DurableMarkerRelationProtocol::AuthLeaseCredentialPublication,
+            }),
             rust: ProtocolRustBinding {
                 module_path:
                     "meerkat-runtime/src/generated/protocol_auth_lease_lifecycle_publication.rs"

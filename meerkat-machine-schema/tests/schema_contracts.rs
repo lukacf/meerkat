@@ -1552,6 +1552,7 @@ mod handoff_binding {
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
             comms_trust_authority: None,
+            durable_marker: None,
             rust,
         }
     }
@@ -1644,6 +1645,7 @@ mod handoff_binding {
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
             comms_trust_authority: None,
+            durable_marker: None,
             rust: binding,
         };
         let composition = composition_with_protocol(protocol);
@@ -1876,6 +1878,7 @@ mod handoff_binding {
                 closure_policy: ClosurePolicy::AckRequired,
                 liveness_annotation: None,
                 comms_trust_authority: None,
+                durable_marker: None,
                 rust: ProtocolRustBinding {
                     module_path: "meerkat-mcp/src/generated/test_protocol.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,

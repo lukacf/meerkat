@@ -199,8 +199,13 @@ fn auth_lease_transition_authority_sources_matches_codegen_output() {
 
 #[test]
 fn auth_lease_durable_lifecycle_marker_matches_codegen_output() {
-    let rendered = xtask::protocol_codegen::render_auth_lease_durable_lifecycle_marker_contract()
-        .expect("render auth_lease_durable_lifecycle_marker");
+    use meerkat_machine_schema::{canonical_composition_schemas, compat_composition_schemas};
+
+    let mut compositions = canonical_composition_schemas();
+    compositions.extend(compat_composition_schemas());
+    let rendered =
+        xtask::protocol_codegen::render_auth_lease_durable_lifecycle_marker_contract(&compositions)
+            .expect("render auth_lease_durable_lifecycle_marker");
     let rendered = rustfmt(&rendered);
 
     let committed_path =

@@ -373,8 +373,13 @@ impl AgentMobToolSurface {
                         .cloned()
                         .collect::<std::collections::HashSet<String>>()
                 });
-                let filter =
-                    snapshot.with_witnessed_overlays(allow_set.as_ref(), deny_set.as_ref());
+                let filter = snapshot
+                    .with_witnessed_overlays(allow_set.as_ref(), deny_set.as_ref())
+                    .map_err(|err| {
+                        ToolError::execution_failed(format!(
+                            "parent tool visibility inheritance requires tool provenance witnesses: {err}"
+                        ))
+                    })?;
                 Ok(ResolvedSpawnTooling {
                     inherited_tool_filter: Some(filter),
                     override_profile: None,
@@ -402,10 +407,15 @@ impl AgentMobToolSurface {
                 .collect();
                 let tools = provider.snapshot_visible_tools();
                 let snapshot = meerkat_mob::snapshot::ParentToolScopeSnapshot::from_tools(&tools);
+                let filter = snapshot
+                    .with_witnessed_overlays(Some(&comms_tools), None)
+                    .map_err(|err| {
+                        ToolError::execution_failed(format!(
+                            "minimal tool visibility inheritance requires tool provenance witnesses: {err}"
+                        ))
+                    })?;
                 Ok(ResolvedSpawnTooling {
-                    inherited_tool_filter: Some(
-                        snapshot.with_witnessed_overlays(Some(&comms_tools), None),
-                    ),
+                    inherited_tool_filter: Some(filter),
                     override_profile: None,
                 })
             }
@@ -472,7 +482,15 @@ impl AgentMobToolSurface {
                             .cloned()
                             .collect::<std::collections::HashSet<String>>()
                     });
-                    Some(snapshot.with_witnessed_overlays(allow_set.as_ref(), deny_set.as_ref()))
+                    Some(
+                        snapshot
+                            .with_witnessed_overlays(allow_set.as_ref(), deny_set.as_ref())
+                            .map_err(|err| {
+                                ToolError::execution_failed(format!(
+                                    "profile tool visibility inheritance requires tool provenance witnesses: {err}"
+                                ))
+                            })?,
+                    )
                 };
 
                 Ok(ResolvedSpawnTooling {
@@ -4263,30 +4281,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_spawn_tooling_inherit_parent_synthesizes_missing_witnesses() {
+    async fn test_resolve_spawn_tooling_inherit_parent_rejects_unprovenanced_parent_tool() {
         let surface = surface_with_unprovenanced_parent_tool();
         let tooling = meerkat_mob::SpawnTooling::InheritParent {
             allow_overlay: None,
             deny_overlay: None,
         };
-        let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
-        let authority = resolved
-            .inherited_tool_filter
-            .expect("expected inherited tool filter authority");
-        let witness = authority
-            .witnesses
-            .get("external_ob3_tool")
-            .expect("unprovenanced parent tool should still get a witness");
+        let err = surface.resolve_spawn_tooling(&tooling).await.unwrap_err();
 
-        assert!(
-            witness.has_provenance_identity_witness(),
-            "delegate inheritance should be valid for visible external tools without provenance"
-        );
-        meerkat_core::tool_scope::validate_witnessed_filter_authority(
-            &authority.filter,
-            &authority.witnesses,
-        )
-        .expect("delegate inherited filter should validate with synthesized witness");
+        match err {
+            ToolError::ExecutionFailed { message } => {
+                assert!(message.contains("requires tool provenance witnesses"));
+                assert!(message.contains("external_ob3_tool"));
+            }
+            other => {
+                panic!("expected ExecutionFailed for unprovenanced parent tool, got {other:?}")
+            }
+        }
     }
 
     #[tokio::test]

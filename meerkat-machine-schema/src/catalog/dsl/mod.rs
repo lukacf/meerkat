@@ -564,11 +564,15 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "RpcEventStreamTerminalObservationKind",
-                &["TransportEnded", "NotificationQueueOverflow"],
+                &[
+                    "TransportEnded",
+                    "NotificationQueueOverflow",
+                    "NotificationReceiverGone",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "RpcEventStreamTerminalErrorCode",
-                &["StreamQueueOverflow"],
+                &["StreamQueueOverflow", "StreamReceiverGone"],
             ),
             NamedTypeBinding::string_enum(
                 "LiveChannelPublicStatus",

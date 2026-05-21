@@ -5130,11 +5130,14 @@ pub enum RpcEventStreamTerminalErrorCode {
     #[default]
     #[serde(rename = "StreamQueueOverflow")]
     StreamQueueOverflow,
+    #[serde(rename = "StreamReceiverGone")]
+    StreamReceiverGone,
 }
 impl RpcEventStreamTerminalErrorCode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::StreamQueueOverflow => "StreamQueueOverflow",
+            Self::StreamReceiverGone => "StreamReceiverGone",
         }
     }
 }
@@ -5143,6 +5146,7 @@ impl std::convert::TryFrom<&str> for RpcEventStreamTerminalErrorCode {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "StreamQueueOverflow" => Ok(Self::StreamQueueOverflow),
+            "StreamReceiverGone" => Ok(Self::StreamReceiverGone),
             other => Err(format!(
                 "invalid RpcEventStreamTerminalErrorCode value `{other}`"
             )),
@@ -5180,12 +5184,15 @@ pub enum RpcEventStreamTerminalObservationKind {
     TransportEnded,
     #[serde(rename = "NotificationQueueOverflow")]
     NotificationQueueOverflow,
+    #[serde(rename = "NotificationReceiverGone")]
+    NotificationReceiverGone,
 }
 impl RpcEventStreamTerminalObservationKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::TransportEnded => "TransportEnded",
             Self::NotificationQueueOverflow => "NotificationQueueOverflow",
+            Self::NotificationReceiverGone => "NotificationReceiverGone",
         }
     }
 }
@@ -5195,6 +5202,7 @@ impl std::convert::TryFrom<&str> for RpcEventStreamTerminalObservationKind {
         match value {
             "TransportEnded" => Ok(Self::TransportEnded),
             "NotificationQueueOverflow" => Ok(Self::NotificationQueueOverflow),
+            "NotificationReceiverGone" => Ok(Self::NotificationReceiverGone),
             other => Err(format!(
                 "invalid RpcEventStreamTerminalObservationKind value `{other}`"
             )),

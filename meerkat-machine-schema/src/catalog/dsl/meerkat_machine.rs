@@ -806,6 +806,7 @@ pub enum RpcEventStreamTerminalObservationKind {
     #[default]
     TransportEnded,
     NotificationQueueOverflow,
+    NotificationReceiverGone,
 }
 
 /// Typed public error code for RPC event-stream terminal notifications. The
@@ -815,6 +816,7 @@ pub enum RpcEventStreamTerminalObservationKind {
 pub enum RpcEventStreamTerminalErrorCode {
     #[default]
     StreamQueueOverflow,
+    StreamReceiverGone,
 }
 
 /// Typed public status class for `live/status` after the live host has
@@ -11685,10 +11687,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_event_stream_session_ids.contains_key(stream_id)
             }
             guard "terminal_detail_matches_observation" {
-                (observation == RpcEventStreamTerminalObservationKind::NotificationQueueOverflow
-                    && detail != None)
-                || (observation != RpcEventStreamTerminalObservationKind::NotificationQueueOverflow
+                (observation == RpcEventStreamTerminalObservationKind::TransportEnded
                     && detail == None)
+                || (observation != RpcEventStreamTerminalObservationKind::TransportEnded
+                    && detail != None)
             }
             update {
                 self.session_event_stream_terminal_sequence += 1;
@@ -11699,8 +11701,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit SessionEventStreamTerminalResolved {
                 stream_id: stream_id,
                 session_id: self.session_event_stream_session_ids.get_cloned(stream_id).get("value"),
-                reason: if observation == RpcEventStreamTerminalObservationKind::NotificationQueueOverflow { RpcEventStreamTerminalReason::TerminalError } else { RpcEventStreamTerminalReason::RemoteEnd },
-                error_code: if observation == RpcEventStreamTerminalObservationKind::NotificationQueueOverflow { Some(RpcEventStreamTerminalErrorCode::StreamQueueOverflow) } else { None },
+                reason: if observation == RpcEventStreamTerminalObservationKind::TransportEnded { RpcEventStreamTerminalReason::RemoteEnd } else { RpcEventStreamTerminalReason::TerminalError },
+                error_code: if observation == RpcEventStreamTerminalObservationKind::NotificationQueueOverflow { Some(RpcEventStreamTerminalErrorCode::StreamQueueOverflow) } else { if observation == RpcEventStreamTerminalObservationKind::NotificationReceiverGone { Some(RpcEventStreamTerminalErrorCode::StreamReceiverGone) } else { None } },
                 detail: detail,
                 sequence: self.session_event_stream_terminal_sequence
             }
@@ -11779,10 +11781,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "stream_id_present" { stream_id != "" }
             guard "stream_active" { self.active_mob_event_streams.contains(stream_id) }
             guard "terminal_detail_matches_observation" {
-                (observation == RpcEventStreamTerminalObservationKind::NotificationQueueOverflow
-                    && detail != None)
-                || (observation != RpcEventStreamTerminalObservationKind::NotificationQueueOverflow
+                (observation == RpcEventStreamTerminalObservationKind::TransportEnded
                     && detail == None)
+                || (observation != RpcEventStreamTerminalObservationKind::TransportEnded
+                    && detail != None)
             }
             update {
                 self.mob_event_stream_terminal_sequence += 1;
@@ -11792,8 +11794,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit MobEventStreamTerminalResolved {
                 stream_id: stream_id,
-                reason: if observation == RpcEventStreamTerminalObservationKind::NotificationQueueOverflow { RpcEventStreamTerminalReason::TerminalError } else { RpcEventStreamTerminalReason::RemoteEnd },
-                error_code: if observation == RpcEventStreamTerminalObservationKind::NotificationQueueOverflow { Some(RpcEventStreamTerminalErrorCode::StreamQueueOverflow) } else { None },
+                reason: if observation == RpcEventStreamTerminalObservationKind::TransportEnded { RpcEventStreamTerminalReason::RemoteEnd } else { RpcEventStreamTerminalReason::TerminalError },
+                error_code: if observation == RpcEventStreamTerminalObservationKind::NotificationQueueOverflow { Some(RpcEventStreamTerminalErrorCode::StreamQueueOverflow) } else { if observation == RpcEventStreamTerminalObservationKind::NotificationReceiverGone { Some(RpcEventStreamTerminalErrorCode::StreamReceiverGone) } else { None } },
                 detail: detail,
                 sequence: self.mob_event_stream_terminal_sequence
             }

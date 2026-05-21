@@ -1689,6 +1689,7 @@ pub enum RpcEventStreamTerminalObservationKind {
     #[default]
     TransportEnded,
     NotificationQueueOverflow,
+    NotificationReceiverGone,
 }
 
 /// Typed public error code for RPC event-stream terminal notifications. The
@@ -1698,6 +1699,7 @@ pub enum RpcEventStreamTerminalObservationKind {
 pub enum RpcEventStreamTerminalErrorCode {
     #[default]
     StreamQueueOverflow,
+    StreamReceiverGone,
 }
 
 /// Typed public status class for `live/status` after the live host has

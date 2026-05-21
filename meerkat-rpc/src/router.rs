@@ -627,6 +627,28 @@ fn rpc_event_stream_terminal_error_code_wire(
         meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode::StreamQueueOverflow => {
             "stream_queue_overflow"
         }
+        meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode::StreamReceiverGone => {
+            "stream_receiver_gone"
+        }
+    }
+}
+
+fn terminal_observation_from_emit_status(
+    status: StreamEmitStatus,
+) -> Option<(
+    meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind,
+    &'static str,
+)> {
+    match status {
+        StreamEmitStatus::Delivered => None,
+        StreamEmitStatus::Overflow => Some((
+            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind::NotificationQueueOverflow,
+            "transport stream notification queue overflow",
+        )),
+        StreamEmitStatus::ReceiverGone => Some((
+            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind::NotificationReceiverGone,
+            "transport stream notification receiver closed",
+        )),
     }
 }
 
@@ -2779,14 +2801,16 @@ impl MethodRouter {
                                 let emit_status = notification_sink
                                     .emit_session_stream_event(&stream_id_for_task, sequence, &session_id_for_task, &envelope)
                                     .await;
-                                if emit_status == StreamEmitStatus::Overflow {
+                                if let Some((observation, detail)) =
+                                    terminal_observation_from_emit_status(emit_status)
+                                {
                                     emit_authorized_session_stream_terminal(
                                         &notification_sink,
                                         &active_session_streams,
                                         &stream_authority,
                                         stream_id_for_task,
-                                        meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind::NotificationQueueOverflow,
-                                        Some("transport stream notification queue overflow".to_string()),
+                                        observation,
+                                        Some(detail.to_string()),
                                     )
                                     .await;
                                     break;
@@ -2988,14 +3012,16 @@ impl MethodRouter {
                                             &event_json,
                                         )
                                         .await;
-                                    if emit_status == StreamEmitStatus::Overflow {
+                                    if let Some((observation, detail)) =
+                                        terminal_observation_from_emit_status(emit_status)
+                                    {
                                         emit_authorized_mob_stream_terminal(
                                             &notification_sink,
                                             &active_mob_streams,
                                             &stream_authority,
                                             stream_id_for_task,
-                                            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind::NotificationQueueOverflow,
-                                            Some("transport stream notification queue overflow".to_string()),
+                                            observation,
+                                            Some(detail.to_string()),
                                         )
                                         .await;
                                         break;
@@ -3072,14 +3098,16 @@ impl MethodRouter {
                                             &event_json,
                                         )
                                         .await;
-                                    if emit_status == StreamEmitStatus::Overflow {
+                                    if let Some((observation, detail)) =
+                                        terminal_observation_from_emit_status(emit_status)
+                                    {
                                         emit_authorized_mob_stream_terminal(
                                             &notification_sink,
                                             &active_mob_streams,
                                             &stream_authority,
                                             stream_id_for_task,
-                                            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind::NotificationQueueOverflow,
-                                            Some("transport stream notification queue overflow".to_string()),
+                                            observation,
+                                            Some(detail.to_string()),
                                         )
                                         .await;
                                         break;
@@ -6924,6 +6952,56 @@ args = [{}]
     }
 
     #[tokio::test]
+    async fn session_stream_receiver_gone_records_machine_terminal() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        let sink = NotificationSink::new(tx);
+        let authority = Arc::new(Mutex::new(new_rpc_stream_authority()));
+        let session_id = SessionId::new();
+        let stream_id = Uuid::new_v4();
+        resolve_session_stream_open_authority(&authority, &stream_id, &session_id)
+            .await
+            .expect("machine should accept session stream open");
+        let envelope = EventEnvelope::new_session(
+            session_id.clone(),
+            1,
+            None,
+            AgentEvent::TextDelta {
+                delta: "hello".to_string(),
+            },
+        );
+
+        let emit_status = sink
+            .emit_session_stream_event(&stream_id, 1, &session_id, &envelope)
+            .await;
+        assert_eq!(emit_status, StreamEmitStatus::ReceiverGone);
+        let (observation, detail) = terminal_observation_from_emit_status(emit_status)
+            .expect("closed receiver should lower into a terminal observation");
+        assert_eq!(
+            observation,
+            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind::NotificationReceiverGone
+        );
+        let terminal = record_session_stream_terminal_authority(
+            &authority,
+            &stream_id,
+            observation,
+            Some(detail.to_string()),
+        )
+        .await
+        .expect("machine should derive receiver-gone terminal class");
+        assert_eq!(
+            terminal.reason,
+            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError
+        );
+        assert_eq!(
+            terminal.error_code,
+            Some(
+                meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode::StreamReceiverGone
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn session_stream_router_overflow_emits_terminal_error_outcome() {
         let requests = Arc::new(std::sync::Mutex::new(Vec::<Vec<Message>>::new()));
         let llm_client = Arc::new(RecordingMockLlmClient::new(requests));
@@ -7045,6 +7123,53 @@ args = [{}]
         assert_eq!(
             terminal_notification.params["error"]["code"],
             "stream_queue_overflow"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_stream_receiver_gone_records_machine_terminal() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        let sink = NotificationSink::new(tx);
+        let authority = Arc::new(Mutex::new(new_rpc_stream_authority()));
+        let stream_id = Uuid::new_v4();
+        resolve_mob_stream_open_authority(&authority, &stream_id)
+            .await
+            .expect("machine should accept mob stream open");
+        let event = serde_json::json!({
+            "event_id": "e1",
+            "payload": {
+                "type": "text_delta",
+                "delta": "hello",
+            }
+        });
+
+        let emit_status = sink.emit_mob_stream_event(&stream_id, 1, &event).await;
+        assert_eq!(emit_status, StreamEmitStatus::ReceiverGone);
+        let (observation, detail) = terminal_observation_from_emit_status(emit_status)
+            .expect("closed receiver should lower into a terminal observation");
+        assert_eq!(
+            observation,
+            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind::NotificationReceiverGone
+        );
+        let terminal = record_mob_stream_terminal_authority(
+            &authority,
+            &stream_id,
+            observation,
+            Some(detail.to_string()),
+        )
+        .await
+        .expect("machine should derive receiver-gone terminal class");
+        assert_eq!(
+            terminal.reason,
+            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError
+        );
+        assert_eq!(
+            terminal.error_code,
+            Some(
+                meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalErrorCode::StreamReceiverGone
+            )
         );
     }
 

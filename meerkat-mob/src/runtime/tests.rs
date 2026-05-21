@@ -32399,6 +32399,67 @@ async fn test_wire_external_peer_not_blocked_by_delayed_turn_driven_submit_work(
 }
 
 #[tokio::test]
+async fn test_internal_turn_completed_reply_does_not_block_actor_operations() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = MeerkatId::from("l-busy-internal-turn");
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven lead");
+
+    let baseline_start_turn_calls = service.start_turn_call_count();
+    service.set_start_turn_delay_ms(250);
+
+    let turn_handle = handle.clone();
+    let turn_identity = AgentIdentity::from(member_id.as_str());
+    let internal_turn = tokio::spawn(async move {
+        turn_handle
+            .internal_turn(turn_identity, "long internal turn")
+            .await
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while service.start_turn_call_count() < baseline_start_turn_calls + 1 {
+        assert!(
+            Instant::now() < deadline,
+            "delayed internal turn should reach the runtime executor"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        handle.list_members_including_retiring(),
+    )
+    .await
+    .expect("member listing must not wait behind TurnCompleted runtime completion");
+
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        handle.spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("worker-after-internal-turn"),
+            None,
+        ),
+    )
+    .await
+    .expect("spawn must not wait behind TurnCompleted runtime completion")
+    .expect("spawn worker while internal turn is still running");
+
+    tokio::time::timeout(Duration::from_secs(2), internal_turn)
+        .await
+        .expect("internal_turn should complete once the runtime turn completes")
+        .expect("internal_turn task should not panic")
+        .expect("internal_turn result should succeed");
+}
+
+#[tokio::test]
 async fn test_submit_work_stale_fence_token_rejected() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     handle

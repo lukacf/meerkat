@@ -41,6 +41,15 @@ impl InitialTurnHandle {
     }
 }
 
+enum SubmitWorkDispatchCompletion {
+    Completed,
+    AwaitTurnCompletion {
+        provisioner: Arc<dyn MobProvisioner>,
+        member_ref: MemberRef,
+        req: Box<meerkat_core::service::StartTurnRequest>,
+    },
+}
+
 // Sized for real mob-scale startup/shutdown fan-out (50+ members).
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS: usize = 64;
@@ -4905,8 +4914,26 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SubmitWork { payload, reply_tx } => {
-                    let result = Box::pin(self.handle_submit_work(payload)).await;
-                    let _ = reply_tx.send(result);
+                    match Box::pin(self.handle_submit_work(payload)).await {
+                        Ok(SubmitWorkDispatchCompletion::Completed) => {
+                            let _ = reply_tx.send(Ok(()));
+                        }
+                        Ok(SubmitWorkDispatchCompletion::AwaitTurnCompletion {
+                            provisioner,
+                            member_ref,
+                            req,
+                        }) => {
+                            Self::spawn_turn_completed_reply(
+                                provisioner,
+                                member_ref,
+                                req,
+                                reply_tx,
+                            );
+                        }
+                        Err(error) => {
+                            let _ = reply_tx.send(Err(error));
+                        }
+                    }
                 }
                 MobCommand::SendPeerMessage {
                     from,
@@ -13094,7 +13121,7 @@ impl MobActor {
     async fn handle_submit_work(
         &mut self,
         payload: Box<super::state::SubmitWorkPayload>,
-    ) -> Result<(), MobError> {
+    ) -> Result<SubmitWorkDispatchCompletion, MobError> {
         let super::state::SubmitWorkPayload {
             runtime_id,
             fence_token,
@@ -13281,6 +13308,18 @@ impl MobActor {
         .await
     }
 
+    fn spawn_turn_completed_reply(
+        provisioner: Arc<dyn MobProvisioner>,
+        member_ref: MemberRef,
+        req: Box<meerkat_core::service::StartTurnRequest>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    ) {
+        tokio::spawn(async move {
+            let result = provisioner.start_turn(&member_ref, *req).await;
+            let _ = reply_tx.send(result);
+        });
+    }
+
     async fn dispatch_turn_driven_spawn_initial_turn(
         &mut self,
         agent_identity: &MeerkatId,
@@ -13349,14 +13388,16 @@ impl MobActor {
             ));
         }
 
-        self.dispatch_member_turn_after_machine_admission(
-            &entry,
-            content,
-            meerkat_core::types::HandlingMode::Queue,
-            None,
-            crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
-        )
-        .await
+        let completion = self
+            .dispatch_member_turn_after_machine_admission(
+                &entry,
+                content,
+                meerkat_core::types::HandlingMode::Queue,
+                None,
+                crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            )
+            .await?;
+        self.finish_submit_work_dispatch(completion).await
     }
 
     /// Unified work-lane cancel entry.
@@ -13426,14 +13467,30 @@ impl MobActor {
         ack_mode: crate::mob_machine::SubmitWorkAckMode,
     ) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("dispatch_member_turn preflight")?;
-        self.dispatch_member_turn_after_machine_admission(
-            entry,
-            content,
-            handling_mode,
-            render_metadata,
-            ack_mode,
-        )
-        .await
+        let completion = self
+            .dispatch_member_turn_after_machine_admission(
+                entry,
+                content,
+                handling_mode,
+                render_metadata,
+                ack_mode,
+            )
+            .await?;
+        self.finish_submit_work_dispatch(completion).await
+    }
+
+    async fn finish_submit_work_dispatch(
+        &self,
+        completion: SubmitWorkDispatchCompletion,
+    ) -> Result<(), MobError> {
+        match completion {
+            SubmitWorkDispatchCompletion::Completed => Ok(()),
+            SubmitWorkDispatchCompletion::AwaitTurnCompletion {
+                provisioner,
+                member_ref,
+                req,
+            } => provisioner.start_turn(&member_ref, *req).await,
+        }
     }
 
     async fn dispatch_member_turn_after_machine_admission(
@@ -13443,7 +13500,7 @@ impl MobActor {
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         ack_mode: crate::mob_machine::SubmitWorkAckMode,
-    ) -> Result<(), MobError> {
+    ) -> Result<SubmitWorkDispatchCompletion, MobError> {
         if let Some(bridge_session_id) = entry.member_ref.bridge_session_id() {
             match self.session_service.read(bridge_session_id).await {
                 Ok(_) => {}
@@ -13511,7 +13568,7 @@ impl MobActor {
                             entry.agent_identity, error
                         ))
                     })?;
-                Ok(())
+                Ok(SubmitWorkDispatchCompletion::Completed)
             }
             crate::MobRuntimeMode::TurnDriven => {
                 let machine_member_ref = self
@@ -13534,14 +13591,16 @@ impl MobActor {
                         self.provisioner
                             .admit_turn(&machine_member_ref, req)
                             .await?;
+                        Ok(SubmitWorkDispatchCompletion::Completed)
                     }
                     crate::mob_machine::SubmitWorkAckMode::TurnCompleted => {
-                        self.provisioner
-                            .start_turn(&machine_member_ref, req)
-                            .await?;
+                        Ok(SubmitWorkDispatchCompletion::AwaitTurnCompletion {
+                            provisioner: self.provisioner.clone(),
+                            member_ref: machine_member_ref,
+                            req: Box::new(req),
+                        })
                     }
                 }
-                Ok(())
             }
         }
     }

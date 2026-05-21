@@ -4606,6 +4606,66 @@ impl std::fmt::Display for RoutingDenialReason {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RoutingImageApprovalReason {
+    #[default]
+    #[serde(rename = "CrossProvider")]
+    CrossProvider,
+    #[serde(rename = "CostExceedsThreshold")]
+    CostExceedsThreshold,
+    #[serde(rename = "SafetyHold")]
+    SafetyHold,
+    #[serde(rename = "RealtimeDetachRequired")]
+    RealtimeDetachRequired,
+}
+impl RoutingImageApprovalReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CrossProvider => "CrossProvider",
+            Self::CostExceedsThreshold => "CostExceedsThreshold",
+            Self::SafetyHold => "SafetyHold",
+            Self::RealtimeDetachRequired => "RealtimeDetachRequired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingImageApprovalReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CrossProvider" => Ok(Self::CrossProvider),
+            "CostExceedsThreshold" => Ok(Self::CostExceedsThreshold),
+            "SafetyHold" => Ok(Self::SafetyHold),
+            "RealtimeDetachRequired" => Ok(Self::RealtimeDetachRequired),
+            other => Err(format!(
+                "invalid RoutingImageApprovalReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingImageApprovalReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingImageApprovalReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RoutingImageOperationPhase {
     #[default]
     #[serde(rename = "Requested")]
@@ -4822,6 +4882,70 @@ impl std::convert::TryFrom<String> for RoutingImageTerminal {
     }
 }
 impl std::fmt::Display for RoutingImageTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingSwitchApprovalReason {
+    #[default]
+    #[serde(rename = "CrossProvider")]
+    CrossProvider,
+    #[serde(rename = "CostExceedsThreshold")]
+    CostExceedsThreshold,
+    #[serde(rename = "SafetyHold")]
+    SafetyHold,
+    #[serde(rename = "UntilChangedFromModelOrigin")]
+    UntilChangedFromModelOrigin,
+    #[serde(rename = "RealtimeDetachRequired")]
+    RealtimeDetachRequired,
+}
+impl RoutingSwitchApprovalReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CrossProvider => "CrossProvider",
+            Self::CostExceedsThreshold => "CostExceedsThreshold",
+            Self::SafetyHold => "SafetyHold",
+            Self::UntilChangedFromModelOrigin => "UntilChangedFromModelOrigin",
+            Self::RealtimeDetachRequired => "RealtimeDetachRequired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingSwitchApprovalReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CrossProvider" => Ok(Self::CrossProvider),
+            "CostExceedsThreshold" => Ok(Self::CostExceedsThreshold),
+            "SafetyHold" => Ok(Self::SafetyHold),
+            "UntilChangedFromModelOrigin" => Ok(Self::UntilChangedFromModelOrigin),
+            "RealtimeDetachRequired" => Ok(Self::RealtimeDetachRequired),
+            other => Err(format!(
+                "invalid RoutingSwitchApprovalReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingSwitchApprovalReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingSwitchApprovalReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -6697,6 +6821,8 @@ pub struct State {
     pub model_routing_switch_terminal:
         std::collections::BTreeMap<String, RoutingSwitchTurnTerminal>,
     pub model_routing_switch_denials: std::collections::BTreeMap<String, RoutingDenialReason>,
+    pub model_routing_switch_approval_reasons:
+        std::collections::BTreeMap<String, RoutingSwitchApprovalReason>,
     pub model_routing_image_operation_phases:
         std::collections::BTreeMap<String, RoutingImageOperationPhase>,
     pub model_routing_image_operation_target_models: std::collections::BTreeMap<String, String>,
@@ -6706,6 +6832,8 @@ pub struct State {
     pub model_routing_image_terminals: std::collections::BTreeMap<String, RoutingImageTerminal>,
     pub model_routing_image_terminal_payloads: std::collections::BTreeMap<String, String>,
     pub model_routing_image_denials: std::collections::BTreeMap<String, RoutingDenialReason>,
+    pub model_routing_image_approval_reasons:
+        std::collections::BTreeMap<String, RoutingImageApprovalReason>,
     pub model_routing_image_plan_denials:
         std::collections::BTreeMap<String, RoutingImagePlanDenialReason>,
     pub model_routing_approval_phases: std::collections::BTreeMap<String, RoutingApprovalPhase>,
@@ -7020,6 +7148,7 @@ pub mod inputs {
         pub requires_approval: bool,
         pub approval_available: bool,
         pub approval_denied: bool,
+        pub approval_reason: Option<RoutingSwitchApprovalReason>,
         pub realtime_detach_allowed: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -7030,6 +7159,7 @@ pub mod inputs {
         pub requires_approval: bool,
         pub approval_available: bool,
         pub approval_denied: bool,
+        pub approval_reason: Option<RoutingSwitchApprovalReason>,
         pub realtime_detach_allowed: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -7046,6 +7176,7 @@ pub mod inputs {
         pub requires_approval: bool,
         pub approval_available: bool,
         pub approval_denied: bool,
+        pub approval_reason: Option<RoutingImageApprovalReason>,
         pub realtime_detach_allowed: bool,
         pub requires_scoped_override: bool,
     }
@@ -10440,6 +10571,7 @@ pub fn initial_state() -> State {
         model_routing_pending_switch_phase: None,
         model_routing_switch_terminal: Default::default(),
         model_routing_switch_denials: Default::default(),
+        model_routing_switch_approval_reasons: Default::default(),
         model_routing_image_operation_phases: Default::default(),
         model_routing_image_operation_target_models: Default::default(),
         model_routing_image_operation_realtime: Default::default(),
@@ -10447,6 +10579,7 @@ pub fn initial_state() -> State {
         model_routing_image_terminals: Default::default(),
         model_routing_image_terminal_payloads: Default::default(),
         model_routing_image_denials: Default::default(),
+        model_routing_image_approval_reasons: Default::default(),
         model_routing_image_plan_denials: Default::default(),
         model_routing_approval_phases: Default::default(),
         model_routing_approval_parent_kind: Default::default(),

@@ -2381,7 +2381,10 @@ async fn model_routing_denials_cover_approval_and_scoped_nesting_guards() {
     assert!(matches!(
         denied,
         meerkat_core::image_generation::SwitchTurnControlResult::Denied {
-            reason: meerkat_core::image_generation::SwitchTurnDenialReason::DeniedDuringApproval { .. },
+            reason: meerkat_core::image_generation::SwitchTurnDenialReason::DeniedDuringApproval {
+                approvable:
+                    meerkat_core::image_generation::SwitchTurnApprovalReason::CostExceedsThreshold
+            },
             ..
         }
     ));
@@ -2429,7 +2432,32 @@ async fn model_routing_denials_cover_approval_and_scoped_nesting_guards() {
     assert!(matches!(
         denied_by_user,
         meerkat_core::image_generation::SwitchTurnControlResult::Denied {
-            reason: meerkat_core::image_generation::SwitchTurnDenialReason::DeniedDuringApproval { .. },
+            reason: meerkat_core::image_generation::SwitchTurnDenialReason::DeniedDuringApproval {
+                approvable: meerkat_core::image_generation::SwitchTurnApprovalReason::UntilChangedFromModelOrigin
+            },
+            ..
+        }
+    ));
+
+    let mut denied_image = image_request(400, "image-denied-target");
+    denied_image.approval = ModelRoutingApprovalDisposition::DeniedByUser;
+    denied_image.approval_reason =
+        Some(meerkat_core::image_generation::ImageOperationApprovalReason::SafetyHold);
+    let denied_image_result = <MeerkatMachine as SessionServiceRuntimeExt>::begin_image_operation(
+        &adapter,
+        &session_id,
+        denied_image,
+    )
+    .await
+    .expect("image user denial should terminalize");
+    assert!(matches!(
+        denied_image_result,
+        ImageOperationRoutingResult::Denied {
+            reason:
+                meerkat_core::image_generation::ImageOperationDenialReason::DeniedDuringApproval {
+                    approvable:
+                        meerkat_core::image_generation::ImageOperationApprovalReason::SafetyHold
+                },
             ..
         }
     ));

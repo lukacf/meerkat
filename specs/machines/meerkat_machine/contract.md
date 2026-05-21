@@ -54,6 +54,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `model_routing_pending_switch_phase`: `Option<RoutingSwitchTurnPhase>`
 - `model_routing_switch_terminal`: `Map<String, RoutingSwitchTurnTerminal>`
 - `model_routing_switch_denials`: `Map<String, RoutingDenialReason>`
+- `model_routing_switch_approval_reasons`: `Map<String, RoutingSwitchApprovalReason>`
 - `model_routing_image_operation_phases`: `Map<String, RoutingImageOperationPhase>`
 - `model_routing_image_operation_target_models`: `Map<String, String>`
 - `model_routing_image_operation_realtime`: `Map<String, Bool>`
@@ -61,6 +62,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `model_routing_image_terminals`: `Map<String, RoutingImageTerminal>`
 - `model_routing_image_terminal_payloads`: `Map<String, String>`
 - `model_routing_image_denials`: `Map<String, RoutingDenialReason>`
+- `model_routing_image_approval_reasons`: `Map<String, RoutingImageApprovalReason>`
 - `model_routing_image_plan_denials`: `Map<String, RoutingImagePlanDenialReason>`
 - `model_routing_approval_phases`: `Map<String, RoutingApprovalPhase>`
 - `model_routing_approval_parent_kind`: `Map<String, RoutingApprovalParentKind>`
@@ -213,11 +215,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RuntimeState`(runtime_id: String)
 - `ModelRoutingStatus`(session_id: SessionId)
 - `SetModelRoutingBaseline`(baseline_model: String, realtime_capable: Bool)
-- `RequestFiniteSwitchTurn`(request_id: String, target_model: String, turns: u64, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, realtime_detach_allowed: Bool)
-- `RequestUntilChangedSwitchTurn`(request_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, realtime_detach_allowed: Bool)
+- `RequestFiniteSwitchTurn`(request_id: String, target_model: String, turns: u64, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool)
+- `RequestUntilChangedSwitchTurn`(request_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool)
 - `CompleteUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `AdmitModelRoutingAssistantTurn`
-- `BeginImageOperation`(operation_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, realtime_detach_allowed: Bool, requires_scoped_override: Bool)
+- `BeginImageOperation`(operation_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingImageApprovalReason>, realtime_detach_allowed: Bool, requires_scoped_override: Bool)
 - `DenyImageOperationPlan`(operation_id: String, reason: RoutingImagePlanDenialReason, terminal_payload: String)
 - `ActivateImageOperationOverride`(operation_id: String, target_model: String, target_realtime_capable: Bool)
 - `CompleteImageOperation`(operation_id: String, terminal: RoutingImageTerminal, terminal_payload: String)
@@ -653,7 +655,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalUnavailableIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `baseline_known`
   - `approval_unavailable`
@@ -662,7 +664,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalUnavailableAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `baseline_known`
   - `approval_unavailable`
@@ -671,7 +673,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalUnavailableRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `baseline_known`
   - `approval_unavailable`
@@ -680,31 +682,34 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalDeniedIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `approval_denied`
+  - `approval_reason_present`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Idle`
 
 ### `RequestFiniteSwitchTurnApprovalDeniedAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `approval_denied`
+  - `approval_reason_present`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Attached`
 
 ### `RequestFiniteSwitchTurnApprovalDeniedRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `approval_denied`
+  - `approval_reason_present`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Running`
 
 ### `RequestFiniteSwitchTurnScopedConflictIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `scoped_conflict`
 - Emits: `SwitchTurnDenied`
@@ -712,7 +717,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnScopedConflictAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `scoped_conflict`
 - Emits: `SwitchTurnDenied`
@@ -720,7 +725,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnScopedConflictRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `scoped_conflict`
 - Emits: `SwitchTurnDenied`
@@ -728,7 +733,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnAcceptedIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `baseline_known`
   - `positive_turns`
@@ -738,7 +743,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnAcceptedAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `baseline_known`
   - `positive_turns`
@@ -748,7 +753,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnAcceptedRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `baseline_known`
   - `positive_turns`
@@ -758,7 +763,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnAcceptedIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `baseline_known`
   - `approval_satisfied`
@@ -767,7 +772,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnAcceptedAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `baseline_known`
   - `approval_satisfied`
@@ -776,7 +781,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnAcceptedRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `baseline_known`
   - `approval_satisfied`
@@ -785,7 +790,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalUnavailableIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `baseline_known`
   - `approval_unavailable`
@@ -794,7 +799,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalUnavailableAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `baseline_known`
   - `approval_unavailable`
@@ -803,7 +808,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalUnavailableRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `baseline_known`
   - `approval_unavailable`
@@ -812,25 +817,28 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalDeniedIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `approval_denied`
+  - `approval_reason_present`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Idle`
 
 ### `RequestUntilChangedSwitchTurnApprovalDeniedAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `approval_denied`
+  - `approval_reason_present`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Attached`
 
 ### `RequestUntilChangedSwitchTurnApprovalDeniedRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed)
 - Guards:
   - `approval_denied`
+  - `approval_reason_present`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Running`
 
@@ -929,7 +937,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginImageOperationScopedConflictIdle`
 - From: `Idle`
-- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, requires_scoped_override)
 - Guards:
   - `operation_in_operation_conflict`
 - Emits: `ImageOperationDenied`
@@ -937,7 +945,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginImageOperationScopedConflictAttached`
 - From: `Attached`
-- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, requires_scoped_override)
 - Guards:
   - `operation_in_operation_conflict`
 - Emits: `ImageOperationDenied`
@@ -945,7 +953,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginImageOperationScopedConflictRunning`
 - From: `Running`
-- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, requires_scoped_override)
 - Guards:
   - `operation_in_operation_conflict`
 - Emits: `ImageOperationDenied`
@@ -953,7 +961,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginImageOperationApprovalUnavailableIdle`
 - From: `Idle`
-- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, requires_scoped_override)
 - Guards:
   - `approval_unavailable`
 - Emits: `ImageOperationDenied`
@@ -961,7 +969,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginImageOperationApprovalUnavailableAttached`
 - From: `Attached`
-- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, requires_scoped_override)
 - Guards:
   - `approval_unavailable`
 - Emits: `ImageOperationDenied`
@@ -969,7 +977,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginImageOperationApprovalUnavailableRunning`
 - From: `Running`
-- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, requires_scoped_override)
 - Guards:
   - `approval_unavailable`
 - Emits: `ImageOperationDenied`
@@ -977,31 +985,34 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginImageOperationApprovalDeniedIdle`
 - From: `Idle`
-- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, requires_scoped_override)
 - Guards:
   - `approval_denied`
+  - `approval_reason_present`
 - Emits: `ImageOperationDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Idle`
 
 ### `BeginImageOperationApprovalDeniedAttached`
 - From: `Attached`
-- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, requires_scoped_override)
 - Guards:
   - `approval_denied`
+  - `approval_reason_present`
 - Emits: `ImageOperationDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Attached`
 
 ### `BeginImageOperationApprovalDeniedRunning`
 - From: `Running`
-- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, requires_scoped_override)
 - Guards:
   - `approval_denied`
+  - `approval_reason_present`
 - Emits: `ImageOperationDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Running`
 
 ### `BeginImageOperationAcceptedIdle`
 - From: `Idle`
-- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, requires_scoped_override)
 - Guards:
   - `baseline_known`
   - `no_operation_in_operation`
@@ -1011,7 +1022,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginImageOperationAcceptedAttached`
 - From: `Attached`
-- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, requires_scoped_override)
 - Guards:
   - `baseline_known`
   - `no_operation_in_operation`
@@ -1021,7 +1032,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginImageOperationAcceptedRunning`
 - From: `Running`
-- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, realtime_detach_allowed, requires_scoped_override)
+- On: `BeginImageOperation`(operation_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, requires_scoped_override)
 - Guards:
   - `baseline_known`
   - `no_operation_in_operation`

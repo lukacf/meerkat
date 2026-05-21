@@ -676,6 +676,25 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "RoutingSwitchApprovalReason",
+                &[
+                    "CrossProvider",
+                    "CostExceedsThreshold",
+                    "SafetyHold",
+                    "UntilChangedFromModelOrigin",
+                    "RealtimeDetachRequired",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RoutingImageApprovalReason",
+                &[
+                    "CrossProvider",
+                    "CostExceedsThreshold",
+                    "SafetyHold",
+                    "RealtimeDetachRequired",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "RoutingImagePlanDenialReason",
                 &[
                     "UnsupportedTarget",

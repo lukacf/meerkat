@@ -2732,6 +2732,25 @@ pub enum RoutingDenialReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingSwitchApprovalReason {
+    #[default]
+    CrossProvider,
+    CostExceedsThreshold,
+    SafetyHold,
+    UntilChangedFromModelOrigin,
+    RealtimeDetachRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageApprovalReason {
+    #[default]
+    CrossProvider,
+    CostExceedsThreshold,
+    SafetyHold,
+    RealtimeDetachRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RoutingImagePlanDenialReason {
     #[default]
     UnsupportedTarget,

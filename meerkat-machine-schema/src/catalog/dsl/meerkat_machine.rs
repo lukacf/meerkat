@@ -1426,6 +1426,25 @@ pub enum RoutingDenialReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingSwitchApprovalReason {
+    #[default]
+    CrossProvider,
+    CostExceedsThreshold,
+    SafetyHold,
+    UntilChangedFromModelOrigin,
+    RealtimeDetachRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageApprovalReason {
+    #[default]
+    CrossProvider,
+    CostExceedsThreshold,
+    SafetyHold,
+    RealtimeDetachRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RoutingImagePlanDenialReason {
     #[default]
     UnsupportedTarget,
@@ -1704,6 +1723,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             model_routing_pending_switch_phase: Option<Enum<RoutingSwitchTurnPhase>>,
             model_routing_switch_terminal: Map<String, Enum<RoutingSwitchTurnTerminal>>,
             model_routing_switch_denials: Map<String, Enum<RoutingDenialReason>>,
+            model_routing_switch_approval_reasons: Map<String, Enum<RoutingSwitchApprovalReason>>,
             model_routing_image_operation_phases: Map<String, Enum<RoutingImageOperationPhase>>,
             model_routing_image_operation_target_models: Map<String, String>,
             model_routing_image_operation_realtime: Map<String, bool>,
@@ -1711,6 +1731,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             model_routing_image_terminals: Map<String, Enum<RoutingImageTerminal>>,
             model_routing_image_terminal_payloads: Map<String, String>,
             model_routing_image_denials: Map<String, Enum<RoutingDenialReason>>,
+            model_routing_image_approval_reasons: Map<String, Enum<RoutingImageApprovalReason>>,
             model_routing_image_plan_denials: Map<String, Enum<RoutingImagePlanDenialReason>>,
             model_routing_approval_phases: Map<String, Enum<RoutingApprovalPhase>>,
             model_routing_approval_parent_kind: Map<String, Enum<RoutingApprovalParentKind>>,
@@ -2041,6 +2062,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             model_routing_pending_switch_phase = None,
             model_routing_switch_terminal = EmptyMap,
             model_routing_switch_denials = EmptyMap,
+            model_routing_switch_approval_reasons = EmptyMap,
             model_routing_image_operation_phases = EmptyMap,
             model_routing_image_operation_target_models = EmptyMap,
             model_routing_image_operation_realtime = EmptyMap,
@@ -2048,6 +2070,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             model_routing_image_terminals = EmptyMap,
             model_routing_image_terminal_payloads = EmptyMap,
             model_routing_image_denials = EmptyMap,
+            model_routing_image_approval_reasons = EmptyMap,
             model_routing_image_plan_denials = EmptyMap,
             model_routing_approval_phases = EmptyMap,
             model_routing_approval_parent_kind = EmptyMap,
@@ -2272,6 +2295,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requires_approval: bool,
                 approval_available: bool,
                 approval_denied: bool,
+                approval_reason: Option<Enum<RoutingSwitchApprovalReason>>,
                 realtime_detach_allowed: bool,
             },
             RequestUntilChangedSwitchTurn {
@@ -2281,6 +2305,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requires_approval: bool,
                 approval_available: bool,
                 approval_denied: bool,
+                approval_reason: Option<Enum<RoutingSwitchApprovalReason>>,
                 realtime_detach_allowed: bool,
             },
             CompleteUntilChangedSwitchTurnReconfigure { request_id: String },
@@ -2292,6 +2317,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requires_approval: bool,
                 approval_available: bool,
                 approval_denied: bool,
+                approval_reason: Option<Enum<RoutingImageApprovalReason>>,
                 realtime_detach_allowed: bool,
                 requires_scoped_override: bool,
             },
@@ -3494,7 +3520,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_unavailable" { requires_approval && !approval_available }
@@ -3511,14 +3537,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
+            guard "approval_reason_present" { approval_reason != None }
             update {
                 self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Denied);
                 self.model_routing_approval_parent_kind.insert(request_id, RoutingApprovalParentKind::SwitchTurn);
                 self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
                 self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::DeniedDuringApproval);
+                self.model_routing_switch_approval_reasons.insert(request_id, approval_reason.get("value"));
             }
             to Idle
             emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::DeniedDuringApproval }
@@ -3530,7 +3558,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "scoped_conflict" {
                 self.model_routing_turn_override_id != None
@@ -3550,7 +3578,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "positive_turns" { turns > 0 }
@@ -3579,7 +3607,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
@@ -3603,7 +3631,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_unavailable" { requires_approval && !approval_available }
@@ -3620,14 +3648,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
+            guard "approval_reason_present" { approval_reason != None }
             update {
                 self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Denied);
                 self.model_routing_approval_parent_kind.insert(request_id, RoutingApprovalParentKind::SwitchTurn);
                 self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
                 self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::DeniedDuringApproval);
+                self.model_routing_switch_approval_reasons.insert(request_id, approval_reason.get("value"));
             }
             to Idle
             emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::DeniedDuringApproval }
@@ -3721,7 +3751,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input BeginImageOperation {
                 operation_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed, requires_scoped_override
+                approval_reason, realtime_detach_allowed, requires_scoped_override
             }
             guard "operation_in_operation_conflict" { self.model_routing_operation_override_id != None }
             update {
@@ -3738,7 +3768,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input BeginImageOperation {
                 operation_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed, requires_scoped_override
+                approval_reason, realtime_detach_allowed, requires_scoped_override
             }
             guard "approval_unavailable" { requires_approval && !approval_available }
             update {
@@ -3755,15 +3785,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input BeginImageOperation {
                 operation_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed, requires_scoped_override
+                approval_reason, realtime_detach_allowed, requires_scoped_override
             }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
+            guard "approval_reason_present" { approval_reason != None }
             update {
                 self.model_routing_approval_phases.insert(operation_id, RoutingApprovalPhase::Denied);
                 self.model_routing_approval_parent_kind.insert(operation_id, RoutingApprovalParentKind::ImageOperation);
                 self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::Terminal);
                 self.model_routing_image_terminals.insert(operation_id, RoutingImageTerminal::Denied);
                 self.model_routing_image_denials.insert(operation_id, RoutingDenialReason::DeniedDuringApproval);
+                self.model_routing_image_approval_reasons.insert(operation_id, approval_reason.get("value"));
             }
             to Idle
             emit ImageOperationDenied { operation_id: operation_id, reason: RoutingDenialReason::DeniedDuringApproval }
@@ -3775,7 +3807,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input BeginImageOperation {
                 operation_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed, requires_scoped_override
+                approval_reason, realtime_detach_allowed, requires_scoped_override
             }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "no_operation_in_operation" { self.model_routing_operation_override_id == None }

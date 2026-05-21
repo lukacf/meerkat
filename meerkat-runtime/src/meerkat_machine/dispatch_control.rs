@@ -537,6 +537,9 @@ impl MeerkatMachine {
                                     request.approval,
                                     crate::meerkat_machine_types::ModelRoutingApprovalDisposition::DeniedByUser
                                 ),
+                                approval_reason: request
+                                    .approval_reason
+                                    .map(routing_switch_approval_reason),
                                 realtime_detach_allowed: request.target_realtime.allow_realtime_detach,
                             },
                             "RequestSwitchTurn",
@@ -564,6 +567,9 @@ impl MeerkatMachine {
                                         request.approval,
                                         crate::meerkat_machine_types::ModelRoutingApprovalDisposition::DeniedByUser
                                     ),
+                                    approval_reason: request
+                                        .approval_reason
+                                        .map(routing_switch_approval_reason),
                                     realtime_detach_allowed: request.target_realtime.allow_realtime_detach,
                                 },
                                 "RequestSwitchTurn",
@@ -631,10 +637,18 @@ impl MeerkatMachine {
 
                 let status_state = self.session_dsl_state(&session_id).await?;
                 if let Some(reason) = status_state.model_routing_switch_denials.get(&request_key) {
+                    let reason = switch_denial_from_routing(
+                        *reason,
+                        status_state
+                            .model_routing_switch_approval_reasons
+                            .get(&request_key)
+                            .copied(),
+                    )
+                    .map_err(RuntimeControlPlaneError::Internal)?;
                     return Ok(MeerkatMachineCommandResult::SwitchTurnControlResult(
                         meerkat_core::image_generation::SwitchTurnControlResult::Denied {
                             request_id: request.request_id,
-                            reason: switch_denial_from_routing(*reason, request.approval_reason),
+                            reason,
                         },
                     ));
                 }
@@ -681,6 +695,7 @@ impl MeerkatMachine {
                             request.approval,
                             crate::meerkat_machine_types::ModelRoutingApprovalDisposition::DeniedByUser
                         ),
+                        approval_reason: request.approval_reason.map(routing_image_approval_reason),
                         realtime_detach_allowed: request.target_realtime.allow_realtime_detach,
                         requires_scoped_override: request.requires_scoped_override,
                     },
@@ -694,10 +709,18 @@ impl MeerkatMachine {
                     .get(&operation_key)
                     .copied()
                 {
+                    let reason = image_denial_from_routing(
+                        reason,
+                        status_state
+                            .model_routing_image_approval_reasons
+                            .get(&operation_key)
+                            .copied(),
+                    )
+                    .map_err(RuntimeControlPlaneError::Internal)?;
                     return Ok(MeerkatMachineCommandResult::ImageOperationRoutingResult(
                         crate::meerkat_machine_types::ImageOperationRoutingResult::Denied {
                             operation_id: request.operation_id,
-                            reason: image_denial_from_routing(reason, request.approval_reason),
+                            reason,
                         },
                     ));
                 }
@@ -996,54 +1019,140 @@ fn uuid_from_key(key: &str) -> Option<uuid::Uuid> {
 
 fn switch_denial_from_routing(
     reason: super::dsl::RoutingDenialReason,
-    approval_reason: Option<meerkat_core::image_generation::SwitchTurnApprovalReason>,
-) -> meerkat_core::image_generation::SwitchTurnDenialReason {
-    use meerkat_core::image_generation::{SwitchTurnApprovalReason, SwitchTurnDenialReason};
+    approval_reason: Option<super::dsl::RoutingSwitchApprovalReason>,
+) -> Result<meerkat_core::image_generation::SwitchTurnDenialReason, String> {
+    use meerkat_core::image_generation::SwitchTurnDenialReason;
     match reason {
         super::dsl::RoutingDenialReason::ApprovalRequiredButUnavailable => {
-            SwitchTurnDenialReason::ApprovalRequiredButUnavailable
+            Ok(SwitchTurnDenialReason::ApprovalRequiredButUnavailable)
         }
         super::dsl::RoutingDenialReason::DeniedDuringApproval => {
-            SwitchTurnDenialReason::DeniedDuringApproval {
-                approvable: approval_reason.unwrap_or(SwitchTurnApprovalReason::CrossProvider),
-            }
+            let approval_reason = approval_reason.ok_or_else(|| {
+                "generated switch-turn denial is missing approval reason".to_string()
+            })?;
+            Ok(SwitchTurnDenialReason::DeniedDuringApproval {
+                approvable: switch_approval_reason_from_routing(approval_reason),
+            })
         }
         super::dsl::RoutingDenialReason::ScopedOverrideConflict => {
-            SwitchTurnDenialReason::ScopedOverrideConflict
+            Ok(SwitchTurnDenialReason::ScopedOverrideConflict)
         }
         super::dsl::RoutingDenialReason::RealtimeTransportConflict => {
-            SwitchTurnDenialReason::RealtimeTransportConflict
+            Ok(SwitchTurnDenialReason::RealtimeTransportConflict)
         }
         super::dsl::RoutingDenialReason::CapabilityPolicy => {
-            SwitchTurnDenialReason::CapabilityPolicy
+            Ok(SwitchTurnDenialReason::CapabilityPolicy)
         }
     }
 }
 
 fn image_denial_from_routing(
     reason: super::dsl::RoutingDenialReason,
-    approval_reason: Option<meerkat_core::image_generation::ImageOperationApprovalReason>,
-) -> meerkat_core::image_generation::ImageOperationDenialReason {
-    use meerkat_core::image_generation::{
-        ImageOperationApprovalReason, ImageOperationDenialReason,
-    };
+    approval_reason: Option<super::dsl::RoutingImageApprovalReason>,
+) -> Result<meerkat_core::image_generation::ImageOperationDenialReason, String> {
+    use meerkat_core::image_generation::ImageOperationDenialReason;
     match reason {
         super::dsl::RoutingDenialReason::ApprovalRequiredButUnavailable => {
-            ImageOperationDenialReason::ApprovalRequiredButUnavailable
+            Ok(ImageOperationDenialReason::ApprovalRequiredButUnavailable)
         }
         super::dsl::RoutingDenialReason::DeniedDuringApproval => {
-            ImageOperationDenialReason::DeniedDuringApproval {
-                approvable: approval_reason.unwrap_or(ImageOperationApprovalReason::CrossProvider),
-            }
+            let approval_reason = approval_reason.ok_or_else(|| {
+                "generated image-operation denial is missing approval reason".to_string()
+            })?;
+            Ok(ImageOperationDenialReason::DeniedDuringApproval {
+                approvable: image_approval_reason_from_routing(approval_reason),
+            })
         }
         super::dsl::RoutingDenialReason::ScopedOverrideConflict => {
-            ImageOperationDenialReason::ScopedOverrideConflict
+            Ok(ImageOperationDenialReason::ScopedOverrideConflict)
         }
         super::dsl::RoutingDenialReason::RealtimeTransportConflict => {
-            ImageOperationDenialReason::RealtimeTransportConflict
+            Ok(ImageOperationDenialReason::RealtimeTransportConflict)
         }
         super::dsl::RoutingDenialReason::CapabilityPolicy => {
-            ImageOperationDenialReason::CapabilityPolicy
+            Ok(ImageOperationDenialReason::CapabilityPolicy)
+        }
+    }
+}
+
+fn routing_switch_approval_reason(
+    reason: meerkat_core::image_generation::SwitchTurnApprovalReason,
+) -> super::dsl::RoutingSwitchApprovalReason {
+    use meerkat_core::image_generation::SwitchTurnApprovalReason;
+    match reason {
+        SwitchTurnApprovalReason::CrossProvider => {
+            super::dsl::RoutingSwitchApprovalReason::CrossProvider
+        }
+        SwitchTurnApprovalReason::CostExceedsThreshold => {
+            super::dsl::RoutingSwitchApprovalReason::CostExceedsThreshold
+        }
+        SwitchTurnApprovalReason::SafetyHold => super::dsl::RoutingSwitchApprovalReason::SafetyHold,
+        SwitchTurnApprovalReason::UntilChangedFromModelOrigin => {
+            super::dsl::RoutingSwitchApprovalReason::UntilChangedFromModelOrigin
+        }
+        SwitchTurnApprovalReason::RealtimeDetachRequired => {
+            super::dsl::RoutingSwitchApprovalReason::RealtimeDetachRequired
+        }
+    }
+}
+
+fn switch_approval_reason_from_routing(
+    reason: super::dsl::RoutingSwitchApprovalReason,
+) -> meerkat_core::image_generation::SwitchTurnApprovalReason {
+    use meerkat_core::image_generation::SwitchTurnApprovalReason;
+    match reason {
+        super::dsl::RoutingSwitchApprovalReason::CrossProvider => {
+            SwitchTurnApprovalReason::CrossProvider
+        }
+        super::dsl::RoutingSwitchApprovalReason::CostExceedsThreshold => {
+            SwitchTurnApprovalReason::CostExceedsThreshold
+        }
+        super::dsl::RoutingSwitchApprovalReason::SafetyHold => SwitchTurnApprovalReason::SafetyHold,
+        super::dsl::RoutingSwitchApprovalReason::UntilChangedFromModelOrigin => {
+            SwitchTurnApprovalReason::UntilChangedFromModelOrigin
+        }
+        super::dsl::RoutingSwitchApprovalReason::RealtimeDetachRequired => {
+            SwitchTurnApprovalReason::RealtimeDetachRequired
+        }
+    }
+}
+
+fn routing_image_approval_reason(
+    reason: meerkat_core::image_generation::ImageOperationApprovalReason,
+) -> super::dsl::RoutingImageApprovalReason {
+    use meerkat_core::image_generation::ImageOperationApprovalReason;
+    match reason {
+        ImageOperationApprovalReason::CrossProvider => {
+            super::dsl::RoutingImageApprovalReason::CrossProvider
+        }
+        ImageOperationApprovalReason::CostExceedsThreshold => {
+            super::dsl::RoutingImageApprovalReason::CostExceedsThreshold
+        }
+        ImageOperationApprovalReason::SafetyHold => {
+            super::dsl::RoutingImageApprovalReason::SafetyHold
+        }
+        ImageOperationApprovalReason::RealtimeDetachRequired => {
+            super::dsl::RoutingImageApprovalReason::RealtimeDetachRequired
+        }
+    }
+}
+
+fn image_approval_reason_from_routing(
+    reason: super::dsl::RoutingImageApprovalReason,
+) -> meerkat_core::image_generation::ImageOperationApprovalReason {
+    use meerkat_core::image_generation::ImageOperationApprovalReason;
+    match reason {
+        super::dsl::RoutingImageApprovalReason::CrossProvider => {
+            ImageOperationApprovalReason::CrossProvider
+        }
+        super::dsl::RoutingImageApprovalReason::CostExceedsThreshold => {
+            ImageOperationApprovalReason::CostExceedsThreshold
+        }
+        super::dsl::RoutingImageApprovalReason::SafetyHold => {
+            ImageOperationApprovalReason::SafetyHold
+        }
+        super::dsl::RoutingImageApprovalReason::RealtimeDetachRequired => {
+            ImageOperationApprovalReason::RealtimeDetachRequired
         }
     }
 }

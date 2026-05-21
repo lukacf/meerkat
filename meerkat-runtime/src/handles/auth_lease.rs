@@ -1236,9 +1236,6 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                     "AuthLeaseHandle::restore_auth_lifecycle_snapshot",
                 )?;
                 to_phase
-            } else if snapshot.generation == 0 {
-                guard.authorities.remove(lease_key);
-                AuthLeasePhase::Released
             } else {
                 let (to_phase, _) = apply_restore_input_to_registry(
                     &mut guard,
@@ -1696,11 +1693,13 @@ mod tests {
     }
 
     #[test]
-    fn restore_empty_zero_generation_snapshot_clears_runtime_authority() {
+    fn restore_empty_zero_generation_snapshot_releases_through_generated_authority() {
         let h = RuntimeAuthLeaseHandle::new();
         let key = lease("dev", "shared");
         let empty = h.capture_auth_lifecycle_restore_snapshot(&key);
         h.acquire_lease(&key, 1_800_000_000).unwrap();
+        let acquired_generation = h.snapshot(&key).generation;
+        assert!(acquired_generation > empty.snapshot().generation);
 
         h.restore_auth_lifecycle_snapshot(&empty).unwrap();
 
@@ -1708,7 +1707,7 @@ mod tests {
         assert_eq!(restored.phase, None);
         assert_eq!(restored.expires_at, None);
         assert!(!restored.credential_present);
-        assert_eq!(restored.generation, 0);
+        assert_eq!(restored.generation, acquired_generation);
         assert_eq!(restored.credential_published_at_millis, None);
     }
 

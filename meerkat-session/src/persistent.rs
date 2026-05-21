@@ -2288,6 +2288,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary),
                 _admission,
             )) => {
+                let terminal = self
+                    .inner
+                    .resolve_no_pending_boundary_terminal(id)
+                    .await
+                    .map_err(|error| (error, None))?;
                 if !pre_turn_context_events.is_empty() {
                     self.inner
                         .apply_runtime_system_context_for_turn(id, pre_turn_context_events.clone())
@@ -2299,7 +2304,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     run_id,
                     boundary,
                     contributing_input_ids,
-                    Some(CoreApplyTerminal::NoPendingBoundary),
+                    Some(terminal),
                     pre_turn_context_events,
                 )
                 .await
@@ -2369,6 +2374,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await
             }
             Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
+                let terminal = self.inner.resolve_no_pending_boundary_terminal(id).await?;
                 if !pre_turn_context_events.is_empty() {
                     self.inner
                         .apply_runtime_system_context_for_turn(id, pre_turn_context_events.clone())
@@ -2379,7 +2385,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     run_id,
                     boundary,
                     contributing_input_ids,
-                    Some(CoreApplyTerminal::NoPendingBoundary),
+                    Some(terminal),
                     pre_turn_context_events,
                 )
                 .await

@@ -41,7 +41,10 @@ use crate::tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot,
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot, watch};
 
-use crate::turn_admission::{TurnAdmissionPhase, TurnAdmissionSlot};
+use crate::turn_admission::{
+    StartTurnDispatchAuthorization, StartTurnDisposition, StartTurnPublicTerminal,
+    TurnAdmissionPhase, TurnAdmissionProjection, TurnAdmissionSlot,
+};
 
 /// Capacity for the internal agent event channel.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -53,15 +56,9 @@ const COMMAND_CHANNEL_CAPACITY: usize = 8;
 // Session state
 // ---------------------------------------------------------------------------
 
-/// Observable state of a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionState {
-    Idle,
-    Admitted,
-    Running,
-    Completing,
-    ShuttingDown,
-}
+/// Observable state of a session, projected from generated turn-admission
+/// authority.
+type SessionState = TurnAdmissionProjection;
 
 /// Snapshot of session metadata for read/list operations.
 #[derive(Debug, Clone)]
@@ -199,7 +196,7 @@ struct SessionHandle {
     state_rx: watch::Receiver<SessionState>,
     summary_rx: watch::Receiver<SessionSummaryCache>,
     llm_identity_rx: watch::Receiver<SessionLlmIdentity>,
-    /// Canonical owner for session turn admission lifecycle.
+    /// Mutexed shell around generated session turn-admission authority.
     turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
     created_at: SystemTime,
     /// Key-value labels attached at session creation.
@@ -1326,14 +1323,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         drop(sessions);
         release_staged_capacity_permit(&handle.staged_capacity_permit);
-        let phase = {
+        let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
-            slot.request_shutdown().ok()
+            slot.request_shutdown().ok().map(|_| slot.projection())
         };
-        if let Some(phase) = phase {
-            handle
-                .state_tx
-                .send_replace(map_turn_phase_to_session_state(phase));
+        if let Some(projection) = projection {
+            handle.state_tx.send_replace(projection);
         }
         let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         Ok(())
@@ -1598,12 +1593,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 .await
             }
             Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
+                let terminal = self.resolve_no_pending_boundary_terminal(id).await?;
                 self.build_runtime_output(
                     id,
                     run_id,
                     boundary,
                     contributing_input_ids,
-                    Some(CoreApplyTerminal::NoPendingBoundary),
+                    Some(terminal),
                 )
                 .await
             }
@@ -1621,6 +1617,28 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     Err(error)
                 }
             }
+        }
+    }
+
+    pub(crate) async fn resolve_no_pending_boundary_terminal(
+        &self,
+        id: &SessionId,
+    ) -> Result<CoreApplyTerminal, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let terminal = {
+            let mut slot = lock_turn_admission(&handle.turn_admission);
+            slot.resolve_last_start_turn_public_terminal()
+        }
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "generated turn authority did not confirm NoPendingBoundary terminal: {error}"
+            )))
+        })?;
+        match terminal {
+            StartTurnPublicTerminal::NoPendingBoundary => Ok(CoreApplyTerminal::NoPendingBoundary),
         }
     }
 
@@ -2010,14 +2028,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let mut sessions = self.sessions.write().await;
         for (_id, handle) in sessions.drain(..) {
             release_staged_capacity_permit(&handle.staged_capacity_permit);
-            let phase = {
+            let projection = {
                 let mut slot = lock_turn_admission(&handle.turn_admission);
-                slot.request_shutdown().ok()
+                slot.request_shutdown().ok().map(|_| slot.projection())
             };
-            if let Some(phase) = phase {
-                handle
-                    .state_tx
-                    .send_replace(map_turn_phase_to_session_state(phase));
+            if let Some(projection) = projection {
+                handle.state_tx.send_replace(projection);
             }
             let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         }
@@ -2099,40 +2115,32 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     }
 
     fn is_session_state_active(state: SessionState) -> bool {
-        matches!(
-            state,
-            SessionState::Admitted | SessionState::Running | SessionState::Completing
-        )
+        state.is_active
     }
 
     fn request_start_turn(id: &SessionId, handle: &SessionHandle) -> Result<(), SessionError> {
-        let phase = {
+        let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
-            let phase = slot
-                .claim()
+            slot.claim()
                 .map_err(|_| SessionError::Busy { id: id.clone() })?;
             clear_cancel_after_boundary_request(&handle.cancel_after_boundary_handle);
-            phase
+            slot.projection()
         };
-        handle
-            .state_tx
-            .send_replace(map_turn_phase_to_session_state(phase));
+        handle.state_tx.send_replace(projection);
         Ok(())
     }
 
     fn try_abort_admitted_turn(handle: &SessionHandle) {
-        let phase = {
+        let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
             let phase = slot.abort_claim().ok();
             if phase.is_some() {
                 clear_cancel_after_boundary_request(&handle.cancel_after_boundary_handle);
             }
-            phase
+            phase.map(|_| slot.projection())
         };
-        if let Some(phase) = phase {
-            handle
-                .state_tx
-                .send_replace(map_turn_phase_to_session_state(phase));
+        if let Some(projection) = projection {
+            handle.state_tx.send_replace(projection);
         }
     }
 }
@@ -2204,7 +2212,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .await?;
         let session_id = agent.session_id();
         let created_at = SystemTime::now();
-        let turn_admission = Arc::new(std::sync::Mutex::new(TurnAdmissionSlot::new()));
+        let turn_admission_slot = TurnAdmissionSlot::new();
+        let initial_session_state = turn_admission_slot.projection();
+        let turn_admission = Arc::new(std::sync::Mutex::new(turn_admission_slot));
         let staged_capacity_permit = Arc::new(std::sync::Mutex::new(None));
         let active_capacity_lease =
             Arc::new(std::sync::Mutex::new(SessionActiveCapacityLease::default()));
@@ -2231,7 +2241,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let session_context = agent.session_context_handle();
         // Create session task channels
         let (command_tx, command_rx) = mpsc::channel::<SessionCommand>(COMMAND_CHANNEL_CAPACITY);
-        let (state_tx, state_rx) = watch::channel(SessionState::Idle);
+        let (state_tx, state_rx) = watch::channel(initial_session_state);
         let state_tx_handle = state_tx.clone();
         let (summary_tx, summary_rx) = watch::channel(SessionSummaryCache {
             updated_at: created_at,
@@ -2578,14 +2588,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         };
 
         {
-            let slot = lock_turn_admission(&handle.turn_admission);
-            let phase = slot.phase();
-            if !matches!(
-                phase,
-                TurnAdmissionPhase::Admitted | TurnAdmissionPhase::Running
-            ) {
-                return Err(SessionError::NotRunning { id: id.clone() });
-            }
+            let mut slot = lock_turn_admission(&handle.turn_admission);
+            slot.authorize_cancel_after_boundary()
+                .map_err(|_| SessionError::NotRunning { id: id.clone() })?;
             cancel_after_boundary_handle.store(true, Ordering::SeqCst);
         }
         wake_interrupt_notify(&handle.interrupt_notify);
@@ -2691,14 +2696,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .await
             .insert(id.clone(), archived_view);
 
-        let phase = {
+        let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
-            slot.request_shutdown().ok()
+            slot.request_shutdown().ok().map(|_| slot.projection())
         };
-        if let Some(phase) = phase {
-            handle
-                .state_tx
-                .send_replace(map_turn_phase_to_session_state(phase));
+        if let Some(projection) = projection {
+            handle.state_tx.send_replace(projection);
         }
         let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         Ok(())
@@ -3154,16 +3157,6 @@ fn release_active_capacity_lease(
     }
 }
 
-fn map_turn_phase_to_session_state(phase: TurnAdmissionPhase) -> SessionState {
-    match phase {
-        TurnAdmissionPhase::Idle => SessionState::Idle,
-        TurnAdmissionPhase::Admitted => SessionState::Admitted,
-        TurnAdmissionPhase::Running => SessionState::Running,
-        TurnAdmissionPhase::Completing => SessionState::Completing,
-        TurnAdmissionPhase::ShuttingDown => SessionState::ShuttingDown,
-    }
-}
-
 fn lock_turn_admission(
     slot: &Arc<std::sync::Mutex<TurnAdmissionSlot>>,
 ) -> std::sync::MutexGuard<'_, TurnAdmissionSlot> {
@@ -3174,79 +3167,16 @@ fn lock_turn_admission(
 /// Roll an admitted turn back to `Idle` from within the session task when a
 /// preflight check fails before the run starts.
 fn abort_admitted_turn(control: &SessionTaskControl) {
-    let phase = {
+    let projection = {
         let mut slot = lock_turn_admission(&control.turn_admission);
         let phase = slot.abort_claim().ok();
         if phase.is_some() {
             clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
         }
-        phase
+        phase.map(|_| slot.projection())
     };
-    if let Some(phase) = phase {
-        control
-            .state_tx
-            .send_replace(map_turn_phase_to_session_state(phase));
-    }
-}
-
-/// Canonical turn-admissibility disposition.
-///
-/// This is the single owner of the "can this turn request legally proceed?"
-/// decision. It reads both the live session state (has_pending_boundary)
-/// AND deferred staging state (has_staged_tool_results) to produce a typed
-/// outcome. No shell code should re-derive this from partial projections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartTurnDisposition {
-    /// Run a content turn (prompt → LLM).
-    RunContentTurn,
-    /// Resume a pending continuation boundary (ToolResults or User).
-    RunPending,
-    /// No pending boundary exists and no staged tool results will create one.
-    /// The caller should return NoPendingBoundary.
-    NoPendingBoundary,
-}
-
-/// Evaluate turn admissibility from the canonical inputs.
-///
-/// This function is the single source of truth for deciding how a StartTurn
-/// request should be dispatched. It considers:
-/// - `execution_kind`: typed intent from the runtime layer (or None for substrate-direct)
-/// - `prompt`: the content to send (for the None/substrate-direct fallback)
-/// - `session_has_pending_boundary`: whether the live session ends in User/ToolResults
-/// - `has_staged_tool_results`: whether deferred tool results will create a boundary
-fn evaluate_start_turn_disposition(
-    execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
-    prompt: &meerkat_core::types::ContentInput,
-    session_has_pending_boundary: bool,
-    has_staged_tool_results: bool,
-) -> StartTurnDisposition {
-    // A pending boundary exists if the live session has one OR if staged
-    // tool results will materialize one when applied.
-    let effective_pending_boundary = session_has_pending_boundary || has_staged_tool_results;
-
-    match execution_kind {
-        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn) => {
-            StartTurnDisposition::RunContentTurn
-        }
-        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending) => {
-            if effective_pending_boundary {
-                StartTurnDisposition::RunPending
-            } else {
-                StartTurnDisposition::NoPendingBoundary
-            }
-        }
-        None => {
-            // Non-runtime substrate-direct paths: infer from prompt content.
-            let has_prompt =
-                prompt.has_non_text_content() || !prompt.text_content().trim().is_empty();
-            if has_prompt {
-                StartTurnDisposition::RunContentTurn
-            } else if effective_pending_boundary {
-                StartTurnDisposition::RunPending
-            } else {
-                StartTurnDisposition::NoPendingBoundary
-            }
-        }
+    if let Some(projection) = projection {
+        control.state_tx.send_replace(projection);
     }
 }
 
@@ -3397,10 +3327,23 @@ async fn session_task<A: SessionAgent>(
                     .as_ref()
                     .and_then(|metadata| metadata.execution_kind);
                 let mut active_admission = active_admission;
-                let current_phase = lock_turn_admission(&control.turn_admission).phase();
-                if current_phase == TurnAdmissionPhase::ShuttingDown {
-                    let _ = result_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
-                    continue;
+                let dispatch_authorization = {
+                    let mut slot = lock_turn_admission(&control.turn_admission);
+                    slot.authorize_start_turn_dispatch()
+                };
+                match dispatch_authorization {
+                    Ok(StartTurnDispatchAuthorization::Authorized) => {}
+                    Ok(StartTurnDispatchAuthorization::Cancelled) => {
+                        let _ = result_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+                        continue;
+                    }
+                    Err(error) => {
+                        let _ =
+                            result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
+                                format!("generated turn authority rejected dispatch: {error}"),
+                            )));
+                        continue;
+                    }
                 }
 
                 let (restore_first_turn_pending, pending_initial_prompt, pending_tool_results) = {
@@ -3422,16 +3365,37 @@ async fn session_task<A: SessionAgent>(
                     .flat_map(|pending| pending.results.clone())
                     .collect::<Vec<_>>();
 
-                // Canonical turn-preflight: evaluate whether this turn request
-                // can legally proceed. This is the single owner of the
-                // admissibility decision — it reads both the live session state
-                // AND deferred staging state to produce a typed disposition.
-                let disposition = evaluate_start_turn_disposition(
-                    execution_kind,
-                    &prompt,
-                    agent.has_pending_boundary(),
-                    !flattened_tool_results.is_empty(),
-                );
+                let disposition = {
+                    let mut slot = lock_turn_admission(&control.turn_admission);
+                    slot.resolve_start_turn_disposition(
+                        execution_kind,
+                        &prompt,
+                        agent.has_pending_boundary(),
+                        !flattened_tool_results.is_empty(),
+                    )
+                };
+                let disposition = match disposition {
+                    Ok(disposition) => disposition,
+                    Err(error) => {
+                        restore_deferred_turn_inputs(
+                            &deferred_turn_state,
+                            restore_first_turn_pending,
+                            pending_initial_prompt,
+                            pending_tool_results,
+                        );
+                        if restore_staged_capacity_on_pre_run_failure
+                            && let Some(admission) = active_admission.take()
+                        {
+                            admission.restore_staged_capacity();
+                        }
+                        abort_admitted_turn(&control);
+                        let _ =
+                            result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
+                                format!("illegal start-turn disposition transition: {error}"),
+                            )));
+                        continue;
+                    }
+                };
                 if matches!(disposition, StartTurnDisposition::NoPendingBoundary) {
                     restore_deferred_turn_inputs(
                         &deferred_turn_state,
@@ -3485,13 +3449,11 @@ async fn session_task<A: SessionAgent>(
                 }
                 let begin_phase = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
-                    slot.begin()
+                    slot.begin().map(|_| slot.projection())
                 };
                 match begin_phase {
-                    Ok(phase) => {
-                        control
-                            .state_tx
-                            .send_replace(map_turn_phase_to_session_state(phase));
+                    Ok(projection) => {
+                        control.state_tx.send_replace(projection);
                     }
                     Err(error) => {
                         let _ = agent.set_flow_tool_overlay(None);
@@ -3520,7 +3482,7 @@ async fn session_task<A: SessionAgent>(
 
                 // Scope the pinned future so its mutable borrow of `agent` is
                 // released before we call `agent.snapshot()`.
-                let (result, resolved_phase) = {
+                let (result, resolved_projection) = {
                     #[cfg(not(target_arch = "wasm32"))]
                     type RunFut<'a> = std::pin::Pin<
                         Box<
@@ -3562,7 +3524,7 @@ async fn session_task<A: SessionAgent>(
                     // run_fut is already Pin<Box<...>>, no tokio::pin! needed.
                     let mut run_fut = run_fut;
                     let mut interrupted = false;
-                    let mut resolved_phase = None;
+                    let mut resolved_projection = None;
 
                     let r = loop {
                         if lock_turn_admission(&control.turn_admission).interrupt_pending() {
@@ -3582,7 +3544,7 @@ async fn session_task<A: SessionAgent>(
                                     interrupted = true;
                                     break Err(meerkat_core::error::AgentError::Cancelled);
                                 }
-                                resolved_phase = slot.resolve().ok();
+                                resolved_projection = slot.resolve().ok().map(|_| slot.projection());
                                 break result;
                             }
                             () = &mut interrupt_wait => {
@@ -3626,17 +3588,15 @@ async fn session_task<A: SessionAgent>(
                         }
                     }
 
-                    (r, resolved_phase)
+                    (r, resolved_projection)
                 }; // run_fut dropped here
 
-                let resolve_phase = resolved_phase.or_else(|| {
+                let resolve_projection = resolved_projection.or_else(|| {
                     let mut slot = lock_turn_admission(&control.turn_admission);
-                    slot.resolve().ok()
+                    slot.resolve().ok().map(|_| slot.projection())
                 });
-                if let Some(phase) = resolve_phase {
-                    control
-                        .state_tx
-                        .send_replace(map_turn_phase_to_session_state(phase));
+                if let Some(projection) = resolve_projection {
+                    control.state_tx.send_replace(projection);
                 }
 
                 // Update cached summary
@@ -3666,13 +3626,11 @@ async fn session_task<A: SessionAgent>(
                     if finalize.is_ok() {
                         clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
                     }
-                    finalize
+                    finalize.map(|outcome| (outcome, slot.projection()))
                 };
                 let shutting_down = match finalize {
-                    Ok(outcome) => {
-                        control
-                            .state_tx
-                            .send_replace(map_turn_phase_to_session_state(outcome.next_phase));
+                    Ok((outcome, projection)) => {
+                        control.state_tx.send_replace(projection);
                         outcome.next_phase == TurnAdmissionPhase::ShuttingDown
                     }
                     Err(error) => {
@@ -3877,24 +3835,16 @@ async fn session_task<A: SessionAgent>(
                 let _ = reply_tx.send(agent.update_system_prompt(system_prompt));
             }
             SessionCommand::Shutdown => {
-                let next_phase = {
+                let next_projection = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
-                    if slot.phase() == TurnAdmissionPhase::ShuttingDown {
-                        None
-                    } else {
-                        let next_phase = slot.request_shutdown().ok();
-                        if matches!(next_phase, Some(TurnAdmissionPhase::ShuttingDown)) {
-                            clear_cancel_after_boundary_request(
-                                &control.cancel_after_boundary_handle,
-                            );
-                        }
-                        next_phase
+                    let next_phase = slot.request_shutdown().ok();
+                    if matches!(next_phase, Some(TurnAdmissionPhase::ShuttingDown)) {
+                        clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
                     }
+                    next_phase.map(|_| slot.projection())
                 };
-                if let Some(phase) = next_phase {
-                    control
-                        .state_tx
-                        .send_replace(map_turn_phase_to_session_state(phase));
+                if let Some(projection) = next_projection {
+                    control.state_tx.send_replace(projection);
                 }
                 break;
             }
@@ -5165,99 +5115,5 @@ mod inline_video_admission_tests {
             .await
             .expect("live identity");
         assert_eq!(live_identity, target_identity);
-    }
-}
-
-#[cfg(test)]
-mod disposition_tests {
-    use super::*;
-    use meerkat_core::lifecycle::RuntimeExecutionKind;
-
-    #[test]
-    fn content_turn_always_runs() {
-        let d = evaluate_start_turn_disposition(
-            Some(RuntimeExecutionKind::ContentTurn),
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            false,
-        );
-        assert_eq!(d, StartTurnDisposition::RunContentTurn);
-    }
-
-    #[test]
-    fn resume_pending_with_session_boundary() {
-        let d = evaluate_start_turn_disposition(
-            Some(RuntimeExecutionKind::ResumePending),
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            true,
-            false,
-        );
-        assert_eq!(d, StartTurnDisposition::RunPending);
-    }
-
-    #[test]
-    fn resume_pending_with_staged_tool_results() {
-        let d = evaluate_start_turn_disposition(
-            Some(RuntimeExecutionKind::ResumePending),
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            true,
-        );
-        assert_eq!(d, StartTurnDisposition::RunPending);
-    }
-
-    #[test]
-    fn resume_pending_no_boundary_no_staged() {
-        let d = evaluate_start_turn_disposition(
-            Some(RuntimeExecutionKind::ResumePending),
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            false,
-        );
-        assert_eq!(d, StartTurnDisposition::NoPendingBoundary);
-    }
-
-    #[test]
-    fn none_with_prompt_runs_content_turn() {
-        let d = evaluate_start_turn_disposition(
-            None,
-            &meerkat_core::types::ContentInput::Text("hello".into()),
-            false,
-            false,
-        );
-        assert_eq!(d, StartTurnDisposition::RunContentTurn);
-    }
-
-    #[test]
-    fn none_empty_prompt_with_boundary_runs_pending() {
-        let d = evaluate_start_turn_disposition(
-            None,
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            true,
-            false,
-        );
-        assert_eq!(d, StartTurnDisposition::RunPending);
-    }
-
-    #[test]
-    fn none_empty_prompt_no_boundary_is_no_pending() {
-        let d = evaluate_start_turn_disposition(
-            None,
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            false,
-        );
-        assert_eq!(d, StartTurnDisposition::NoPendingBoundary);
-    }
-
-    #[test]
-    fn none_empty_prompt_staged_tool_results_runs_pending() {
-        let d = evaluate_start_turn_disposition(
-            None,
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            true,
-        );
-        assert_eq!(d, StartTurnDisposition::RunPending);
     }
 }

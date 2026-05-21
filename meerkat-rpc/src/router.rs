@@ -533,7 +533,7 @@ enum StreamTerminal {
 enum StreamForwarderState {
     Active {
         stop_tx: Option<oneshot::Sender<()>>,
-        task: JoinHandle<()>,
+        task: Option<JoinHandle<()>>,
     },
 }
 
@@ -599,6 +599,42 @@ fn rpc_event_stream_terminal_reason_wire(
         meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::ExplicitClose => {
             "explicit_close"
         }
+    }
+}
+
+fn stop_stream_forwarder(stream: &mut StreamForwarder) {
+    match &mut stream.state {
+        StreamForwarderState::Active { stop_tx, task } => {
+            if let Some(stop_tx) = stop_tx.take() {
+                let _ = stop_tx.send(());
+            }
+            if let Some(task) = task.take() {
+                task.abort();
+            }
+        }
+    }
+}
+
+async fn attach_stream_forwarder_task(
+    streams: &Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    stream_id: Uuid,
+    task: JoinHandle<()>,
+) {
+    let mut task = Some(task);
+    {
+        let mut streams = streams.lock().await;
+        if let Some(stream) = streams.get_mut(&stream_id) {
+            match &mut stream.state {
+                StreamForwarderState::Active {
+                    task: task_slot, ..
+                } => {
+                    *task_slot = task.take();
+                }
+            }
+        }
+    }
+    if let Some(task) = task {
+        task.abort();
     }
 }
 
@@ -685,6 +721,49 @@ async fn record_session_stream_terminal_authority(
                 "RecordSessionEventStreamTerminated for stream '{stream_id}' emitted no SessionEventStreamTerminalResolved effect"
             )
         })
+}
+
+async fn emit_authorized_session_stream_terminal(
+    notification_sink: &NotificationSink,
+    active_session_streams: &Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    stream_authority: &RpcStreamAuthority,
+    stream_id: Uuid,
+    reason: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason,
+    detail: Option<String>,
+) {
+    let terminal =
+        record_session_stream_terminal_authority(stream_authority, &stream_id, reason, detail)
+            .await;
+    active_session_streams.lock().await.remove(&stream_id);
+    let terminal = match terminal {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            tracing::warn!(
+                stream_id = %stream_id,
+                "failed to authorize session event stream terminal notification: {error}"
+            );
+            return;
+        }
+    };
+    let terminal_session_id = match SessionId::parse(&terminal.session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            tracing::warn!(
+                stream_id = %stream_id,
+                session_id = %terminal.session_id,
+                "session event stream authority emitted invalid session id: {error}"
+            );
+            return;
+        }
+    };
+    notification_sink
+        .emit_session_stream_end(
+            &stream_id,
+            &terminal_session_id,
+            rpc_event_stream_terminal_reason_wire(terminal.reason),
+            terminal.detail.as_deref(),
+        )
+        .await;
 }
 
 async fn resolve_session_stream_close_authority(
@@ -810,6 +889,36 @@ async fn record_mob_stream_terminal_authority(
                 "RecordMobEventStreamTerminated for stream '{stream_id}' emitted no MobEventStreamTerminalResolved effect"
             )
         })
+}
+
+async fn emit_authorized_mob_stream_terminal(
+    notification_sink: &NotificationSink,
+    active_mob_streams: &Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    stream_authority: &RpcStreamAuthority,
+    stream_id: Uuid,
+    reason: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason,
+    detail: Option<String>,
+) {
+    let terminal =
+        record_mob_stream_terminal_authority(stream_authority, &stream_id, reason, detail).await;
+    active_mob_streams.lock().await.remove(&stream_id);
+    let terminal = match terminal {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            tracing::warn!(
+                stream_id = %stream_id,
+                "failed to authorize mob event stream terminal notification: {error}"
+            );
+            return;
+        }
+    };
+    notification_sink
+        .emit_mob_stream_end(
+            &stream_id,
+            rpc_event_stream_terminal_reason_wire(terminal.reason),
+            terminal.detail.as_deref(),
+        )
+        .await;
 }
 
 async fn resolve_mob_stream_close_authority(
@@ -2625,6 +2734,17 @@ impl MethodRouter {
         let stream_id_for_task = stream_id;
         let session_id_for_task = session_id.clone();
 
+        self.active_session_streams.lock().await.insert(
+            stream_id,
+            StreamForwarder {
+                terminal: StreamTerminal::Session(session_id.clone()),
+                state: StreamForwarderState::Active {
+                    stop_tx: Some(stop_tx),
+                    task: None,
+                },
+            },
+        );
+
         let task = tokio::spawn(async move {
             let mut stream = stream;
             let mut stop_rx = stop_rx;
@@ -2643,94 +2763,28 @@ impl MethodRouter {
                                     .emit_session_stream_event(&stream_id_for_task, sequence, &session_id_for_task, &envelope)
                                     .await;
                                 if emit_status == StreamEmitStatus::Overflow {
-                                    let should_emit = {
-                                        let mut streams = active_session_streams.lock().await;
-                                        if streams
-                                            .get(&stream_id_for_task)
-                                            .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
-                                        {
-                                            let terminal = record_session_stream_terminal_authority(
-                                                &stream_authority,
-                                                &stream_id_for_task,
-                                                meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
-                                                Some("transport stream notification queue overflow".to_string()),
-                                            )
-                                            .await;
-                                            streams.remove(&stream_id_for_task);
-                                            terminal.map_err(|error| {
-                                                tracing::warn!(
-                                                    stream_id = %stream_id_for_task,
-                                                    "failed to authorize session event stream terminal notification: {error}"
-                                                );
-                                            }).ok()
-                                        } else {
-                                            None
-                                        }
-                                    };
-                                    if let Some(terminal) = should_emit {
-                                        let Ok(terminal_session_id) = SessionId::parse(&terminal.session_id) else {
-                                            tracing::warn!(
-                                                stream_id = %stream_id_for_task,
-                                                session_id = %terminal.session_id,
-                                                "session event stream authority emitted invalid session id"
-                                            );
-                                            break;
-                                        };
-                                        notification_sink
-                                            .emit_session_stream_end(
-                                                &stream_id_for_task,
-                                                &terminal_session_id,
-                                                rpc_event_stream_terminal_reason_wire(terminal.reason),
-                                                terminal.detail.as_deref(),
-                                            )
-                                            .await;
-                                    }
+                                    emit_authorized_session_stream_terminal(
+                                        &notification_sink,
+                                        &active_session_streams,
+                                        &stream_authority,
+                                        stream_id_for_task,
+                                        meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
+                                        Some("transport stream notification queue overflow".to_string()),
+                                    )
+                                    .await;
                                     break;
                                 }
                             }
                             None => {
-                                let should_emit = {
-                                    let mut streams = active_session_streams.lock().await;
-                                    if streams
-                                        .get(&stream_id_for_task)
-                                        .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
-                                    {
-                                        let terminal = record_session_stream_terminal_authority(
-                                            &stream_authority,
-                                            &stream_id_for_task,
-                                            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::RemoteEnd,
-                                            None,
-                                        )
-                                        .await;
-                                        streams.remove(&stream_id_for_task);
-                                        terminal.map_err(|error| {
-                                            tracing::warn!(
-                                                stream_id = %stream_id_for_task,
-                                                "failed to authorize session event stream terminal notification: {error}"
-                                            );
-                                        }).ok()
-                                    } else {
-                                        None
-                                    }
-                                };
-                                if let Some(terminal) = should_emit {
-                                    let Ok(terminal_session_id) = SessionId::parse(&terminal.session_id) else {
-                                        tracing::warn!(
-                                            stream_id = %stream_id_for_task,
-                                            session_id = %terminal.session_id,
-                                            "session event stream authority emitted invalid session id"
-                                        );
-                                        break;
-                                    };
-                                    notification_sink
-                                        .emit_session_stream_end(
-                                            &stream_id_for_task,
-                                            &terminal_session_id,
-                                            rpc_event_stream_terminal_reason_wire(terminal.reason),
-                                            terminal.detail.as_deref(),
-                                        )
-                                        .await;
-                                }
+                                emit_authorized_session_stream_terminal(
+                                    &notification_sink,
+                                    &active_session_streams,
+                                    &stream_authority,
+                                    stream_id_for_task,
+                                    meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::RemoteEnd,
+                                    None,
+                                )
+                                .await;
                                 break;
                             }
                         }
@@ -2739,16 +2793,7 @@ impl MethodRouter {
             }
         });
 
-        self.active_session_streams.lock().await.insert(
-            stream_id,
-            StreamForwarder {
-                terminal: StreamTerminal::Session(session_id.clone()),
-                state: StreamForwarderState::Active {
-                    stop_tx: Some(stop_tx),
-                    task,
-                },
-            },
-        );
+        attach_stream_forwarder_task(&self.active_session_streams, stream_id, task).await;
 
         let result = meerkat_contracts::SessionStreamOpenResult {
             stream_id: stream_id.to_string(),
@@ -2787,58 +2832,28 @@ impl MethodRouter {
             }
         };
 
-        let close_authority = {
-            let mut active_session_streams = self.active_session_streams.lock().await;
-            if active_session_streams.contains_key(&stream_id) {
-                let authority = match resolve_session_stream_close_authority(
-                    &self.stream_authority,
-                    &stream_id,
-                )
-                .await
+        let close_authority = match resolve_session_stream_close_authority(
+            &self.stream_authority,
+            &stream_id,
+        )
+        .await
+        {
+            Ok(authority) => authority,
+            Err(error) => {
+                if let Some(mut stream) =
+                    self.active_session_streams.lock().await.remove(&stream_id)
                 {
-                    Ok(authority) if authority.already_closed => {
-                        return RpcResponse::error(
-                            id,
-                            error::INTERNAL_ERROR,
-                            format!(
-                                "Session event stream authority reported already_closed for active stream {stream_id}"
-                            ),
-                        );
-                    }
-                    Ok(authority) => authority,
-                    Err(error) => {
-                        return RpcResponse::error(
-                            id,
-                            error::INTERNAL_ERROR,
-                            format!("Failed to authorize session event stream close: {error}"),
-                        );
-                    }
-                };
-                if let Some(mut stream) = active_session_streams.remove(&stream_id) {
-                    match &mut stream.state {
-                        StreamForwarderState::Active { stop_tx, task } => {
-                            if let Some(stop_tx) = stop_tx.take() {
-                                let _ = stop_tx.send(());
-                            }
-                            task.abort();
-                        }
-                    }
+                    stop_stream_forwarder(&mut stream);
                 }
-                authority
-            } else {
-                match resolve_session_stream_close_authority(&self.stream_authority, &stream_id)
-                    .await
-                {
-                    Ok(authority) => authority,
-                    Err(error) => {
-                        return RpcResponse::error(
-                            id,
-                            error::INVALID_PARAMS,
-                            format!("Session event stream not tracked: {stream_id} ({error})"),
-                        );
-                    }
-                }
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("Session event stream not tracked: {stream_id} ({error})"),
+                );
             }
+        };
+        if let Some(mut stream) = self.active_session_streams.lock().await.remove(&stream_id) {
+            stop_stream_forwarder(&mut stream);
         };
         if let Some(terminal) = close_authority.terminal.as_ref() {
             let terminal_session_id = match SessionId::parse(&terminal.session_id) {
@@ -2906,24 +2921,12 @@ impl MethodRouter {
         };
 
         let stream_id = Uuid::new_v4();
-        let open_authority =
-            match resolve_mob_stream_open_authority(&self.stream_authority, &stream_id).await {
-                Ok(authority) => authority,
-                Err(error) => {
-                    return RpcResponse::error(
-                        id,
-                        error::INTERNAL_ERROR,
-                        format!("Failed to authorize mob event stream open: {error}"),
-                    );
-                }
-            };
-        let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let notification_sink = self.notification_sink.clone();
         let active_mob_streams = self.active_mob_streams.clone();
         let stream_authority = self.stream_authority.clone();
         let stream_id_for_task = stream_id;
 
-        if let Some(agent_identity) = params.agent_identity {
+        let opened = if let Some(agent_identity) = params.agent_identity {
             // Per-member stream: subscribe to a specific member's agent events.
             let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
             let stream: meerkat_core::comms::EventStream =
@@ -2938,9 +2941,31 @@ impl MethodRouter {
                     }
                 };
 
+            let open_authority =
+                match resolve_mob_stream_open_authority(&self.stream_authority, &stream_id).await {
+                    Ok(authority) => authority,
+                    Err(error) => {
+                        return RpcResponse::error(
+                            id,
+                            error::INTERNAL_ERROR,
+                            format!("Failed to authorize mob event stream open: {error}"),
+                        );
+                    }
+                };
+            let (stop_tx, stop_rx) = oneshot::channel::<()>();
             let notification_sink = notification_sink.clone();
             let active_mob_streams = active_mob_streams.clone();
             let stream_authority = stream_authority.clone();
+            self.active_mob_streams.lock().await.insert(
+                stream_id,
+                StreamForwarder {
+                    terminal: StreamTerminal::Mob,
+                    state: StreamForwarderState::Active {
+                        stop_tx: Some(stop_tx),
+                        task: None,
+                    },
+                },
+            );
             let task = tokio::spawn(async move {
                 let mut stream = stream;
                 let mut stop_rx = stop_rx;
@@ -2965,76 +2990,28 @@ impl MethodRouter {
                                         )
                                         .await;
                                     if emit_status == StreamEmitStatus::Overflow {
-                                        let should_emit = {
-                                            let mut streams = active_mob_streams.lock().await;
-                                            if streams
-                                                .get(&stream_id_for_task)
-                                                .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
-                                            {
-                                                let terminal = record_mob_stream_terminal_authority(
-                                                    &stream_authority,
-                                                    &stream_id_for_task,
-                                                    meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
-                                                    Some("transport stream notification queue overflow".to_string()),
-                                                )
-                                                .await;
-                                                streams.remove(&stream_id_for_task);
-                                                terminal.map_err(|error| {
-                                                    tracing::warn!(
-                                                        stream_id = %stream_id_for_task,
-                                                        "failed to authorize mob event stream terminal notification: {error}"
-                                                    );
-                                                }).ok()
-                                            } else {
-                                                None
-                                            }
-                                        };
-                                        if let Some(terminal) = should_emit {
-                                            notification_sink
-                                                .emit_mob_stream_end(
-                                                    &stream_id_for_task,
-                                                    rpc_event_stream_terminal_reason_wire(terminal.reason),
-                                                    terminal.detail.as_deref(),
-                                                )
-                                                .await;
-                                        }
+                                        emit_authorized_mob_stream_terminal(
+                                            &notification_sink,
+                                            &active_mob_streams,
+                                            &stream_authority,
+                                            stream_id_for_task,
+                                            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
+                                            Some("transport stream notification queue overflow".to_string()),
+                                        )
+                                        .await;
                                         break;
                                     }
                                 }
                                 None => {
-                                    let should_emit = {
-                                        let mut streams = active_mob_streams.lock().await;
-                                        if streams
-                                            .get(&stream_id_for_task)
-                                            .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
-                                        {
-                                            let terminal = record_mob_stream_terminal_authority(
-                                                &stream_authority,
-                                                &stream_id_for_task,
-                                                meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::RemoteEnd,
-                                                None,
-                                            )
-                                            .await;
-                                            streams.remove(&stream_id_for_task);
-                                            terminal.map_err(|error| {
-                                                tracing::warn!(
-                                                    stream_id = %stream_id_for_task,
-                                                    "failed to authorize mob event stream terminal notification: {error}"
-                                                );
-                                            }).ok()
-                                        } else {
-                                            None
-                                        }
-                                    };
-                                    if let Some(terminal) = should_emit {
-                                        notification_sink
-                                            .emit_mob_stream_end(
-                                                &stream_id_for_task,
-                                                rpc_event_stream_terminal_reason_wire(terminal.reason),
-                                                terminal.detail.as_deref(),
-                                            )
-                                            .await;
-                                    }
+                                    emit_authorized_mob_stream_terminal(
+                                        &notification_sink,
+                                        &active_mob_streams,
+                                        &stream_authority,
+                                        stream_id_for_task,
+                                        meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::RemoteEnd,
+                                        None,
+                                    )
+                                    .await;
                                     break;
                                 }
                             }
@@ -3043,23 +3020,37 @@ impl MethodRouter {
                 }
             });
 
+            attach_stream_forwarder_task(&self.active_mob_streams, stream_id, task).await;
+            open_authority.opened
+        } else {
+            // Mob-wide stream: subscribe to all members' events (attributed).
+            let mut router_handle = handle.subscribe_mob_events().await;
+
+            let open_authority =
+                match resolve_mob_stream_open_authority(&self.stream_authority, &stream_id).await {
+                    Ok(authority) => authority,
+                    Err(error) => {
+                        return RpcResponse::error(
+                            id,
+                            error::INTERNAL_ERROR,
+                            format!("Failed to authorize mob event stream open: {error}"),
+                        );
+                    }
+                };
+            let (stop_tx, stop_rx) = oneshot::channel::<()>();
+            let notification_sink = notification_sink.clone();
+            let active_mob_streams = active_mob_streams.clone();
+            let stream_authority = stream_authority.clone();
             self.active_mob_streams.lock().await.insert(
                 stream_id,
                 StreamForwarder {
                     terminal: StreamTerminal::Mob,
                     state: StreamForwarderState::Active {
                         stop_tx: Some(stop_tx),
-                        task,
+                        task: None,
                     },
                 },
             );
-        } else {
-            // Mob-wide stream: subscribe to all members' events (attributed).
-            let mut router_handle = handle.subscribe_mob_events().await;
-
-            let notification_sink = notification_sink.clone();
-            let active_mob_streams = active_mob_streams.clone();
-            let stream_authority = stream_authority.clone();
             let task = tokio::spawn(async move {
                 let mut stop_rx = stop_rx;
                 let mut sequence = 0u64;
@@ -3083,76 +3074,28 @@ impl MethodRouter {
                                         )
                                         .await;
                                     if emit_status == StreamEmitStatus::Overflow {
-                                        let should_emit = {
-                                            let mut streams = active_mob_streams.lock().await;
-                                            if streams
-                                                .get(&stream_id_for_task)
-                                                .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
-                                            {
-                                                let terminal = record_mob_stream_terminal_authority(
-                                                    &stream_authority,
-                                                    &stream_id_for_task,
-                                                    meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
-                                                    Some("transport stream notification queue overflow".to_string()),
-                                                )
-                                                .await;
-                                                streams.remove(&stream_id_for_task);
-                                                terminal.map_err(|error| {
-                                                    tracing::warn!(
-                                                        stream_id = %stream_id_for_task,
-                                                        "failed to authorize mob event stream terminal notification: {error}"
-                                                    );
-                                                }).ok()
-                                            } else {
-                                                None
-                                            }
-                                        };
-                                        if let Some(terminal) = should_emit {
-                                            notification_sink
-                                                .emit_mob_stream_end(
-                                                    &stream_id_for_task,
-                                                    rpc_event_stream_terminal_reason_wire(terminal.reason),
-                                                    terminal.detail.as_deref(),
-                                                )
-                                                .await;
-                                        }
+                                        emit_authorized_mob_stream_terminal(
+                                            &notification_sink,
+                                            &active_mob_streams,
+                                            &stream_authority,
+                                            stream_id_for_task,
+                                            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
+                                            Some("transport stream notification queue overflow".to_string()),
+                                        )
+                                        .await;
                                         break;
                                     }
                                 }
                                 None => {
-                                    let should_emit = {
-                                        let mut streams = active_mob_streams.lock().await;
-                                        if streams
-                                            .get(&stream_id_for_task)
-                                            .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
-                                        {
-                                            let terminal = record_mob_stream_terminal_authority(
-                                                &stream_authority,
-                                                &stream_id_for_task,
-                                                meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::RemoteEnd,
-                                                None,
-                                            )
-                                            .await;
-                                            streams.remove(&stream_id_for_task);
-                                            terminal.map_err(|error| {
-                                                tracing::warn!(
-                                                    stream_id = %stream_id_for_task,
-                                                    "failed to authorize mob event stream terminal notification: {error}"
-                                                );
-                                            }).ok()
-                                        } else {
-                                            None
-                                        }
-                                    };
-                                    if let Some(terminal) = should_emit {
-                                        notification_sink
-                                            .emit_mob_stream_end(
-                                                &stream_id_for_task,
-                                                rpc_event_stream_terminal_reason_wire(terminal.reason),
-                                                terminal.detail.as_deref(),
-                                            )
-                                            .await;
-                                    }
+                                    emit_authorized_mob_stream_terminal(
+                                        &notification_sink,
+                                        &active_mob_streams,
+                                        &stream_authority,
+                                        stream_id_for_task,
+                                        meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::RemoteEnd,
+                                        None,
+                                    )
+                                    .await;
                                     break;
                                 }
                             }
@@ -3161,21 +3104,13 @@ impl MethodRouter {
                 }
             });
 
-            self.active_mob_streams.lock().await.insert(
-                stream_id,
-                StreamForwarder {
-                    terminal: StreamTerminal::Mob,
-                    state: StreamForwarderState::Active {
-                        stop_tx: Some(stop_tx),
-                        task,
-                    },
-                },
-            );
-        }
+            attach_stream_forwarder_task(&self.active_mob_streams, stream_id, task).await;
+            open_authority.opened
+        };
 
         let result = meerkat_contracts::MobStreamOpenResult {
             stream_id: stream_id.to_string(),
-            opened: open_authority.opened,
+            opened,
         };
         match serde_json::to_value(result) {
             Ok(value) => RpcResponse::success(id, value),
@@ -3210,56 +3145,24 @@ impl MethodRouter {
             }
         };
 
-        let close_authority = {
-            let mut active_mob_streams = self.active_mob_streams.lock().await;
-            if active_mob_streams.contains_key(&stream_id) {
-                let authority = match resolve_mob_stream_close_authority(
-                    &self.stream_authority,
-                    &stream_id,
-                )
-                .await
-                {
-                    Ok(authority) if authority.already_closed => {
-                        return RpcResponse::error(
-                            id,
-                            error::INTERNAL_ERROR,
-                            format!(
-                                "Mob event stream authority reported already_closed for active stream {stream_id}"
-                            ),
-                        );
+        let close_authority =
+            match resolve_mob_stream_close_authority(&self.stream_authority, &stream_id).await {
+                Ok(authority) => authority,
+                Err(error) => {
+                    if let Some(mut stream) =
+                        self.active_mob_streams.lock().await.remove(&stream_id)
+                    {
+                        stop_stream_forwarder(&mut stream);
                     }
-                    Ok(authority) => authority,
-                    Err(error) => {
-                        return RpcResponse::error(
-                            id,
-                            error::INTERNAL_ERROR,
-                            format!("Failed to authorize mob event stream close: {error}"),
-                        );
-                    }
-                };
-                if let Some(mut stream) = active_mob_streams.remove(&stream_id) {
-                    match &mut stream.state {
-                        StreamForwarderState::Active { stop_tx, task } => {
-                            if let Some(stop_tx) = stop_tx.take() {
-                                let _ = stop_tx.send(());
-                            }
-                            task.abort();
-                        }
-                    }
+                    return RpcResponse::error(
+                        id,
+                        error::INVALID_PARAMS,
+                        format!("Mob event stream not tracked: {stream_id} ({error})"),
+                    );
                 }
-                authority
-            } else {
-                match resolve_mob_stream_close_authority(&self.stream_authority, &stream_id).await {
-                    Ok(authority) => authority,
-                    Err(error) => {
-                        return RpcResponse::error(
-                            id,
-                            error::INVALID_PARAMS,
-                            format!("Mob event stream not tracked: {stream_id} ({error})"),
-                        );
-                    }
-                }
-            }
+            };
+        if let Some(mut stream) = self.active_mob_streams.lock().await.remove(&stream_id) {
+            stop_stream_forwarder(&mut stream);
         };
         if let Some(terminal) = close_authority.terminal.as_ref() {
             if !close_authority.already_closed {
@@ -5069,6 +4972,61 @@ args = [{}]
             .await
             .unwrap();
         assert_eq!(error_code(&close_resp), error::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn session_stream_close_trusts_machine_terminal_over_active_map() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "deferred stream terminal fixture",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let open_resp = router
+            .dispatch(make_request(
+                "session/stream_open",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let stream_id = result_value(&open_resp)["stream_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let stream_uuid = Uuid::parse_str(&stream_id).unwrap();
+        assert_eq!(router.active_session_streams.lock().await.len(), 1);
+
+        record_session_stream_terminal_authority(
+            &router.stream_authority,
+            &stream_uuid,
+            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::RemoteEnd,
+            None,
+        )
+        .await
+        .expect("machine should accept remote terminal observation");
+
+        let close_resp = router
+            .dispatch(make_request(
+                "session/stream_close",
+                serde_json::json!({ "stream_id": stream_id }),
+            ))
+            .await
+            .unwrap();
+        let closed = result_value(&close_resp);
+        assert_eq!(closed["closed"], true);
+        assert_eq!(closed["already_closed"], true);
+        assert_eq!(router.active_session_streams.lock().await.len(), 0);
     }
 
     #[tokio::test]
@@ -7567,6 +7525,69 @@ args = [{}]
             .await
             .unwrap();
         assert_eq!(error_code(&close_resp), error::INVALID_PARAMS);
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_stream_close_trusts_machine_terminal_over_active_map() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "stale-active-mob",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-6",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let open_resp = router
+            .dispatch(make_request(
+                "mob/stream_open",
+                serde_json::json!({ "mob_id": mob_id }),
+            ))
+            .await
+            .unwrap();
+        let stream_id = result_value(&open_resp)["stream_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let stream_uuid = Uuid::parse_str(&stream_id).unwrap();
+        assert_eq!(router.active_mob_streams.lock().await.len(), 1);
+
+        record_mob_stream_terminal_authority(
+            &router.stream_authority,
+            &stream_uuid,
+            meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalReason::TerminalError,
+            Some("stale active map fixture".to_string()),
+        )
+        .await
+        .expect("machine should accept mob terminal observation");
+
+        let close_resp = router
+            .dispatch(make_request(
+                "mob/stream_close",
+                serde_json::json!({ "stream_id": stream_id }),
+            ))
+            .await
+            .unwrap();
+        let closed = result_value(&close_resp);
+        assert_eq!(closed["closed"], true);
+        assert_eq!(closed["already_closed"], true);
+        assert_eq!(router.active_mob_streams.lock().await.len(), 0);
     }
 
     #[cfg(feature = "mob")]

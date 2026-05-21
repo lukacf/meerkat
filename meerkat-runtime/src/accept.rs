@@ -153,6 +153,10 @@ impl ResolvedAdmission {
         self.requires_active_pre_admission
     }
 
+    pub(crate) fn stages_run_boundary(&self) -> bool {
+        self.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
+    }
+
     pub(crate) fn authority(&self) -> &MachineAdmissionAuthority {
         &self.authority
     }

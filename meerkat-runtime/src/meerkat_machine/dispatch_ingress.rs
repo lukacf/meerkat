@@ -297,7 +297,7 @@ impl MeerkatMachine {
 
                 if state == RuntimeState::Running
                     && signal.should_interrupt_yielding()
-                    && resolved.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
+                    && resolved.stages_run_boundary()
                     && let (Some(input_id), Some(boundary_handle)) =
                         (accepted_input_id_for_live_boundary, boundary_handle)
                 {

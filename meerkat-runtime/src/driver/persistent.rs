@@ -567,7 +567,13 @@ impl PersistentRuntimeDriver {
             self.inner.restore_rollback_snapshot(checkpoint);
             return Err(err);
         }
-        let input_updates = self.inner.stored_input_states_snapshot();
+        let input_updates = match self.inner.stored_input_states_snapshot() {
+            Ok(input_updates) => input_updates,
+            Err(err) => {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(err);
+            }
+        };
         if let Err(err) = self
             .store
             .atomic_apply(

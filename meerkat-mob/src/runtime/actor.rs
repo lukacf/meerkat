@@ -12,7 +12,7 @@ use super::terminalization::{TerminalizationOutcome, TerminalizationTarget};
 use super::transaction::LifecycleRollback;
 use super::*;
 use crate::generated::protocol_mob_destroying_session_ingress::MobDestroyingSessionIngressObligation;
-use crate::ids::{AgentIdentity, AgentRuntimeId};
+use crate::ids::{AgentIdentity, AgentRuntimeId, RespawnTopologyPeerId};
 use crate::machines::mob_machine as mob_dsl;
 use crate::run::{MobMachineFlowAuthorityToken, MobMachineFlowRunCommand, MobRunStatus, flow_run};
 #[cfg(target_arch = "wasm32")]
@@ -573,12 +573,12 @@ struct RespawnSnapshot {
 
 struct FinalizeSpawnOutcome {
     receipt: super::handle::MemberSpawnReceipt,
-    failed_restore_peer_ids: Vec<MeerkatId>,
+    failed_restore_peer_ids: Vec<RespawnTopologyPeerId>,
 }
 
 struct RespawnTopologyRestoreResolution {
     result: mob_dsl::RespawnTopologyRestoreResultKind,
-    failed_peer_ids: Vec<AgentIdentity>,
+    failed_peer_ids: Vec<RespawnTopologyPeerId>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3778,12 +3778,12 @@ impl MobActor {
     fn resolve_respawn_topology_restore_result(
         &mut self,
         agent_identity: &MeerkatId,
-        failed_restore_peer_ids: Vec<MeerkatId>,
+        failed_restore_peer_ids: Vec<RespawnTopologyPeerId>,
     ) -> Result<RespawnTopologyRestoreResolution, MobError> {
         let dsl_identity = mob_dsl::AgentIdentity::from(agent_identity.as_str());
         let dsl_failed_peer_ids = failed_restore_peer_ids
             .iter()
-            .map(|peer_id| mob_dsl::AgentIdentity::from(peer_id.as_str()))
+            .map(|peer_id| mob_dsl::RespawnTopologyPeerId::from(peer_id.as_str()))
             .collect::<Vec<_>>();
         let transition = self.apply_dsl_signal_collect_transition(
             mob_dsl::MobMachineSignal::ResolveRespawnTopologyRestore {
@@ -3817,7 +3817,7 @@ impl MobActor {
         }
         let failed_peer_ids = effect_failed_peer_ids
             .into_iter()
-            .map(|peer_id| AgentIdentity::from(peer_id.0.as_str()))
+            .map(|peer_id| RespawnTopologyPeerId::from(peer_id.0.as_str()))
             .collect::<Vec<_>>();
         match result {
             mob_dsl::RespawnTopologyRestoreResultKind::Completed if failed_peer_ids.is_empty() => {
@@ -7231,7 +7231,7 @@ impl MobActor {
         // from roster projection fields. These loop results are shell
         // observations only; `ResolveRespawnTopologyRestore` below owns the
         // public respawn result class.
-        let mut failed_restore_peer_ids: Vec<MeerkatId> = Vec::new();
+        let mut failed_restore_peer_ids: Vec<RespawnTopologyPeerId> = Vec::new();
         if let Some(plan) = restore_wiring {
             for peer_identity in plan.local_peers {
                 if peer_identity == *agent_identity {
@@ -7251,11 +7251,12 @@ impl MobActor {
                         %error,
                         "respawn: failed to restore machine-owned local peer edge"
                     );
-                    failed_restore_peer_ids.push(peer_identity);
+                    failed_restore_peer_ids
+                        .push(RespawnTopologyPeerId::from(peer_identity.as_str()));
                 }
             }
             for peer_spec in plan.external_peers {
-                let peer_name_id = MeerkatId::from(peer_spec.name.as_str());
+                let peer_id = RespawnTopologyPeerId::from(peer_spec.peer_id.as_str());
                 if let Err(error) = self
                     .handle_wire(
                         agent_identity.clone(),
@@ -7269,7 +7270,7 @@ impl MobActor {
                         %error,
                         "respawn: failed to restore machine-owned external peer edge"
                     );
-                    failed_restore_peer_ids.push(peer_name_id);
+                    failed_restore_peer_ids.push(peer_id);
                 }
             }
         }
@@ -10252,20 +10253,15 @@ impl MobActor {
 
         // 1. Snapshot all replacement inputs before retiring. Topology comes
         // from the MobMachine authority; the roster is only the read model
-        // that supplies profile/runtime binding details for the old member and
-        // filters stale local edges whose peers are no longer live.
+        // that supplies profile/runtime binding details for the old member.
         let snapshot = {
             let roster = self.roster.read().await;
             let entry = roster
                 .get(&agent_identity)
                 .cloned()
                 .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
-            let live_local_identities = roster
-                .list()
-                .map(|entry| MeerkatId::from(entry.agent_identity.as_str()))
-                .collect::<HashSet<_>>();
             let restore_wiring = self
-                .machine_restore_wiring_plan(&agent_identity, &live_local_identities)
+                .machine_restore_wiring_plan(&agent_identity)
                 .map_err(MobRespawnError::from)?;
             let binding = match &entry.member_ref {
                 crate::event::MemberRef::BackendPeer {
@@ -14938,7 +14934,6 @@ impl MobActor {
     fn machine_restore_wiring_plan(
         &self,
         agent_identity: &MeerkatId,
-        live_local_identities: &HashSet<MeerkatId>,
     ) -> Result<RestoreWiringPlan, MobError> {
         let local =
             mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(agent_identity.as_str()));
@@ -14952,10 +14947,7 @@ impl MobActor {
                 None
             };
             if let Some(peer) = peer {
-                let peer_identity = MeerkatId::from(peer.0.as_str());
-                if live_local_identities.contains(&peer_identity) {
-                    local_peers.push(peer_identity);
-                }
+                local_peers.push(MeerkatId::from(peer.0.as_str()));
             }
         }
         local_peers.sort();

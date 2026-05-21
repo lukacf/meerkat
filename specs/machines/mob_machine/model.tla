@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for MobMachine.
 
-CONSTANTS AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, BranchIdValues, CollectionPolicyKindValues, DependencyModeValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, FenceTokenValues, FlowFrameReducerCommandKindValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FrameIdValues, FrameNodeKeyValues, FrameScopeValues, FrameStatusValues, GenerationValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, MemberPeerEndpointValues, MobIdValues, MobMemberStateValues, MobToolCallerProvenanceValues, NatValues, NodeRunStatusValues, OpaquePrincipalTokenValues, PeerIdValues, RunIdValues, RunStepKeyValues, SessionIdValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfExternalPeerEdgeValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfLoopInstanceIdValues, SetOfStepIdValues, SetOfStringValues, SetOfWiringEdgeValues, SpawnPolicyRuntimeModeValues, StepIdValues, StepRunStatusValues, StringValues, WiringEdgeValues, WorkIdValues, WorkOriginValues
+CONSTANTS AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, BranchIdValues, CollectionPolicyKindValues, DependencyModeValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, FenceTokenValues, FlowFrameReducerCommandKindValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FrameIdValues, FrameNodeKeyValues, FrameScopeValues, FrameStatusValues, GenerationValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, MemberPeerEndpointValues, MobIdValues, MobMemberStateValues, MobToolCallerProvenanceValues, NatValues, NodeRunStatusValues, OpaquePrincipalTokenValues, PeerIdValues, RespawnTopologyPeerIdValues, RunIdValues, RunStepKeyValues, SessionIdValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfExternalPeerEdgeValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfLoopInstanceIdValues, SetOfStepIdValues, SetOfStringValues, SetOfWiringEdgeValues, SpawnPolicyRuntimeModeValues, StepIdValues, StepRunStatusValues, StringValues, WiringEdgeValues, WorkIdValues, WorkOriginValues
 
 ExternalPeerEdgeValuesCi == {}
 ExternalPeerKeyValuesCi == {}
@@ -79,10 +79,10 @@ OptionStepIdValues == {None} \cup {Some(x) : x \in StepIdValues}
 OptionStepRunStatusValues == {None} \cup {Some(x) : x \in StepRunStatusValues}
 OptionStringValues == {None} \cup {Some(x) : x \in StringValues}
 OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
-SeqOfAgentIdentityValues == {<<>>} \cup {<<x>> : x \in AgentIdentityValues} \cup {<<x, y>> : x \in AgentIdentityValues, y \in AgentIdentityValues}
 SeqOfFlowNodeIdValues == {<<>>} \cup {<<x>> : x \in FlowNodeIdValues} \cup {<<x, y>> : x \in FlowNodeIdValues, y \in FlowNodeIdValues}
 SeqOfFrameIdValues == {<<>>} \cup {<<x>> : x \in FrameIdValues} \cup {<<x, y>> : x \in FrameIdValues, y \in FrameIdValues}
 SeqOfLoopInstanceIdValues == {<<>>} \cup {<<x>> : x \in LoopInstanceIdValues} \cup {<<x, y>> : x \in LoopInstanceIdValues, y \in LoopInstanceIdValues}
+SeqOfRespawnTopologyPeerIdValues == {<<>>} \cup {<<x>> : x \in RespawnTopologyPeerIdValues} \cup {<<x, y>> : x \in RespawnTopologyPeerIdValues, y \in RespawnTopologyPeerIdValues}
 SeqOfStepIdValues == {<<>>} \cup {<<x>> : x \in StepIdValues} \cup {<<x, y>> : x \in StepIdValues, y \in StepIdValues}
 MapAgentIdentityOptionSpawnPolicyRuntimeModeValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in AgentIdentityValues, v \in OptionSpawnPolicyRuntimeModeValues }
 MapFlowNodeIdOptionBoolValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in FlowNodeIdValues, v \in OptionBoolValues }
@@ -3192,8 +3192,8 @@ Next ==
     \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveMemberRetirementArchivedAlreadyClearedStopped(agent_identity, agent_runtime_id, fence_token)
     \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : \E session_id \in SessionIdValues : ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id)
     \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E external_addressable \in BOOLEAN : \E session_id \in SessionIdValues : RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id)
-    \/ \E agent_identity \in AgentIdentityValues : \E failed_peer_ids \in SeqOfAgentIdentityValues : ResolveRespawnTopologyRestoreCompleted(agent_identity, failed_peer_ids)
-    \/ \E agent_identity \in AgentIdentityValues : \E failed_peer_ids \in SeqOfAgentIdentityValues : ResolveRespawnTopologyRestoreFailed(agent_identity, failed_peer_ids)
+    \/ \E agent_identity \in AgentIdentityValues : \E failed_peer_ids \in SeqOfRespawnTopologyPeerIdValues : ResolveRespawnTopologyRestoreCompleted(agent_identity, failed_peer_ids)
+    \/ \E agent_identity \in AgentIdentityValues : \E failed_peer_ids \in SeqOfRespawnTopologyPeerIdValues : ResolveRespawnTopologyRestoreFailed(agent_identity, failed_peer_ids)
     \/ \E agent_identity \in AgentIdentityValues : \E reason \in StringValues : RecoverMemberRestoreFailureRunning(agent_identity, reason)
     \/ \E agent_identity \in AgentIdentityValues : \E reason \in StringValues : RecoverMemberRestoreFailureStopped(agent_identity, reason)
     \/ \E agent_identity \in AgentIdentityValues : \E reason \in StringValues : RecoverMemberRestoreFailureCompleted(agent_identity, reason)

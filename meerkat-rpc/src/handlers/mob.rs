@@ -2416,7 +2416,10 @@ mod tests {
             &mob_id,
             Err(MobRespawnError::TopologyRestoreFailed {
                 receipt: receipt.clone(),
-                failed_peer_ids: vec![AgentIdentity::from("peer-a"), AgentIdentity::from("peer-b")],
+                failed_peer_ids: vec![
+                    meerkat_mob::RespawnTopologyPeerId::from("peer-a"),
+                    meerkat_mob::RespawnTopologyPeerId::from("peer-b"),
+                ],
             }),
         );
 

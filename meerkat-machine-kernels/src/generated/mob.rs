@@ -1504,6 +1504,34 @@ impl std::fmt::Display for NodeRunStatus {
 }
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
 pub type PeerId = meerkat_machine_schema::catalog::dsl::mob_machine::PeerId;
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct RespawnTopologyPeerId(pub String);
+impl From<String> for RespawnTopologyPeerId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for RespawnTopologyPeerId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for RespawnTopologyPeerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -2780,7 +2808,7 @@ pub mod signals {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRespawnTopologyRestore {
         pub agent_identity: AgentIdentity,
-        pub failed_peer_ids: Vec<AgentIdentity>,
+        pub failed_peer_ids: Vec<RespawnTopologyPeerId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DestroyMob {
@@ -3143,7 +3171,7 @@ pub mod effects {
     pub struct RespawnTopologyRestoreResolved {
         pub agent_identity: AgentIdentity,
         pub result: RespawnTopologyRestoreResultKind,
-        pub failed_peer_ids: Vec<AgentIdentity>,
+        pub failed_peer_ids: Vec<RespawnTopologyPeerId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WiringGraphChanged {

@@ -440,7 +440,7 @@ macro_rules! mob_catalog_machine_dsl {
             ObserveMemberRetirementArchived { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             ResetMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
             RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
-            ResolveRespawnTopologyRestore { agent_identity: AgentIdentity, failed_peer_ids: Seq<AgentIdentity> },
+            ResolveRespawnTopologyRestore { agent_identity: AgentIdentity, failed_peer_ids: Seq<RespawnTopologyPeerId> },
             DestroyMob { session_id: SessionId },
             ObserveRuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             RecoverRosterMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool },
@@ -502,7 +502,7 @@ macro_rules! mob_catalog_machine_dsl {
             PersistKickoffFailureUpdate { member_id: String, phase: KickoffPhase, error: String },
             EmitKickoffLifecycleNotice { member_id: String, intent: Enum<KickoffIntent> },
             SpawnPolicyResolutionRecorded { agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<Enum<SpawnPolicyRuntimeMode>> },
-            RespawnTopologyRestoreResolved { agent_identity: AgentIdentity, result: Enum<RespawnTopologyRestoreResultKind>, failed_peer_ids: Seq<AgentIdentity> },
+            RespawnTopologyRestoreResolved { agent_identity: AgentIdentity, result: Enum<RespawnTopologyRestoreResultKind>, failed_peer_ids: Seq<RespawnTopologyPeerId> },
             // Track-B (R5): canonical topology-change signals consumed by
             // the `RecomputeMobPeerOverlay` composition driver.
             //
@@ -4280,6 +4280,29 @@ pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
 pub struct AgentIdentity(pub String);
 
 impl<T: Into<String>> From<T> for AgentIdentity {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Canonical peer identity for respawn topology-restore feedback. Local
+/// member edges use `AgentIdentity`; external peer edges use `PeerId`, not the
+/// display-only peer name.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct RespawnTopologyPeerId(pub String);
+
+impl<T: Into<String>> From<T> for RespawnTopologyPeerId {
     fn from(s: T) -> Self {
         Self(s.into())
     }

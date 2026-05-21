@@ -11352,24 +11352,47 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             agent_identity,
             initial_message,
         } => {
-            let receipt = state
+            let result = state
                 .mob_respawn(
                     &meerkat_mob::MobId::from(mob_id.clone()),
                     meerkat_mob::AgentIdentity::from(agent_identity),
                     initial_message.map(meerkat_core::ContentInput::from),
                 )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            println!(
-                "{}",
-                serde_json::json!({
-                    "status": "completed",
-                    "receipt": receipt,
-                })
-            );
-            Ok(())
+                .await;
+            match result {
+                Ok(receipt) => {
+                    sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+                    save_mob_registry(scope, &registry).await?;
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "completed",
+                            "receipt": receipt,
+                        })
+                    );
+                    Ok(())
+                }
+                Err(meerkat_mob::MobRespawnError::TopologyRestoreFailed {
+                    receipt,
+                    failed_peer_ids,
+                }) => {
+                    sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+                    save_mob_registry(scope, &registry).await?;
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "topology_restore_failed",
+                            "receipt": receipt,
+                            "failed_peer_ids": failed_peer_ids
+                                .iter()
+                                .map(std::string::ToString::to_string)
+                                .collect::<Vec<_>>(),
+                        })
+                    );
+                    Ok(())
+                }
+                Err(err) => Err(anyhow::anyhow!("{err}")),
+            }
         }
         MobCommands::WaitKickoff {
             mob_id,

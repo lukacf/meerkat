@@ -34,6 +34,29 @@ impl<T: Into<String>> From<T> for AgentIdentity {
     }
 }
 
+/// Canonical peer identity for respawn topology-restore feedback. Local
+/// member edges use `AgentIdentity`; external peer edges use `PeerId`, not the
+/// display-only peer name.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct RespawnTopologyPeerId(pub String);
+
+impl<T: Into<String>> From<T> for RespawnTopologyPeerId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
 /// Bridging type for agent runtime ID. Maps to `crate::ids::AgentRuntimeId`.
 ///
 /// The real `AgentRuntimeId` is a struct `{ identity: AgentIdentity, generation: Generation }`.
@@ -2009,7 +2032,7 @@ mod tests {
         let mut authority = MobMachineAuthority::new();
         let identity = AgentIdentity::from("worker");
         let runtime_id = AgentRuntimeId::from("worker:1");
-        let failed_peer = AgentIdentity::from("peer");
+        let failed_peer = RespawnTopologyPeerId::from("peer");
         let expected_failed_peer_ids = vec![failed_peer];
 
         seed_live_member(&mut authority, &identity, &runtime_id);

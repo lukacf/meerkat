@@ -10813,7 +10813,7 @@ async fn test_respawn_repairs_local_machine_edge_without_roster_projection() {
 }
 
 #[tokio::test]
-async fn test_respawn_ignores_machine_local_edge_to_retired_peer() {
+async fn test_respawn_reports_machine_local_edge_to_retired_peer() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let left = MeerkatId::from("respawn-stale-left");
     let right = MeerkatId::from("respawn-stale-right");
@@ -10857,13 +10857,24 @@ async fn test_respawn_ignores_machine_local_edge_to_retired_peer() {
         "test setup should remove the old peer from the live roster"
     );
 
-    handle
+    let error = handle
         .respawn(
             AgentIdentity::from(left.as_str()),
-            Some("ignore stale peer".into()),
+            Some("report stale peer".into()),
         )
         .await
-        .expect("respawn should ignore machine edge to retired peer");
+        .expect_err("respawn should report machine edge to retired peer");
+    let failed_peer_ids = match error {
+        crate::runtime::handle::MobRespawnError::TopologyRestoreFailed {
+            failed_peer_ids, ..
+        } => failed_peer_ids,
+        other => panic!("expected TopologyRestoreFailed, got {other:?}"),
+    };
+    assert_eq!(
+        failed_peer_ids,
+        vec![crate::ids::RespawnTopologyPeerId::from(right.as_str())],
+        "machine-owned local peer edge must reach generated respawn topology result authority"
+    );
     let left_after = handle
         .get_member(&AgentIdentity::from(left.as_str()))
         .await

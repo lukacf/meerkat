@@ -1425,6 +1425,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "RespawnTopologyRestoreResultKind",
                 &["Completed", "TopologyRestoreFailed"],
             ),
+            NamedTypeBinding::string("RespawnTopologyPeerId"),
             NamedTypeBinding::string("WiringEdge"),
             NamedTypeBinding::string_enum("WiringLifecycleKind", &["Wired", "Unwired"]),
             NamedTypeBinding::string("WorkId"),

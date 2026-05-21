@@ -550,7 +550,7 @@ pub enum MobRespawnError {
     #[error("topology restore failed for member {}: {} peer(s) failed", receipt.identity, failed_peer_ids.len())]
     TopologyRestoreFailed {
         receipt: MemberRespawnReceipt,
-        failed_peer_ids: Vec<AgentIdentity>,
+        failed_peer_ids: Vec<crate::ids::RespawnTopologyPeerId>,
     },
 
     /// Retire cleanup progressed far enough that the old member may still exist,

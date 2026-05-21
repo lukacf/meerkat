@@ -80,7 +80,8 @@ pub use error::MobError;
 pub use event::{AttributedEvent, MemberWireEdge, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
-    LoopId, LoopInstanceId, MobId, ProfileName, RunId, StepId, WorkOrigin, WorkRef, WorkSpec,
+    LoopId, LoopInstanceId, MobId, ProfileName, RespawnTopologyPeerId, RunId, StepId, WorkOrigin,
+    WorkRef, WorkSpec,
 };
 pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 #[doc(hidden)]

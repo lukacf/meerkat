@@ -207,6 +207,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RespawnMember`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `ResolveRespawnTopologyRestoreCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveRespawnTopologyRestoreFailed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 - `RecoverMemberRestoreFailureRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
@@ -782,6 +788,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SpawnPolicyResolutionRecorded`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `RespawnTopologyRestoreResolved`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
 - `WiringGraphChanged`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`

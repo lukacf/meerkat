@@ -1421,6 +1421,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "SpawnPolicyRuntimeMode",
                 &["AutonomousHost", "TurnDriven"],
             ),
+            NamedTypeBinding::string_enum(
+                "RespawnTopologyRestoreResultKind",
+                &["Completed", "TopologyRestoreFailed"],
+            ),
             NamedTypeBinding::string("WiringEdge"),
             NamedTypeBinding::string_enum("WiringLifecycleKind", &["Wired", "Unwired"]),
             NamedTypeBinding::string("WorkId"),

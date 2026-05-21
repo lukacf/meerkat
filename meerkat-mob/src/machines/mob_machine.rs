@@ -664,6 +664,17 @@ pub enum SpawnPolicyRuntimeMode {
     TurnDriven,
 }
 
+/// Typed public result class for the respawn topology-restore follow-up.
+/// The shell observes concrete peer restoration attempts, but MobMachine owns
+/// whether the public respawn envelope is complete or topology-restoration
+/// partial failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RespawnTopologyRestoreResultKind {
+    #[default]
+    Completed,
+    TopologyRestoreFailed,
+}
+
 impl From<crate::ids::WorkOrigin> for WorkOrigin {
     fn from(origin: crate::ids::WorkOrigin) -> Self {
         match origin {
@@ -1991,5 +2002,50 @@ mod tests {
                 error: Some("missing durable session".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn respawn_topology_restore_result_class_is_machine_owned() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("worker");
+        let runtime_id = AgentRuntimeId::from("worker:1");
+        let failed_peer = AgentIdentity::from("peer");
+        let expected_failed_peer_ids = vec![failed_peer];
+
+        seed_live_member(&mut authority, &identity, &runtime_id);
+
+        let completed = authority
+            .apply_signal(MobMachineSignal::ResolveRespawnTopologyRestore {
+                agent_identity: identity.clone(),
+                failed_peer_ids: Vec::new(),
+            })
+            .expect("machine should classify empty restore failures as completed");
+        assert!(completed.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                MobMachineEffect::RespawnTopologyRestoreResolved {
+                    agent_identity,
+                    result: RespawnTopologyRestoreResultKind::Completed,
+                    failed_peer_ids,
+                } if *agent_identity == identity && failed_peer_ids.is_empty()
+            )
+        }));
+
+        let failed = authority
+            .apply_signal(MobMachineSignal::ResolveRespawnTopologyRestore {
+                agent_identity: identity.clone(),
+                failed_peer_ids: expected_failed_peer_ids.clone(),
+            })
+            .expect("machine should classify non-empty restore failures as topology failure");
+        assert!(failed.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                MobMachineEffect::RespawnTopologyRestoreResolved {
+                    agent_identity,
+                    result: RespawnTopologyRestoreResultKind::TopologyRestoreFailed,
+                    failed_peer_ids,
+                } if *agent_identity == identity && failed_peer_ids == &expected_failed_peer_ids
+            )
+        }));
     }
 }

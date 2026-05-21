@@ -576,6 +576,11 @@ struct FinalizeSpawnOutcome {
     failed_restore_peer_ids: Vec<MeerkatId>,
 }
 
+struct RespawnTopologyRestoreResolution {
+    result: mob_dsl::RespawnTopologyRestoreResultKind,
+    failed_peer_ids: Vec<AgentIdentity>,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 struct RemoteDestroyOutcome {
     identity: AgentIdentity,
@@ -2643,6 +2648,15 @@ impl MobActor {
         signal: mob_dsl::MobMachineSignal,
         context: &str,
     ) -> Result<(), MobError> {
+        self.apply_dsl_signal_collect_transition(signal, context)
+            .map(|_| ())
+    }
+
+    fn apply_dsl_signal_collect_transition(
+        &mut self,
+        signal: mob_dsl::MobMachineSignal,
+        context: &str,
+    ) -> Result<mob_dsl::MobMachineTransition, MobError> {
         let signal_debug = format!("{signal:?}");
         let transition = self
             .dsl_authority
@@ -2659,7 +2673,7 @@ impl MobActor {
             let _ = self.phase_watch_tx.send(self.state());
         }
         self.publish_machine_state_projection();
-        Ok(())
+        Ok(transition)
     }
 
     /// Wave-c C-6p — harvest routed seam effects from a DSL transition's
@@ -3759,6 +3773,78 @@ impl MobActor {
             "run_flow_command_admission",
         )
         .map(|_| ())
+    }
+
+    fn resolve_respawn_topology_restore_result(
+        &mut self,
+        agent_identity: &MeerkatId,
+        failed_restore_peer_ids: Vec<MeerkatId>,
+    ) -> Result<RespawnTopologyRestoreResolution, MobError> {
+        let dsl_identity = mob_dsl::AgentIdentity::from(agent_identity.as_str());
+        let dsl_failed_peer_ids = failed_restore_peer_ids
+            .iter()
+            .map(|peer_id| mob_dsl::AgentIdentity::from(peer_id.as_str()))
+            .collect::<Vec<_>>();
+        let transition = self.apply_dsl_signal_collect_transition(
+            mob_dsl::MobMachineSignal::ResolveRespawnTopologyRestore {
+                agent_identity: dsl_identity.clone(),
+                failed_peer_ids: dsl_failed_peer_ids.clone(),
+            },
+            "respawn_topology_restore_result",
+        )?;
+        let resolution = transition
+            .into_effects()
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::RespawnTopologyRestoreResolved {
+                    agent_identity: effect_identity,
+                    result,
+                    failed_peer_ids,
+                } if effect_identity == dsl_identity => Some((result, failed_peer_ids)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted respawn topology feedback but emitted no typed result"
+                        .into(),
+                )
+            })?;
+        let (result, effect_failed_peer_ids) = resolution;
+        if effect_failed_peer_ids != dsl_failed_peer_ids {
+            return Err(MobError::Internal(
+                "MobMachine respawn topology feedback echoed inconsistent failed peer ids".into(),
+            ));
+        }
+        let failed_peer_ids = effect_failed_peer_ids
+            .into_iter()
+            .map(|peer_id| AgentIdentity::from(peer_id.0.as_str()))
+            .collect::<Vec<_>>();
+        match result {
+            mob_dsl::RespawnTopologyRestoreResultKind::Completed if failed_peer_ids.is_empty() => {
+                Ok(RespawnTopologyRestoreResolution {
+                    result,
+                    failed_peer_ids,
+                })
+            }
+            mob_dsl::RespawnTopologyRestoreResultKind::Completed => Err(MobError::Internal(
+                "MobMachine classified respawn topology restore as completed with failed peers"
+                    .into(),
+            )),
+            mob_dsl::RespawnTopologyRestoreResultKind::TopologyRestoreFailed
+                if !failed_peer_ids.is_empty() =>
+            {
+                Ok(RespawnTopologyRestoreResolution {
+                    result,
+                    failed_peer_ids,
+                })
+            }
+            mob_dsl::RespawnTopologyRestoreResultKind::TopologyRestoreFailed => {
+                Err(MobError::Internal(
+                    "MobMachine classified respawn topology restore as failed without failed peers"
+                        .into(),
+                ))
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7142,9 +7228,9 @@ impl MobActor {
         }
 
         // Respawn restore: re-fire topology captured from MobMachine, not
-        // from roster projection fields. When the machine already owns an
-        // edge, `handle_wire` consumes generated repair authority to restore
-        // live trust only; it does not manufacture roster/event projection.
+        // from roster projection fields. These loop results are shell
+        // observations only; `ResolveRespawnTopologyRestore` below owns the
+        // public respawn result class.
         let mut failed_restore_peer_ids: Vec<MeerkatId> = Vec::new();
         if let Some(plan) = restore_wiring {
             for peer_identity in plan.local_peers {
@@ -10568,21 +10654,31 @@ impl MobActor {
                 reason: error.to_string(),
             })?;
 
-            if finalized.failed_restore_peer_ids.is_empty() {
-                Ok(finalized.receipt)
-            } else {
-                Err(MobRespawnError::TopologyRestoreFailed {
-                    receipt: super::handle::MemberRespawnReceipt::new(
-                        AgentIdentity::from(agent_identity.as_str()),
-                        crate::ids::AgentRuntimeId::new(
+            let topology_restore = self
+                .resolve_respawn_topology_restore_result(
+                    &agent_identity,
+                    finalized.failed_restore_peer_ids,
+                )
+                .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                    identity: AgentIdentity::from(agent_identity.as_str()),
+                    reason: error.to_string(),
+                })?;
+            match topology_restore.result {
+                mob_dsl::RespawnTopologyRestoreResultKind::Completed => Ok(finalized.receipt),
+                mob_dsl::RespawnTopologyRestoreResultKind::TopologyRestoreFailed => {
+                    Err(MobRespawnError::TopologyRestoreFailed {
+                        receipt: super::handle::MemberRespawnReceipt::new(
                             AgentIdentity::from(agent_identity.as_str()),
-                            replacement_generation,
+                            crate::ids::AgentRuntimeId::new(
+                                AgentIdentity::from(agent_identity.as_str()),
+                                replacement_generation,
+                            ),
+                            snapshot.old_fence_token,
+                            respawn_fence,
                         ),
-                        snapshot.old_fence_token,
-                        respawn_fence,
-                    ),
-                    failed_peer_ids: finalized.failed_restore_peer_ids.into_iter().map(|mid| AgentIdentity::from(mid.as_str())).collect(),
-                })
+                        failed_peer_ids: topology_restore.failed_peer_ids,
+                    })
+                }
             }
         })
         .await;

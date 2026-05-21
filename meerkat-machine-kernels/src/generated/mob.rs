@@ -1504,6 +1504,58 @@ impl std::fmt::Display for NodeRunStatus {
 }
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
 pub type PeerId = meerkat_machine_schema::catalog::dsl::mob_machine::PeerId;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RespawnTopologyRestoreResultKind {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "TopologyRestoreFailed")]
+    TopologyRestoreFailed,
+}
+impl RespawnTopologyRestoreResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::TopologyRestoreFailed => "TopologyRestoreFailed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RespawnTopologyRestoreResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "TopologyRestoreFailed" => Ok(Self::TopologyRestoreFailed),
+            other => Err(format!(
+                "invalid RespawnTopologyRestoreResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RespawnTopologyRestoreResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RespawnTopologyRestoreResultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -2726,6 +2778,11 @@ pub mod signals {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRespawnTopologyRestore {
+        pub agent_identity: AgentIdentity,
+        pub failed_peer_ids: Vec<AgentIdentity>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DestroyMob {
         pub session_id: SessionId,
     }
@@ -2845,6 +2902,7 @@ pub enum Signal {
     ObserveMemberRetirementArchived(signals::ObserveMemberRetirementArchived),
     ResetMember(signals::ResetMember),
     RespawnMember(signals::RespawnMember),
+    ResolveRespawnTopologyRestore(signals::ResolveRespawnTopologyRestore),
     DestroyMob(signals::DestroyMob),
     ObserveRuntimeDestroyed(signals::ObserveRuntimeDestroyed),
     RecoverRosterMember(signals::RecoverRosterMember),
@@ -2889,6 +2947,7 @@ impl Signal {
             Self::ObserveMemberRetirementArchived(_) => SignalKind::ObserveMemberRetirementArchived,
             Self::ResetMember(_) => SignalKind::ResetMember,
             Self::RespawnMember(_) => SignalKind::RespawnMember,
+            Self::ResolveRespawnTopologyRestore(_) => SignalKind::ResolveRespawnTopologyRestore,
             Self::DestroyMob(_) => SignalKind::DestroyMob,
             Self::ObserveRuntimeDestroyed(_) => SignalKind::ObserveRuntimeDestroyed,
             Self::RecoverRosterMember(_) => SignalKind::RecoverRosterMember,
@@ -2934,6 +2993,7 @@ pub enum SignalKind {
     ObserveMemberRetirementArchived,
     ResetMember,
     RespawnMember,
+    ResolveRespawnTopologyRestore,
     DestroyMob,
     ObserveRuntimeDestroyed,
     RecoverRosterMember,
@@ -3080,6 +3140,12 @@ pub mod effects {
         pub runtime_mode: Option<SpawnPolicyRuntimeMode>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RespawnTopologyRestoreResolved {
+        pub agent_identity: AgentIdentity,
+        pub result: RespawnTopologyRestoreResultKind,
+        pub failed_peer_ids: Vec<AgentIdentity>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WiringGraphChanged {
         pub epoch: u64,
     }
@@ -3182,6 +3248,7 @@ pub enum Effect {
     PersistKickoffFailureUpdate(effects::PersistKickoffFailureUpdate),
     EmitKickoffLifecycleNotice(effects::EmitKickoffLifecycleNotice),
     SpawnPolicyResolutionRecorded(effects::SpawnPolicyResolutionRecorded),
+    RespawnTopologyRestoreResolved(effects::RespawnTopologyRestoreResolved),
     WiringGraphChanged(effects::WiringGraphChanged),
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
     MemberTrustWiringRequested(effects::MemberTrustWiringRequested),
@@ -3221,6 +3288,7 @@ pub enum EffectKind {
     PersistKickoffFailureUpdate,
     EmitKickoffLifecycleNotice,
     SpawnPolicyResolutionRecorded,
+    RespawnTopologyRestoreResolved,
     WiringGraphChanged,
     MemberSessionBindingChanged,
     MemberTrustWiringRequested,
@@ -3300,6 +3368,8 @@ pub enum TransitionId {
     ObserveMemberRetirementArchivedAlreadyClearedStopped,
     ResetMember,
     RespawnMember,
+    ResolveRespawnTopologyRestoreCompleted,
+    ResolveRespawnTopologyRestoreFailed,
     RecoverMemberRestoreFailureRunning,
     RecoverMemberRestoreFailureStopped,
     RecoverMemberRestoreFailureCompleted,

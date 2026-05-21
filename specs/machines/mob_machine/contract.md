@@ -201,6 +201,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ObserveMemberRetirementArchived`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `ResetMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, session_id: SessionId)
 - `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, session_id: SessionId)
+- `ResolveRespawnTopologyRestore`(agent_identity: AgentIdentity, failed_peer_ids: Seq<AgentIdentity>)
 - `DestroyMob`(session_id: SessionId)
 - `ObserveRuntimeDestroyed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `RecoverRosterMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool)
@@ -261,6 +262,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PersistKickoffFailureUpdate`(member_id: String, phase: KickoffPhase, error: String)
 - `EmitKickoffLifecycleNotice`(member_id: String, intent: KickoffIntent)
 - `SpawnPolicyResolutionRecorded`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
+- `RespawnTopologyRestoreResolved`(agent_identity: AgentIdentity, result: RespawnTopologyRestoreResultKind, failed_peer_ids: Seq<AgentIdentity>)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
 - `MemberTrustWiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, a_endpoint: MemberPeerEndpoint, b_endpoint: MemberPeerEndpoint, epoch: u64)
@@ -794,6 +796,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `RespawnMember`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id)
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
+- To: `Running`
+
+### `ResolveRespawnTopologyRestoreCompleted`
+- From: `Running`
+- On: `ResolveRespawnTopologyRestore`(agent_identity, failed_peer_ids)
+- Guards:
+  - `identity_present`
+  - `no_failed_peers`
+- Emits: `RespawnTopologyRestoreResolved`
+- To: `Running`
+
+### `ResolveRespawnTopologyRestoreFailed`
+- From: `Running`
+- On: `ResolveRespawnTopologyRestore`(agent_identity, failed_peer_ids)
+- Guards:
+  - `identity_present`
+  - `failed_peers_present`
+- Emits: `RespawnTopologyRestoreResolved`
 - To: `Running`
 
 ### `RecoverMemberRestoreFailureRunning`

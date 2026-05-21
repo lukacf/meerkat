@@ -440,6 +440,7 @@ macro_rules! mob_catalog_machine_dsl {
             ObserveMemberRetirementArchived { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             ResetMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
             RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
+            ResolveRespawnTopologyRestore { agent_identity: AgentIdentity, failed_peer_ids: Seq<AgentIdentity> },
             DestroyMob { session_id: SessionId },
             ObserveRuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             RecoverRosterMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool },
@@ -501,6 +502,7 @@ macro_rules! mob_catalog_machine_dsl {
             PersistKickoffFailureUpdate { member_id: String, phase: KickoffPhase, error: String },
             EmitKickoffLifecycleNotice { member_id: String, intent: Enum<KickoffIntent> },
             SpawnPolicyResolutionRecorded { agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<Enum<SpawnPolicyRuntimeMode>> },
+            RespawnTopologyRestoreResolved { agent_identity: AgentIdentity, result: Enum<RespawnTopologyRestoreResultKind>, failed_peer_ids: Seq<AgentIdentity> },
             // Track-B (R5): canonical topology-change signals consumed by
             // the `RecomputeMobPeerOverlay` composition driver.
             //
@@ -566,6 +568,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition PersistKickoffFailureUpdate => local,
         disposition EmitKickoffLifecycleNotice => external,
         disposition SpawnPolicyResolutionRecorded => local,
+        disposition RespawnTopologyRestoreResolved => local,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
         disposition MemberTrustWiringRequested => external handoff mob_member_trust_wiring,
@@ -1415,6 +1418,34 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation, session_id: session_id }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Respawned }
+        }
+
+        transition ResolveRespawnTopologyRestoreCompleted {
+            on signal ResolveRespawnTopologyRestore { agent_identity, failed_peer_ids }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "no_failed_peers" { failed_peer_ids == EmptySeq }
+            update {}
+            to Running
+            emit RespawnTopologyRestoreResolved {
+                agent_identity: agent_identity,
+                result: RespawnTopologyRestoreResultKind::Completed,
+                failed_peer_ids: failed_peer_ids
+            }
+        }
+
+        transition ResolveRespawnTopologyRestoreFailed {
+            on signal ResolveRespawnTopologyRestore { agent_identity, failed_peer_ids }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "failed_peers_present" { failed_peer_ids != EmptySeq }
+            update {}
+            to Running
+            emit RespawnTopologyRestoreResolved {
+                agent_identity: agent_identity,
+                result: RespawnTopologyRestoreResultKind::TopologyRestoreFailed,
+                failed_peer_ids: failed_peer_ids
+            }
         }
 
         transition RecoverMemberRestoreFailureRunning {
@@ -4776,6 +4807,17 @@ pub enum SpawnPolicyRuntimeMode {
     #[default]
     AutonomousHost,
     TurnDriven,
+}
+
+/// Typed public result class for the respawn topology-restore follow-up.
+/// The shell observes concrete peer restoration attempts, but MobMachine owns
+/// whether the public respawn envelope is complete or topology-restoration
+/// partial failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RespawnTopologyRestoreResultKind {
+    #[default]
+    Completed,
+    TopologyRestoreFailed,
 }
 
 /// Fallible reverse mapping: the `Ingest` variant has no counterpart in the

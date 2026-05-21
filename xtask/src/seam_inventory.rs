@@ -888,6 +888,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MobMachine",
+            "RespawnTopologyRestoreResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Respawn topology-restore public result class must align with generated MobMachine truth",
+        ),
+        (
+            "MobMachine",
             "MemberTrustWiringRequested",
             SeamClassification::OwnerRealizationOnly,
             "External member trust-wiring request realized by the mob comms trust owner",

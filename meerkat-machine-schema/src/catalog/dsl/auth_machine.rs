@@ -132,6 +132,7 @@ macro_rules! auth_catalog_machine_dsl {
             effect AuthMachineEffect {
                 EmitLifecycleEvent {
                     new_state: AuthLifecyclePhase,
+                    expires_at: Option<u64>,
                     credential_generation: u64,
                     credential_published_at_millis: Option<u64>,
                 },
@@ -165,6 +166,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -176,6 +178,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Expiring
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -187,6 +190,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Refreshing
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -199,6 +203,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Refreshing
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -219,6 +224,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -233,6 +239,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Expiring
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -247,6 +254,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to ReauthRequired
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -258,6 +266,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to ReauthRequired
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -269,6 +278,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to ReauthRequired
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -280,6 +290,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to ReauthRequired
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -297,6 +308,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to ReauthRequired
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -323,6 +335,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Released
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -352,6 +365,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -381,6 +395,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Expiring
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -410,6 +425,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Refreshing
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -439,6 +455,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to ReauthRequired
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -468,6 +485,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Released
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -488,6 +506,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -512,6 +531,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -538,6 +558,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -560,6 +581,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to ReauthRequired
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -576,6 +598,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -598,6 +621,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -617,6 +641,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -638,6 +663,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -660,6 +686,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to ReauthRequired
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -683,6 +710,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -701,6 +729,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -716,6 +745,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -737,6 +767,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
@@ -756,6 +787,7 @@ macro_rules! auth_catalog_machine_dsl {
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }

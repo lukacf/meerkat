@@ -1825,6 +1825,7 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
             correlation_fields: vec![fld_id("new_state")],
             obligation_fields: vec![
                 fld_id("new_state"),
+                fld_id("expires_at"),
                 fld_id("credential_generation"),
                 fld_id("credential_published_at_millis"),
             ],

@@ -28,7 +28,7 @@ fn release_transition_is_valid_on_input_release() -> Result<(), String> {
 }
 
 #[test]
-fn release_transition_emits_lifecycle_event_with_lifecycle_phase() -> Result<(), String> {
+fn release_transition_emits_lifecycle_event_with_publication_facts() -> Result<(), String> {
     let release = release_transition()?;
 
     assert_eq!(
@@ -45,13 +45,22 @@ fn release_transition_emits_lifecycle_event_with_lifecycle_phase() -> Result<(),
         "Release must emit EmitLifecycleEvent so the terminal phase is observable",
     );
 
-    assert_eq!(
-        fields.len(),
-        1,
-        "EmitLifecycleEvent carries exactly one field (new_state); got {fields:?}",
-    );
-    let Some((new_state_field, new_state_expr)) = fields.iter().next() else {
-        return Err("EmitLifecycleEvent field list non-empty by prior assertion".to_string());
+    for required in [
+        "new_state",
+        "expires_at",
+        "credential_generation",
+        "credential_published_at_millis",
+    ] {
+        assert!(
+            fields.iter().any(|(field, _)| field.as_str() == required),
+            "EmitLifecycleEvent must carry `{required}` for generated auth lease publication; got {fields:?}",
+        );
+    }
+    let Some((new_state_field, new_state_expr)) = fields
+        .iter()
+        .find(|(field, _)| field.as_str() == "new_state")
+    else {
+        return Err("EmitLifecycleEvent field list missing new_state".to_string());
     };
     let (new_state_field, new_state_expr): (&FieldId, &Expr) = (new_state_field, new_state_expr);
     assert_eq!(new_state_field.as_str(), "new_state");
@@ -68,18 +77,31 @@ fn release_transition_emits_lifecycle_event_with_lifecycle_phase() -> Result<(),
 }
 
 #[test]
-fn every_auth_machine_transition_emits_lifecycle_event() {
+fn every_auth_machine_lifecycle_event_carries_publication_facts() {
     let schema = dsl_auth_machine();
     for transition in &schema.transitions {
-        let emits_lifecycle = transition
+        let Some(lifecycle_event) = transition
             .emit
             .iter()
-            .any(|e| e.variant.as_str() == "EmitLifecycleEvent");
-        assert!(
-            emits_lifecycle,
-            "AuthMachine transition {:?} must emit EmitLifecycleEvent so the \
-             phase change is externally observable; emit list: {:?}",
-            transition.name, transition.emit,
-        );
+            .find(|e| e.variant.as_str() == "EmitLifecycleEvent")
+        else {
+            continue;
+        };
+        for required in [
+            "new_state",
+            "expires_at",
+            "credential_generation",
+            "credential_published_at_millis",
+        ] {
+            assert!(
+                lifecycle_event
+                    .fields
+                    .iter()
+                    .any(|(field, _)| field.as_str() == required),
+                "AuthMachine transition {:?} lifecycle event must carry `{required}` for generated publication; fields: {:?}",
+                transition.name,
+                lifecycle_event.fields,
+            );
+        }
     }
 }

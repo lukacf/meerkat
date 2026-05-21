@@ -307,10 +307,9 @@ fn apply_restore_input(
 ) -> Result<(AuthLeasePhase, AuthLeaseTransition), DslTransitionError> {
     let transition = auth_dsl::AuthMachineMutator::apply(authority, input)
         .map_err(|err| map_auth_machine_error(err, context))?;
-    let expires_at = authority.state().expires_at.unwrap_or(u64::MAX);
     let auth_transition = auth_lease_transition_from_generated_publication(
         lease_key,
-        expires_at,
+        authority,
         &transition,
         context,
     )?;
@@ -396,7 +395,7 @@ fn restore_lifecycle_with_oauth_to_registry(
 
 fn auth_lease_transition_from_generated_publication(
     lease_key: &LeaseKey,
-    expires_at: u64,
+    authority: &auth_dsl::AuthMachineAuthority,
     transition: &auth_dsl::AuthMachineTransition,
     context: &'static str,
 ) -> Result<AuthLeaseTransition, DslTransitionError> {
@@ -411,9 +410,14 @@ fn auth_lease_transition_from_generated_publication(
             ),
         ));
     }
+    let scope =
+        crate::protocol_auth_lease_lifecycle_publication::AuthLeaseLifecyclePublicationScope::from_authority(
+            lease_key.clone(),
+            authority,
+        );
     obligations
         .remove(0)
-        .into_auth_lease_transition(lease_key.clone(), expires_at)
+        .into_auth_lease_transition(scope)
         .map_err(|err| {
             DslTransitionError::new(
                 context,
@@ -621,10 +625,9 @@ impl RuntimeAuthLeaseHandle {
             let from_phase = map_phase(entry.state().lifecycle_phase);
             let transition = auth_dsl::AuthMachineMutator::apply(entry, input)
                 .map_err(|err| map_auth_machine_error(err, context))?;
-            let expires_at = entry.state().expires_at.unwrap_or(u64::MAX);
             let auth_transition = auth_lease_transition_from_generated_publication(
                 lease_key,
-                expires_at,
+                entry,
                 &transition,
                 context,
             )?;

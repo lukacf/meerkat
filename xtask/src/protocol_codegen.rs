@@ -485,12 +485,87 @@ fn emit_auth_lease_transition_authority_helper(
     out: &mut String,
     obligation_type: &str,
 ) -> Result<()> {
+    writeln!(
+        out,
+        "pub(crate) struct AuthLeaseLifecyclePublicationScope {{"
+    )?;
+    writeln!(out, "    lease_key: meerkat_core::handles::LeaseKey,")?;
+    writeln!(out, "    new_state: AuthLifecyclePhase,")?;
+    writeln!(out, "    expires_at: Option<u64>,")?;
+    writeln!(out, "    credential_generation: u64,")?;
+    writeln!(out, "    credential_published_at_millis: Option<u64>,")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(out, "impl AuthLeaseLifecyclePublicationScope {{")?;
+    writeln!(out, "    pub(crate) fn from_authority(")?;
+    writeln!(out, "        lease_key: meerkat_core::handles::LeaseKey,")?;
+    writeln!(
+        out,
+        "        authority: &crate::auth_machine::dsl::AuthMachineAuthority,"
+    )?;
+    writeln!(out, "    ) -> Self {{")?;
+    writeln!(out, "        let state = authority.state();")?;
+    writeln!(out, "        Self {{")?;
+    writeln!(out, "            lease_key,")?;
+    writeln!(out, "            new_state: state.lifecycle_phase,")?;
+    writeln!(out, "            expires_at: state.expires_at,")?;
+    writeln!(
+        out,
+        "            credential_generation: state.credential_generation,"
+    )?;
+    writeln!(
+        out,
+        "            credential_published_at_millis: state.credential_published_at_millis,"
+    )?;
+    writeln!(out, "        }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "    fn validate_obligation(&self, obligation: &{obligation_type}) -> Result<(), String> {{"
+    )?;
+    writeln!(out, "        if self.new_state != obligation.new_state {{")?;
+    writeln!(
+        out,
+        "            return Err(format!(\"generated auth lease lifecycle publication state {{:?}} does not match authority state {{:?}}\", obligation.new_state, self.new_state));"
+    )?;
+    writeln!(out, "        }}")?;
+    writeln!(
+        out,
+        "        if self.expires_at != obligation.expires_at {{"
+    )?;
+    writeln!(
+        out,
+        "            return Err(format!(\"generated auth lease lifecycle publication expires_at {{:?}} does not match authority expires_at {{:?}}\", obligation.expires_at, self.expires_at));"
+    )?;
+    writeln!(out, "        }}")?;
+    writeln!(
+        out,
+        "        if self.credential_generation != obligation.credential_generation {{"
+    )?;
+    writeln!(
+        out,
+        "            return Err(format!(\"generated auth lease lifecycle publication generation {{}} does not match authority generation {{}}\", obligation.credential_generation, self.credential_generation));"
+    )?;
+    writeln!(out, "        }}")?;
+    writeln!(
+        out,
+        "        if self.credential_published_at_millis != obligation.credential_published_at_millis {{"
+    )?;
+    writeln!(
+        out,
+        "            return Err(format!(\"generated auth lease lifecycle publication credential publication time {{:?}} does not match authority publication time {{:?}}\", obligation.credential_published_at_millis, self.credential_published_at_millis));"
+    )?;
+    writeln!(out, "        }}")?;
+    writeln!(out, "        Ok(())")?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
     writeln!(out, "impl {obligation_type} {{")?;
     writeln!(out, "    #[allow(unsafe_code)]")?;
     writeln!(out, "    pub(crate) fn into_auth_lease_transition(")?;
     writeln!(out, "        &self,")?;
-    writeln!(out, "        lease_key: meerkat_core::handles::LeaseKey,")?;
-    writeln!(out, "        expires_at: u64,")?;
+    writeln!(out, "        scope: AuthLeaseLifecyclePublicationScope,")?;
     writeln!(
         out,
         "    ) -> Result<meerkat_core::handles::AuthLeaseTransition, String> {{"
@@ -504,6 +579,7 @@ fn emit_auth_lease_transition_authority_helper(
         "            return Err(\"generated auth lease lifecycle publication was already consumed\".into());"
     )?;
     writeln!(out, "        }}")?;
+    writeln!(out, "        scope.validate_obligation(self)?;")?;
     writeln!(
         out,
         "        #[allow(improper_ctypes_definitions, unsafe_code)]"
@@ -543,8 +619,8 @@ fn emit_auth_lease_transition_authority_helper(
         "            core_runtime_generated_auth_lease_transition_build("
     )?;
     writeln!(out, "                generated_authority_bridge_token(),")?;
-    writeln!(out, "                lease_key,")?;
-    writeln!(out, "                expires_at,")?;
+    writeln!(out, "                scope.lease_key,")?;
+    writeln!(out, "                self.expires_at.unwrap_or(u64::MAX),")?;
     writeln!(out, "                self.credential_generation,")?;
     writeln!(out, "                self.credential_published_at_millis,")?;
     writeln!(out, "            )")?;

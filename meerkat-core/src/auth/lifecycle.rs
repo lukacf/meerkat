@@ -440,6 +440,7 @@ mod tests {
     struct RecordingAuthLeaseHandle {
         acquired: Mutex<Vec<(LeaseKey, u64)>>,
         released: Mutex<Vec<LeaseKey>>,
+        restored: Mutex<Vec<LeaseKey>>,
         snapshot_expires_at: Option<u64>,
     }
 
@@ -464,6 +465,13 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
         }
+
+        fn restored(&self) -> Vec<LeaseKey> {
+            self.restored
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
     }
 
     impl AuthLeaseHandle for RecordingAuthLeaseHandle {
@@ -476,11 +484,9 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((lease_key.clone(), expires_at));
-            Ok(AuthLeaseTransition::__from_test_authority(
-                lease_key.clone(),
-                expires_at,
-                1,
-                None,
+            Err(DslTransitionError::new(
+                "RecordingAuthLeaseHandle::acquire_lease",
+                "recording test handle cannot mint AuthLeaseTransition; production uses generated AuthMachine publication authority",
             ))
         }
 
@@ -498,12 +504,7 @@ mod tests {
             new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition::__from_test_authority(
-                lease_key.clone(),
-                new_expires_at,
-                1,
-                None,
-            ))
+            self.acquire_lease(lease_key, new_expires_at)
         }
 
         fn refresh_failed(
@@ -534,11 +535,11 @@ mod tests {
             if !snapshot.credential_present {
                 return Ok(None);
             }
-            let transition = self.acquire_lease(
-                captured.lease_key(),
-                snapshot.expires_at.unwrap_or(u64::MAX),
-            )?;
-            Ok(Some(transition))
+            self.restored
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(captured.lease_key().clone());
+            Ok(None)
         }
 
         fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
@@ -705,7 +706,11 @@ mod tests {
         let tokens = tokens_with_expiry(Some(expires_at));
         let auth_binding = auth_binding();
 
-        publish_token_lifecycle_acquired(&handle, &auth_binding, &tokens).unwrap();
+        let err = publish_token_lifecycle_acquired(&handle, &auth_binding, &tokens).unwrap_err();
+        assert!(
+            err.reason.contains("cannot mint AuthLeaseTransition"),
+            "recording handle should fail closed after capturing the machine input: {err:?}"
+        );
 
         assert_eq!(
             handle.acquired(),
@@ -718,7 +723,11 @@ mod tests {
         let handle = RecordingAuthLeaseHandle::default();
         let tokens = tokens_with_expiry(None);
 
-        publish_token_lifecycle_acquired(&handle, &auth_binding(), &tokens).unwrap();
+        let err = publish_token_lifecycle_acquired(&handle, &auth_binding(), &tokens).unwrap_err();
+        assert!(
+            err.reason.contains("cannot mint AuthLeaseTransition"),
+            "recording handle should fail closed after capturing the machine input: {err:?}"
+        );
 
         assert_eq!(handle.acquired()[0].1, u64::MAX);
     }
@@ -766,11 +775,8 @@ mod tests {
             vec![LeaseKey::from_auth_binding(&auth_binding)]
         );
         assert_eq!(
-            handle.acquired(),
-            vec![(
-                LeaseKey::from_auth_binding(&auth_binding),
-                persisted_token_expires_at_epoch_secs(&tokens),
-            )]
+            handle.restored(),
+            vec![LeaseKey::from_auth_binding(&auth_binding)]
         );
         assert!(
             store

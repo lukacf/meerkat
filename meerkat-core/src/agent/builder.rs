@@ -1101,29 +1101,10 @@ mod tests {
             lease_key: &LeaseKey,
             expires_at: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            let mut snapshots = self
-                .snapshots
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let generation = snapshots
-                .get(lease_key)
-                .map(|snapshot| snapshot.generation + 1)
-                .unwrap_or(1);
-            snapshots.insert(
-                lease_key.clone(),
-                AuthLeaseSnapshot {
-                    phase: Some(AuthLeasePhase::Valid),
-                    expires_at: (expires_at != u64::MAX).then_some(expires_at),
-                    credential_present: true,
-                    generation,
-                    credential_published_at_millis: None,
-                },
-            );
-            Ok(AuthLeaseTransition::__from_test_authority(
-                lease_key.clone(),
-                expires_at,
-                generation,
-                None,
+            let _ = (lease_key, expires_at);
+            Err(DslTransitionError::new(
+                "RecordingAuthLeaseHandle::acquire_lease",
+                "recording test handle cannot mint AuthLeaseTransition; production uses generated AuthMachine publication authority",
             ))
         }
 
@@ -1157,10 +1138,7 @@ mod tests {
         }
 
         fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            self.snapshots
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(lease_key);
+            let _ = lease_key;
             Ok(())
         }
 

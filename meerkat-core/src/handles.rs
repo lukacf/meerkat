@@ -1148,22 +1148,6 @@ impl AuthLeaseTransition {
         self.credential_published_at_millis
     }
 
-    #[cfg(test)]
-    #[doc(hidden)]
-    pub(crate) fn __from_test_authority(
-        lease_key: LeaseKey,
-        expires_at: u64,
-        generation: u64,
-        credential_published_at_millis: Option<u64>,
-    ) -> Self {
-        Self {
-            lease_key,
-            expires_at,
-            generation,
-            credential_published_at_millis,
-        }
-    }
-
     #[cfg_attr(not(meerkat_internal_generated_authority_bridge), allow(dead_code))]
     fn from_generated_auth_lease_publication_parts(
         lease_key: LeaseKey,

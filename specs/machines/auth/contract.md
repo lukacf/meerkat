@@ -51,7 +51,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Signals
 
 ## Effects
-- `EmitLifecycleEvent`(new_state: AuthLifecyclePhase, credential_generation: u64, credential_published_at_millis: Option<u64>)
+- `EmitLifecycleEvent`(new_state: AuthLifecyclePhase, expires_at: Option<u64>, credential_generation: u64, credential_published_at_millis: Option<u64>)
 - `WakeRefreshLoop`
 
 ## Invariants

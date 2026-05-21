@@ -322,6 +322,7 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EmitLifecycleEvent {
         pub new_state: AuthLifecyclePhase,
+        pub expires_at: Option<u64>,
         pub credential_generation: u64,
         pub credential_published_at_millis: Option<u64>,
     }

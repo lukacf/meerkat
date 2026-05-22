@@ -1168,10 +1168,9 @@ impl CoreExecutorBoundaryHandle for MobSessionRuntimeBoundaryHandle {
         appends: Vec<PendingSystemContextAppend>,
     ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
         self.session_service
-            .apply_runtime_system_context_for_turn(&self.bridge_session_id, appends)
+            .stage_runtime_system_context_for_active_turn(&self.bridge_session_id, appends)
             .await
-            .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()))?;
-        Ok(None)
+            .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()))
     }
 }
 

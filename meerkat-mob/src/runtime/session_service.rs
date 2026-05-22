@@ -319,6 +319,20 @@ pub trait MobSessionService:
         ))
     }
 
+    /// Stage runtime-owned context for an already-active turn's next LLM
+    /// boundary. Unlike `apply_runtime_system_context_for_turn`, this must not
+    /// route through the session task mailbox: the session task may be the
+    /// active turn currently waiting for that boundary.
+    async fn stage_runtime_system_context_for_active_turn(
+        &self,
+        session_id: &SessionId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<Option<Vec<u8>>, SessionError> {
+        self.apply_runtime_system_context_for_turn(session_id, appends)
+            .await?;
+        Ok(None)
+    }
+
     async fn checkpoint_committed_runtime_session_snapshot(
         &self,
         _session_id: &SessionId,
@@ -516,6 +530,18 @@ where
             self, session_id, appends,
         )
         .await
+    }
+
+    async fn stage_runtime_system_context_for_active_turn(
+        &self,
+        session_id: &SessionId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<Option<Vec<u8>>, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::stage_runtime_system_context_for_active_turn(
+            self, session_id, appends,
+        )
+        .await?;
+        Ok(None)
     }
 }
 
@@ -719,6 +745,17 @@ where
         appends: Vec<PendingSystemContextAppend>,
     ) -> Result<(), SessionError> {
         meerkat_session::PersistentSessionService::<B>::apply_runtime_system_context_for_turn(
+            self, session_id, appends,
+        )
+        .await
+    }
+
+    async fn stage_runtime_system_context_for_active_turn(
+        &self,
+        session_id: &SessionId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<Option<Vec<u8>>, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::stage_live_system_context_boundary_snapshot(
             self, session_id, appends,
         )
         .await

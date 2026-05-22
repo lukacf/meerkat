@@ -1391,6 +1391,58 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
+    /// Stage runtime-owned context for the active turn's next model boundary.
+    ///
+    /// This path intentionally mutates the shared system-context state directly
+    /// instead of sending a command to the session task. During a long turn the
+    /// session task is busy inside `run_turn_with_events`, and mailbox delivery
+    /// would make an operator steer visible only after the turn had already
+    /// completed.
+    pub async fn stage_runtime_system_context_for_active_turn(
+        &self,
+        id: &SessionId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<(), SessionError> {
+        if appends.is_empty() {
+            return Ok(());
+        }
+
+        let state = self
+            .system_context_state(id)
+            .await
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+
+        let mut guard = match state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    session_id = %id,
+                    "system-context state lock poisoned while staging active-turn context"
+                );
+                poisoned.into_inner()
+            }
+        };
+
+        let mut candidate = guard.clone();
+        for append in appends {
+            let req = AppendSystemContextRequest {
+                text: append.text,
+                source: append.source,
+                idempotency_key: append.idempotency_key,
+            };
+            candidate
+                .stage_append(&req, append.accepted_at)
+                .map_err(|err| {
+                    SessionError::Agent(AgentError::InternalError(
+                        err.into_control_error(id).to_string(),
+                    ))
+                })?;
+        }
+        *guard = candidate;
+
+        Ok(())
+    }
+
     pub async fn publish_runtime_system_context_events(
         &self,
         id: &SessionId,
@@ -4108,6 +4160,127 @@ mod runtime_turn_metadata_tests {
         }
     }
 
+    #[derive(Clone)]
+    struct BlockingBoundaryBuilder {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    struct BlockingBoundaryAgent {
+        session_id: SessionId,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgentBuilder for BlockingBoundaryBuilder {
+        type Agent = BlockingBoundaryAgent;
+
+        async fn build_agent(
+            &self,
+            _req: &CreateSessionRequest,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            Ok(BlockingBoundaryAgent {
+                session_id: SessionId::new(),
+                started: Arc::clone(&self.started),
+                release: Arc::clone(&self.release),
+                system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            })
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgent for BlockingBoundaryAgent {
+        async fn run_with_events(
+            &mut self,
+            _prompt: ContentInput,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<RunResult, AgentError> {
+            self.started.notify_waiters();
+            self.release.notified().await;
+            Ok(RunResult {
+                text: "released".to_string(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                terminal_cause_kind: None,
+                structured_output: None,
+                extraction_error: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
+        fn cancel(&mut self) {}
+
+        fn set_skill_references(&mut self, _refs: Option<Vec<SkillKey>>) {}
+
+        fn set_flow_tool_overlay(
+            &mut self,
+            _overlay: Option<TurnToolOverlay>,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            _client: Arc<dyn meerkat_core::AgentLlmClient>,
+            _identity: SessionLlmIdentity,
+            _request_policy: meerkat_core::SessionLlmRequestPolicy,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn session_id(&self) -> SessionId {
+            self.session_id.clone()
+        }
+
+        fn snapshot(&self) -> SessionSnapshot {
+            SessionSnapshot {
+                created_at: SystemTime::now(),
+                updated_at: SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                usage: Usage::default(),
+                last_assistant_text: None,
+            }
+        }
+
+        fn session_clone(&self) -> meerkat_core::Session {
+            let mut session = meerkat_core::Session::new();
+            let state = self
+                .system_context_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            session
+                .set_system_context_state(state)
+                .expect("test system context state should serialize");
+            session
+        }
+
+        fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]) {
+            let mut session = self.session_clone();
+            session.append_system_context_blocks(appends);
+            let state = session.system_context_state().unwrap_or_default();
+            *self
+                .system_context_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
+        }
+
+        fn system_context_state(
+            &self,
+        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+            Arc::clone(&self.system_context_state)
+        }
+    }
+
     #[tokio::test]
     async fn eager_initial_turn_forwards_full_runtime_metadata_carrier() {
         let observed_skill_references = Arc::new(Mutex::new(Vec::new()));
@@ -4376,6 +4549,170 @@ mod runtime_turn_metadata_tests {
         assert!(
             ticks.last().copied().unwrap_or_default() > stale_runtime_context_ms,
             "post-commit runtime context tick must move past the current projection watermark"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_turn_context_staging_does_not_wait_for_session_task_mailbox() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let service = Arc::new(EphemeralSessionService::new(
+            BlockingBoundaryBuilder {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            },
+            1,
+        ));
+
+        let result = service
+            .create_session(CreateSessionRequest {
+                model: "blocking-boundary-model".to_string(),
+                prompt: ContentInput::Text("defer".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            })
+            .await
+            .expect("deferred blocking session should create");
+
+        let run_service = Arc::clone(&service);
+        let run_session_id = result.session_id.clone();
+        let run = tokio::spawn(async move {
+            run_service
+                .start_turn(
+                    &run_session_id,
+                    StartTurnRequest {
+                        prompt: ContentInput::Text("hold the turn open".to_string()),
+                        system_prompt: None,
+                        event_tx: None,
+                        runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                            None,
+                            meerkat_core::types::HandlingMode::Queue,
+                            None,
+                            None,
+                            Vec::new(),
+                            Some(RuntimeTurnMetadata {
+                                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                                ..Default::default()
+                            }),
+                        ),
+                    },
+                )
+                .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+            .await
+            .expect("turn should enter the blocking agent");
+
+        let appends = vec![PendingSystemContextAppend {
+            text: "active-turn steer context".to_string(),
+            source: Some("console:steer:test".to_string()),
+            idempotency_key: Some("console:steer:test".to_string()),
+            accepted_at: meerkat_core::time_compat::SystemTime::now(),
+        }];
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            service.stage_runtime_system_context_for_active_turn(&result.session_id, appends),
+        )
+        .await
+        .expect("active-turn staging must not wait for the busy session task")
+        .expect("active-turn staging should succeed");
+
+        let state = service
+            .system_context_state(&result.session_id)
+            .await
+            .expect("session state should exist");
+        let pending = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .clone();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].text, "active-turn steer context");
+
+        release.notify_waiters();
+        run.await
+            .expect("start_turn task should join")
+            .expect("blocked turn should complete after release");
+    }
+
+    #[tokio::test]
+    async fn active_turn_context_staging_is_atomic_on_batch_conflict() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let service = Arc::new(EphemeralSessionService::new(
+            BlockingBoundaryBuilder {
+                started: Arc::clone(&started),
+                release,
+            },
+            1,
+        ));
+
+        let result = service
+            .create_session(CreateSessionRequest {
+                model: "blocking-boundary-model".to_string(),
+                prompt: ContentInput::Text("defer".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            })
+            .await
+            .expect("deferred blocking session should create");
+
+        let accepted_at = meerkat_core::time_compat::SystemTime::now();
+        let err = service
+            .stage_runtime_system_context_for_active_turn(
+                &result.session_id,
+                vec![
+                    PendingSystemContextAppend {
+                        text: "first staged context".to_string(),
+                        source: Some("console:steer:test".to_string()),
+                        idempotency_key: Some("console:steer:conflict".to_string()),
+                        accepted_at,
+                    },
+                    PendingSystemContextAppend {
+                        text: "conflicting staged context".to_string(),
+                        source: Some("console:steer:test".to_string()),
+                        idempotency_key: Some("console:steer:conflict".to_string()),
+                        accepted_at,
+                    },
+                ],
+            )
+            .await
+            .expect_err("conflicting batch should fail");
+        assert!(
+            err.to_string().contains("idempotency conflict"),
+            "unexpected error: {err}"
+        );
+
+        let state = service
+            .system_context_state(&result.session_id)
+            .await
+            .expect("session state should exist");
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            guard.pending.is_empty(),
+            "failed active-turn staging batch must not leave partial pending context"
+        );
+        assert!(
+            guard.seen.is_empty(),
+            "failed active-turn staging batch must not reserve idempotency keys"
         );
     }
 

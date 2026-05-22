@@ -671,6 +671,12 @@ where
                 }
             };
             if state.pending.is_empty() {
+                tracing::debug!(
+                    pending_count = 0usize,
+                    applied_count = state.applied.len(),
+                    active_turn_pending_count = state.active_turn_pending_keys.len(),
+                    "no pending runtime system context at model boundary"
+                );
                 return Vec::new();
             }
             let pending = state.pending.clone();

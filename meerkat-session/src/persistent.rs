@@ -1907,6 +1907,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .map_err(|err| control_error_into_session_error(err.into_control_error(id)))?;
             }
             *guard = candidate.clone();
+            tracing::debug!(
+                session_id = %id,
+                pending_count = candidate.pending.len(),
+                applied_count = candidate.applied.len(),
+                active_turn_pending_count = candidate.active_turn_pending_keys.len(),
+                "staged live active-turn runtime system context"
+            );
             (snapshot_state, candidate)
         };
 

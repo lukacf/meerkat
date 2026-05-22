@@ -414,6 +414,13 @@ impl AgentBuilder {
             None => Arc::new(LocalToolVisibilityOwner::new()),
         };
         let mut session = self.session.unwrap_or_default();
+        let discarded_runtime_steer_context = session.discard_transient_runtime_steer_context();
+        if discarded_runtime_steer_context > 0 {
+            tracing::debug!(
+                discarded_runtime_steer_context,
+                "discarded transient runtime steer context while building agent"
+            );
+        }
         let system_context_state = Arc::new(std::sync::Mutex::new(
             session.system_context_state().unwrap_or_default(),
         ));

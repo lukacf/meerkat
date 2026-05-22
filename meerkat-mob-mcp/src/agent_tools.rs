@@ -96,6 +96,8 @@ pub struct AgentMobToolSurface {
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     /// Context for capturing a parent agent's tool scope snapshot.
     snapshot_context: meerkat_core::service::MobToolSnapshotContext,
+    /// Runtime-owned ops registry for owner-bound mob operations.
+    ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
 }
 
 impl AgentMobToolSurface {
@@ -233,6 +235,7 @@ impl AgentMobToolSurface {
             comms_peer_id,
             comms_runtime,
             snapshot_context,
+            ops_registry: None,
         }
     }
 
@@ -856,11 +859,18 @@ impl AgentMobToolSurface {
             spec.auth_binding = Some(cref);
         }
 
-        let spawn_result = self
-            .state
-            .mob_spawn_spec(&mob_id, spec)
-            .await
-            .map_err(|e| Self::map_mob_error(call, e))?;
+        let spawn_result = if let Some(ops_registry) = self.ops_registry.as_ref() {
+            audit_handle
+                .spawn_spec_with_owner_context(
+                    spec,
+                    self.owner_bridge_session_id.clone(),
+                    Arc::clone(ops_registry),
+                )
+                .await
+        } else {
+            self.state.mob_spawn_spec(&mob_id, spec).await
+        }
+        .map_err(|e| Self::map_mob_error(call, e))?;
 
         self.record_successful_operator_action(&audit_handle, call.name)
             .await;
@@ -1221,6 +1231,37 @@ impl AgentToolDispatcher for AgentMobToolSurface {
             TOOL_MOB_PROFILE_LIST_SOURCES => self.dispatch_mob_profile_list_sources(call).await,
             _ => Err(ToolError::not_found(call.name)),
         }
+    }
+
+    fn capabilities(&self) -> meerkat_core::agent::DispatcherCapabilities {
+        meerkat_core::agent::DispatcherCapabilities {
+            ops_lifecycle: true,
+        }
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+        owner_bridge_session_id: SessionId,
+    ) -> Result<meerkat_core::agent::BindOutcome, meerkat_core::agent::OpsLifecycleBindError> {
+        if Arc::strong_count(&self) != 1 {
+            return Err(meerkat_core::agent::OpsLifecycleBindError::SharedOwnership);
+        }
+        let this = Arc::try_unwrap(self)
+            .map_err(|_| meerkat_core::agent::OpsLifecycleBindError::SharedOwnership)?;
+        Ok(meerkat_core::agent::BindOutcome::Bound(Arc::new(Self {
+            state: this.state,
+            cached_implicit_mob_id: this.cached_implicit_mob_id,
+            effective_authority: this.effective_authority,
+            tools: this.tools,
+            owner_bridge_session_id,
+            model: this.model,
+            comms_name: this.comms_name,
+            comms_peer_id: this.comms_peer_id,
+            comms_runtime: this.comms_runtime,
+            snapshot_context: this.snapshot_context,
+            ops_registry: Some(registry),
+        })))
     }
 }
 
@@ -3664,6 +3705,73 @@ mod tests {
             unknown_profile_error,
             ToolError::AccessDenied { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn test_mob_spawn_member_auto_wire_parent_uses_bound_owner_session() {
+        let state = MobMcpState::new_in_memory();
+        let mob_id = state
+            .mob_create_definition(sample_definition("spawn-auto-wire-parent"))
+            .await
+            .expect("create mob");
+        let handle = state.handle_for(&mob_id).await.expect("handle");
+        let parent_identity = AgentIdentity::from("parent");
+        state
+            .mob_spawn_spec(
+                &mob_id,
+                SpawnMemberSpec::new(ProfileName::from("worker"), parent_identity.clone()),
+            )
+            .await
+            .expect("spawn parent");
+        let parent_bridge_session_id = handle
+            .resolve_bridge_session_id(&parent_identity)
+            .await
+            .expect("parent bridge session");
+        let surface: Arc<dyn AgentToolDispatcher> = Arc::new(AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            spawn_profile_authority(mob_id.as_str(), "worker"),
+            "claude-sonnet-4-5".to_string(),
+            parent_bridge_session_id.clone(),
+            None,
+            None,
+            None,
+        ));
+        let surface = surface
+            .bind_ops_lifecycle(
+                Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                parent_bridge_session_id,
+            )
+            .expect("bind ops lifecycle")
+            .into_dispatcher();
+
+        let spawn_args = serde_json::value::RawValue::from_string(
+            json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "member_id": "child",
+                "auto_wire_parent": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        surface
+            .dispatch(ToolCallView {
+                id: "spawn-auto-wire-child",
+                name: "mob_spawn_member",
+                args: &spawn_args,
+            })
+            .await
+            .expect("owner-bound spawn should succeed");
+
+        let roster = handle.roster().await;
+        let child = roster
+            .get_by_identity(&AgentIdentity::from("child"))
+            .expect("child roster entry");
+        assert!(
+            child.wired_to.contains(&parent_identity),
+            "auto_wire_parent must wire the spawned member to the bound spawning member"
+        );
     }
 
     #[tokio::test]

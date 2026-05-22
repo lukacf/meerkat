@@ -2558,6 +2558,38 @@ impl MobHandle {
         })
     }
 
+    /// Spawn a member from an agent-owned tool call.
+    ///
+    /// This preserves the owning bridge session so MobMachine-owned spawn
+    /// policies such as `auto_wire_parent` can resolve the actual spawning
+    /// member rather than falling back to ownerless consumer semantics.
+    pub async fn spawn_spec_with_owner_context(
+        &self,
+        spec: SpawnMemberSpec,
+        owner_bridge_session_id: SessionId,
+        ops_registry: Arc<dyn OpsLifecycleRegistry>,
+    ) -> Result<SpawnResult, MobError> {
+        let identity = spec.identity.clone();
+        self.spawn_spec_receipt_with_owner_context(
+            spec,
+            CanonicalOpsOwnerContext {
+                owner_bridge_session_id,
+                ops_registry,
+            },
+        )
+        .await?;
+        let entry = self.get_member(&identity).await.ok_or_else(|| {
+            MobError::Internal(format!(
+                "spawn succeeded but roster entry missing for '{identity}'"
+            ))
+        })?;
+        Ok(SpawnResult {
+            agent_identity: entry.agent_identity,
+            agent_runtime_id: entry.agent_runtime_id,
+            fence_token: entry.fence_token,
+        })
+    }
+
     /// Internal spawn that returns the raw `MemberRef` for crate-internal callers.
     pub(crate) async fn spawn_spec_internal(
         &self,

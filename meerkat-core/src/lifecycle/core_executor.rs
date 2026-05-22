@@ -389,6 +389,12 @@ impl CoreApplyOutput {
 pub trait CoreExecutorBoundaryHandle: Send + Sync {
     async fn cancel_after_boundary(&self, reason: String) -> Result<(), CoreExecutorError>;
 
+    /// Return true when the executor still has an active turn whose next
+    /// cooperative model boundary can receive staged system context.
+    async fn active_turn_boundary_available(&self) -> Result<bool, CoreExecutorError> {
+        Ok(false)
+    }
+
     /// Stage runtime-owned system context for the next cooperative LLM
     /// boundary of the active turn.
     ///

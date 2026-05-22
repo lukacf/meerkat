@@ -57,9 +57,27 @@ impl MeerkatMachine {
                     .unwrap_or(RuntimeState::Destroyed);
                 Self::reject_visible_terminal_ingress(visible_state)?;
 
+                let active_turn_boundary_available =
+                    if let Some(boundary_handle) = boundary_handle.as_ref() {
+                        boundary_handle
+                            .active_turn_boundary_available()
+                            .await
+                            .unwrap_or_else(|error| {
+                                tracing::debug!(
+                                    session_id = %session_id,
+                                    error = %error,
+                                    "active turn boundary availability check failed"
+                                );
+                                false
+                            })
+                    } else {
+                        false
+                    };
+
                 let (resolved, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
-                    let runtime_idle = state.is_idle_or_attached();
+                    let runtime_idle =
+                        state.is_idle_or_attached() && !active_turn_boundary_available;
                     let resolved = driver.resolve_admission_for_runtime_idle(&input, runtime_idle);
                     self.preview_session_dsl_input(
                         &session_id,
@@ -222,7 +240,7 @@ impl MeerkatMachine {
                     return Err(err);
                 }
 
-                if state == RuntimeState::Running
+                if (state == RuntimeState::Running || active_turn_boundary_available)
                     && signal.should_interrupt_yielding()
                     && resolved.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
                     && let (Some(input_id), Some(boundary_handle)) =

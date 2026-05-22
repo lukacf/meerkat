@@ -5999,6 +5999,10 @@ impl CoreExecutorBoundaryHandle for InterruptYieldingBoundaryHandle {
         Ok(())
     }
 
+    async fn active_turn_boundary_available(&self) -> Result<bool, CoreExecutorError> {
+        Ok(true)
+    }
+
     async fn stage_system_context_at_boundary(
         &self,
         appends: Vec<meerkat_core::PendingSystemContextAppend>,
@@ -6222,6 +6226,10 @@ async fn explicit_running_steer_admission_injects_live_boundary_context_once() {
         async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+
+        async fn active_turn_boundary_available(&self) -> Result<bool, CoreExecutorError> {
+            Ok(true)
         }
 
         async fn stage_system_context_at_boundary(

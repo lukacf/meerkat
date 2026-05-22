@@ -3529,6 +3529,15 @@ async fn session_task<A: SessionAgent>(
                     continue;
                 }
 
+                let discarded_stale_active_context =
+                    agent.discard_unapplied_active_turn_system_context();
+                if discarded_stale_active_context > 0 {
+                    tracing::debug!(
+                        discarded_stale_active_context,
+                        "discarded stale active-turn system context before starting a new run"
+                    );
+                }
+
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
                     restore_deferred_turn_inputs(
@@ -4695,6 +4704,101 @@ mod runtime_turn_metadata_tests {
             after.seen.is_empty(),
             "discarded active-turn context should not reserve idempotency keys"
         );
+    }
+
+    #[tokio::test]
+    async fn stale_active_turn_context_is_discarded_before_next_turn_boundary() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let service = Arc::new(EphemeralSessionService::new(
+            BlockingBoundaryBuilder {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            },
+            1,
+        ));
+
+        let result = service
+            .create_session(CreateSessionRequest {
+                model: "blocking-boundary-model".to_string(),
+                prompt: ContentInput::Text("defer".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            })
+            .await
+            .expect("deferred boundary snapshot session should create");
+
+        service
+            .stage_runtime_system_context_for_active_turn(
+                &result.session_id,
+                vec![PendingSystemContextAppend {
+                    text: "STALE_ACTIVE_STEER_SHOULD_NOT_REACH_NEXT_TURN".to_string(),
+                    source: Some("console:steer:stale".to_string()),
+                    idempotency_key: Some("console:steer:stale".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+            )
+            .await
+            .expect("synthetic stale active-turn context should stage");
+
+        let run_service = Arc::clone(&service);
+        let run_session_id = result.session_id.clone();
+        let run = tokio::spawn(async move {
+            run_service
+                .start_turn(
+                    &run_session_id,
+                    StartTurnRequest {
+                        prompt: ContentInput::Text("unrelated next turn".to_string()),
+                        system_prompt: None,
+                        event_tx: None,
+                        runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                            None,
+                            meerkat_core::types::HandlingMode::Queue,
+                            None,
+                            None,
+                            Vec::new(),
+                            Some(RuntimeTurnMetadata {
+                                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                                ..Default::default()
+                            }),
+                        ),
+                    },
+                )
+                .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+            .await
+            .expect("next turn should enter the blocking agent");
+
+        let state = service
+            .system_context_state(&result.session_id)
+            .await
+            .expect("session state should exist");
+        {
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(guard.pending.is_empty());
+            assert!(guard.applied.is_empty());
+            assert!(guard.active_turn_pending_keys.is_empty());
+            assert!(
+                guard.seen.is_empty(),
+                "discarded stale active-turn context should not reserve idempotency keys"
+            );
+        }
+
+        release.notify_waiters();
+        run.await
+            .expect("start_turn task should join")
+            .expect("next turn should complete after release");
     }
 
     #[tokio::test]

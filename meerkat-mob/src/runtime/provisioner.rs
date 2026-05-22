@@ -1163,6 +1163,14 @@ impl CoreExecutorBoundaryHandle for MobSessionRuntimeBoundaryHandle {
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
 
+    async fn active_turn_boundary_available(&self) -> Result<bool, CoreExecutorError> {
+        self.session_service
+            .read(&self.bridge_session_id)
+            .await
+            .map(|view| view.state.is_active)
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
+
     async fn stage_system_context_at_boundary(
         &self,
         appends: Vec<PendingSystemContextAppend>,

@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for schedule_bundle.
 
-CONSTANTS ClaimTokenValues, DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, ScheduleIdValues, SessionIdValues, SetOfOccurrenceIdValues, StringValues
+CONSTANTS ClaimTokenValues, DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OccurrenceTransitionFailureObservationKindValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, ScheduleIdValues, SessionIdValues, SetOfOccurrenceIdValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -563,6 +563,1545 @@ schedule_deleted_has_no_planning_cursor == ((schedule_phase # "Deleted") \/ (sch
 schedule_planning_cursor_requires_occurrence_progress == ((schedule_planning_cursor_utc_ms = None) \/ (schedule_next_occurrence_ordinal > 0))
 
 occurrence__is_live_claim_phase(arg_phase) == ((arg_phase = "Claimed") \/ (arg_phase = "Dispatching") \/ (arg_phase = "AwaitingCompletion"))
+
+occurrence_ClassifyTransitionFailurePlanRejectedPending(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ (packet.payload.observation = "PlanOccurrence")
+       /\ occurrence_phase' = "Pending"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "PlanRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailurePlanRejectedPending"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailurePlanRejectedPending", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Pending"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailurePlanRejectedClaimed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ (packet.payload.observation = "PlanOccurrence")
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "PlanRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailurePlanRejectedClaimed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailurePlanRejectedClaimed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailurePlanRejectedDispatching(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching"
+       /\ (packet.payload.observation = "PlanOccurrence")
+       /\ occurrence_phase' = "Dispatching"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "PlanRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailurePlanRejectedDispatching"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailurePlanRejectedDispatching", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Dispatching"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailurePlanRejectedAwaitingCompletion(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "AwaitingCompletion"
+       /\ (packet.payload.observation = "PlanOccurrence")
+       /\ occurrence_phase' = "AwaitingCompletion"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "PlanRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailurePlanRejectedAwaitingCompletion"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailurePlanRejectedAwaitingCompletion", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "AwaitingCompletion"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailurePlanRejectedCompleted(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Completed"
+       /\ (packet.payload.observation = "PlanOccurrence")
+       /\ occurrence_phase' = "Completed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "PlanRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailurePlanRejectedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailurePlanRejectedCompleted", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailurePlanRejectedSkipped(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Skipped"
+       /\ (packet.payload.observation = "PlanOccurrence")
+       /\ occurrence_phase' = "Skipped"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "PlanRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailurePlanRejectedSkipped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailurePlanRejectedSkipped", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Skipped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailurePlanRejectedMisfired(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Misfired"
+       /\ (packet.payload.observation = "PlanOccurrence")
+       /\ occurrence_phase' = "Misfired"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "PlanRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailurePlanRejectedMisfired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailurePlanRejectedMisfired", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailurePlanRejectedSuperseded(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Superseded"
+       /\ (packet.payload.observation = "PlanOccurrence")
+       /\ occurrence_phase' = "Superseded"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "PlanRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailurePlanRejectedSuperseded"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailurePlanRejectedSuperseded", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Superseded"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailurePlanRejectedDeliveryFailed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "DeliveryFailed"
+       /\ (packet.payload.observation = "PlanOccurrence")
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "PlanRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailurePlanRejectedDeliveryFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailurePlanRejectedDeliveryFailed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureTargetSyncRejectedPending(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ (packet.payload.observation = "SyncTargetSnapshot")
+       /\ occurrence_phase' = "Pending"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "TargetSyncRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureTargetSyncRejectedPending"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureTargetSyncRejectedPending", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Pending"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureTargetSyncRejectedClaimed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ (packet.payload.observation = "SyncTargetSnapshot")
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "TargetSyncRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureTargetSyncRejectedClaimed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureTargetSyncRejectedClaimed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureTargetSyncRejectedDispatching(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching"
+       /\ (packet.payload.observation = "SyncTargetSnapshot")
+       /\ occurrence_phase' = "Dispatching"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "TargetSyncRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureTargetSyncRejectedDispatching"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureTargetSyncRejectedDispatching", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Dispatching"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureTargetSyncRejectedAwaitingCompletion(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "AwaitingCompletion"
+       /\ (packet.payload.observation = "SyncTargetSnapshot")
+       /\ occurrence_phase' = "AwaitingCompletion"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "TargetSyncRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureTargetSyncRejectedAwaitingCompletion"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureTargetSyncRejectedAwaitingCompletion", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "AwaitingCompletion"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureTargetSyncRejectedCompleted(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Completed"
+       /\ (packet.payload.observation = "SyncTargetSnapshot")
+       /\ occurrence_phase' = "Completed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "TargetSyncRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureTargetSyncRejectedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureTargetSyncRejectedCompleted", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureTargetSyncRejectedSkipped(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Skipped"
+       /\ (packet.payload.observation = "SyncTargetSnapshot")
+       /\ occurrence_phase' = "Skipped"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "TargetSyncRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureTargetSyncRejectedSkipped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureTargetSyncRejectedSkipped", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Skipped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureTargetSyncRejectedMisfired(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Misfired"
+       /\ (packet.payload.observation = "SyncTargetSnapshot")
+       /\ occurrence_phase' = "Misfired"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "TargetSyncRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureTargetSyncRejectedMisfired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureTargetSyncRejectedMisfired", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureTargetSyncRejectedSuperseded(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Superseded"
+       /\ (packet.payload.observation = "SyncTargetSnapshot")
+       /\ occurrence_phase' = "Superseded"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "TargetSyncRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureTargetSyncRejectedSuperseded"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureTargetSyncRejectedSuperseded", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Superseded"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureTargetSyncRejectedDeliveryFailed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "DeliveryFailed"
+       /\ (packet.payload.observation = "SyncTargetSnapshot")
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "TargetSyncRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureTargetSyncRejectedDeliveryFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureTargetSyncRejectedDeliveryFailed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureReceiptRecordRejectedPending(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ (packet.payload.observation = "RecordReceipt")
+       /\ occurrence_phase' = "Pending"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "ReceiptRecordRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureReceiptRecordRejectedPending"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureReceiptRecordRejectedPending", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Pending"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureReceiptRecordRejectedClaimed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ (packet.payload.observation = "RecordReceipt")
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "ReceiptRecordRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureReceiptRecordRejectedClaimed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureReceiptRecordRejectedClaimed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureReceiptRecordRejectedDispatching(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching"
+       /\ (packet.payload.observation = "RecordReceipt")
+       /\ occurrence_phase' = "Dispatching"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "ReceiptRecordRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureReceiptRecordRejectedDispatching"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureReceiptRecordRejectedDispatching", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Dispatching"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureReceiptRecordRejectedAwaitingCompletion(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "AwaitingCompletion"
+       /\ (packet.payload.observation = "RecordReceipt")
+       /\ occurrence_phase' = "AwaitingCompletion"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "ReceiptRecordRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureReceiptRecordRejectedAwaitingCompletion"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureReceiptRecordRejectedAwaitingCompletion", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "AwaitingCompletion"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureReceiptRecordRejectedCompleted(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Completed"
+       /\ (packet.payload.observation = "RecordReceipt")
+       /\ occurrence_phase' = "Completed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "ReceiptRecordRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureReceiptRecordRejectedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureReceiptRecordRejectedCompleted", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureReceiptRecordRejectedSkipped(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Skipped"
+       /\ (packet.payload.observation = "RecordReceipt")
+       /\ occurrence_phase' = "Skipped"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "ReceiptRecordRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureReceiptRecordRejectedSkipped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureReceiptRecordRejectedSkipped", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Skipped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureReceiptRecordRejectedMisfired(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Misfired"
+       /\ (packet.payload.observation = "RecordReceipt")
+       /\ occurrence_phase' = "Misfired"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "ReceiptRecordRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureReceiptRecordRejectedMisfired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureReceiptRecordRejectedMisfired", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureReceiptRecordRejectedSuperseded(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Superseded"
+       /\ (packet.payload.observation = "RecordReceipt")
+       /\ occurrence_phase' = "Superseded"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "ReceiptRecordRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureReceiptRecordRejectedSuperseded"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureReceiptRecordRejectedSuperseded", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Superseded"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureReceiptRecordRejectedDeliveryFailed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "DeliveryFailed"
+       /\ (packet.payload.observation = "RecordReceipt")
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "ReceiptRecordRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureReceiptRecordRejectedDeliveryFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureReceiptRecordRejectedDeliveryFailed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureDueClassificationRejectedPending(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ (packet.payload.observation = "ClassifyDue")
+       /\ occurrence_phase' = "Pending"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "DueClassificationRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureDueClassificationRejectedPending"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureDueClassificationRejectedPending", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Pending"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureDueClassificationRejectedClaimed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ (packet.payload.observation = "ClassifyDue")
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "DueClassificationRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureDueClassificationRejectedClaimed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureDueClassificationRejectedClaimed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureDueClassificationRejectedDispatching(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching"
+       /\ (packet.payload.observation = "ClassifyDue")
+       /\ occurrence_phase' = "Dispatching"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "DueClassificationRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureDueClassificationRejectedDispatching"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureDueClassificationRejectedDispatching", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Dispatching"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureDueClassificationRejectedAwaitingCompletion(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "AwaitingCompletion"
+       /\ (packet.payload.observation = "ClassifyDue")
+       /\ occurrence_phase' = "AwaitingCompletion"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "DueClassificationRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureDueClassificationRejectedAwaitingCompletion"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureDueClassificationRejectedAwaitingCompletion", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "AwaitingCompletion"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureDueClassificationRejectedCompleted(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Completed"
+       /\ (packet.payload.observation = "ClassifyDue")
+       /\ occurrence_phase' = "Completed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "DueClassificationRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureDueClassificationRejectedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureDueClassificationRejectedCompleted", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureDueClassificationRejectedSkipped(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Skipped"
+       /\ (packet.payload.observation = "ClassifyDue")
+       /\ occurrence_phase' = "Skipped"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "DueClassificationRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureDueClassificationRejectedSkipped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureDueClassificationRejectedSkipped", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Skipped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureDueClassificationRejectedMisfired(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Misfired"
+       /\ (packet.payload.observation = "ClassifyDue")
+       /\ occurrence_phase' = "Misfired"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "DueClassificationRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureDueClassificationRejectedMisfired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureDueClassificationRejectedMisfired", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureDueClassificationRejectedSuperseded(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Superseded"
+       /\ (packet.payload.observation = "ClassifyDue")
+       /\ occurrence_phase' = "Superseded"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "DueClassificationRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureDueClassificationRejectedSuperseded"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureDueClassificationRejectedSuperseded", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Superseded"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "DeliveryFailed"
+       /\ (packet.payload.observation = "ClassifyDue")
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "DueClassificationRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotPendingForClaimPending(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ (packet.payload.observation = "Claim")
+       /\ occurrence_phase' = "Pending"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotPendingForClaim"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotPendingForClaimPending"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotPendingForClaimPending", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Pending"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotPendingForClaimClaimed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ (packet.payload.observation = "Claim")
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotPendingForClaim"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotPendingForClaimClaimed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotPendingForClaimClaimed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotPendingForClaimDispatching(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching"
+       /\ (packet.payload.observation = "Claim")
+       /\ occurrence_phase' = "Dispatching"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotPendingForClaim"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotPendingForClaimDispatching"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotPendingForClaimDispatching", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Dispatching"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "AwaitingCompletion"
+       /\ (packet.payload.observation = "Claim")
+       /\ occurrence_phase' = "AwaitingCompletion"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotPendingForClaim"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "AwaitingCompletion"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotPendingForClaimCompleted(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Completed"
+       /\ (packet.payload.observation = "Claim")
+       /\ occurrence_phase' = "Completed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotPendingForClaim"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotPendingForClaimCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotPendingForClaimCompleted", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotPendingForClaimSkipped(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Skipped"
+       /\ (packet.payload.observation = "Claim")
+       /\ occurrence_phase' = "Skipped"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotPendingForClaim"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotPendingForClaimSkipped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotPendingForClaimSkipped", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Skipped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotPendingForClaimMisfired(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Misfired"
+       /\ (packet.payload.observation = "Claim")
+       /\ occurrence_phase' = "Misfired"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotPendingForClaim"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotPendingForClaimMisfired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotPendingForClaimMisfired", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotPendingForClaimSuperseded(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Superseded"
+       /\ (packet.payload.observation = "Claim")
+       /\ occurrence_phase' = "Superseded"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotPendingForClaim"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotPendingForClaimSuperseded"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotPendingForClaimSuperseded", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Superseded"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotPendingForClaimDeliveryFailed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "DeliveryFailed"
+       /\ (packet.payload.observation = "Claim")
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotPendingForClaim"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotPendingForClaimDeliveryFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotPendingForClaimDeliveryFailed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotClaimedPending(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ (packet.payload.observation = "DispatchStarted")
+       /\ occurrence_phase' = "Pending"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotClaimed"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotClaimedPending"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotClaimedPending", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Pending"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotClaimedClaimed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ (packet.payload.observation = "DispatchStarted")
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotClaimed"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotClaimedClaimed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotClaimedClaimed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotClaimedDispatching(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching"
+       /\ (packet.payload.observation = "DispatchStarted")
+       /\ occurrence_phase' = "Dispatching"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotClaimed"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotClaimedDispatching"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotClaimedDispatching", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Dispatching"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotClaimedAwaitingCompletion(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "AwaitingCompletion"
+       /\ (packet.payload.observation = "DispatchStarted")
+       /\ occurrence_phase' = "AwaitingCompletion"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotClaimed"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotClaimedAwaitingCompletion"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotClaimedAwaitingCompletion", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "AwaitingCompletion"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotClaimedCompleted(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Completed"
+       /\ (packet.payload.observation = "DispatchStarted")
+       /\ occurrence_phase' = "Completed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotClaimed"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotClaimedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotClaimedCompleted", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotClaimedSkipped(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Skipped"
+       /\ (packet.payload.observation = "DispatchStarted")
+       /\ occurrence_phase' = "Skipped"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotClaimed"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotClaimedSkipped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotClaimedSkipped", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Skipped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotClaimedMisfired(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Misfired"
+       /\ (packet.payload.observation = "DispatchStarted")
+       /\ occurrence_phase' = "Misfired"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotClaimed"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotClaimedMisfired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotClaimedMisfired", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotClaimedSuperseded(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Superseded"
+       /\ (packet.payload.observation = "DispatchStarted")
+       /\ occurrence_phase' = "Superseded"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotClaimed"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotClaimedSuperseded"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotClaimedSuperseded", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Superseded"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotClaimedDeliveryFailed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "DeliveryFailed"
+       /\ (packet.payload.observation = "DispatchStarted")
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotClaimed"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotClaimedDeliveryFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotClaimedDeliveryFailed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotDispatchingPending(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ (packet.payload.observation = "AwaitCompletion")
+       /\ occurrence_phase' = "Pending"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotDispatching"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotDispatchingPending"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotDispatchingPending", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Pending"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotDispatchingClaimed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ (packet.payload.observation = "AwaitCompletion")
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotDispatching"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotDispatchingClaimed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotDispatchingClaimed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotDispatchingDispatching(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching"
+       /\ (packet.payload.observation = "AwaitCompletion")
+       /\ occurrence_phase' = "Dispatching"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotDispatching"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotDispatchingDispatching"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotDispatchingDispatching", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Dispatching"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotDispatchingAwaitingCompletion(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "AwaitingCompletion"
+       /\ (packet.payload.observation = "AwaitCompletion")
+       /\ occurrence_phase' = "AwaitingCompletion"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotDispatching"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotDispatchingAwaitingCompletion"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotDispatchingAwaitingCompletion", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "AwaitingCompletion"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotDispatchingCompleted(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Completed"
+       /\ (packet.payload.observation = "AwaitCompletion")
+       /\ occurrence_phase' = "Completed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotDispatching"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotDispatchingCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotDispatchingCompleted", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotDispatchingSkipped(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Skipped"
+       /\ (packet.payload.observation = "AwaitCompletion")
+       /\ occurrence_phase' = "Skipped"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotDispatching"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotDispatchingSkipped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotDispatchingSkipped", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Skipped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotDispatchingMisfired(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Misfired"
+       /\ (packet.payload.observation = "AwaitCompletion")
+       /\ occurrence_phase' = "Misfired"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotDispatching"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotDispatchingMisfired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotDispatchingMisfired", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotDispatchingSuperseded(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Superseded"
+       /\ (packet.payload.observation = "AwaitCompletion")
+       /\ occurrence_phase' = "Superseded"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotDispatching"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotDispatchingSuperseded"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotDispatchingSuperseded", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Superseded"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotDispatchingDeliveryFailed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "DeliveryFailed"
+       /\ (packet.payload.observation = "AwaitCompletion")
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotDispatching"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotDispatchingDeliveryFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotDispatchingDeliveryFailed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLeaseHoldingPending(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ ((packet.payload.observation = "LeaseExpired") \/ (packet.payload.observation = "ReleaseLeaseForPausedSchedule"))
+       /\ occurrence_phase' = "Pending"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLeaseHolding"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLeaseHoldingPending"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLeaseHoldingPending", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Pending"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLeaseHoldingClaimed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ ((packet.payload.observation = "LeaseExpired") \/ (packet.payload.observation = "ReleaseLeaseForPausedSchedule"))
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLeaseHolding"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLeaseHoldingClaimed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLeaseHoldingClaimed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLeaseHoldingDispatching(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching"
+       /\ ((packet.payload.observation = "LeaseExpired") \/ (packet.payload.observation = "ReleaseLeaseForPausedSchedule"))
+       /\ occurrence_phase' = "Dispatching"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLeaseHolding"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLeaseHoldingDispatching"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLeaseHoldingDispatching", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Dispatching"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLeaseHoldingAwaitingCompletion(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "AwaitingCompletion"
+       /\ ((packet.payload.observation = "LeaseExpired") \/ (packet.payload.observation = "ReleaseLeaseForPausedSchedule"))
+       /\ occurrence_phase' = "AwaitingCompletion"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLeaseHolding"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLeaseHoldingAwaitingCompletion"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLeaseHoldingAwaitingCompletion", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "AwaitingCompletion"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLeaseHoldingCompleted(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Completed"
+       /\ ((packet.payload.observation = "LeaseExpired") \/ (packet.payload.observation = "ReleaseLeaseForPausedSchedule"))
+       /\ occurrence_phase' = "Completed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLeaseHolding"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLeaseHoldingCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLeaseHoldingCompleted", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLeaseHoldingSkipped(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Skipped"
+       /\ ((packet.payload.observation = "LeaseExpired") \/ (packet.payload.observation = "ReleaseLeaseForPausedSchedule"))
+       /\ occurrence_phase' = "Skipped"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLeaseHolding"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLeaseHoldingSkipped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLeaseHoldingSkipped", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Skipped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLeaseHoldingMisfired(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Misfired"
+       /\ ((packet.payload.observation = "LeaseExpired") \/ (packet.payload.observation = "ReleaseLeaseForPausedSchedule"))
+       /\ occurrence_phase' = "Misfired"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLeaseHolding"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLeaseHoldingMisfired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLeaseHoldingMisfired", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLeaseHoldingSuperseded(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Superseded"
+       /\ ((packet.payload.observation = "LeaseExpired") \/ (packet.payload.observation = "ReleaseLeaseForPausedSchedule"))
+       /\ occurrence_phase' = "Superseded"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLeaseHolding"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLeaseHoldingSuperseded"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLeaseHoldingSuperseded", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Superseded"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "DeliveryFailed"
+       /\ ((packet.payload.observation = "LeaseExpired") \/ (packet.payload.observation = "ReleaseLeaseForPausedSchedule"))
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLeaseHolding"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLiveForTerminalPending(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ ((packet.payload.observation = "Complete") \/ (packet.payload.observation = "ResolveRuntimeCompletion") \/ (packet.payload.observation = "Skip") \/ (packet.payload.observation = "Misfire") \/ (packet.payload.observation = "Supersede") \/ (packet.payload.observation = "DeliveryFailed"))
+       /\ occurrence_phase' = "Pending"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLiveForTerminal"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLiveForTerminalPending"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLiveForTerminalPending", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Pending"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLiveForTerminalClaimed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ ((packet.payload.observation = "Complete") \/ (packet.payload.observation = "ResolveRuntimeCompletion") \/ (packet.payload.observation = "Skip") \/ (packet.payload.observation = "Misfire") \/ (packet.payload.observation = "Supersede") \/ (packet.payload.observation = "DeliveryFailed"))
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLiveForTerminal"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLiveForTerminalClaimed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLiveForTerminalClaimed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLiveForTerminalDispatching(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching"
+       /\ ((packet.payload.observation = "Complete") \/ (packet.payload.observation = "ResolveRuntimeCompletion") \/ (packet.payload.observation = "Skip") \/ (packet.payload.observation = "Misfire") \/ (packet.payload.observation = "Supersede") \/ (packet.payload.observation = "DeliveryFailed"))
+       /\ occurrence_phase' = "Dispatching"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLiveForTerminal"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLiveForTerminalDispatching"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLiveForTerminalDispatching", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Dispatching"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "AwaitingCompletion"
+       /\ ((packet.payload.observation = "Complete") \/ (packet.payload.observation = "ResolveRuntimeCompletion") \/ (packet.payload.observation = "Skip") \/ (packet.payload.observation = "Misfire") \/ (packet.payload.observation = "Supersede") \/ (packet.payload.observation = "DeliveryFailed"))
+       /\ occurrence_phase' = "AwaitingCompletion"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLiveForTerminal"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "AwaitingCompletion"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLiveForTerminalCompleted(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Completed"
+       /\ ((packet.payload.observation = "Complete") \/ (packet.payload.observation = "ResolveRuntimeCompletion") \/ (packet.payload.observation = "Skip") \/ (packet.payload.observation = "Misfire") \/ (packet.payload.observation = "Supersede") \/ (packet.payload.observation = "DeliveryFailed"))
+       /\ occurrence_phase' = "Completed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLiveForTerminal"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLiveForTerminalCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLiveForTerminalCompleted", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLiveForTerminalSkipped(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Skipped"
+       /\ ((packet.payload.observation = "Complete") \/ (packet.payload.observation = "ResolveRuntimeCompletion") \/ (packet.payload.observation = "Skip") \/ (packet.payload.observation = "Misfire") \/ (packet.payload.observation = "Supersede") \/ (packet.payload.observation = "DeliveryFailed"))
+       /\ occurrence_phase' = "Skipped"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLiveForTerminal"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLiveForTerminalSkipped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLiveForTerminalSkipped", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Skipped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLiveForTerminalMisfired(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Misfired"
+       /\ ((packet.payload.observation = "Complete") \/ (packet.payload.observation = "ResolveRuntimeCompletion") \/ (packet.payload.observation = "Skip") \/ (packet.payload.observation = "Misfire") \/ (packet.payload.observation = "Supersede") \/ (packet.payload.observation = "DeliveryFailed"))
+       /\ occurrence_phase' = "Misfired"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLiveForTerminal"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLiveForTerminalMisfired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLiveForTerminalMisfired", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLiveForTerminalSuperseded(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Superseded"
+       /\ ((packet.payload.observation = "Complete") \/ (packet.payload.observation = "ResolveRuntimeCompletion") \/ (packet.payload.observation = "Skip") \/ (packet.payload.observation = "Misfire") \/ (packet.payload.observation = "Supersede") \/ (packet.payload.observation = "DeliveryFailed"))
+       /\ occurrence_phase' = "Superseded"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLiveForTerminal"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLiveForTerminalSuperseded"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLiveForTerminalSuperseded", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Superseded"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed(arg_observation) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.observation = arg_observation
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "DeliveryFailed"
+       /\ ((packet.payload.observation = "Complete") \/ (packet.payload.observation = "ResolveRuntimeCompletion") \/ (packet.payload.observation = "Skip") \/ (packet.payload.observation = "Misfire") \/ (packet.payload.observation = "Supersede") \/ (packet.payload.observation = "DeliveryFailed"))
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ UNCHANGED << schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [observation |-> packet.payload.observation, public_class |-> "NotLiveForTerminal"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
 
 occurrence_PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revision, arg_occurrence_ordinal, arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_misfire_policy_key, arg_overlap_policy, arg_overlap_policy_key, arg_missing_target_policy, arg_missing_target_policy_key, arg_target_materialized_session_id, arg_due_at_utc_ms, arg_misfire_deadline_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
@@ -1758,6 +3297,87 @@ CoreNext ==
     \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededActive(arg_occurrence_id, arg_superseding_revision)
     \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededPaused(arg_occurrence_id, arg_superseding_revision)
     \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededDeleted(arg_occurrence_id, arg_superseding_revision)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedPending(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedClaimed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedDispatching(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedAwaitingCompletion(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedCompleted(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedSkipped(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedMisfired(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedSuperseded(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedDeliveryFailed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedPending(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedClaimed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedDispatching(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedAwaitingCompletion(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedCompleted(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedSkipped(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedMisfired(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedSuperseded(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedDeliveryFailed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedPending(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedClaimed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedDispatching(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedAwaitingCompletion(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedCompleted(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedSkipped(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedMisfired(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedSuperseded(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedDeliveryFailed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedPending(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedClaimed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedDispatching(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedAwaitingCompletion(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedCompleted(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedSkipped(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedMisfired(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedSuperseded(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimPending(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimClaimed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDispatching(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimCompleted(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimSkipped(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimMisfired(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimSuperseded(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDeliveryFailed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedPending(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedClaimed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedDispatching(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedAwaitingCompletion(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedCompleted(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedSkipped(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedMisfired(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedSuperseded(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedDeliveryFailed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingPending(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingClaimed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingDispatching(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingAwaitingCompletion(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingCompleted(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingSkipped(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingMisfired(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingSuperseded(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingDeliveryFailed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingPending(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingClaimed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingDispatching(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingAwaitingCompletion(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingCompleted(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSkipped(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingMisfired(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSuperseded(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalPending(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalClaimed(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalDispatching(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalCompleted(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalSkipped(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalMisfired(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalSuperseded(arg_observation)
+    \/ \E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed(arg_observation)
     \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_schedule_id \in ScheduleIdValues : \E arg_schedule_revision \in 0..2 : \E arg_occurrence_ordinal \in 0..2 : \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_misfire_policy_key \in StringValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_overlap_policy_key \in StringValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : \E arg_missing_target_policy_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : \E arg_due_at_utc_ms \in 0..2 : \E arg_misfire_deadline_utc_ms \in 0..2 : occurrence_PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revision, arg_occurrence_ordinal, arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_misfire_policy_key, arg_overlap_policy, arg_overlap_policy_key, arg_missing_target_policy, arg_missing_target_policy_key, arg_target_materialized_session_id, arg_due_at_utc_ms, arg_misfire_deadline_utc_ms)
     \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingFuture(arg_now_utc_ms)
     \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingMisfire(arg_now_utc_ms)
@@ -1861,6 +3481,95 @@ WitnessFairness_revision_supersede_route_1 ==
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededActive(arg_occurrence_id, arg_superseding_revision))
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededPaused(arg_occurrence_id, arg_superseding_revision))
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededDeleted(arg_occurrence_id, arg_superseding_revision))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedMisfired(arg_observation))
+
+WitnessFairness_revision_supersede_route_2 ==
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedAwaitingCompletion(arg_observation))
+
+WitnessFairness_revision_supersede_route_3 ==
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingPending(arg_observation))
+
+WitnessFairness_revision_supersede_route_4 ==
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalMisfired(arg_observation))
+
+WitnessFairness_revision_supersede_route_5 ==
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed(arg_observation))
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_schedule_id \in ScheduleIdValues : \E arg_schedule_revision \in 0..2 : \E arg_occurrence_ordinal \in 0..2 : \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_misfire_policy_key \in StringValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_overlap_policy_key \in StringValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : \E arg_missing_target_policy_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : \E arg_due_at_utc_ms \in 0..2 : \E arg_misfire_deadline_utc_ms \in 0..2 : occurrence_PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revision, arg_occurrence_ordinal, arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_misfire_policy_key, arg_overlap_policy, arg_overlap_policy_key, arg_missing_target_policy, arg_missing_target_policy_key, arg_target_materialized_session_id, arg_due_at_utc_ms, arg_misfire_deadline_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingFuture(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingMisfire(arg_now_utc_ms))
@@ -1868,8 +3577,6 @@ WitnessFairness_revision_supersede_route_1 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDispatchingLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueAwaitingCompletionLeaseExpired(arg_now_utc_ms))
-
-WitnessFairness_revision_supersede_route_2 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseCurrent(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDispatchingLeaseCurrent(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueAwaitingCompletionLeaseCurrent(arg_now_utc_ms))
@@ -1885,6 +3592,8 @@ WitnessFairness_revision_supersede_route_2 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptDispatching(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptAwaitingCompletion(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptCompleted(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
+
+WitnessFairness_revision_supersede_route_6 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSkipped(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptMisfired(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSuperseded(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
@@ -1894,8 +3603,6 @@ WitnessFairness_revision_supersede_route_2 ==
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionCompleted(arg_outcome, arg_detail, arg_at_utc_ms))
-
-WitnessFairness_revision_supersede_route_3 ==
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionRuntimeRejected(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionTransportError(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionInternalError(arg_outcome, arg_detail, arg_at_utc_ms))
@@ -1916,6 +3623,9 @@ WitnessSpec_revision_supersede_route ==
     /\ WitnessFairness_revision_supersede_route_1
     /\ WitnessFairness_revision_supersede_route_2
     /\ WitnessFairness_revision_supersede_route_3
+    /\ WitnessFairness_revision_supersede_route_4
+    /\ WitnessFairness_revision_supersede_route_5
+    /\ WitnessFairness_revision_supersede_route_6
 
 WitnessFairness_occurrence_supersede_ack_route_1 ==
     /\ WF_vars(DeliverQueuedRoute)
@@ -1935,6 +3645,95 @@ WitnessFairness_occurrence_supersede_ack_route_1 ==
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededActive(arg_occurrence_id, arg_superseding_revision))
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededPaused(arg_occurrence_id, arg_superseding_revision))
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededDeleted(arg_occurrence_id, arg_superseding_revision))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedMisfired(arg_observation))
+
+WitnessFairness_occurrence_supersede_ack_route_2 ==
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedAwaitingCompletion(arg_observation))
+
+WitnessFairness_occurrence_supersede_ack_route_3 ==
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingPending(arg_observation))
+
+WitnessFairness_occurrence_supersede_ack_route_4 ==
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalMisfired(arg_observation))
+
+WitnessFairness_occurrence_supersede_ack_route_5 ==
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed(arg_observation))
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_schedule_id \in ScheduleIdValues : \E arg_schedule_revision \in 0..2 : \E arg_occurrence_ordinal \in 0..2 : \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_misfire_policy_key \in StringValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_overlap_policy_key \in StringValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : \E arg_missing_target_policy_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : \E arg_due_at_utc_ms \in 0..2 : \E arg_misfire_deadline_utc_ms \in 0..2 : occurrence_PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revision, arg_occurrence_ordinal, arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_misfire_policy_key, arg_overlap_policy, arg_overlap_policy_key, arg_missing_target_policy, arg_missing_target_policy_key, arg_target_materialized_session_id, arg_due_at_utc_ms, arg_misfire_deadline_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingFuture(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingMisfire(arg_now_utc_ms))
@@ -1942,8 +3741,6 @@ WitnessFairness_occurrence_supersede_ack_route_1 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDispatchingLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueAwaitingCompletionLeaseExpired(arg_now_utc_ms))
-
-WitnessFairness_occurrence_supersede_ack_route_2 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseCurrent(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDispatchingLeaseCurrent(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueAwaitingCompletionLeaseCurrent(arg_now_utc_ms))
@@ -1959,6 +3756,8 @@ WitnessFairness_occurrence_supersede_ack_route_2 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptDispatching(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptAwaitingCompletion(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptCompleted(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
+
+WitnessFairness_occurrence_supersede_ack_route_6 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSkipped(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptMisfired(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSuperseded(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
@@ -1968,8 +3767,6 @@ WitnessFairness_occurrence_supersede_ack_route_2 ==
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionCompleted(arg_outcome, arg_detail, arg_at_utc_ms))
-
-WitnessFairness_occurrence_supersede_ack_route_3 ==
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionRuntimeRejected(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionTransportError(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionInternalError(arg_outcome, arg_detail, arg_at_utc_ms))
@@ -1990,6 +3787,9 @@ WitnessSpec_occurrence_supersede_ack_route ==
     /\ WitnessFairness_occurrence_supersede_ack_route_1
     /\ WitnessFairness_occurrence_supersede_ack_route_2
     /\ WitnessFairness_occurrence_supersede_ack_route_3
+    /\ WitnessFairness_occurrence_supersede_ack_route_4
+    /\ WitnessFairness_occurrence_supersede_ack_route_5
+    /\ WitnessFairness_occurrence_supersede_ack_route_6
 
 WitnessFairness_pause_resume_without_revision_1 ==
     /\ WF_vars(DeliverQueuedRoute)
@@ -2009,6 +3809,95 @@ WitnessFairness_pause_resume_without_revision_1 ==
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededActive(arg_occurrence_id, arg_superseding_revision))
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededPaused(arg_occurrence_id, arg_superseding_revision))
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededDeleted(arg_occurrence_id, arg_superseding_revision))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedMisfired(arg_observation))
+
+WitnessFairness_pause_resume_without_revision_2 ==
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailurePlanRejectedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureTargetSyncRejectedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureReceiptRecordRejectedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedAwaitingCompletion(arg_observation))
+
+WitnessFairness_pause_resume_without_revision_3 ==
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotClaimedDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingPending(arg_observation))
+
+WitnessFairness_pause_resume_without_revision_4 ==
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotDispatchingDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingMisfired(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalPending(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalClaimed(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalDispatching(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalCompleted(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalSkipped(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalMisfired(arg_observation))
+
+WitnessFairness_pause_resume_without_revision_5 ==
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalSuperseded(arg_observation))
+    /\ WF_vars(\E arg_observation \in OccurrenceTransitionFailureObservationKindValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed(arg_observation))
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_schedule_id \in ScheduleIdValues : \E arg_schedule_revision \in 0..2 : \E arg_occurrence_ordinal \in 0..2 : \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_misfire_policy_key \in StringValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_overlap_policy_key \in StringValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : \E arg_missing_target_policy_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : \E arg_due_at_utc_ms \in 0..2 : \E arg_misfire_deadline_utc_ms \in 0..2 : occurrence_PlanOccurrenceFromPending(arg_occurrence_id, arg_schedule_id, arg_schedule_revision, arg_occurrence_ordinal, arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_misfire_policy_key, arg_overlap_policy, arg_overlap_policy_key, arg_missing_target_policy, arg_missing_target_policy_key, arg_target_materialized_session_id, arg_due_at_utc_ms, arg_misfire_deadline_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingFuture(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingMisfire(arg_now_utc_ms))
@@ -2016,8 +3905,6 @@ WitnessFairness_pause_resume_without_revision_1 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDispatchingLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueAwaitingCompletionLeaseExpired(arg_now_utc_ms))
-
-WitnessFairness_pause_resume_without_revision_2 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseCurrent(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDispatchingLeaseCurrent(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueAwaitingCompletionLeaseCurrent(arg_now_utc_ms))
@@ -2033,6 +3920,8 @@ WitnessFairness_pause_resume_without_revision_2 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptDispatching(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptAwaitingCompletion(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptCompleted(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
+
+WitnessFairness_pause_resume_without_revision_6 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSkipped(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptMisfired(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSuperseded(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
@@ -2042,8 +3931,6 @@ WitnessFairness_pause_resume_without_revision_2 ==
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionCompleted(arg_outcome, arg_detail, arg_at_utc_ms))
-
-WitnessFairness_pause_resume_without_revision_3 ==
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionRuntimeRejected(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionTransportError(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionInternalError(arg_outcome, arg_detail, arg_at_utc_ms))
@@ -2064,6 +3951,9 @@ WitnessSpec_pause_resume_without_revision ==
     /\ WitnessFairness_pause_resume_without_revision_1
     /\ WitnessFairness_pause_resume_without_revision_2
     /\ WitnessFairness_pause_resume_without_revision_3
+    /\ WitnessFairness_pause_resume_without_revision_4
+    /\ WitnessFairness_pause_resume_without_revision_5
+    /\ WitnessFairness_pause_resume_without_revision_6
 
 WitnessRouteObserved_revision_supersede_route_revision_supersede_enters_occurrence_authority == <> RouteObserved_revision_supersede_enters_occurrence_authority
 WitnessRouteObserved_occurrence_supersede_ack_route_occurrence_supersede_ack_returns_to_schedule == <> RouteObserved_occurrence_supersede_ack_returns_to_schedule

@@ -1170,6 +1170,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::NoOwnerRealization,
             "Local due-occurrence lease-expired classification retained inside the occurrence scheduler",
         ),
+        (
+            "OccurrenceLifecycleMachine",
+            "TransitionFailureClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "Occurrence transition failure public result class must align with generated occurrence failure-observation classification",
+        ),
         //
         // =========================================================================
         // WorkGraphLifecycleMachine

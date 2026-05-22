@@ -420,6 +420,190 @@ impl std::fmt::Display for OccurrenceLifecycleState {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum OccurrenceTransitionFailureClassKind {
+    #[default]
+    #[serde(rename = "PlanRejected")]
+    PlanRejected,
+    #[serde(rename = "TargetSyncRejected")]
+    TargetSyncRejected,
+    #[serde(rename = "ReceiptRecordRejected")]
+    ReceiptRecordRejected,
+    #[serde(rename = "DueClassificationRejected")]
+    DueClassificationRejected,
+    #[serde(rename = "NotPendingForClaim")]
+    NotPendingForClaim,
+    #[serde(rename = "NotClaimed")]
+    NotClaimed,
+    #[serde(rename = "NotDispatching")]
+    NotDispatching,
+    #[serde(rename = "NotLeaseHolding")]
+    NotLeaseHolding,
+    #[serde(rename = "NotLiveForTerminal")]
+    NotLiveForTerminal,
+}
+impl OccurrenceTransitionFailureClassKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PlanRejected => "PlanRejected",
+            Self::TargetSyncRejected => "TargetSyncRejected",
+            Self::ReceiptRecordRejected => "ReceiptRecordRejected",
+            Self::DueClassificationRejected => "DueClassificationRejected",
+            Self::NotPendingForClaim => "NotPendingForClaim",
+            Self::NotClaimed => "NotClaimed",
+            Self::NotDispatching => "NotDispatching",
+            Self::NotLeaseHolding => "NotLeaseHolding",
+            Self::NotLiveForTerminal => "NotLiveForTerminal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OccurrenceTransitionFailureClassKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PlanRejected" => Ok(Self::PlanRejected),
+            "TargetSyncRejected" => Ok(Self::TargetSyncRejected),
+            "ReceiptRecordRejected" => Ok(Self::ReceiptRecordRejected),
+            "DueClassificationRejected" => Ok(Self::DueClassificationRejected),
+            "NotPendingForClaim" => Ok(Self::NotPendingForClaim),
+            "NotClaimed" => Ok(Self::NotClaimed),
+            "NotDispatching" => Ok(Self::NotDispatching),
+            "NotLeaseHolding" => Ok(Self::NotLeaseHolding),
+            "NotLiveForTerminal" => Ok(Self::NotLiveForTerminal),
+            other => Err(format!(
+                "invalid OccurrenceTransitionFailureClassKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OccurrenceTransitionFailureClassKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OccurrenceTransitionFailureClassKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OccurrenceTransitionFailureObservationKind {
+    #[default]
+    #[serde(rename = "PlanOccurrence")]
+    PlanOccurrence,
+    #[serde(rename = "SyncTargetSnapshot")]
+    SyncTargetSnapshot,
+    #[serde(rename = "RecordReceipt")]
+    RecordReceipt,
+    #[serde(rename = "ClassifyDue")]
+    ClassifyDue,
+    #[serde(rename = "Claim")]
+    Claim,
+    #[serde(rename = "DispatchStarted")]
+    DispatchStarted,
+    #[serde(rename = "AwaitCompletion")]
+    AwaitCompletion,
+    #[serde(rename = "Complete")]
+    Complete,
+    #[serde(rename = "ResolveRuntimeCompletion")]
+    ResolveRuntimeCompletion,
+    #[serde(rename = "Skip")]
+    Skip,
+    #[serde(rename = "Misfire")]
+    Misfire,
+    #[serde(rename = "Supersede")]
+    Supersede,
+    #[serde(rename = "DeliveryFailed")]
+    DeliveryFailed,
+    #[serde(rename = "LeaseExpired")]
+    LeaseExpired,
+    #[serde(rename = "ReleaseLeaseForPausedSchedule")]
+    ReleaseLeaseForPausedSchedule,
+}
+impl OccurrenceTransitionFailureObservationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PlanOccurrence => "PlanOccurrence",
+            Self::SyncTargetSnapshot => "SyncTargetSnapshot",
+            Self::RecordReceipt => "RecordReceipt",
+            Self::ClassifyDue => "ClassifyDue",
+            Self::Claim => "Claim",
+            Self::DispatchStarted => "DispatchStarted",
+            Self::AwaitCompletion => "AwaitCompletion",
+            Self::Complete => "Complete",
+            Self::ResolveRuntimeCompletion => "ResolveRuntimeCompletion",
+            Self::Skip => "Skip",
+            Self::Misfire => "Misfire",
+            Self::Supersede => "Supersede",
+            Self::DeliveryFailed => "DeliveryFailed",
+            Self::LeaseExpired => "LeaseExpired",
+            Self::ReleaseLeaseForPausedSchedule => "ReleaseLeaseForPausedSchedule",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OccurrenceTransitionFailureObservationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PlanOccurrence" => Ok(Self::PlanOccurrence),
+            "SyncTargetSnapshot" => Ok(Self::SyncTargetSnapshot),
+            "RecordReceipt" => Ok(Self::RecordReceipt),
+            "ClassifyDue" => Ok(Self::ClassifyDue),
+            "Claim" => Ok(Self::Claim),
+            "DispatchStarted" => Ok(Self::DispatchStarted),
+            "AwaitCompletion" => Ok(Self::AwaitCompletion),
+            "Complete" => Ok(Self::Complete),
+            "ResolveRuntimeCompletion" => Ok(Self::ResolveRuntimeCompletion),
+            "Skip" => Ok(Self::Skip),
+            "Misfire" => Ok(Self::Misfire),
+            "Supersede" => Ok(Self::Supersede),
+            "DeliveryFailed" => Ok(Self::DeliveryFailed),
+            "LeaseExpired" => Ok(Self::LeaseExpired),
+            "ReleaseLeaseForPausedSchedule" => Ok(Self::ReleaseLeaseForPausedSchedule),
+            other => Err(format!(
+                "invalid OccurrenceTransitionFailureObservationKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OccurrenceTransitionFailureObservationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OccurrenceTransitionFailureObservationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum OverlapPolicy {
     #[default]
     #[serde(rename = "AllowConcurrent")]
@@ -739,6 +923,10 @@ pub mod inputs {
     pub struct ReleaseLeaseForPausedSchedule {
         pub at_utc_ms: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyTransitionFailure {
+        pub observation: OccurrenceTransitionFailureObservationKind,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -758,6 +946,7 @@ pub enum Input {
     DeliveryFailed(inputs::DeliveryFailed),
     LeaseExpired(inputs::LeaseExpired),
     ReleaseLeaseForPausedSchedule(inputs::ReleaseLeaseForPausedSchedule),
+    ClassifyTransitionFailure(inputs::ClassifyTransitionFailure),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -777,6 +966,7 @@ impl Input {
             Self::DeliveryFailed(_) => InputKind::DeliveryFailed,
             Self::LeaseExpired(_) => InputKind::LeaseExpired,
             Self::ReleaseLeaseForPausedSchedule(_) => InputKind::ReleaseLeaseForPausedSchedule,
+            Self::ClassifyTransitionFailure(_) => InputKind::ClassifyTransitionFailure,
         }
     }
 }
@@ -797,6 +987,7 @@ pub enum InputKind {
     DeliveryFailed,
     LeaseExpired,
     ReleaseLeaseForPausedSchedule,
+    ClassifyTransitionFailure,
 }
 
 pub mod effects {
@@ -833,6 +1024,11 @@ pub mod effects {
     pub struct DeliveryFailed {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LeaseExpired {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TransitionFailureClassified {
+        pub observation: OccurrenceTransitionFailureObservationKind,
+        pub public_class: OccurrenceTransitionFailureClassKind,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -851,6 +1047,7 @@ pub enum Effect {
     DueLeaseExpired(effects::DueLeaseExpired),
     DeliveryFailed(effects::DeliveryFailed),
     LeaseExpired(effects::LeaseExpired),
+    TransitionFailureClassified(effects::TransitionFailureClassified),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -868,11 +1065,93 @@ pub enum EffectKind {
     DueLeaseExpired,
     DeliveryFailed,
     LeaseExpired,
+    TransitionFailureClassified,
 }
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
+    ClassifyTransitionFailurePlanRejectedPending,
+    ClassifyTransitionFailurePlanRejectedClaimed,
+    ClassifyTransitionFailurePlanRejectedDispatching,
+    ClassifyTransitionFailurePlanRejectedAwaitingCompletion,
+    ClassifyTransitionFailurePlanRejectedCompleted,
+    ClassifyTransitionFailurePlanRejectedSkipped,
+    ClassifyTransitionFailurePlanRejectedMisfired,
+    ClassifyTransitionFailurePlanRejectedSuperseded,
+    ClassifyTransitionFailurePlanRejectedDeliveryFailed,
+    ClassifyTransitionFailureTargetSyncRejectedPending,
+    ClassifyTransitionFailureTargetSyncRejectedClaimed,
+    ClassifyTransitionFailureTargetSyncRejectedDispatching,
+    ClassifyTransitionFailureTargetSyncRejectedAwaitingCompletion,
+    ClassifyTransitionFailureTargetSyncRejectedCompleted,
+    ClassifyTransitionFailureTargetSyncRejectedSkipped,
+    ClassifyTransitionFailureTargetSyncRejectedMisfired,
+    ClassifyTransitionFailureTargetSyncRejectedSuperseded,
+    ClassifyTransitionFailureTargetSyncRejectedDeliveryFailed,
+    ClassifyTransitionFailureReceiptRecordRejectedPending,
+    ClassifyTransitionFailureReceiptRecordRejectedClaimed,
+    ClassifyTransitionFailureReceiptRecordRejectedDispatching,
+    ClassifyTransitionFailureReceiptRecordRejectedAwaitingCompletion,
+    ClassifyTransitionFailureReceiptRecordRejectedCompleted,
+    ClassifyTransitionFailureReceiptRecordRejectedSkipped,
+    ClassifyTransitionFailureReceiptRecordRejectedMisfired,
+    ClassifyTransitionFailureReceiptRecordRejectedSuperseded,
+    ClassifyTransitionFailureReceiptRecordRejectedDeliveryFailed,
+    ClassifyTransitionFailureDueClassificationRejectedPending,
+    ClassifyTransitionFailureDueClassificationRejectedClaimed,
+    ClassifyTransitionFailureDueClassificationRejectedDispatching,
+    ClassifyTransitionFailureDueClassificationRejectedAwaitingCompletion,
+    ClassifyTransitionFailureDueClassificationRejectedCompleted,
+    ClassifyTransitionFailureDueClassificationRejectedSkipped,
+    ClassifyTransitionFailureDueClassificationRejectedMisfired,
+    ClassifyTransitionFailureDueClassificationRejectedSuperseded,
+    ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed,
+    ClassifyTransitionFailureNotPendingForClaimPending,
+    ClassifyTransitionFailureNotPendingForClaimClaimed,
+    ClassifyTransitionFailureNotPendingForClaimDispatching,
+    ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion,
+    ClassifyTransitionFailureNotPendingForClaimCompleted,
+    ClassifyTransitionFailureNotPendingForClaimSkipped,
+    ClassifyTransitionFailureNotPendingForClaimMisfired,
+    ClassifyTransitionFailureNotPendingForClaimSuperseded,
+    ClassifyTransitionFailureNotPendingForClaimDeliveryFailed,
+    ClassifyTransitionFailureNotClaimedPending,
+    ClassifyTransitionFailureNotClaimedClaimed,
+    ClassifyTransitionFailureNotClaimedDispatching,
+    ClassifyTransitionFailureNotClaimedAwaitingCompletion,
+    ClassifyTransitionFailureNotClaimedCompleted,
+    ClassifyTransitionFailureNotClaimedSkipped,
+    ClassifyTransitionFailureNotClaimedMisfired,
+    ClassifyTransitionFailureNotClaimedSuperseded,
+    ClassifyTransitionFailureNotClaimedDeliveryFailed,
+    ClassifyTransitionFailureNotDispatchingPending,
+    ClassifyTransitionFailureNotDispatchingClaimed,
+    ClassifyTransitionFailureNotDispatchingDispatching,
+    ClassifyTransitionFailureNotDispatchingAwaitingCompletion,
+    ClassifyTransitionFailureNotDispatchingCompleted,
+    ClassifyTransitionFailureNotDispatchingSkipped,
+    ClassifyTransitionFailureNotDispatchingMisfired,
+    ClassifyTransitionFailureNotDispatchingSuperseded,
+    ClassifyTransitionFailureNotDispatchingDeliveryFailed,
+    ClassifyTransitionFailureNotLeaseHoldingPending,
+    ClassifyTransitionFailureNotLeaseHoldingClaimed,
+    ClassifyTransitionFailureNotLeaseHoldingDispatching,
+    ClassifyTransitionFailureNotLeaseHoldingAwaitingCompletion,
+    ClassifyTransitionFailureNotLeaseHoldingCompleted,
+    ClassifyTransitionFailureNotLeaseHoldingSkipped,
+    ClassifyTransitionFailureNotLeaseHoldingMisfired,
+    ClassifyTransitionFailureNotLeaseHoldingSuperseded,
+    ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed,
+    ClassifyTransitionFailureNotLiveForTerminalPending,
+    ClassifyTransitionFailureNotLiveForTerminalClaimed,
+    ClassifyTransitionFailureNotLiveForTerminalDispatching,
+    ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion,
+    ClassifyTransitionFailureNotLiveForTerminalCompleted,
+    ClassifyTransitionFailureNotLiveForTerminalSkipped,
+    ClassifyTransitionFailureNotLiveForTerminalMisfired,
+    ClassifyTransitionFailureNotLiveForTerminalSuperseded,
+    ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed,
     PlanOccurrenceFromPending,
     ClassifyDuePendingFuture,
     ClassifyDuePendingMisfire,

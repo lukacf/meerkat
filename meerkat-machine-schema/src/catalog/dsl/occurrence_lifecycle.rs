@@ -3,7 +3,7 @@ use meerkat_machine_dsl::machine;
 
 machine! {
     machine OccurrenceLifecycleMachine {
-        version: 3,
+        version: 4,
         rust: "self" / "catalog::dsl::occurrence_lifecycle",
 
         state {
@@ -144,6 +144,7 @@ machine! {
             DeliveryFailed { failure_class: Enum<OccurrenceFailureClass>, detail: Option<String>, at_utc_ms: u64 },
             LeaseExpired { at_utc_ms: u64 },
             ReleaseLeaseForPausedSchedule { at_utc_ms: u64 },
+            ClassifyTransitionFailure { observation: Enum<OccurrenceTransitionFailureObservationKind> },
         }
 
         effect OccurrenceLifecycleEffect {
@@ -167,6 +168,10 @@ machine! {
             DueLeaseExpired,
             DeliveryFailed,
             LeaseExpired,
+            TransitionFailureClassified {
+                observation: Enum<OccurrenceTransitionFailureObservationKind>,
+                public_class: Enum<OccurrenceTransitionFailureClassKind>,
+            },
         }
 
         helper is_live_claim_phase(phase: OccurrenceLifecycleState) -> bool {
@@ -203,6 +208,132 @@ machine! {
         disposition DueLeaseExpired => local,
         disposition DeliveryFailed => external,
         disposition LeaseExpired => external,
+        disposition TransitionFailureClassified => local,
+
+        // --- Transition failure classification ---
+        //
+        // Public occurrence lifecycle error class is a machine fact. Shells may
+        // report the typed input they attempted, but the generated occurrence
+        // authority owns the mapping from that observation to the public class
+        // exposed by the domain API.
+
+        transition ClassifyTransitionFailurePlanRejected {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { observation }
+            guard "plan_rejected" { observation == OccurrenceTransitionFailureObservationKind::PlanOccurrence }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                observation: observation,
+                public_class: OccurrenceTransitionFailureClassKind::PlanRejected
+            }
+        }
+
+        transition ClassifyTransitionFailureTargetSyncRejected {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { observation }
+            guard "target_sync_rejected" { observation == OccurrenceTransitionFailureObservationKind::SyncTargetSnapshot }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                observation: observation,
+                public_class: OccurrenceTransitionFailureClassKind::TargetSyncRejected
+            }
+        }
+
+        transition ClassifyTransitionFailureReceiptRecordRejected {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { observation }
+            guard "receipt_record_rejected" { observation == OccurrenceTransitionFailureObservationKind::RecordReceipt }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                observation: observation,
+                public_class: OccurrenceTransitionFailureClassKind::ReceiptRecordRejected
+            }
+        }
+
+        transition ClassifyTransitionFailureDueClassificationRejected {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { observation }
+            guard "due_classification_rejected" { observation == OccurrenceTransitionFailureObservationKind::ClassifyDue }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                observation: observation,
+                public_class: OccurrenceTransitionFailureClassKind::DueClassificationRejected
+            }
+        }
+
+        transition ClassifyTransitionFailureNotPendingForClaim {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { observation }
+            guard "not_pending_for_claim" { observation == OccurrenceTransitionFailureObservationKind::Claim }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                observation: observation,
+                public_class: OccurrenceTransitionFailureClassKind::NotPendingForClaim
+            }
+        }
+
+        transition ClassifyTransitionFailureNotClaimed {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { observation }
+            guard "not_claimed" { observation == OccurrenceTransitionFailureObservationKind::DispatchStarted }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                observation: observation,
+                public_class: OccurrenceTransitionFailureClassKind::NotClaimed
+            }
+        }
+
+        transition ClassifyTransitionFailureNotDispatching {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { observation }
+            guard "not_dispatching" { observation == OccurrenceTransitionFailureObservationKind::AwaitCompletion }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                observation: observation,
+                public_class: OccurrenceTransitionFailureClassKind::NotDispatching
+            }
+        }
+
+        transition ClassifyTransitionFailureNotLeaseHolding {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { observation }
+            guard "not_lease_holding" {
+                observation == OccurrenceTransitionFailureObservationKind::LeaseExpired
+                || observation == OccurrenceTransitionFailureObservationKind::ReleaseLeaseForPausedSchedule
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                observation: observation,
+                public_class: OccurrenceTransitionFailureClassKind::NotLeaseHolding
+            }
+        }
+
+        transition ClassifyTransitionFailureNotLiveForTerminal {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { observation }
+            guard "not_live_for_terminal" {
+                observation == OccurrenceTransitionFailureObservationKind::Complete
+                || observation == OccurrenceTransitionFailureObservationKind::ResolveRuntimeCompletion
+                || observation == OccurrenceTransitionFailureObservationKind::Skip
+                || observation == OccurrenceTransitionFailureObservationKind::Misfire
+                || observation == OccurrenceTransitionFailureObservationKind::Supersede
+                || observation == OccurrenceTransitionFailureObservationKind::DeliveryFailed
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                observation: observation,
+                public_class: OccurrenceTransitionFailureClassKind::NotLiveForTerminal
+            }
+        }
 
         // --- Plan occurrence ---
         //
@@ -1114,4 +1245,36 @@ pub enum DeliveryReceiptStage {
     Superseded,
     DeliveryFailed,
     LeaseExpired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OccurrenceTransitionFailureObservationKind {
+    PlanOccurrence,
+    SyncTargetSnapshot,
+    RecordReceipt,
+    ClassifyDue,
+    Claim,
+    DispatchStarted,
+    AwaitCompletion,
+    Complete,
+    ResolveRuntimeCompletion,
+    Skip,
+    Misfire,
+    Supersede,
+    DeliveryFailed,
+    LeaseExpired,
+    ReleaseLeaseForPausedSchedule,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OccurrenceTransitionFailureClassKind {
+    PlanRejected,
+    TargetSyncRejected,
+    ReceiptRecordRejected,
+    DueClassificationRejected,
+    NotPendingForClaim,
+    NotClaimed,
+    NotDispatching,
+    NotLeaseHolding,
+    NotLiveForTerminal,
 }

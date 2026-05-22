@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `3`
+- Version: `4`
 - Rust owner: `self` / `catalog::dsl::occurrence_lifecycle`
 
 ## State
@@ -62,6 +62,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DeliveryFailed`(failure_class: OccurrenceFailureClass, detail: Option<String>, at_utc_ms: u64)
 - `LeaseExpired`(at_utc_ms: u64)
 - `ReleaseLeaseForPausedSchedule`(at_utc_ms: u64)
+- `ClassifyTransitionFailure`(observation: OccurrenceTransitionFailureObservationKind)
 
 ## Signals
 
@@ -80,6 +81,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DueLeaseExpired`
 - `DeliveryFailed`
 - `LeaseExpired`
+- `TransitionFailureClassified`(observation: OccurrenceTransitionFailureObservationKind, public_class: OccurrenceTransitionFailureClassKind)
 
 ## Helpers
 - `is_live_claim_phase`(phase: OccurrenceLifecycleState) -> `Bool`
@@ -91,6 +93,654 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `misfire_deadline_not_before_due`
 
 ## Transitions
+### `ClassifyTransitionFailurePlanRejectedPending`
+- From: `Pending`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `plan_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Pending`
+
+### `ClassifyTransitionFailurePlanRejectedClaimed`
+- From: `Claimed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `plan_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Claimed`
+
+### `ClassifyTransitionFailurePlanRejectedDispatching`
+- From: `Dispatching`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `plan_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Dispatching`
+
+### `ClassifyTransitionFailurePlanRejectedAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `plan_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyTransitionFailurePlanRejectedCompleted`
+- From: `Completed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `plan_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Completed`
+
+### `ClassifyTransitionFailurePlanRejectedSkipped`
+- From: `Skipped`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `plan_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Skipped`
+
+### `ClassifyTransitionFailurePlanRejectedMisfired`
+- From: `Misfired`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `plan_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Misfired`
+
+### `ClassifyTransitionFailurePlanRejectedSuperseded`
+- From: `Superseded`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `plan_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Superseded`
+
+### `ClassifyTransitionFailurePlanRejectedDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `plan_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `DeliveryFailed`
+
+### `ClassifyTransitionFailureTargetSyncRejectedPending`
+- From: `Pending`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `target_sync_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Pending`
+
+### `ClassifyTransitionFailureTargetSyncRejectedClaimed`
+- From: `Claimed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `target_sync_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Claimed`
+
+### `ClassifyTransitionFailureTargetSyncRejectedDispatching`
+- From: `Dispatching`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `target_sync_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Dispatching`
+
+### `ClassifyTransitionFailureTargetSyncRejectedAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `target_sync_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyTransitionFailureTargetSyncRejectedCompleted`
+- From: `Completed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `target_sync_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Completed`
+
+### `ClassifyTransitionFailureTargetSyncRejectedSkipped`
+- From: `Skipped`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `target_sync_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Skipped`
+
+### `ClassifyTransitionFailureTargetSyncRejectedMisfired`
+- From: `Misfired`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `target_sync_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Misfired`
+
+### `ClassifyTransitionFailureTargetSyncRejectedSuperseded`
+- From: `Superseded`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `target_sync_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Superseded`
+
+### `ClassifyTransitionFailureTargetSyncRejectedDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `target_sync_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `DeliveryFailed`
+
+### `ClassifyTransitionFailureReceiptRecordRejectedPending`
+- From: `Pending`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `receipt_record_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Pending`
+
+### `ClassifyTransitionFailureReceiptRecordRejectedClaimed`
+- From: `Claimed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `receipt_record_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Claimed`
+
+### `ClassifyTransitionFailureReceiptRecordRejectedDispatching`
+- From: `Dispatching`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `receipt_record_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Dispatching`
+
+### `ClassifyTransitionFailureReceiptRecordRejectedAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `receipt_record_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyTransitionFailureReceiptRecordRejectedCompleted`
+- From: `Completed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `receipt_record_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Completed`
+
+### `ClassifyTransitionFailureReceiptRecordRejectedSkipped`
+- From: `Skipped`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `receipt_record_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Skipped`
+
+### `ClassifyTransitionFailureReceiptRecordRejectedMisfired`
+- From: `Misfired`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `receipt_record_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Misfired`
+
+### `ClassifyTransitionFailureReceiptRecordRejectedSuperseded`
+- From: `Superseded`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `receipt_record_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Superseded`
+
+### `ClassifyTransitionFailureReceiptRecordRejectedDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `receipt_record_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `DeliveryFailed`
+
+### `ClassifyTransitionFailureDueClassificationRejectedPending`
+- From: `Pending`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `due_classification_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Pending`
+
+### `ClassifyTransitionFailureDueClassificationRejectedClaimed`
+- From: `Claimed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `due_classification_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Claimed`
+
+### `ClassifyTransitionFailureDueClassificationRejectedDispatching`
+- From: `Dispatching`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `due_classification_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Dispatching`
+
+### `ClassifyTransitionFailureDueClassificationRejectedAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `due_classification_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyTransitionFailureDueClassificationRejectedCompleted`
+- From: `Completed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `due_classification_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Completed`
+
+### `ClassifyTransitionFailureDueClassificationRejectedSkipped`
+- From: `Skipped`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `due_classification_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Skipped`
+
+### `ClassifyTransitionFailureDueClassificationRejectedMisfired`
+- From: `Misfired`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `due_classification_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Misfired`
+
+### `ClassifyTransitionFailureDueClassificationRejectedSuperseded`
+- From: `Superseded`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `due_classification_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Superseded`
+
+### `ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `due_classification_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `DeliveryFailed`
+
+### `ClassifyTransitionFailureNotPendingForClaimPending`
+- From: `Pending`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_pending_for_claim`
+- Emits: `TransitionFailureClassified`
+- To: `Pending`
+
+### `ClassifyTransitionFailureNotPendingForClaimClaimed`
+- From: `Claimed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_pending_for_claim`
+- Emits: `TransitionFailureClassified`
+- To: `Claimed`
+
+### `ClassifyTransitionFailureNotPendingForClaimDispatching`
+- From: `Dispatching`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_pending_for_claim`
+- Emits: `TransitionFailureClassified`
+- To: `Dispatching`
+
+### `ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_pending_for_claim`
+- Emits: `TransitionFailureClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyTransitionFailureNotPendingForClaimCompleted`
+- From: `Completed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_pending_for_claim`
+- Emits: `TransitionFailureClassified`
+- To: `Completed`
+
+### `ClassifyTransitionFailureNotPendingForClaimSkipped`
+- From: `Skipped`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_pending_for_claim`
+- Emits: `TransitionFailureClassified`
+- To: `Skipped`
+
+### `ClassifyTransitionFailureNotPendingForClaimMisfired`
+- From: `Misfired`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_pending_for_claim`
+- Emits: `TransitionFailureClassified`
+- To: `Misfired`
+
+### `ClassifyTransitionFailureNotPendingForClaimSuperseded`
+- From: `Superseded`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_pending_for_claim`
+- Emits: `TransitionFailureClassified`
+- To: `Superseded`
+
+### `ClassifyTransitionFailureNotPendingForClaimDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_pending_for_claim`
+- Emits: `TransitionFailureClassified`
+- To: `DeliveryFailed`
+
+### `ClassifyTransitionFailureNotClaimedPending`
+- From: `Pending`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_claimed`
+- Emits: `TransitionFailureClassified`
+- To: `Pending`
+
+### `ClassifyTransitionFailureNotClaimedClaimed`
+- From: `Claimed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_claimed`
+- Emits: `TransitionFailureClassified`
+- To: `Claimed`
+
+### `ClassifyTransitionFailureNotClaimedDispatching`
+- From: `Dispatching`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_claimed`
+- Emits: `TransitionFailureClassified`
+- To: `Dispatching`
+
+### `ClassifyTransitionFailureNotClaimedAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_claimed`
+- Emits: `TransitionFailureClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyTransitionFailureNotClaimedCompleted`
+- From: `Completed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_claimed`
+- Emits: `TransitionFailureClassified`
+- To: `Completed`
+
+### `ClassifyTransitionFailureNotClaimedSkipped`
+- From: `Skipped`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_claimed`
+- Emits: `TransitionFailureClassified`
+- To: `Skipped`
+
+### `ClassifyTransitionFailureNotClaimedMisfired`
+- From: `Misfired`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_claimed`
+- Emits: `TransitionFailureClassified`
+- To: `Misfired`
+
+### `ClassifyTransitionFailureNotClaimedSuperseded`
+- From: `Superseded`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_claimed`
+- Emits: `TransitionFailureClassified`
+- To: `Superseded`
+
+### `ClassifyTransitionFailureNotClaimedDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_claimed`
+- Emits: `TransitionFailureClassified`
+- To: `DeliveryFailed`
+
+### `ClassifyTransitionFailureNotDispatchingPending`
+- From: `Pending`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_dispatching`
+- Emits: `TransitionFailureClassified`
+- To: `Pending`
+
+### `ClassifyTransitionFailureNotDispatchingClaimed`
+- From: `Claimed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_dispatching`
+- Emits: `TransitionFailureClassified`
+- To: `Claimed`
+
+### `ClassifyTransitionFailureNotDispatchingDispatching`
+- From: `Dispatching`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_dispatching`
+- Emits: `TransitionFailureClassified`
+- To: `Dispatching`
+
+### `ClassifyTransitionFailureNotDispatchingAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_dispatching`
+- Emits: `TransitionFailureClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyTransitionFailureNotDispatchingCompleted`
+- From: `Completed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_dispatching`
+- Emits: `TransitionFailureClassified`
+- To: `Completed`
+
+### `ClassifyTransitionFailureNotDispatchingSkipped`
+- From: `Skipped`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_dispatching`
+- Emits: `TransitionFailureClassified`
+- To: `Skipped`
+
+### `ClassifyTransitionFailureNotDispatchingMisfired`
+- From: `Misfired`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_dispatching`
+- Emits: `TransitionFailureClassified`
+- To: `Misfired`
+
+### `ClassifyTransitionFailureNotDispatchingSuperseded`
+- From: `Superseded`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_dispatching`
+- Emits: `TransitionFailureClassified`
+- To: `Superseded`
+
+### `ClassifyTransitionFailureNotDispatchingDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_dispatching`
+- Emits: `TransitionFailureClassified`
+- To: `DeliveryFailed`
+
+### `ClassifyTransitionFailureNotLeaseHoldingPending`
+- From: `Pending`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_lease_holding`
+- Emits: `TransitionFailureClassified`
+- To: `Pending`
+
+### `ClassifyTransitionFailureNotLeaseHoldingClaimed`
+- From: `Claimed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_lease_holding`
+- Emits: `TransitionFailureClassified`
+- To: `Claimed`
+
+### `ClassifyTransitionFailureNotLeaseHoldingDispatching`
+- From: `Dispatching`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_lease_holding`
+- Emits: `TransitionFailureClassified`
+- To: `Dispatching`
+
+### `ClassifyTransitionFailureNotLeaseHoldingAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_lease_holding`
+- Emits: `TransitionFailureClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyTransitionFailureNotLeaseHoldingCompleted`
+- From: `Completed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_lease_holding`
+- Emits: `TransitionFailureClassified`
+- To: `Completed`
+
+### `ClassifyTransitionFailureNotLeaseHoldingSkipped`
+- From: `Skipped`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_lease_holding`
+- Emits: `TransitionFailureClassified`
+- To: `Skipped`
+
+### `ClassifyTransitionFailureNotLeaseHoldingMisfired`
+- From: `Misfired`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_lease_holding`
+- Emits: `TransitionFailureClassified`
+- To: `Misfired`
+
+### `ClassifyTransitionFailureNotLeaseHoldingSuperseded`
+- From: `Superseded`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_lease_holding`
+- Emits: `TransitionFailureClassified`
+- To: `Superseded`
+
+### `ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_lease_holding`
+- Emits: `TransitionFailureClassified`
+- To: `DeliveryFailed`
+
+### `ClassifyTransitionFailureNotLiveForTerminalPending`
+- From: `Pending`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_live_for_terminal`
+- Emits: `TransitionFailureClassified`
+- To: `Pending`
+
+### `ClassifyTransitionFailureNotLiveForTerminalClaimed`
+- From: `Claimed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_live_for_terminal`
+- Emits: `TransitionFailureClassified`
+- To: `Claimed`
+
+### `ClassifyTransitionFailureNotLiveForTerminalDispatching`
+- From: `Dispatching`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_live_for_terminal`
+- Emits: `TransitionFailureClassified`
+- To: `Dispatching`
+
+### `ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_live_for_terminal`
+- Emits: `TransitionFailureClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyTransitionFailureNotLiveForTerminalCompleted`
+- From: `Completed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_live_for_terminal`
+- Emits: `TransitionFailureClassified`
+- To: `Completed`
+
+### `ClassifyTransitionFailureNotLiveForTerminalSkipped`
+- From: `Skipped`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_live_for_terminal`
+- Emits: `TransitionFailureClassified`
+- To: `Skipped`
+
+### `ClassifyTransitionFailureNotLiveForTerminalMisfired`
+- From: `Misfired`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_live_for_terminal`
+- Emits: `TransitionFailureClassified`
+- To: `Misfired`
+
+### `ClassifyTransitionFailureNotLiveForTerminalSuperseded`
+- From: `Superseded`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_live_for_terminal`
+- Emits: `TransitionFailureClassified`
+- To: `Superseded`
+
+### `ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyTransitionFailure`(observation)
+- Guards:
+  - `not_live_for_terminal`
+- Emits: `TransitionFailureClassified`
+- To: `DeliveryFailed`
+
 ### `PlanOccurrenceFromPending`
 - From: `Pending`
 - On: `PlanOccurrence`(occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, target_materialized_session_id, due_at_utc_ms, misfire_deadline_utc_ms)

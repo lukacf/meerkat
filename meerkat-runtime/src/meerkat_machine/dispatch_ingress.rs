@@ -73,6 +73,13 @@ impl MeerkatMachine {
                     } else {
                         false
                     };
+                if active_turn_boundary_available {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        runtime_state = ?state,
+                        "active turn boundary available during ingress admission"
+                    );
+                }
 
                 let (resolved, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
@@ -266,6 +273,13 @@ impl MeerkatMachine {
                     };
 
                     if let Some((run_id, appends, sequence)) = live_boundary_plan {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            run_id = %run_id,
+                            input_id = %input_id,
+                            append_count = appends.len(),
+                            "staging live boundary context for accepted steer input"
+                        );
                         match boundary_handle
                             .stage_system_context_at_boundary(appends)
                             .await

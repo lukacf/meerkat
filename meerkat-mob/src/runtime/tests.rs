@@ -25656,6 +25656,113 @@ async fn test_active_autonomous_direct_steer_ack_waits_for_live_admission_not_tu
 }
 
 #[tokio::test]
+async fn test_active_internal_submit_work_steer_live_injects_for_identity_bridge() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+
+    let sid_worker = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("w-internal-steer"),
+            None,
+        )
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wait_for_ready(Some(Duration::from_secs(2)))
+        .await
+        .expect("startup should settle");
+    handle
+        .wait_for_members_kickoff_complete(
+            &[AgentIdentity::from("w-internal-steer")],
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .expect("kickoff should resolve before blocked direct turn");
+
+    let prompt_baseline = service.applied_runtime_prompts(&sid_worker).await.len();
+    let context_baseline = service
+        .applied_runtime_context_appends(&sid_worker)
+        .await
+        .len();
+
+    service.set_keep_alive_turns_complete_immediately(false);
+    let worker = handle
+        .member(&AgentIdentity::from("w-internal-steer"))
+        .await
+        .expect("worker handle");
+    worker
+        .send(
+            "first direct prompt holds active apply",
+            HandlingMode::Steer,
+        )
+        .await
+        .expect("first direct steer should be admitted");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&sid_worker).await;
+            if prompts
+                .iter()
+                .skip(prompt_baseline)
+                .any(|prompt| prompt.text_content().contains("first direct prompt"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("first direct steer should enter active apply");
+
+    let entry = handle
+        .get_member(&AgentIdentity::from("w-internal-steer"))
+        .await
+        .expect("member entry");
+    handle
+        .submit_work_with_mode(
+            entry.agent_runtime_id,
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new(
+                "internal identity bridge steer must stage live".to_string(),
+                WorkOrigin::Internal,
+            ),
+            HandlingMode::Steer,
+        )
+        .await
+        .expect("internal active steer should be admitted");
+
+    let appends = service.applied_runtime_context_appends(&sid_worker).await;
+    assert!(
+        appends.iter().skip(context_baseline).any(|append| append
+            .text
+            .contains("internal identity bridge steer must stage live")),
+        "internal active steer should stage for the live boundary; appends={appends:?}"
+    );
+    assert_eq!(
+        service.applied_runtime_prompts(&sid_worker).await.len(),
+        prompt_baseline + 1,
+        "internal active steer must not schedule a second full turn before the blocked apply is released"
+    );
+
+    service
+        .interrupt(&sid_worker)
+        .await
+        .expect("interrupt should release blocked worker apply");
+    tokio::time::timeout(Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop timeout after internal active steer assertion")
+        .expect("stop after internal active steer assertion");
+}
+
+#[tokio::test]
 async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let (handle, service) =

@@ -11384,14 +11384,28 @@ impl MobActor {
             use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 
             match adapter.runtime_state(session_id).await {
-                Ok(meerkat_runtime::RuntimeState::Running) => return Ok(true),
-                Ok(_) => {
-                    if self
+                Ok(meerkat_runtime::RuntimeState::Running) => {
+                    tracing::debug!(
+                        agent_identity = %entry.agent_identity,
+                        session_id = %session_id,
+                        "active steer admission barrier enabled by running runtime state"
+                    );
+                    return Ok(true);
+                }
+                Ok(state) => {
+                    let session_active = self
                         .provisioner
                         .is_member_active(&entry.member_ref)
                         .await?
-                        .unwrap_or(false)
-                    {
+                        .unwrap_or(false);
+                    tracing::debug!(
+                        agent_identity = %entry.agent_identity,
+                        session_id = %session_id,
+                        runtime_state = ?state,
+                        session_active,
+                        "active steer admission barrier checked non-running runtime state"
+                    );
+                    if session_active {
                         return Ok(true);
                     }
                     return Ok(false);

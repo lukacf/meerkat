@@ -6775,6 +6775,84 @@ async fn interrupt_yielding_without_live_boundary_handle_falls_back_to_steer_que
 }
 
 #[tokio::test]
+async fn running_steered_operator_prompt_with_live_boundary_runs_as_followup_turn() {
+    let rig = InterruptYieldingTestRig::new(true, false).await;
+    rig.start_busy_turn().await;
+    let probe = rig.probe.clone().expect("live boundary probe installed");
+
+    let prompt = Input::Prompt(crate::input::PromptInput::new(
+        "operator steer must produce a followup assistant turn",
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                ..Default::default()
+            },
+        ),
+    ));
+    let prompt_id = prompt.id().clone();
+    let (outcome, completion_handle) = rig
+        .adapter
+        .accept_input_with_completion(&rig.session_id, prompt)
+        .await
+        .expect("running operator steer should be accepted");
+    assert!(outcome.is_accepted());
+    let completion_handle =
+        completion_handle.expect("operator steer should register a completion waiter");
+
+    assert_eq!(
+        probe.live_boundary_stage_calls.load(Ordering::SeqCst),
+        0,
+        "operator prompts must not be consumed by live-boundary context injection"
+    );
+    let during_busy = rig
+        .adapter
+        .meerkat_machine_spine_snapshot(&rig.session_id)
+        .await
+        .expect("snapshot should exist while busy");
+    assert!(
+        during_busy.inputs.steer_queue.contains(&prompt_id),
+        "operator steer must stay runnable until the active turn reaches a boundary"
+    );
+    assert!(
+        during_busy
+            .completion_waiters
+            .waiting_inputs
+            .iter()
+            .any(|waiter| waiter.input_id == prompt_id),
+        "operator steer must not complete merely by being staged as context"
+    );
+
+    rig.allow_finish.notify_waiters();
+    rig.wait_for_apply_calls(2).await;
+    let second_turn = rig
+        .adapter
+        .meerkat_machine_spine_snapshot(&rig.session_id)
+        .await
+        .expect("snapshot should exist while followup prompt is running");
+    assert_eq!(second_turn.control.phase, RuntimeState::Running);
+    assert_eq!(
+        second_turn.inputs.current_run_contributors,
+        vec![prompt_id.clone()],
+        "the followup run must be driven by the operator steer prompt"
+    );
+    assert_eq!(probe.live_boundary_stage_calls.load(Ordering::SeqCst), 0);
+
+    rig.allow_finish.notify_waiters();
+    rig.wait_until_attached_and_empty().await;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), completion_handle.wait())
+            .await
+            .expect("operator steer completion should resolve"),
+        CompletionOutcome::CompletedWithoutResult
+    ));
+    assert_eq!(
+        rig.apply_calls.load(Ordering::SeqCst),
+        2,
+        "operator steer must run exactly once after the active turn"
+    );
+}
+
+#[tokio::test]
 async fn interrupt_yielding_live_stage_failure_leaves_accepted_work_queued() {
     let rig = InterruptYieldingTestRig::new(true, true).await;
     rig.start_busy_turn().await;

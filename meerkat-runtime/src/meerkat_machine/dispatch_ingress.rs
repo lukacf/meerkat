@@ -57,6 +57,7 @@ impl MeerkatMachine {
                     .unwrap_or(RuntimeState::Destroyed);
                 Self::reject_visible_terminal_ingress(visible_state)?;
 
+                let input_kind = input.kind();
                 let (resolved, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
                     let runtime_idle = state.is_idle_or_attached();
@@ -225,6 +226,7 @@ impl MeerkatMachine {
                 if state == RuntimeState::Running
                     && signal.should_interrupt_yielding()
                     && resolved.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
+                    && !matches!(input_kind, crate::identifiers::InputKind::Prompt)
                     && let (Some(input_id), Some(boundary_handle)) =
                         (accepted_input_id_for_live_boundary, boundary_handle)
                 {

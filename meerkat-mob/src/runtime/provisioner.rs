@@ -1186,6 +1186,21 @@ impl CoreExecutorBoundaryHandle for MobSessionRuntimeBoundaryHandle {
             .await
             .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()))
     }
+
+    async fn discard_staged_system_context_at_boundary(
+        &self,
+        expected_run_id: &CoreRunId,
+        idempotency_keys: Vec<String>,
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .discard_runtime_system_context_for_active_turn(
+                &self.bridge_session_id,
+                expected_run_id,
+                idempotency_keys,
+            )
+            .await
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]

@@ -335,6 +335,18 @@ pub trait MobSessionService:
         ))
     }
 
+    async fn discard_runtime_system_context_for_active_turn(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &RunId,
+        idempotency_keys: Vec<String>,
+    ) -> Result<(), SessionError> {
+        let _ = (session_id, expected_run_id, idempotency_keys);
+        Err(SessionError::Agent(
+            meerkat_core::error::AgentError::NoPendingBoundary,
+        ))
+    }
+
     async fn active_turn_system_context_boundary_available(
         &self,
         _session_id: &SessionId,
@@ -555,6 +567,22 @@ where
         )
         .await?;
         Ok(None)
+    }
+
+    async fn discard_runtime_system_context_for_active_turn(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &RunId,
+        idempotency_keys: Vec<String>,
+    ) -> Result<(), SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::discard_runtime_system_context_for_active_turn(
+            self,
+            session_id,
+            expected_run_id,
+            idempotency_keys,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn active_turn_system_context_boundary_available(
@@ -786,6 +814,22 @@ where
             appends,
         )
         .await
+    }
+
+    async fn discard_runtime_system_context_for_active_turn(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &RunId,
+        idempotency_keys: Vec<String>,
+    ) -> Result<(), SessionError> {
+        meerkat_session::PersistentSessionService::<B>::discard_live_system_context_boundary_staging(
+            self,
+            session_id,
+            expected_run_id,
+            idempotency_keys,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn active_turn_system_context_boundary_available(

@@ -1541,6 +1541,50 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         Ok(())
     }
 
+    /// Roll back active-turn-only runtime context that is still pending.
+    ///
+    /// This is intentionally best-effort with respect to the current turn
+    /// phase: the runtime calls it after its own commit failed, and the cleanup
+    /// must still remove the staged session projection if the turn has already
+    /// advanced or finished.
+    pub async fn discard_runtime_system_context_for_active_turn(
+        &self,
+        id: &SessionId,
+        expected_run_id: &RunId,
+        idempotency_keys: Vec<String>,
+    ) -> Result<usize, SessionError> {
+        if idempotency_keys.is_empty() {
+            return Ok(0);
+        }
+
+        let state = self
+            .system_context_state(id)
+            .await
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+
+        let mut guard = match state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    session_id = %id,
+                    "system-context state lock poisoned while rolling back active-turn context"
+                );
+                poisoned.into_inner()
+            }
+        };
+
+        let discarded = guard.discard_active_turn_pending_by_keys(&idempotency_keys);
+        if !discarded.is_empty() {
+            tracing::debug!(
+                session_id = %id,
+                expected_run_id = %expected_run_id,
+                discarded_count = discarded.len(),
+                "rolled back staged active-turn runtime system context"
+            );
+        }
+        Ok(discarded.len())
+    }
+
     /// Report whether the current runtime-owned turn phase still has a
     /// cooperative model boundary that can consume active-turn system context.
     pub async fn active_turn_system_context_boundary_available(

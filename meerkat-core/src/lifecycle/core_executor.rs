@@ -411,6 +411,18 @@ pub trait CoreExecutorBoundaryHandle: Send + Sync {
             "live boundary system-context staging is unsupported by this executor".to_string(),
         ))
     }
+
+    /// Roll back live-boundary system context that was staged for an accepted
+    /// input whose runtime/machine commit did not succeed.
+    async fn discard_staged_system_context_at_boundary(
+        &self,
+        _expected_run_id: &RunId,
+        _idempotency_keys: Vec<String>,
+    ) -> Result<(), CoreExecutorError> {
+        Err(CoreExecutorError::Internal(
+            "live boundary system-context rollback is unsupported by this executor".to_string(),
+        ))
+    }
 }
 
 /// Cloneable live endpoint for hard-cancelling the active run immediately.

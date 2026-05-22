@@ -289,6 +289,10 @@ impl MeerkatMachine {
                     };
 
                     if let Some((run_id, appends, sequence)) = live_boundary_plan {
+                        let rollback_keys = appends
+                            .iter()
+                            .filter_map(|append| append.idempotency_key.clone())
+                            .collect::<Vec<_>>();
                         tracing::debug!(
                             session_id = %session_id,
                             run_id = %run_id,
@@ -309,7 +313,7 @@ impl MeerkatMachine {
                                     message_count: 0,
                                     sequence,
                                 };
-                                {
+                                let commit_result = {
                                     let mut driver = driver.lock().await;
                                     driver
                                         .machine_realize_live_boundary_context_injected(
@@ -318,7 +322,41 @@ impl MeerkatMachine {
                                             &receipt,
                                             session_snapshot,
                                         )
-                                        .await?;
+                                        .await
+                                };
+                                if let Err(error) = commit_result {
+                                    let rollback_result = if rollback_keys.is_empty() {
+                                        Ok(())
+                                    } else {
+                                        boundary_handle
+                                            .discard_staged_system_context_at_boundary(
+                                                &run_id,
+                                                rollback_keys,
+                                            )
+                                            .await
+                                    };
+                                    match rollback_result {
+                                        Ok(()) => {
+                                            tracing::warn!(
+                                                session_id = %session_id,
+                                                run_id = %run_id,
+                                                input_id = %input_id,
+                                                error = %error,
+                                                "live boundary runtime commit failed; rolled back staged session context"
+                                            );
+                                        }
+                                        Err(rollback_error) => {
+                                            tracing::error!(
+                                                session_id = %session_id,
+                                                run_id = %run_id,
+                                                input_id = %input_id,
+                                                error = %error,
+                                                rollback_error = %rollback_error,
+                                                "live boundary runtime commit failed and staged session context rollback failed"
+                                            );
+                                        }
+                                    }
+                                    return Err(error);
                                 }
                                 let mut completions = completions.lock().await;
                                 completions.resolve_without_result(&input_id);

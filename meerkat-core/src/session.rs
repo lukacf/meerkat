@@ -669,6 +669,51 @@ impl SessionSystemContextState {
 
         discarded
     }
+
+    /// Discard specific active-turn-only appends that are still pending.
+    ///
+    /// This is the rollback companion for live-boundary staging. The runtime
+    /// owns the accepted input, so if that commit fails after the session has
+    /// staged context, the session-side projection must be removed by the same
+    /// idempotency keys before the caller reports failure.
+    pub fn discard_active_turn_pending_by_keys(
+        &mut self,
+        idempotency_keys: &[String],
+    ) -> Vec<PendingSystemContextAppend> {
+        if idempotency_keys.is_empty() || self.active_turn_pending_keys.is_empty() {
+            return Vec::new();
+        }
+
+        let requested_keys: std::collections::BTreeSet<&str> =
+            idempotency_keys.iter().map(String::as_str).collect();
+        let mut discarded = Vec::new();
+        let mut discarded_keys = Vec::new();
+        self.pending.retain(|append| {
+            let should_discard = append.idempotency_key.as_ref().is_some_and(|key| {
+                requested_keys.contains(key.as_str()) && self.active_turn_pending_keys.contains(key)
+            });
+            if should_discard {
+                if let Some(key) = append.idempotency_key.as_ref() {
+                    discarded_keys.push(key.clone());
+                }
+                discarded.push(append.clone());
+            }
+            !should_discard
+        });
+
+        for key in discarded_keys {
+            self.active_turn_pending_keys.remove(&key);
+            if self
+                .seen
+                .get(&key)
+                .is_some_and(|seen| seen.state == SeenSystemContextState::Pending)
+            {
+                self.seen.remove(&key);
+            }
+        }
+
+        discarded
+    }
 }
 
 impl SessionDeferredTurnState {
@@ -4105,6 +4150,49 @@ mod tests {
         assert!(
             state.seen.is_empty(),
             "discarded active-turn context should not block later idempotency keys"
+        );
+    }
+
+    #[test]
+    fn active_turn_system_context_can_roll_back_targeted_keys() {
+        let mut state = SessionSystemContextState::default();
+        for key in ["runtime:steer:input-1", "runtime:steer:input-2"] {
+            state
+                .stage_active_turn_append(
+                    &AppendSystemContextRequest {
+                        text: format!("context for {key}"),
+                        source: Some(key.to_string()),
+                        idempotency_key: Some(key.to_string()),
+                    },
+                    SystemTime::UNIX_EPOCH,
+                )
+                .expect("active context should stage");
+        }
+
+        let discarded =
+            state.discard_active_turn_pending_by_keys(&["runtime:steer:input-1".to_string()]);
+
+        assert_eq!(discarded.len(), 1);
+        assert_eq!(
+            discarded[0].idempotency_key.as_deref(),
+            Some("runtime:steer:input-1")
+        );
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(
+            state.pending[0].idempotency_key.as_deref(),
+            Some("runtime:steer:input-2")
+        );
+        assert!(!state.seen.contains_key("runtime:steer:input-1"));
+        assert!(state.seen.contains_key("runtime:steer:input-2"));
+        assert!(
+            !state
+                .active_turn_pending_keys
+                .contains("runtime:steer:input-1")
+        );
+        assert!(
+            state
+                .active_turn_pending_keys
+                .contains("runtime:steer:input-2")
         );
     }
 

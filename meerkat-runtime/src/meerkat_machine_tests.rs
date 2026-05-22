@@ -5964,7 +5964,9 @@ async fn service_peer_admission_wakes_without_live_cancel_after_boundary() {
 struct InterruptYieldingProbe {
     live_boundary_cancel_calls: Arc<AtomicUsize>,
     live_boundary_stage_calls: Arc<AtomicUsize>,
+    live_boundary_discard_calls: Arc<AtomicUsize>,
     live_boundary_staged_texts: Arc<std::sync::Mutex<Vec<String>>>,
+    live_boundary_discarded_keys: Arc<std::sync::Mutex<Vec<String>>>,
     fail_live_stage: Arc<AtomicBool>,
 }
 
@@ -5973,7 +5975,9 @@ impl InterruptYieldingProbe {
         Self {
             live_boundary_cancel_calls: Arc::new(AtomicUsize::new(0)),
             live_boundary_stage_calls: Arc::new(AtomicUsize::new(0)),
+            live_boundary_discard_calls: Arc::new(AtomicUsize::new(0)),
             live_boundary_staged_texts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            live_boundary_discarded_keys: Arc::new(std::sync::Mutex::new(Vec::new())),
             fail_live_stage: Arc::new(AtomicBool::new(fail_live_stage)),
         }
     }
@@ -5982,6 +5986,13 @@ impl InterruptYieldingProbe {
         self.live_boundary_staged_texts
             .lock()
             .expect("staged text mutex poisoned")
+            .clone()
+    }
+
+    fn discarded_keys(&self) -> Vec<String> {
+        self.live_boundary_discarded_keys
+            .lock()
+            .expect("discarded keys mutex poisoned")
             .clone()
     }
 }
@@ -6023,6 +6034,23 @@ impl CoreExecutorBoundaryHandle for InterruptYieldingBoundaryHandle {
             .expect("staged text mutex poisoned");
         staged.extend(appends.into_iter().map(|append| append.text));
         Ok(None)
+    }
+
+    async fn discard_staged_system_context_at_boundary(
+        &self,
+        _expected_run_id: &meerkat_core::RunId,
+        idempotency_keys: Vec<String>,
+    ) -> Result<(), CoreExecutorError> {
+        self.probe
+            .live_boundary_discard_calls
+            .fetch_add(1, Ordering::SeqCst);
+        let mut discarded = self
+            .probe
+            .live_boundary_discarded_keys
+            .lock()
+            .expect("discarded keys mutex poisoned");
+        discarded.extend(idempotency_keys);
+        Ok(())
     }
 }
 
@@ -6088,7 +6116,19 @@ struct InterruptYieldingTestRig {
 
 impl InterruptYieldingTestRig {
     async fn new(with_live_boundary: bool, fail_live_stage: bool) -> Self {
-        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        Self::new_with_adapter(
+            Arc::new(MeerkatMachine::ephemeral()),
+            with_live_boundary,
+            fail_live_stage,
+        )
+        .await
+    }
+
+    async fn new_with_adapter(
+        adapter: Arc<MeerkatMachine>,
+        with_live_boundary: bool,
+        fail_live_stage: bool,
+    ) -> Self {
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let queued_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
@@ -6925,6 +6965,79 @@ async fn interrupt_yielding_live_stage_failure_leaves_accepted_work_queued() {
     );
     assert_eq!(rig.queued_boundary_cancel_calls.load(Ordering::SeqCst), 0);
     assert_eq!(probe.live_boundary_cancel_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn interrupt_yielding_live_commit_failure_rolls_back_staged_context() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
+        &inner,
+    )));
+    let runtime_store: Arc<dyn RuntimeStore> = store.clone();
+    let rig = InterruptYieldingTestRig::new_with_adapter(
+        Arc::new(MeerkatMachine::persistent(
+            runtime_store,
+            memory_blob_store(),
+        )),
+        true,
+        false,
+    )
+    .await;
+    rig.start_busy_turn().await;
+    let probe = rig.probe.clone().expect("live boundary probe installed");
+
+    store.fail_atomic_apply.store(true, Ordering::SeqCst);
+    let (peer_input, peer_id) = interrupt_yielding_peer_input(
+        "explicit steer rolls back if the runtime commit fails",
+        Some(meerkat_core::types::HandlingMode::Steer),
+    );
+    let err = rig
+        .adapter
+        .accept_input_with_completion(&rig.session_id, peer_input)
+        .await
+        .expect_err("live boundary runtime-store failure should reject dispatch");
+    assert!(
+        err.to_string().contains("synthetic atomic_apply failure"),
+        "unexpected live boundary commit error: {err}"
+    );
+
+    assert_eq!(
+        probe.live_boundary_stage_calls.load(Ordering::SeqCst),
+        1,
+        "the live injection path should stage before the persistent commit"
+    );
+    assert_eq!(
+        probe.live_boundary_discard_calls.load(Ordering::SeqCst),
+        1,
+        "failed persistent live-boundary commit must roll back session-side staging"
+    );
+    let discarded_keys = probe.discarded_keys();
+    assert_eq!(discarded_keys, vec![format!("runtime:steer:{peer_id}")]);
+
+    let during_busy = rig
+        .adapter
+        .meerkat_machine_spine_snapshot(&rig.session_id)
+        .await
+        .expect("snapshot should remain available after failed live commit");
+    assert!(
+        during_busy.inputs.steer_queue.contains(&peer_id),
+        "the runtime input should remain queued when live-boundary commit fails"
+    );
+    let steered_snapshot = during_busy
+        .inputs
+        .admission_order
+        .iter()
+        .find(|input| input.input_id == peer_id)
+        .expect("failed live-commit input should remain visible");
+    assert_eq!(
+        steered_snapshot.lifecycle,
+        Some(crate::input_state::InputLifecycleState::Queued)
+    );
+
+    rig.allow_finish.notify_waiters();
+    rig.wait_for_apply_calls(2).await;
+    rig.allow_finish.notify_waiters();
+    rig.wait_until_attached_and_empty().await;
 }
 
 #[tokio::test]

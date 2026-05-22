@@ -1997,6 +1997,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
     }
 
+    pub async fn discard_live_system_context_boundary_staging(
+        &self,
+        id: &SessionId,
+        expected_run_id: &RunId,
+        idempotency_keys: Vec<String>,
+    ) -> Result<usize, SessionError> {
+        self.inner
+            .discard_runtime_system_context_for_active_turn(id, expected_run_id, idempotency_keys)
+            .await
+    }
+
     async fn fail_closed_runtime_projection_update(
         &self,
         id: &SessionId,

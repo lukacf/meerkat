@@ -41,6 +41,11 @@ impl InitialTurnHandle {
 
 enum SubmitWorkDispatchCompletion {
     Completed,
+    AwaitTurnAdmission {
+        provisioner: Arc<dyn MobProvisioner>,
+        member_ref: MemberRef,
+        req: Box<meerkat_core::service::StartTurnRequest>,
+    },
     AwaitTurnCompletion {
         provisioner: Arc<dyn MobProvisioner>,
         member_ref: MemberRef,
@@ -3455,6 +3460,18 @@ impl MobActor {
                     match Box::pin(self.handle_submit_work(payload)).await {
                         Ok(SubmitWorkDispatchCompletion::Completed) => {
                             let _ = reply_tx.send(Ok(()));
+                        }
+                        Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
+                            provisioner,
+                            member_ref,
+                            req,
+                        }) => {
+                            Self::spawn_turn_admission_reply(
+                                provisioner,
+                                member_ref,
+                                req,
+                                reply_tx,
+                            );
                         }
                         Ok(SubmitWorkDispatchCompletion::AwaitTurnCompletion {
                             provisioner,
@@ -11023,6 +11040,34 @@ impl MobActor {
         });
     }
 
+    fn spawn_turn_admission_reply(
+        provisioner: Arc<dyn MobProvisioner>,
+        member_ref: MemberRef,
+        req: Box<meerkat_core::service::StartTurnRequest>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    ) {
+        tokio::spawn(async move {
+            let result = provisioner.admit_turn(&member_ref, *req).await;
+            let _ = reply_tx.send(result);
+        });
+    }
+
+    fn spawn_turn_admission_detached(
+        provisioner: Arc<dyn MobProvisioner>,
+        member_ref: MemberRef,
+        req: Box<meerkat_core::service::StartTurnRequest>,
+    ) {
+        tokio::spawn(async move {
+            if let Err(error) = provisioner.admit_turn(&member_ref, *req).await {
+                tracing::warn!(
+                    member_ref = ?member_ref,
+                    error = %error,
+                    "detached turn admission failed"
+                );
+            }
+        });
+    }
+
     async fn dispatch_turn_driven_spawn_initial_turn(
         &mut self,
         agent_identity: &MeerkatId,
@@ -11195,6 +11240,14 @@ impl MobActor {
     ) -> Result<(), MobError> {
         match completion {
             SubmitWorkDispatchCompletion::Completed => Ok(()),
+            SubmitWorkDispatchCompletion::AwaitTurnAdmission {
+                provisioner,
+                member_ref,
+                req,
+            } => {
+                Self::spawn_turn_admission_detached(provisioner, member_ref, req);
+                Ok(())
+            }
             SubmitWorkDispatchCompletion::AwaitTurnCompletion {
                 provisioner,
                 member_ref,
@@ -11284,8 +11337,11 @@ impl MobActor {
                 };
                 match ack_mode {
                     crate::mob_machine::SubmitWorkAckMode::IngressAccepted => {
-                        self.provisioner.admit_turn(&entry.member_ref, req).await?;
-                        Ok(SubmitWorkDispatchCompletion::Completed)
+                        Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
+                            provisioner: self.provisioner.clone(),
+                            member_ref: entry.member_ref.clone(),
+                            req: Box::new(req),
+                        })
                     }
                     crate::mob_machine::SubmitWorkAckMode::TurnCompleted => {
                         Ok(SubmitWorkDispatchCompletion::AwaitTurnCompletion {

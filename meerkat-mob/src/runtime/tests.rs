@@ -26428,6 +26428,75 @@ async fn test_observation_member_reads_bypass_saturated_actor_command_queue() {
     .expect("session-backed member should expose an event stream");
 }
 
+#[tokio::test]
+async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_start_turn_delay_ms(600_000);
+
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            MeerkatId::from("lead-busy"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven lead");
+
+    handle
+        .member(&AgentIdentity::from("lead-busy"))
+        .await
+        .expect("lead member")
+        .send_with_render_metadata(
+            ContentInput::Text("hold the current turn open".into()),
+            HandlingMode::Queue,
+            None,
+        )
+        .await
+        .expect("first turn should be admitted");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while service.start_turn_call_count() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("runtime should start the long-running turn");
+
+    let steer_member = handle
+        .member(&AgentIdentity::from("lead-busy"))
+        .await
+        .expect("lead member for steer");
+    let steer_task = tokio::spawn(async move {
+        steer_member
+            .send_with_render_metadata(
+                ContentInput::Text("queued steer while busy".into()),
+                HandlingMode::Steer,
+                None,
+            )
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        handle.spawn_with_options(
+            ProfileName::from("worker"),
+            MeerkatId::from("worker-after-steer"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        ),
+    )
+    .await
+    .expect("queued steer admission must not park the mob actor")
+    .expect("unrelated actor command should still be processed");
+
+    steer_task.abort();
+}
+
 static REAL_COMMS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[tokio::test]

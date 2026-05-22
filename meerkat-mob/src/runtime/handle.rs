@@ -1404,12 +1404,20 @@ impl MobHandle {
         build: impl FnOnce(oneshot::Sender<R>) -> MobCommand,
     ) -> Result<R, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        tracing::debug!("MobHandle::send_actor_command sending command");
+        let command = build(reply_tx);
+        let command_kind = command.kind();
+        tracing::debug!(
+            command_kind,
+            "MobHandle::send_actor_command sending command"
+        );
         self.command_tx
-            .send(build(reply_tx))
+            .send(command)
             .await
             .map_err(|_| MobError::Internal("actor task dropped".into()))?;
-        tracing::debug!("MobHandle::send_actor_command command sent; awaiting reply");
+        tracing::debug!(
+            command_kind,
+            "MobHandle::send_actor_command command sent; awaiting reply"
+        );
         reply_rx
             .await
             .map_err(|_| MobError::Internal("actor reply dropped".into()))

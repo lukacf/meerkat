@@ -408,3 +408,64 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<MobState>,
     },
 }
+
+impl MobCommand {
+    pub(super) fn kind(&self) -> &'static str {
+        match self {
+            Self::Spawn { .. } => "Spawn",
+            Self::SpawnProvisioned { .. } => "SpawnProvisioned",
+            Self::Retire { .. } => "Retire",
+            Self::Respawn { .. } => "Respawn",
+            Self::RetireAll { .. } => "RetireAll",
+            Self::SubmitWork { .. } => "SubmitWork",
+            Self::SendPeerMessage { .. } => "SendPeerMessage",
+            Self::CancelAllWork { .. } => "CancelAllWork",
+            #[cfg(feature = "runtime-adapter")]
+            Self::KickoffOutcomeResolved { .. } => "KickoffOutcomeResolved",
+            Self::RunFlow { .. } => "RunFlow",
+            Self::CancelFlow { .. } => "CancelFlow",
+            Self::FlowStatus { .. } => "FlowStatus",
+            Self::CommitFlowRunCommand { .. } => "CommitFlowRunCommand",
+            Self::CommitFlowTerminalization { .. } => "CommitFlowTerminalization",
+            Self::CommitFlowFrameStorePlan { .. } => "CommitFlowFrameStorePlan",
+            Self::ProjectMachineInput { .. } => "ProjectMachineInput",
+            Self::PreviewMachineInput { .. } => "PreviewMachineInput",
+            Self::QueryMachineState { .. } => "QueryMachineState",
+            Self::ProjectMachineSignal { .. } => "ProjectMachineSignal",
+            Self::FlowFinished { .. } => "FlowFinished",
+            Self::FlowCanceledCleanup { .. } => "FlowCanceledCleanup",
+            #[cfg(test)]
+            Self::FlowTrackerCounts { .. } => "FlowTrackerCounts",
+            #[cfg(test)]
+            Self::OrchestratorSnapshot { .. } => "OrchestratorSnapshot",
+            #[cfg(test)]
+            Self::LifecycleSnapshot { .. } => "LifecycleSnapshot",
+            #[cfg(test)]
+            Self::LifecycleNotificationBurst { .. } => "LifecycleNotificationBurst",
+            #[cfg(test)]
+            Self::DslT2Snapshot { .. } => "DslT2Snapshot",
+            Self::StartupKickoffSnapshot { .. } => "StartupKickoffSnapshot",
+            Self::ProjectMemberList { .. } => "ProjectMemberList",
+            Self::ProjectMemberStatus { .. } => "ProjectMemberStatus",
+            Self::MemberMachineProjection { .. } => "MemberMachineProjection",
+            Self::Stop { .. } => "Stop",
+            Self::ResumeLifecycle { .. } => "ResumeLifecycle",
+            Self::Complete { .. } => "Complete",
+            Self::Destroy { .. } => "Destroy",
+            Self::Reset { .. } => "Reset",
+            Self::SubscribeAgentEvents { .. } => "SubscribeAgentEvents",
+            Self::SubscribeAllAgentEvents { .. } => "SubscribeAllAgentEvents",
+            Self::RotateSupervisor { .. } => "RotateSupervisor",
+            Self::PollEvents { .. } => "PollEvents",
+            Self::ReplayAllEvents { .. } => "ReplayAllEvents",
+            Self::RecordOperatorActionProvenance { .. } => "RecordOperatorActionProvenance",
+            Self::ForceCancel { .. } => "ForceCancel",
+            Self::Wire { .. } => "Wire",
+            Self::WireMembersBatch { .. } => "WireMembersBatch",
+            Self::Unwire { .. } => "Unwire",
+            Self::SetSpawnPolicy { .. } => "SetSpawnPolicy",
+            Self::Shutdown { .. } => "Shutdown",
+            Self::QueryPhase { .. } => "QueryPhase",
+        }
+    }
+}

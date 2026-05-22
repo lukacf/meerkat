@@ -83,9 +83,23 @@ impl MeerkatMachine {
 
                 let (resolved, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
+                    let input_kind = input.kind();
                     let runtime_idle =
                         state.is_idle_or_attached() && !active_turn_boundary_available;
                     let resolved = driver.resolve_admission_for_runtime_idle(&input, runtime_idle);
+                    tracing::debug!(
+                        session_id = %session_id,
+                        input_kind = ?input_kind,
+                        runtime_state = ?state,
+                        visible_state = ?visible_state,
+                        runtime_idle,
+                        active_turn_boundary_available,
+                        immediate = resolved.coarse_flags.request_immediate_processing,
+                        interrupt_yielding = resolved.coarse_flags.interrupt_yielding,
+                        wake_if_idle = resolved.coarse_flags.wake_if_idle,
+                        apply_mode = ?resolved.policy.apply_mode,
+                        "resolved runtime ingress admission"
+                    );
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
@@ -247,6 +261,8 @@ impl MeerkatMachine {
                     return Err(err);
                 }
 
+                let has_live_boundary_input = accepted_input_id_for_live_boundary.is_some();
+                let has_boundary_handle = boundary_handle.is_some();
                 if (state == RuntimeState::Running || active_turn_boundary_available)
                     && signal.should_interrupt_yielding()
                     && resolved.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
@@ -317,7 +333,26 @@ impl MeerkatMachine {
                                 );
                             }
                         }
+                    } else {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            input_id = %input_id,
+                            runtime_state = ?state,
+                            active_turn_boundary_available,
+                            "accepted steer input had no live boundary plan; leaving input queued for ordinary post-turn drain"
+                        );
                     }
+                } else if signal.should_interrupt_yielding()
+                    && resolved.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
+                {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        runtime_state = ?state,
+                        active_turn_boundary_available,
+                        has_boundary_handle,
+                        has_input_id = has_live_boundary_input,
+                        "accepted steer input did not meet live boundary staging preconditions"
+                    );
                 }
 
                 Ok(MeerkatMachineCommandResult::AcceptWithCompletion {

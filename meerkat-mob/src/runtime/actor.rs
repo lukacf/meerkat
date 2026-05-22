@@ -53,6 +53,16 @@ enum SubmitWorkDispatchCompletion {
     },
 }
 
+impl SubmitWorkDispatchCompletion {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::AwaitTurnAdmission { .. } => "AwaitTurnAdmission",
+            Self::AwaitTurnCompletion { .. } => "AwaitTurnCompletion",
+        }
+    }
+}
+
 // Sized for real mob-scale startup/shutdown fan-out (50+ members).
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS: usize = 64;
@@ -3371,6 +3381,7 @@ impl MobActor {
             } else {
                 break;
             };
+            tracing::debug!(command_kind = cmd.kind(), "MobActor received command");
             match cmd {
                 MobCommand::Spawn {
                     spec,
@@ -3463,6 +3474,15 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SubmitWork { payload, reply_tx } => {
+                    tracing::debug!(
+                        agent_identity = %payload.runtime_id.identity,
+                        runtime_id = %payload.runtime_id,
+                        work_ref = %payload.work_ref,
+                        origin = ?payload.origin,
+                        handling_mode = ?payload.handling_mode,
+                        ack_mode = ?payload.ack_mode,
+                        "MobActor handling SubmitWork command"
+                    );
                     match Box::pin(self.handle_submit_work(payload)).await {
                         Ok(SubmitWorkDispatchCompletion::Completed) => {
                             let _ = reply_tx.send(Ok(()));
@@ -10891,6 +10911,15 @@ impl MobActor {
             render_metadata,
             ack_mode,
         } = *payload;
+        tracing::debug!(
+            agent_identity = %runtime_id.identity,
+            runtime_id = %runtime_id,
+            work_ref = %work_ref,
+            origin = ?origin,
+            handling_mode = ?handling_mode,
+            ack_mode = ?ack_mode,
+            "handle_submit_work started"
+        );
         self.ensure_pending_spawn_alignment("handle_submit_work preflight")?;
 
         let agent_identity = MeerkatId::from(&runtime_id.identity);
@@ -11024,14 +11053,25 @@ impl MobActor {
             ));
         }
 
-        self.dispatch_member_turn_after_machine_admission(
-            &entry,
-            content,
-            handling_mode,
-            render_metadata,
-            ack_mode,
-        )
-        .await
+        let completion = self
+            .dispatch_member_turn_after_machine_admission(
+                &entry,
+                content,
+                handling_mode,
+                render_metadata,
+                ack_mode,
+            )
+            .await?;
+        tracing::debug!(
+            agent_identity = %entry.agent_identity,
+            runtime_id = %entry.agent_runtime_id,
+            work_ref = %work_ref,
+            handling_mode = ?handling_mode,
+            ack_mode = ?ack_mode,
+            completion = completion.kind(),
+            "handle_submit_work dispatched after machine admission"
+        );
+        Ok(completion)
     }
 
     fn spawn_turn_completed_reply(
@@ -11251,6 +11291,14 @@ impl MobActor {
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         ack_mode: crate::mob_machine::SubmitWorkAckMode,
     ) -> Result<SubmitWorkDispatchCompletion, MobError> {
+        tracing::debug!(
+            agent_identity = %entry.agent_identity,
+            runtime_id = %entry.agent_runtime_id,
+            runtime_mode = ?entry.runtime_mode,
+            handling_mode = ?handling_mode,
+            ack_mode = ?ack_mode,
+            "dispatch_member_turn_after_machine_admission started"
+        );
         if let Some(bridge_session_id) = entry.member_ref.bridge_session_id() {
             match self
                 .session_service

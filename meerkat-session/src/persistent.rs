@@ -1903,7 +1903,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     idempotency_key: append.idempotency_key,
                 };
                 candidate
-                    .stage_append(&req, append.accepted_at)
+                    .stage_active_turn_append(&req, append.accepted_at)
                     .map_err(|err| control_error_into_session_error(err.into_control_error(id)))?;
             }
             *guard = candidate.clone();

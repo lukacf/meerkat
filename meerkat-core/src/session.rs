@@ -298,6 +298,8 @@ pub struct SessionSystemContextState {
     pub applied: Vec<PendingSystemContextAppend>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub seen: std::collections::BTreeMap<String, SeenSystemContextKey>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub active_turn_pending_keys: std::collections::BTreeSet<String>,
 }
 
 /// Pending append request accepted by the control plane but not yet applied at an LLM boundary.
@@ -584,6 +586,27 @@ impl SessionSystemContextState {
         Ok(crate::service::AppendSystemContextStatus::Staged)
     }
 
+    /// Stage an append that is scoped to the currently-active turn only.
+    ///
+    /// If the active turn reaches another model boundary, normal pending
+    /// consumption moves it to `applied`. If the turn completes first, callers
+    /// should discard the still-pending active-turn keys so the context cannot
+    /// leak into an unrelated later run.
+    pub fn stage_active_turn_append(
+        &mut self,
+        req: &AppendSystemContextRequest,
+        accepted_at: SystemTime,
+    ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
+        let idempotency_key = req.idempotency_key.clone();
+        let status = self.stage_append(req, accepted_at)?;
+        if matches!(status, crate::service::AppendSystemContextStatus::Staged)
+            && let Some(key) = idempotency_key
+        {
+            self.active_turn_pending_keys.insert(key);
+        }
+        Ok(status)
+    }
+
     /// Mark all currently-pending appends as applied and clear the pending queue.
     pub fn mark_pending_applied(&mut self) {
         for pending in &self.pending {
@@ -599,6 +622,41 @@ impl SessionSystemContextState {
             }
         }
         self.pending.clear();
+        self.active_turn_pending_keys.clear();
+    }
+
+    /// Discard active-turn-only appends that were not consumed by the turn's
+    /// next LLM boundary.
+    pub fn discard_unapplied_active_turn_pending(&mut self) -> Vec<PendingSystemContextAppend> {
+        if self.active_turn_pending_keys.is_empty() {
+            return Vec::new();
+        }
+
+        let active_keys = std::mem::take(&mut self.active_turn_pending_keys);
+        let mut discarded = Vec::new();
+        self.pending.retain(|append| {
+            let should_discard = append
+                .idempotency_key
+                .as_ref()
+                .is_some_and(|key| active_keys.contains(key));
+            if should_discard {
+                discarded.push(append.clone());
+            }
+            !should_discard
+        });
+
+        for append in &discarded {
+            if let Some(key) = append.idempotency_key.as_ref()
+                && self
+                    .seen
+                    .get(key)
+                    .is_some_and(|seen| seen.state == SeenSystemContextState::Pending)
+            {
+                self.seen.remove(key);
+            }
+        }
+
+        discarded
     }
 }
 
@@ -3932,6 +3990,59 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&state).expect("serialize state"))
                 .expect("deserialize state");
         assert_eq!(round_tripped.applied, state.applied);
+    }
+
+    #[test]
+    fn active_turn_system_context_is_discarded_when_not_applied() {
+        let mut state = SessionSystemContextState::default();
+        state
+            .stage_active_turn_append(
+                &AppendSystemContextRequest {
+                    text: "only for the active run".to_string(),
+                    source: Some("runtime:steer:input-1".to_string()),
+                    idempotency_key: Some("runtime:steer:input-1".to_string()),
+                },
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("active context should stage");
+
+        let discarded = state.discard_unapplied_active_turn_pending();
+
+        assert_eq!(discarded.len(), 1);
+        assert!(state.pending.is_empty());
+        assert!(state.applied.is_empty());
+        assert!(state.active_turn_pending_keys.is_empty());
+        assert!(
+            state.seen.is_empty(),
+            "discarded active-turn context should not block later idempotency keys"
+        );
+    }
+
+    #[test]
+    fn active_turn_system_context_becomes_applied_when_boundary_consumes_it() {
+        let mut state = SessionSystemContextState::default();
+        state
+            .stage_active_turn_append(
+                &AppendSystemContextRequest {
+                    text: "visible to this run".to_string(),
+                    source: Some("runtime:steer:input-2".to_string()),
+                    idempotency_key: Some("runtime:steer:input-2".to_string()),
+                },
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("active context should stage");
+
+        state.mark_pending_applied();
+        let discarded = state.discard_unapplied_active_turn_pending();
+
+        assert!(discarded.is_empty());
+        assert!(state.pending.is_empty());
+        assert_eq!(state.applied.len(), 1);
+        assert!(state.active_turn_pending_keys.is_empty());
+        assert_eq!(
+            state.seen["runtime:steer:input-2"].state,
+            SeenSystemContextState::Applied
+        );
     }
 
     #[test]

@@ -685,6 +685,28 @@ pub trait SessionAgent: Send {
     /// Synchronize the shared system-context control state into the canonical session metadata.
     fn sync_system_context_state(&mut self) {}
 
+    /// Drop active-turn-only context that missed the active turn's model
+    /// boundary so it cannot become ordinary context for the next run.
+    fn discard_unapplied_active_turn_system_context(&mut self) -> usize {
+        let discarded_count = {
+            let state = self.system_context_state();
+            let mut guard = match state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::warn!(
+                        "system-context state lock poisoned while discarding active-turn context"
+                    );
+                    poisoned.into_inner()
+                }
+            };
+            guard.discard_unapplied_active_turn_pending().len()
+        };
+        if discarded_count > 0 {
+            self.sync_system_context_state();
+        }
+        discarded_count
+    }
+
     /// Replace live semantic session state from durable authority while preserving live mechanics.
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     fn sync_session_from_durable_snapshot(
@@ -1431,7 +1453,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 idempotency_key: append.idempotency_key,
             };
             candidate
-                .stage_append(&req, append.accepted_at)
+                .stage_active_turn_append(&req, append.accepted_at)
                 .map_err(|err| {
                     SessionError::Agent(AgentError::InternalError(
                         err.into_control_error(id).to_string(),
@@ -3681,6 +3703,14 @@ async fn session_task<A: SessionAgent>(
                     (r, resolved_phase)
                 }; // run_fut dropped here
 
+                let discarded_active_context = agent.discard_unapplied_active_turn_system_context();
+                if discarded_active_context > 0 {
+                    tracing::debug!(
+                        discarded_active_context,
+                        "discarded active-turn system context that missed the run boundary"
+                    );
+                }
+
                 let resolve_phase = resolved_phase.or_else(|| {
                     let mut slot = lock_turn_admission(&control.turn_admission);
                     slot.resolve().ok()
@@ -4642,6 +4672,23 @@ mod runtime_turn_metadata_tests {
         run.await
             .expect("start_turn task should join")
             .expect("blocked turn should complete after release");
+
+        let after = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(
+            after.pending.is_empty(),
+            "active-turn context that missed the run boundary must not leak into the next run"
+        );
+        assert!(
+            after.applied.is_empty(),
+            "missed active-turn context was never applied at an LLM boundary"
+        );
+        assert!(
+            after.seen.is_empty(),
+            "discarded active-turn context should not reserve idempotency keys"
+        );
     }
 
     #[tokio::test]

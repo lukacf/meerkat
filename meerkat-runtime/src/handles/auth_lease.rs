@@ -215,86 +215,35 @@ fn restore_input_from_lifecycle(
 
 fn restore_oauth_inputs_from_state(
     state: &auth_dsl::AuthMachineState,
-    context: &'static str,
-) -> Result<Vec<auth_dsl::AuthMachineInput>, DslTransitionError> {
+) -> Vec<auth_dsl::AuthMachineInput> {
     let mut inputs = Vec::new();
     for flow_id in &state.oauth_browser_flow_ids {
-        let provider = state
-            .oauth_browser_flow_providers
-            .get(flow_id)
-            .cloned()
-            .ok_or_else(|| {
-                DslTransitionError::guard_rejected(
-                    context,
-                    format!("OAuth browser flow `{flow_id}` missing provider in restore snapshot"),
-                )
-            })?;
-        let redirect_uri = state
-            .oauth_browser_flow_redirect_uris
-            .get(flow_id)
-            .cloned()
-            .ok_or_else(|| {
-                DslTransitionError::guard_rejected(
-                    context,
-                    format!(
-                        "OAuth browser flow `{flow_id}` missing redirect URI in restore snapshot"
-                    ),
-                )
-            })?;
-        let expires_at_millis = state
-            .oauth_browser_flow_expires_at_millis
-            .get(flow_id)
-            .copied()
-            .ok_or_else(|| {
-                DslTransitionError::guard_rejected(
-                    context,
-                    format!("OAuth browser flow `{flow_id}` missing expiry in restore snapshot"),
-                )
-            })?;
         inputs.push(auth_dsl::AuthMachineInput::RestoreOAuthBrowserFlow {
             flow_id: flow_id.clone(),
-            provider,
-            redirect_uri,
-            expires_at_millis,
+            provider: state.oauth_browser_flow_providers.get(flow_id).cloned(),
+            redirect_uri: state.oauth_browser_flow_redirect_uris.get(flow_id).cloned(),
+            expires_at_millis: state
+                .oauth_browser_flow_expires_at_millis
+                .get(flow_id)
+                .copied(),
         });
     }
     for flow_id in &state.oauth_device_flow_ids {
-        let provider = state
-            .oauth_device_flow_providers
-            .get(flow_id)
-            .cloned()
-            .ok_or_else(|| {
-                DslTransitionError::guard_rejected(
-                    context,
-                    format!("OAuth device flow `{flow_id}` missing provider in restore snapshot"),
-                )
-            })?;
-        let expires_at_millis = state
-            .oauth_device_flow_expires_at_millis
-            .get(flow_id)
-            .copied()
-            .ok_or_else(|| {
-                DslTransitionError::guard_rejected(
-                    context,
-                    format!("OAuth device flow `{flow_id}` missing expiry in restore snapshot"),
-                )
-            })?;
         inputs.push(auth_dsl::AuthMachineInput::RestoreOAuthDeviceFlow {
             flow_id: flow_id.clone(),
-            provider,
-            expires_at_millis,
-            poll_active: state.oauth_device_poll_ids.contains(flow_id),
+            provider: state.oauth_device_flow_providers.get(flow_id).cloned(),
+            expires_at_millis: state
+                .oauth_device_flow_expires_at_millis
+                .get(flow_id)
+                .copied(),
         });
     }
     for poll_id in &state.oauth_device_poll_ids {
-        if !state.oauth_device_flow_ids.contains(poll_id) {
-            return Err(DslTransitionError::guard_rejected(
-                context,
-                format!("OAuth device poll `{poll_id}` has no device flow in restore snapshot"),
-            ));
-        }
+        inputs.push(auth_dsl::AuthMachineInput::RestoreOAuthDevicePoll {
+            flow_id: poll_id.clone(),
+        });
     }
-    Ok(inputs)
+    inputs
 }
 
 fn map_auth_machine_error(
@@ -348,31 +297,50 @@ fn apply_restore_input_to_registry(
     apply_restore_input(authority, lease_key, input, context)
 }
 
+fn restore_authority_from_registry(
+    registry: &AuthLeaseRegistry,
+    lease_key: &LeaseKey,
+    context: &'static str,
+) -> Result<auth_dsl::AuthMachineAuthority, DslTransitionError> {
+    match registry.authorities.get(lease_key) {
+        Some(authority) => {
+            auth_dsl::AuthMachineAuthority::recover_from_state(authority.state().clone())
+                .map_err(|err| map_auth_machine_error(err, context))
+        }
+        None => Ok(auth_dsl::AuthMachineAuthority::new()),
+    }
+}
+
+fn apply_restore_inputs_to_registry(
+    registry: &mut AuthLeaseRegistry,
+    lease_key: &LeaseKey,
+    lifecycle_input: auth_dsl::AuthMachineInput,
+    oauth_inputs: Vec<auth_dsl::AuthMachineInput>,
+    context: &'static str,
+) -> Result<(AuthLeasePhase, AuthLeaseTransition), DslTransitionError> {
+    let mut authority = restore_authority_from_registry(registry, lease_key, context)?;
+    let restored = apply_restore_input(&mut authority, lease_key, lifecycle_input, context)?;
+    for input in oauth_inputs {
+        apply_restore_input(&mut authority, lease_key, input, context)?;
+    }
+    registry.authorities.insert(lease_key.clone(), authority);
+    Ok(restored)
+}
+
 fn restore_state_to_registry(
     registry: &mut AuthLeaseRegistry,
     lease_key: &LeaseKey,
     state: &auth_dsl::AuthMachineState,
     context: &'static str,
 ) -> Result<(AuthLeasePhase, AuthLeaseTransition), DslTransitionError> {
-    if state.lifecycle_phase == auth_dsl::AuthLifecyclePhase::Released
-        && has_oauth_membership(state)
-    {
-        return Err(DslTransitionError::guard_rejected(
-            context,
-            "released AuthMachine restore snapshot cannot carry OAuth membership",
-        ));
-    }
-    let oauth_inputs = restore_oauth_inputs_from_state(state, context)?;
-    let restored = apply_restore_input_to_registry(
+    let oauth_inputs = restore_oauth_inputs_from_state(state);
+    apply_restore_inputs_to_registry(
         registry,
         lease_key,
         restore_input_from_state(state),
+        oauth_inputs,
         context,
-    )?;
-    for input in oauth_inputs {
-        apply_restore_input_to_registry(registry, lease_key, input, context)?;
-    }
-    Ok(restored)
+    )
 }
 
 fn restore_lifecycle_with_oauth_to_registry(
@@ -388,8 +356,8 @@ fn restore_lifecycle_with_oauth_to_registry(
     credential_published_at_millis: Option<u64>,
     context: &'static str,
 ) -> Result<(AuthLeasePhase, AuthLeaseTransition), DslTransitionError> {
-    let oauth_inputs = restore_oauth_inputs_from_state(oauth, context)?;
-    let restored = apply_restore_input_to_registry(
+    let oauth_inputs = restore_oauth_inputs_from_state(oauth);
+    apply_restore_inputs_to_registry(
         registry,
         lease_key,
         restore_input_from_lifecycle(
@@ -401,12 +369,9 @@ fn restore_lifecycle_with_oauth_to_registry(
             credential_generation,
             credential_published_at_millis,
         ),
+        oauth_inputs,
         context,
-    )?;
-    for input in oauth_inputs {
-        apply_restore_input_to_registry(registry, lease_key, input, context)?;
-    }
-    Ok(restored)
+    )
 }
 
 fn auth_lease_transition_from_generated_publication(
@@ -1017,6 +982,9 @@ impl RuntimeAuthLeaseHandle {
             auth_dsl::AuthMachineInput::RestoreOAuthDeviceFlow { .. } => {
                 "restore_oauth_device_flow"
             }
+            auth_dsl::AuthMachineInput::RestoreOAuthDevicePoll { .. } => {
+                "restore_oauth_device_poll"
+            }
             auth_dsl::AuthMachineInput::AdmitOAuthBrowserFlow { .. } => "admit_oauth_browser_flow",
             auth_dsl::AuthMachineInput::VerifyOAuthBrowserFlow { .. } => {
                 "verify_oauth_browser_flow"
@@ -1488,6 +1456,10 @@ mod tests {
         }
     }
 
+    fn empty_auth_state() -> auth_dsl::AuthMachineState {
+        auth_dsl::AuthMachineAuthority::new().state().clone()
+    }
+
     #[test]
     fn acquire_and_snapshot_roundtrip() {
         let h = RuntimeAuthLeaseHandle::new();
@@ -1805,6 +1777,112 @@ mod tests {
         );
         assert!(h.has_oauth_browser_flow_for_test(&first, "first"));
         assert!(!h.has_oauth_browser_flow_for_test(&second, "second"));
+    }
+
+    #[test]
+    fn restore_oauth_missing_payload_rejected_by_generated_authority() {
+        let mut registry = AuthLeaseRegistry::default();
+        let key = lease("dev", "restore_missing_provider");
+        let mut state = empty_auth_state();
+        state.lifecycle_phase = auth_dsl::AuthLifecyclePhase::ReauthRequired;
+        state
+            .oauth_browser_flow_ids
+            .insert("browser-flow".to_string());
+        state.oauth_browser_flow_redirect_uris.insert(
+            "browser-flow".to_string(),
+            "http://localhost/callback".to_string(),
+        );
+        state
+            .oauth_browser_flow_expires_at_millis
+            .insert("browser-flow".to_string(), 1_900_000_000);
+        state.oauth_outstanding_flow_count = 1;
+
+        let err = restore_state_to_registry(
+            &mut registry,
+            &key,
+            &state,
+            "test_restore_oauth_missing_payload",
+        )
+        .unwrap_err();
+
+        assert!(
+            err.is_guard_rejected(),
+            "missing restored OAuth payload must be rejected by generated guards: {err:?}"
+        );
+        assert!(
+            err.reason.contains("RestoreOAuthBrowserFlow"),
+            "rejection should name the generated restore input: {err:?}"
+        );
+        assert!(!registry.authorities.contains_key(&key));
+    }
+
+    #[test]
+    fn restore_oauth_orphan_device_poll_rejected_by_generated_authority() {
+        let mut registry = AuthLeaseRegistry::default();
+        let key = lease("dev", "restore_orphan_poll");
+        let mut state = empty_auth_state();
+        state.lifecycle_phase = auth_dsl::AuthLifecyclePhase::ReauthRequired;
+        state
+            .oauth_device_poll_ids
+            .insert("orphan-device".to_string());
+
+        let err = restore_state_to_registry(
+            &mut registry,
+            &key,
+            &state,
+            "test_restore_oauth_orphan_device_poll",
+        )
+        .unwrap_err();
+
+        assert!(
+            err.is_guard_rejected(),
+            "orphan restored OAuth poll must be rejected by generated guards: {err:?}"
+        );
+        assert!(
+            err.reason.contains("RestoreOAuthDevicePoll"),
+            "rejection should name the generated restore input: {err:?}"
+        );
+        assert!(!registry.authorities.contains_key(&key));
+    }
+
+    #[test]
+    fn restore_released_oauth_membership_rejected_by_generated_authority() {
+        let mut registry = AuthLeaseRegistry::default();
+        let key = lease("dev", "restore_released_oauth");
+        let mut state = empty_auth_state();
+        state.lifecycle_phase = auth_dsl::AuthLifecyclePhase::Released;
+        state
+            .oauth_browser_flow_ids
+            .insert("browser-flow".to_string());
+        state
+            .oauth_browser_flow_providers
+            .insert("browser-flow".to_string(), "provider".to_string());
+        state.oauth_browser_flow_redirect_uris.insert(
+            "browser-flow".to_string(),
+            "http://localhost/callback".to_string(),
+        );
+        state
+            .oauth_browser_flow_expires_at_millis
+            .insert("browser-flow".to_string(), 1_900_000_000);
+        state.oauth_outstanding_flow_count = 1;
+
+        let err = restore_state_to_registry(
+            &mut registry,
+            &key,
+            &state,
+            "test_restore_released_oauth_membership",
+        )
+        .unwrap_err();
+
+        assert!(
+            err.is_guard_rejected(),
+            "released restored OAuth membership must be refused by generated authority: {err:?}"
+        );
+        assert!(
+            err.reason.contains("RestoreOAuthBrowserFlow"),
+            "rejection should name the generated restore input: {err:?}"
+        );
+        assert!(!registry.authorities.contains_key(&key));
     }
 
     #[test]

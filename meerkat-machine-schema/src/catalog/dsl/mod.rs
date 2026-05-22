@@ -223,6 +223,7 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
             InputVariantId::from_trusted_catalog_literal("RestoreAuthoritySnapshot"),
             InputVariantId::from_trusted_catalog_literal("RestoreOAuthBrowserFlow"),
             InputVariantId::from_trusted_catalog_literal("RestoreOAuthDeviceFlow"),
+            InputVariantId::from_trusted_catalog_literal("RestoreOAuthDevicePoll"),
         ],
     )
 }

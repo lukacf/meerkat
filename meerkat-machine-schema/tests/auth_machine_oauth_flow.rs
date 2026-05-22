@@ -35,6 +35,7 @@ fn auth_machine_declares_oauth_flow_lifecycle_inputs() {
     for input in [
         "RestoreOAuthBrowserFlow",
         "RestoreOAuthDeviceFlow",
+        "RestoreOAuthDevicePoll",
         "AdmitOAuthBrowserFlow",
         "VerifyOAuthBrowserFlow",
         "ConsumeOAuthBrowserFlow",
@@ -111,10 +112,24 @@ fn auth_machine_restore_snapshot_routes_oauth_membership_per_flow() {
         .expect("AuthMachine must declare browser flow restore input");
     assert_eq!(
         browser
+            .field_named("provider")
+            .expect("browser flow restore must carry provider")
+            .ty,
+        TypeRef::Option(Box::new(TypeRef::String))
+    );
+    assert_eq!(
+        browser
+            .field_named("redirect_uri")
+            .expect("browser flow restore must carry redirect URI")
+            .ty,
+        TypeRef::Option(Box::new(TypeRef::String))
+    );
+    assert_eq!(
+        browser
             .field_named("expires_at_millis")
             .expect("browser flow restore must carry expiry")
             .ty,
-        TypeRef::U64
+        TypeRef::Option(Box::new(TypeRef::U64))
     );
 
     let device = schema
@@ -123,16 +138,36 @@ fn auth_machine_restore_snapshot_routes_oauth_membership_per_flow() {
         .expect("AuthMachine must declare device flow restore input");
     assert_eq!(
         device
-            .field_named("poll_active")
-            .expect("device flow restore must carry poll membership")
+            .field_named("provider")
+            .expect("device flow restore must carry provider")
             .ty,
-        TypeRef::Bool
+        TypeRef::Option(Box::new(TypeRef::String))
+    );
+    assert_eq!(
+        device
+            .field_named("expires_at_millis")
+            .expect("device flow restore must carry expiry")
+            .ty,
+        TypeRef::Option(Box::new(TypeRef::U64))
+    );
+
+    let device_poll = schema
+        .inputs
+        .variant_named("RestoreOAuthDevicePoll")
+        .expect("AuthMachine must declare device poll restore input");
+    assert_eq!(
+        device_poll
+            .field_named("flow_id")
+            .expect("device poll restore must carry flow_id")
+            .ty,
+        TypeRef::String
     );
 
     for input in [
         "RestoreAuthoritySnapshot",
         "RestoreOAuthBrowserFlow",
         "RestoreOAuthDeviceFlow",
+        "RestoreOAuthDevicePoll",
     ] {
         assert!(
             schema
@@ -158,6 +193,7 @@ fn auth_machine_routes_oauth_flow_lifecycle_transitions() {
     let transition_prefixes = [
         "RestoreOAuthBrowserFlow",
         "RestoreOAuthDeviceFlow",
+        "RestoreOAuthDevicePoll",
         "AdmitOAuthBrowserFlow",
         "VerifyOAuthBrowserFlow",
         "ConsumeOAuthBrowserFlow",
@@ -279,6 +315,7 @@ fn auth_machine_oauth_flow_lifecycle_transitions_preserve_credential_phase() {
         [
             "RestoreOAuthBrowserFlow",
             "RestoreOAuthDeviceFlow",
+            "RestoreOAuthDevicePoll",
             "AdmitOAuthBrowserFlow",
             "VerifyOAuthBrowserFlow",
             "ConsumeOAuthBrowserFlow",
@@ -303,6 +340,35 @@ fn auth_machine_oauth_flow_lifecycle_transitions_preserve_credential_phase() {
         assert_eq!(
             &transition.to, &transition.from[0],
             "{} must preserve credential lifecycle phase",
+            transition.name
+        );
+    }
+}
+
+#[test]
+fn auth_machine_restore_rejects_orphan_device_poll_in_generated_authority() {
+    let schema = dsl_auth_machine();
+    let transitions = schema
+        .transitions
+        .iter()
+        .filter(|transition| {
+            transition
+                .name
+                .as_str()
+                .starts_with("RestoreOAuthDevicePoll")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !transitions.is_empty(),
+        "AuthMachine must declare generated device poll restore transitions"
+    );
+    for transition in transitions {
+        assert!(
+            transition
+                .guards
+                .iter()
+                .any(|guard| guard.name == "device_flow_present_for_poll_restore"),
+            "{} must reject orphan restored device polls in generated authority",
             transition.name
         );
     }

@@ -167,16 +167,19 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RestoreOAuthBrowserFlow {
         pub flow_id: String,
-        pub provider: String,
-        pub redirect_uri: String,
-        pub expires_at_millis: u64,
+        pub provider: Option<String>,
+        pub redirect_uri: Option<String>,
+        pub expires_at_millis: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RestoreOAuthDeviceFlow {
         pub flow_id: String,
-        pub provider: String,
-        pub expires_at_millis: u64,
-        pub poll_active: bool,
+        pub provider: Option<String>,
+        pub expires_at_millis: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreOAuthDevicePoll {
+        pub flow_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitOAuthBrowserFlow {
@@ -260,6 +263,7 @@ pub enum Input {
     RestoreAuthoritySnapshot(inputs::RestoreAuthoritySnapshot),
     RestoreOAuthBrowserFlow(inputs::RestoreOAuthBrowserFlow),
     RestoreOAuthDeviceFlow(inputs::RestoreOAuthDeviceFlow),
+    RestoreOAuthDevicePoll(inputs::RestoreOAuthDevicePoll),
     AdmitOAuthBrowserFlow(inputs::AdmitOAuthBrowserFlow),
     VerifyOAuthBrowserFlow(inputs::VerifyOAuthBrowserFlow),
     ConsumeOAuthBrowserFlow(inputs::ConsumeOAuthBrowserFlow),
@@ -287,6 +291,7 @@ impl Input {
             Self::RestoreAuthoritySnapshot(_) => InputKind::RestoreAuthoritySnapshot,
             Self::RestoreOAuthBrowserFlow(_) => InputKind::RestoreOAuthBrowserFlow,
             Self::RestoreOAuthDeviceFlow(_) => InputKind::RestoreOAuthDeviceFlow,
+            Self::RestoreOAuthDevicePoll(_) => InputKind::RestoreOAuthDevicePoll,
             Self::AdmitOAuthBrowserFlow(_) => InputKind::AdmitOAuthBrowserFlow,
             Self::VerifyOAuthBrowserFlow(_) => InputKind::VerifyOAuthBrowserFlow,
             Self::ConsumeOAuthBrowserFlow(_) => InputKind::ConsumeOAuthBrowserFlow,
@@ -315,6 +320,7 @@ pub enum InputKind {
     RestoreAuthoritySnapshot,
     RestoreOAuthBrowserFlow,
     RestoreOAuthDeviceFlow,
+    RestoreOAuthDevicePoll,
     AdmitOAuthBrowserFlow,
     VerifyOAuthBrowserFlow,
     ConsumeOAuthBrowserFlow,
@@ -395,6 +401,11 @@ pub enum TransitionId {
     RestoreOAuthDeviceFlowExpired,
     RestoreOAuthDeviceFlowRefreshing,
     RestoreOAuthDeviceFlowReauthRequired,
+    RestoreOAuthDevicePollValid,
+    RestoreOAuthDevicePollExpiring,
+    RestoreOAuthDevicePollExpired,
+    RestoreOAuthDevicePollRefreshing,
+    RestoreOAuthDevicePollReauthRequired,
     AdmitOAuthBrowserFlowValid,
     AdmitOAuthBrowserFlowExpiring,
     AdmitOAuthBrowserFlowExpired,

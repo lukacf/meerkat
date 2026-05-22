@@ -34,8 +34,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClearCredentialLifecycle`
 - `Release`
 - `RestoreAuthoritySnapshot`(lifecycle_phase: AuthLifecyclePhase, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, credential_generation: u64, credential_published_at_millis: Option<u64>)
-- `RestoreOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64)
-- `RestoreOAuthDeviceFlow`(flow_id: String, provider: String, expires_at_millis: u64, poll_active: Bool)
+- `RestoreOAuthBrowserFlow`(flow_id: String, provider: Option<String>, redirect_uri: Option<String>, expires_at_millis: Option<u64>)
+- `RestoreOAuthDeviceFlow`(flow_id: String, provider: Option<String>, expires_at_millis: Option<u64>)
+- `RestoreOAuthDevicePoll`(flow_id: String)
 - `AdmitOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64, observed_global_outstanding_flows: u64)
 - `VerifyOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
 - `ConsumeOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
@@ -263,60 +264,135 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `RestoreOAuthBrowserFlowValid`
 - From: `Valid`
 - On: `RestoreOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis)
+- Guards:
+  - `browser_restore_has_provider`
+  - `browser_restore_has_redirect_uri`
+  - `browser_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
 ### `RestoreOAuthBrowserFlowExpiring`
 - From: `Expiring`
 - On: `RestoreOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis)
+- Guards:
+  - `browser_restore_has_provider`
+  - `browser_restore_has_redirect_uri`
+  - `browser_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
 
 ### `RestoreOAuthBrowserFlowExpired`
 - From: `Expired`
 - On: `RestoreOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis)
+- Guards:
+  - `browser_restore_has_provider`
+  - `browser_restore_has_redirect_uri`
+  - `browser_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
 - To: `Expired`
 
 ### `RestoreOAuthBrowserFlowRefreshing`
 - From: `Refreshing`
 - On: `RestoreOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis)
+- Guards:
+  - `browser_restore_has_provider`
+  - `browser_restore_has_redirect_uri`
+  - `browser_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
 - To: `Refreshing`
 
 ### `RestoreOAuthBrowserFlowReauthRequired`
 - From: `ReauthRequired`
 - On: `RestoreOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis)
+- Guards:
+  - `browser_restore_has_provider`
+  - `browser_restore_has_redirect_uri`
+  - `browser_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 
 ### `RestoreOAuthDeviceFlowValid`
 - From: `Valid`
-- On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis, poll_active)
+- On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis)
+- Guards:
+  - `device_restore_has_provider`
+  - `device_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
 ### `RestoreOAuthDeviceFlowExpiring`
 - From: `Expiring`
-- On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis, poll_active)
+- On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis)
+- Guards:
+  - `device_restore_has_provider`
+  - `device_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
 
 ### `RestoreOAuthDeviceFlowExpired`
 - From: `Expired`
-- On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis, poll_active)
+- On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis)
+- Guards:
+  - `device_restore_has_provider`
+  - `device_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
 - To: `Expired`
 
 ### `RestoreOAuthDeviceFlowRefreshing`
 - From: `Refreshing`
-- On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis, poll_active)
+- On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis)
+- Guards:
+  - `device_restore_has_provider`
+  - `device_restore_has_expiry`
 - Emits: `EmitLifecycleEvent`
 - To: `Refreshing`
 
 ### `RestoreOAuthDeviceFlowReauthRequired`
 - From: `ReauthRequired`
-- On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis, poll_active)
+- On: `RestoreOAuthDeviceFlow`(flow_id, provider, expires_at_millis)
+- Guards:
+  - `device_restore_has_provider`
+  - `device_restore_has_expiry`
+- Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
+### `RestoreOAuthDevicePollValid`
+- From: `Valid`
+- On: `RestoreOAuthDevicePoll`(flow_id)
+- Guards:
+  - `device_flow_present_for_poll_restore`
+- Emits: `EmitLifecycleEvent`
+- To: `Valid`
+
+### `RestoreOAuthDevicePollExpiring`
+- From: `Expiring`
+- On: `RestoreOAuthDevicePoll`(flow_id)
+- Guards:
+  - `device_flow_present_for_poll_restore`
+- Emits: `EmitLifecycleEvent`
+- To: `Expiring`
+
+### `RestoreOAuthDevicePollExpired`
+- From: `Expired`
+- On: `RestoreOAuthDevicePoll`(flow_id)
+- Guards:
+  - `device_flow_present_for_poll_restore`
+- Emits: `EmitLifecycleEvent`
+- To: `Expired`
+
+### `RestoreOAuthDevicePollRefreshing`
+- From: `Refreshing`
+- On: `RestoreOAuthDevicePoll`(flow_id)
+- Guards:
+  - `device_flow_present_for_poll_restore`
+- Emits: `EmitLifecycleEvent`
+- To: `Refreshing`
+
+### `RestoreOAuthDevicePollReauthRequired`
+- From: `ReauthRequired`
+- On: `RestoreOAuthDevicePoll`(flow_id)
+- Guards:
+  - `device_flow_present_for_poll_restore`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 

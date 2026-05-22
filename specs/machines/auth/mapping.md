@@ -135,6 +135,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RestoreOAuthDeviceFlowReauthRequired`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDevicePollValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDevicePollExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDevicePollExpired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDevicePollRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDevicePollReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
 - `AdmitOAuthBrowserFlowValid`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`

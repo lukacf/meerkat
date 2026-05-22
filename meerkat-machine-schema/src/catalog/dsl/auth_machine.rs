@@ -103,8 +103,9 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_generation: u64,
                     credential_published_at_millis: Option<u64>,
                 },
-                RestoreOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64 },
-                RestoreOAuthDeviceFlow { flow_id: String, provider: String, expires_at_millis: u64, poll_active: bool },
+                RestoreOAuthBrowserFlow { flow_id: String, provider: Option<String>, redirect_uri: Option<String>, expires_at_millis: Option<u64> },
+                RestoreOAuthDeviceFlow { flow_id: String, provider: Option<String>, expires_at_millis: Option<u64> },
+                RestoreOAuthDevicePoll { flow_id: String },
                 AdmitOAuthBrowserFlow {
                     flow_id: String,
                     provider: String,
@@ -729,14 +730,17 @@ macro_rules! auth_catalog_machine_dsl {
             transition RestoreOAuthBrowserFlow {
                 per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
                 on input RestoreOAuthBrowserFlow { flow_id, provider, redirect_uri, expires_at_millis }
+                guard "browser_restore_has_provider" { provider != None }
+                guard "browser_restore_has_redirect_uri" { redirect_uri != None }
+                guard "browser_restore_has_expiry" { expires_at_millis != None }
                 update {
                     if self.oauth_browser_flow_ids.contains(flow_id) == false {
                         self.oauth_outstanding_flow_count = self.oauth_outstanding_flow_count + 1;
                     }
                     self.oauth_browser_flow_ids.insert(flow_id);
-                    self.oauth_browser_flow_providers.insert(flow_id, provider);
-                    self.oauth_browser_flow_redirect_uris.insert(flow_id, redirect_uri);
-                    self.oauth_browser_flow_expires_at_millis.insert(flow_id, expires_at_millis);
+                    self.oauth_browser_flow_providers.insert(flow_id, provider.get("value"));
+                    self.oauth_browser_flow_redirect_uris.insert(flow_id, redirect_uri.get("value"));
+                    self.oauth_browser_flow_expires_at_millis.insert(flow_id, expires_at_millis.get("value"));
                 }
                 to Valid
                 emit EmitLifecycleEvent {
@@ -749,19 +753,33 @@ macro_rules! auth_catalog_machine_dsl {
 
             transition RestoreOAuthDeviceFlow {
                 per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
-                on input RestoreOAuthDeviceFlow { flow_id, provider, expires_at_millis, poll_active }
+                on input RestoreOAuthDeviceFlow { flow_id, provider, expires_at_millis }
+                guard "device_restore_has_provider" { provider != None }
+                guard "device_restore_has_expiry" { expires_at_millis != None }
                 update {
                     if self.oauth_device_flow_ids.contains(flow_id) == false {
                         self.oauth_outstanding_flow_count = self.oauth_outstanding_flow_count + 1;
                     }
                     self.oauth_device_flow_ids.insert(flow_id);
-                    self.oauth_device_flow_providers.insert(flow_id, provider);
-                    self.oauth_device_flow_expires_at_millis.insert(flow_id, expires_at_millis);
-                    if poll_active {
-                        self.oauth_device_poll_ids.insert(flow_id);
-                    } else {
-                        self.oauth_device_poll_ids.remove(flow_id);
-                    }
+                    self.oauth_device_flow_providers.insert(flow_id, provider.get("value"));
+                    self.oauth_device_flow_expires_at_millis.insert(flow_id, expires_at_millis.get("value"));
+                    self.oauth_device_poll_ids.remove(flow_id);
+                }
+                to Valid
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition RestoreOAuthDevicePoll {
+                per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired]
+                on input RestoreOAuthDevicePoll { flow_id }
+                guard "device_flow_present_for_poll_restore" { self.oauth_device_flow_ids.contains(flow_id) }
+                update {
+                    self.oauth_device_poll_ids.insert(flow_id);
                 }
                 to Valid
                 emit EmitLifecycleEvent {

@@ -4406,6 +4406,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Attached`
 
+### `ClassifyExternalEnvelopeRequestSupervisorSilentIdle`
+- From: `Idle`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_supervisor_silent_request`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Idle`
+
 ### `ClassifyExternalEnvelopeRequestSupervisorSilentRunning`
 - From: `Running`
 - On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
@@ -4441,6 +4450,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `peer_ingress_supervisor_request`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Attached`
+
+### `ClassifyExternalEnvelopeRequestSupervisorIdle`
+- From: `Idle`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_supervisor_request`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Idle`
 
 ### `ClassifyExternalEnvelopeRequestSupervisorRunning`
 - From: `Running`

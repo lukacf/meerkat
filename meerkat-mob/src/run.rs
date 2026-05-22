@@ -138,6 +138,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::Respawn { .. }
             | mob_dsl::MobMachineInput::RetireAll
             | mob_dsl::MobMachineInput::WireMembers { .. }
+            | mob_dsl::MobMachineInput::WireMembersWithTrust { .. }
             | mob_dsl::MobMachineInput::UnwireMembers { .. }
             | mob_dsl::MobMachineInput::WireExternalPeer { .. }
             | mob_dsl::MobMachineInput::RegisterMemberPeer { .. }
@@ -1228,6 +1229,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::Respawn { .. }
             | mob_dsl::MobMachineInput::RetireAll
             | mob_dsl::MobMachineInput::WireMembers { .. }
+            | mob_dsl::MobMachineInput::WireMembersWithTrust { .. }
             | mob_dsl::MobMachineInput::UnwireMembers { .. }
             | mob_dsl::MobMachineInput::WireExternalPeer { .. }
             | mob_dsl::MobMachineInput::RegisterMemberPeer { .. }

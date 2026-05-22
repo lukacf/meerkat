@@ -683,6 +683,7 @@ fn mob_machine_native_reducer_helpers_are_formally_defined() {
     let model = std::fs::read_to_string(repo_root().join("specs/machines/mob_machine/model.tla"))
         .expect("read generated MobMachine TLA");
     for helper in [
+        "mob_machine_identity_has_session_binding",
         "mob_machine_node_terminal",
         "mob_machine_frame_node_status_after_admit",
         "mob_machine_frame_ready_queue_after_admit",

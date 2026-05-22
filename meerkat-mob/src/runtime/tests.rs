@@ -11003,13 +11003,6 @@ async fn test_respawn_reports_machine_local_edge_to_retired_peer() {
         )
         .await
         .expect("spawn right");
-    handle
-        .wire(
-            AgentIdentity::from(left.as_str()),
-            PeerTarget::Local(AgentIdentity::from(right.as_str())),
-        )
-        .await
-        .expect("wire peers");
 
     handle
         .retire(AgentIdentity::from(right.as_str()))
@@ -11022,6 +11015,16 @@ async fn test_respawn_reports_machine_local_edge_to_retired_peer() {
             .is_none(),
         "test setup should remove the old peer from the live roster"
     );
+    let stale_edge = crate::machines::mob_machine::WiringEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from(left.as_str()),
+        crate::machines::mob_machine::AgentIdentity::from(right.as_str()),
+    );
+    handle
+        .project_machine_input(crate::machines::mob_machine::MobMachineInput::WireMembers {
+            edge: stale_edge,
+        })
+        .await
+        .expect("seed stale machine-owned edge after terminal retire cleanup");
 
     let error = handle
         .respawn(
@@ -11041,15 +11044,12 @@ async fn test_respawn_reports_machine_local_edge_to_retired_peer() {
         vec![crate::ids::RespawnTopologyPeerId::from(right.as_str())],
         "machine-owned local peer edge must reach generated respawn topology result authority"
     );
-    let left_after = handle
-        .get_member(&AgentIdentity::from(left.as_str()))
-        .await
-        .expect("left after respawn");
+    let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        !left_after
-            .wired_to
-            .contains(&AgentIdentity::from(right.as_str())),
-        "stale machine edge to retired peer must not be restored into roster projection"
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MembersWired { .. })),
+        "failed respawn trust repair must not synthesize a MembersWired projection event"
     );
 }
 
@@ -32936,6 +32936,8 @@ struct MobRuntimeParitySnapshotSummary {
     external_peer_edges: BTreeSet<String>,
     external_peer_edges_by_key: BTreeMap<String, String>,
     identity_to_runtime: BTreeMap<String, String>,
+    identity_runtime_generations: BTreeMap<String, u64>,
+    identity_runtime_fence_tokens: BTreeMap<String, u64>,
     member_peer_ids: BTreeMap<String, String>,
     member_peer_endpoints: BTreeMap<String, String>,
     member_restore_failures: BTreeMap<String, String>,
@@ -32956,6 +32958,14 @@ struct MobRuntimeParitySnapshotSummary {
     spawn_policy_resolution_profiles: BTreeMap<String, String>,
     spawn_policy_resolution_runtime_modes: BTreeMap<String, String>,
     spawn_policy_resolution_absent: BTreeSet<String>,
+    spawn_profile_authority_profile_names: BTreeMap<String, String>,
+    spawn_profile_authority_models: BTreeMap<String, String>,
+    spawn_profile_authority_material_digests: BTreeMap<String, String>,
+    spawn_profile_authority_tool_config_digests: BTreeMap<String, String>,
+    spawn_profile_authority_skills_digests: BTreeMap<String, String>,
+    spawn_profile_authority_provider_params_digests: BTreeMap<String, String>,
+    spawn_profile_authority_output_schema_digests: BTreeMap<String, String>,
+    spawn_profile_authority_external_addressable: BTreeMap<String, bool>,
 }
 
 /// Lock-in test for T2 DSL field projection in the runtime parity snapshot.
@@ -33200,6 +33210,8 @@ struct MobModeledStateAuditReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MobRuntimeParityProbeInput {
     Spawn,
+    AuthorizeSpawnProfile,
+    ClassifyMemberWait,
     EnsureMember,
     Reconcile,
     SubmitWork,
@@ -33209,6 +33221,7 @@ enum MobRuntimeParityProbeInput {
     Respawn,
     RetireAll,
     WireMembers,
+    WireMembersWithTrust,
     UnwireMembers,
     WireExternalPeer,
     UnwireExternalPeer,
@@ -33427,6 +33440,12 @@ fn mob_runtime_parity_probe_for_input_variant(
 ) -> Option<MobRuntimeParityProbeInput> {
     match input_variant {
         SchemaMobMachineInputVariant::Spawn => Some(MobRuntimeParityProbeInput::Spawn),
+        SchemaMobMachineInputVariant::AuthorizeSpawnProfile => {
+            Some(MobRuntimeParityProbeInput::AuthorizeSpawnProfile)
+        }
+        SchemaMobMachineInputVariant::ClassifyMemberWait => {
+            Some(MobRuntimeParityProbeInput::ClassifyMemberWait)
+        }
         SchemaMobMachineInputVariant::EnsureMember => {
             Some(MobRuntimeParityProbeInput::EnsureMember)
         }
@@ -33438,6 +33457,9 @@ fn mob_runtime_parity_probe_for_input_variant(
         SchemaMobMachineInputVariant::Respawn => Some(MobRuntimeParityProbeInput::Respawn),
         SchemaMobMachineInputVariant::RetireAll => Some(MobRuntimeParityProbeInput::RetireAll),
         SchemaMobMachineInputVariant::WireMembers => Some(MobRuntimeParityProbeInput::WireMembers),
+        SchemaMobMachineInputVariant::WireMembersWithTrust => {
+            Some(MobRuntimeParityProbeInput::WireMembersWithTrust)
+        }
         SchemaMobMachineInputVariant::UnwireMembers => {
             Some(MobRuntimeParityProbeInput::UnwireMembers)
         }
@@ -33634,6 +33656,8 @@ async fn mob_runtime_parity_snapshot_summary(
         external_peer_edges,
         external_peer_edges_by_key,
         identity_to_runtime,
+        identity_runtime_generations,
+        identity_runtime_fence_tokens,
         member_peer_ids,
         member_peer_endpoints,
         member_restore_failures,
@@ -33647,6 +33671,14 @@ async fn mob_runtime_parity_snapshot_summary(
         spawn_policy_resolution_profiles,
         spawn_policy_resolution_runtime_modes,
         spawn_policy_resolution_absent,
+        spawn_profile_authority_profile_names,
+        spawn_profile_authority_models,
+        spawn_profile_authority_material_digests,
+        spawn_profile_authority_tool_config_digests,
+        spawn_profile_authority_skills_digests,
+        spawn_profile_authority_provider_params_digests,
+        spawn_profile_authority_output_schema_digests,
+        spawn_profile_authority_external_addressable,
     ) = dsl_t2
         .map(|snap| {
             (
@@ -33670,6 +33702,14 @@ async fn mob_runtime_parity_snapshot_summary(
                 snap.identity_to_runtime
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.identity_runtime_generations
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), v.0))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.identity_runtime_fence_tokens
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), v.0))
                     .collect::<BTreeMap<_, _>>(),
                 snap.member_peer_ids
                     .into_iter()
@@ -33714,6 +33754,38 @@ async fn mob_runtime_parity_snapshot_summary(
                     .into_iter()
                     .map(|id| format!("{id:?}"))
                     .collect::<BTreeSet<_>>(),
+                snap.spawn_profile_authority_profile_names
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), v))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.spawn_profile_authority_models
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), v))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.spawn_profile_authority_material_digests
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), v))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.spawn_profile_authority_tool_config_digests
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), v))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.spawn_profile_authority_skills_digests
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), v))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.spawn_profile_authority_provider_params_digests
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.spawn_profile_authority_output_schema_digests
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.spawn_profile_authority_external_addressable
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), v))
+                    .collect::<BTreeMap<_, _>>(),
             )
         })
         .unwrap_or_else(|| {
@@ -33729,6 +33801,8 @@ async fn mob_runtime_parity_snapshot_summary(
                 BTreeMap::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
                 BTreeSet::new(),
                 0,
                 false,
@@ -33737,6 +33811,14 @@ async fn mob_runtime_parity_snapshot_summary(
                 BTreeMap::new(),
                 BTreeMap::new(),
                 BTreeSet::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
             )
         });
 
@@ -33772,6 +33854,8 @@ async fn mob_runtime_parity_snapshot_summary(
         external_peer_edges,
         external_peer_edges_by_key,
         identity_to_runtime,
+        identity_runtime_generations,
+        identity_runtime_fence_tokens,
         member_peer_ids,
         member_peer_endpoints,
         member_restore_failures,
@@ -33785,6 +33869,14 @@ async fn mob_runtime_parity_snapshot_summary(
         spawn_policy_resolution_profiles,
         spawn_policy_resolution_runtime_modes,
         spawn_policy_resolution_absent,
+        spawn_profile_authority_profile_names,
+        spawn_profile_authority_models,
+        spawn_profile_authority_material_digests,
+        spawn_profile_authority_tool_config_digests,
+        spawn_profile_authority_skills_digests,
+        spawn_profile_authority_provider_params_digests,
+        spawn_profile_authority_output_schema_digests,
+        spawn_profile_authority_external_addressable,
     })
 }
 
@@ -33836,6 +33928,12 @@ fn mob_runtime_parity_field_value(
                 .keys()
                 .map(|k| (k.clone(), 0u64))
                 .collect(),
+        )),
+        "identity_runtime_generations" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.identity_runtime_generations.clone(),
+        )),
+        "identity_runtime_fence_tokens" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.identity_runtime_fence_tokens.clone(),
         )),
         "member_peer_ids" => Some(MobRuntimeParityExprValue::Map(
             snapshot
@@ -33901,6 +33999,62 @@ fn mob_runtime_parity_field_value(
         )),
         "spawn_policy_resolution_absent" => Some(MobRuntimeParityExprValue::Set(
             snapshot.spawn_policy_resolution_absent.clone(),
+        )),
+        "spawn_profile_authority_profile_names" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .spawn_profile_authority_profile_names
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "spawn_profile_authority_models" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .spawn_profile_authority_models
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "spawn_profile_authority_material_digests" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .spawn_profile_authority_material_digests
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "spawn_profile_authority_tool_config_digests" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .spawn_profile_authority_tool_config_digests
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "spawn_profile_authority_skills_digests" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .spawn_profile_authority_skills_digests
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "spawn_profile_authority_provider_params_digests" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .spawn_profile_authority_provider_params_digests
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "spawn_profile_authority_output_schema_digests" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .spawn_profile_authority_output_schema_digests
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "spawn_profile_authority_external_addressable" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .spawn_profile_authority_external_addressable
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
         )),
         "externally_addressable_runtime_ids" => Some(MobRuntimeParityExprValue::Set(
             snapshot.externally_addressable_runtime_ids.clone(),
@@ -34172,11 +34326,14 @@ fn mob_modeled_schema_result_summary(
         }
         MobRuntimeParityProbeInput::RunFlow => Some(summarize_mob_runtime_success(probe, "run_id")),
         MobRuntimeParityProbeInput::EnsureMember
+        | MobRuntimeParityProbeInput::AuthorizeSpawnProfile
+        | MobRuntimeParityProbeInput::ClassifyMemberWait
         | MobRuntimeParityProbeInput::Reconcile
         | MobRuntimeParityProbeInput::CancelFlow
         | MobRuntimeParityProbeInput::Retire
         | MobRuntimeParityProbeInput::RetireAll
         | MobRuntimeParityProbeInput::WireMembers
+        | MobRuntimeParityProbeInput::WireMembersWithTrust
         | MobRuntimeParityProbeInput::UnwireMembers
         | MobRuntimeParityProbeInput::WireExternalPeer
         | MobRuntimeParityProbeInput::UnwireExternalPeer
@@ -34277,7 +34434,8 @@ async fn mob_runtime_parity_prepare_probe(
             fixture.ensure_worker().await?;
             setup_tags.push("worker_spawned".to_string());
         }
-        MobRuntimeParityProbeInput::WireMembers => {
+        MobRuntimeParityProbeInput::WireMembers
+        | MobRuntimeParityProbeInput::WireMembersWithTrust => {
             fixture.ensure_worker().await?;
             fixture.ensure_lead().await?;
             setup_tags.push("worker_spawned".to_string());
@@ -34314,6 +34472,8 @@ async fn mob_runtime_parity_prepare_probe(
             setup_tags.push("turn_driven_member_spawned".to_string());
         }
         MobRuntimeParityProbeInput::Spawn
+        | MobRuntimeParityProbeInput::AuthorizeSpawnProfile
+        | MobRuntimeParityProbeInput::ClassifyMemberWait
         | MobRuntimeParityProbeInput::Stop
         | MobRuntimeParityProbeInput::Resume
         | MobRuntimeParityProbeInput::Complete
@@ -34368,6 +34528,36 @@ async fn mob_runtime_parity_execute_probe(
             )
             .await
             .map(|_| summarize_mob_runtime_success(probe, "spawned")),
+        MobRuntimeParityProbeInput::AuthorizeSpawnProfile => fixture
+            .handle
+            .apply_machine_input_effects(
+                crate::machines::mob_machine::MobMachineInput::AuthorizeSpawnProfile {
+                    agent_identity: crate::machines::mob_machine::AgentIdentity::from(
+                        "parity-authorize-profile",
+                    ),
+                    profile_name: "worker".to_string(),
+                    model: "test-model".to_string(),
+                    profile_material_digest: "parity-profile-material".to_string(),
+                    tool_config_digest: "parity-tool-config".to_string(),
+                    skills_digest: "parity-skills".to_string(),
+                    provider_params_digest: None,
+                    output_schema_digest: None,
+                    external_addressable: false,
+                },
+            )
+            .await
+            .map(|_| summarize_mob_runtime_success(probe, "unit")),
+        MobRuntimeParityProbeInput::ClassifyMemberWait => fixture
+            .handle
+            .apply_machine_input_effects(
+                crate::machines::mob_machine::MobMachineInput::ClassifyMemberWait {
+                    agent_identity: crate::machines::mob_machine::AgentIdentity::from(
+                        fixture.worker_identity.as_str(),
+                    ),
+                },
+            )
+            .await
+            .map(|_| summarize_mob_runtime_success(probe, "unit")),
         MobRuntimeParityProbeInput::EnsureMember => fixture
             .handle
             .ensure_member(SpawnMemberSpec::new("worker", "parity-ensure"))
@@ -34437,6 +34627,23 @@ async fn mob_runtime_parity_execute_probe(
             )
             .await
             .map(|()| summarize_mob_runtime_success(probe, "unit")),
+        MobRuntimeParityProbeInput::WireMembersWithTrust => {
+            let edge = crate::machines::mob_machine::WiringEdge::new(
+                crate::machines::mob_machine::AgentIdentity::from_domain(&fixture.worker_identity),
+                crate::machines::mob_machine::AgentIdentity::from_domain(&fixture.lead_identity),
+            );
+            fixture
+                .handle
+                .apply_machine_input_effects(
+                    crate::machines::mob_machine::MobMachineInput::WireMembersWithTrust {
+                        a_identity: edge.a.clone(),
+                        b_identity: edge.b.clone(),
+                        edge,
+                    },
+                )
+                .await
+                .map(|_| summarize_mob_runtime_success(probe, "unit"))
+        }
         MobRuntimeParityProbeInput::UnwireMembers => fixture
             .handle
             .unwire(
@@ -35093,6 +35300,12 @@ fn mob_runtime_parity_probe_input_variant(
 ) -> Option<SchemaMobMachineInputVariant> {
     match probe {
         MobRuntimeParityProbeInput::Spawn => Some(SchemaMobMachineInputVariant::Spawn),
+        MobRuntimeParityProbeInput::AuthorizeSpawnProfile => {
+            Some(SchemaMobMachineInputVariant::AuthorizeSpawnProfile)
+        }
+        MobRuntimeParityProbeInput::ClassifyMemberWait => {
+            Some(SchemaMobMachineInputVariant::ClassifyMemberWait)
+        }
         MobRuntimeParityProbeInput::EnsureMember => {
             Some(SchemaMobMachineInputVariant::EnsureMember)
         }
@@ -35104,6 +35317,9 @@ fn mob_runtime_parity_probe_input_variant(
         MobRuntimeParityProbeInput::Respawn => Some(SchemaMobMachineInputVariant::Respawn),
         MobRuntimeParityProbeInput::RetireAll => Some(SchemaMobMachineInputVariant::RetireAll),
         MobRuntimeParityProbeInput::WireMembers => Some(SchemaMobMachineInputVariant::WireMembers),
+        MobRuntimeParityProbeInput::WireMembersWithTrust => {
+            Some(SchemaMobMachineInputVariant::WireMembersWithTrust)
+        }
         MobRuntimeParityProbeInput::UnwireMembers => {
             Some(SchemaMobMachineInputVariant::UnwireMembers)
         }

@@ -1500,14 +1500,14 @@ impl MobEventsView {
                 channel_capacity,
             })
             .await?;
-        let (after_cursor, _explicit_after_cursor, config) =
+        let (after_cursor, explicit_after_cursor, config) =
             MobHandle::structural_event_subscription_authority_from_effects(effects)?;
         let source_rx = self.handle.events.subscribe().map_err(MobError::from)?;
         Ok(spawn_structural_event_subscription(
             self.clone(),
             source_rx,
             after_cursor,
-            true,
+            explicit_after_cursor,
             config,
         ))
     }
@@ -2364,8 +2364,9 @@ impl MobHandle {
     ) -> BTreeSet<mob_dsl::AgentRuntimeId> {
         machine_state
             .member_session_bindings
-            .keys()
-            .filter_map(|identity| machine_state.identity_to_runtime.get(identity))
+            .iter()
+            .filter(|(_, session_id)| !session_id.0.is_empty())
+            .filter_map(|(identity, _)| machine_state.identity_to_runtime.get(identity))
             .filter(|runtime_id| machine_state.live_runtime_ids.contains(*runtime_id))
             .cloned()
             .collect()
@@ -3783,8 +3784,15 @@ impl MobHandle {
         let snapshot = self
             .member_status(&AgentIdentity::from(agent_identity.as_str()))
             .await?;
-        let (runtime_id, fence_token) =
-            snapshot.require_runtime_identity_fields("external_turn_for_member")?;
+        let Some((runtime_id, fence_token)) = snapshot.runtime_identity_fields() else {
+            return Err(self
+                .resolve_submit_work_missing_runtime_rejection(
+                    &agent_identity,
+                    WorkOrigin::External,
+                    "external_turn_for_member",
+                )
+                .await);
+        };
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
             runtime_id: runtime_id.clone(),
             fence_token,
@@ -3807,8 +3815,15 @@ impl MobHandle {
         let snapshot = self
             .member_status(&AgentIdentity::from(agent_identity.as_str()))
             .await?;
-        let (runtime_id, fence_token) =
-            snapshot.require_runtime_identity_fields("internal_turn_for_member")?;
+        let Some((runtime_id, fence_token)) = snapshot.runtime_identity_fields() else {
+            return Err(self
+                .resolve_submit_work_missing_runtime_rejection(
+                    &agent_identity,
+                    WorkOrigin::Internal,
+                    "internal_turn_for_member",
+                )
+                .await);
+        };
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
             runtime_id: runtime_id.clone(),
             fence_token,
@@ -3821,6 +3836,64 @@ impl MobHandle {
         self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
             .await?;
         Ok(())
+    }
+
+    async fn resolve_submit_work_missing_runtime_rejection(
+        &self,
+        agent_identity: &MeerkatId,
+        origin: WorkOrigin,
+        context: &str,
+    ) -> MobError {
+        let domain_identity = AgentIdentity::from(agent_identity.as_str());
+        let declared_runtime_id = AgentRuntimeId::initial(domain_identity.clone());
+        let declared_fence_token = FenceToken::new(0);
+        let effects = match self
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveSubmitWorkRejection {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&domain_identity),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&declared_runtime_id),
+                fence_token: mob_dsl::FenceToken::from_domain(declared_fence_token),
+                origin: mob_dsl::WorkOrigin::from(origin),
+            })
+            .await
+        {
+            Ok(effects) => effects,
+            Err(error) => return error,
+        };
+        let Some(reason) = effects.into_iter().find_map(|effect| match effect {
+            mob_dsl::MobMachineEffect::SubmitWorkRejected {
+                agent_runtime_id,
+                origin: effect_origin,
+                reason,
+                ..
+            } if agent_runtime_id == mob_dsl::AgentRuntimeId::from_domain(&declared_runtime_id)
+                && effect_origin == mob_dsl::WorkOrigin::from(origin) =>
+            {
+                Some(reason)
+            }
+            _ => None,
+        }) else {
+            return MobError::Internal(format!(
+                "{context} requires MobMachine runtime binding for '{agent_identity}', and generated SubmitWork rejection emitted no result"
+            ));
+        };
+
+        match reason {
+            mob_dsl::SubmitWorkRejectReasonKind::MemberNotFound => {
+                MobError::MemberNotFound(agent_identity.clone())
+            }
+            mob_dsl::SubmitWorkRejectReasonKind::NotExternallyAddressable => {
+                MobError::NotExternallyAddressable(agent_identity.clone())
+            }
+            mob_dsl::SubmitWorkRejectReasonKind::StaleFenceToken => MobError::StaleFenceToken {
+                runtime_id: declared_runtime_id,
+                expected: declared_fence_token,
+                actual: declared_fence_token,
+            },
+            mob_dsl::SubmitWorkRejectReasonKind::MobNotRunning => MobError::InvalidTransition {
+                from: self.status().await.unwrap_or(MobState::Stopped),
+                to: MobState::Running,
+            },
+        }
     }
 
     // -----------------------------------------------------------------

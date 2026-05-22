@@ -396,6 +396,7 @@ macro_rules! mob_catalog_machine_dsl {
             // pre-normalized `WiringEdge` (a <= b). Callers construct the
             // edge via `WiringEdge::new(a, b)` before submitting.
             WireMembers { edge: WiringEdge },
+            WireMembersWithTrust { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             UnwireMembers { edge: WiringEdge },
             WireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
             RegisterMemberPeer { agent_identity: AgentIdentity, peer_endpoint: MemberPeerEndpoint },
@@ -2634,6 +2635,42 @@ macro_rules! mob_catalog_machine_dsl {
             emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
         }
 
+        transition WireMembersWithTrustRunning {
+            on input WireMembersWithTrust { edge, a_identity, b_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_not_already_wired" { self.wiring_edges.contains(edge) == false }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "a_member_peer_registered" { self.member_peer_ids.contains_key(a_identity) == true }
+            guard "b_member_peer_registered" { self.member_peer_ids.contains_key(b_identity) == true }
+            guard "a_member_endpoint_registered" { self.member_peer_endpoints.contains_key(a_identity) == true }
+            guard "b_member_endpoint_registered" { self.member_peer_endpoints.contains_key(b_identity) == true }
+            update {
+                self.wiring_edges.insert(edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit MemberTrustWiringRequested {
+                edge: edge,
+                a_peer_id: self.member_peer_ids.get_cloned(a_identity).get("value"),
+                b_peer_id: self.member_peer_ids.get_cloned(b_identity).get("value"),
+                a_endpoint: self.member_peer_endpoints.get_cloned(a_identity).get("value"),
+                b_endpoint: self.member_peer_endpoints.get_cloned(b_identity).get("value"),
+                epoch: self.topology_epoch
+            }
+            emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
+        }
+
+        transition WireMembersWithTrustAlreadyWired {
+            on input WireMembersWithTrust { edge, a_identity, b_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_already_wired" { self.wiring_edges.contains(edge) == true }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            update {}
+            to Running
+            emit WiringTrustRepairRequested { edge: edge }
+        }
+
         transition WireMembersAlreadyWired {
             on input WireMembers { edge }
             guard { self.lifecycle_phase == Phase::Running }
@@ -2941,7 +2978,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
             guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
-            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "session_bound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == true }
             update {}
             to Running
             emit AuthorizeAgentEventSubscription {
@@ -2954,7 +2991,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
             guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
-            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "session_bound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == true }
             update {}
             to Stopped
             emit AuthorizeAgentEventSubscription {
@@ -2967,7 +3004,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Completed }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
             guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
-            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "session_bound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == true }
             update {}
             to Completed
             emit AuthorizeAgentEventSubscription {
@@ -2980,7 +3017,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Destroyed }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
             guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
-            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "session_bound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == true }
             update {}
             to Destroyed
             emit AuthorizeAgentEventSubscription {
@@ -3025,7 +3062,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
             guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
-            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "session_unbound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == false }
             update {}
             to Running
             emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::NoSessionBinding }
@@ -3035,7 +3072,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
             guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
-            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "session_unbound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == false }
             update {}
             to Stopped
             emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::NoSessionBinding }
@@ -3045,7 +3082,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Completed }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
             guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
-            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "session_unbound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == false }
             update {}
             to Completed
             emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::NoSessionBinding }
@@ -3055,7 +3092,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Destroyed }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
             guard "runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) }
-            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "session_unbound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == false }
             update {}
             to Destroyed
             emit RejectAgentEventSubscription { agent_identity: agent_identity, reason: EventSubscriptionRejectReasonKind::NoSessionBinding }
@@ -3359,7 +3396,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
-            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "session_bound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == true }
             update {}
             to Running
             emit AuthorizeMobEventRouterMemberSubscription { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, session_id: self.member_session_bindings.get_cloned(agent_identity).get("value") }
@@ -3370,7 +3407,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
-            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "session_bound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == true }
             update {}
             to Stopped
             emit AuthorizeMobEventRouterMemberSubscription { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, session_id: self.member_session_bindings.get_cloned(agent_identity).get("value") }
@@ -3381,7 +3418,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
-            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "session_bound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == true }
             update {}
             to Completed
             emit AuthorizeMobEventRouterMemberSubscription { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, session_id: self.member_session_bindings.get_cloned(agent_identity).get("value") }
@@ -3392,7 +3429,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
-            guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "session_bound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == true }
             update {}
             to Destroyed
             emit AuthorizeMobEventRouterMemberSubscription { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, session_id: self.member_session_bindings.get_cloned(agent_identity).get("value") }
@@ -3434,7 +3471,7 @@ macro_rules! mob_catalog_machine_dsl {
             on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
             guard { self.lifecycle_phase == Phase::Running }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "session_unbound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == false }
             update {}
             to Running
             emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
@@ -3443,7 +3480,7 @@ macro_rules! mob_catalog_machine_dsl {
             on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "session_unbound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == false }
             update {}
             to Stopped
             emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
@@ -3452,7 +3489,7 @@ macro_rules! mob_catalog_machine_dsl {
             on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
             guard { self.lifecycle_phase == Phase::Completed }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "session_unbound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == false }
             update {}
             to Completed
             emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
@@ -3461,7 +3498,7 @@ macro_rules! mob_catalog_machine_dsl {
             on input AuthorizeMobEventRouterMemberRemoval { agent_identity }
             guard { self.lifecycle_phase == Phase::Destroyed }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "session_unbound" { mob_machine_identity_has_session_binding(self.member_session_bindings, agent_identity) == false }
             update {}
             to Destroyed
             emit AuthorizeMobEventRouterMemberRemoval { agent_identity: agent_identity }
@@ -5330,6 +5367,15 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         impl MobMachineAuthority {
+        fn mob_machine_identity_has_session_binding(
+            member_session_bindings: &std::collections::BTreeMap<AgentIdentity, SessionId>,
+            agent_identity: &AgentIdentity,
+        ) -> bool {
+            member_session_bindings
+                .get(agent_identity)
+                .is_some_and(|session_id| !session_id.0.is_empty())
+        }
+
         fn mob_machine_session_bound_live_runtime_ids_match(
             identity_to_runtime: &std::collections::BTreeMap<AgentIdentity, AgentRuntimeId>,
             member_session_bindings: &std::collections::BTreeMap<AgentIdentity, SessionId>,
@@ -5337,8 +5383,9 @@ macro_rules! mob_catalog_machine_dsl {
             expected_runtime_ids: &std::collections::BTreeSet<AgentRuntimeId>,
         ) -> bool {
             let actual_runtime_ids = member_session_bindings
-                .keys()
-                .filter_map(|identity| identity_to_runtime.get(identity))
+                .iter()
+                .filter(|(_, session_id)| !session_id.0.is_empty())
+                .filter_map(|(identity, _)| identity_to_runtime.get(identity))
                 .filter(|runtime_id| live_runtime_ids.contains(*runtime_id))
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>();

@@ -161,6 +161,18 @@ impl MobSupervisorBridge {
         dsl: &Arc<meerkat_runtime::HandleDslAuthority>,
         recipient: TrustedPeerDescriptor,
     ) -> Result<(), MobError> {
+        let local_endpoint = Self::local_endpoint_for_runtime(runtime.as_ref())?;
+        dsl.apply_input(
+            mm_dsl::MeerkatMachineInput::PublishLocalEndpoint {
+                endpoint: local_endpoint,
+            },
+            "mob_supervisor_bridge::publish_local_endpoint",
+        )
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "supervisor bridge DSL rejected local endpoint publication: {error}"
+            ))
+        })?;
         let endpoint = mm_dsl::PeerEndpoint::from(&recipient);
         if dsl
             .snapshot_state()
@@ -210,6 +222,33 @@ impl MobSupervisorBridge {
                     "supervisor bridge generated trust reconciliation failed: {error}"
                 ))
             })
+    }
+
+    fn local_endpoint_for_runtime(
+        runtime: &dyn CoreCommsRuntime,
+    ) -> Result<mm_dsl::PeerEndpoint, MobError> {
+        let peer_id = runtime.peer_id().ok_or_else(|| {
+            MobError::Internal("supervisor bridge runtime peer_id unavailable".to_string())
+        })?;
+        let name = runtime.comms_name().ok_or_else(|| {
+            MobError::Internal("supervisor bridge runtime comms_name unavailable".to_string())
+        })?;
+        let address = runtime.advertised_address().ok_or_else(|| {
+            MobError::Internal(
+                "supervisor bridge runtime advertised_address unavailable".to_string(),
+            )
+        })?;
+        let pubkey = runtime.public_key_bytes().ok_or_else(|| {
+            MobError::Internal("supervisor bridge runtime public_key_bytes unavailable".to_string())
+        })?;
+        let descriptor =
+            TrustedPeerDescriptor::unsigned_with_pubkey(name, peer_id.to_string(), pubkey, address)
+                .map_err(|error| {
+                    MobError::WiringError(format!(
+                        "supervisor bridge runtime local endpoint descriptor invalid: {error}"
+                    ))
+                })?;
+        Ok(mm_dsl::PeerEndpoint::from(&descriptor))
     }
 
     pub(crate) async fn supervisor_spec(&self) -> Result<TrustedPeerDescriptor, MobError> {

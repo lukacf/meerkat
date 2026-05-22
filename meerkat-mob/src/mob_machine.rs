@@ -309,6 +309,7 @@ pub enum MobMachineCatalogInput {
     Respawn,
     RetireAll,
     WireMembers,
+    WireMembersWithTrust,
     UnwireMembers,
     WireExternalPeer,
     RegisterMemberPeer,
@@ -384,6 +385,7 @@ impl MobMachineCatalogInput {
         Self::Respawn,
         Self::RetireAll,
         Self::WireMembers,
+        Self::WireMembersWithTrust,
         Self::UnwireMembers,
         Self::WireExternalPeer,
         Self::RegisterMemberPeer,
@@ -462,6 +464,7 @@ impl MobMachineCatalogInput {
             Self::Respawn => MobMachineInputVariant::Respawn,
             Self::RetireAll => MobMachineInputVariant::RetireAll,
             Self::WireMembers => MobMachineInputVariant::WireMembers,
+            Self::WireMembersWithTrust => MobMachineInputVariant::WireMembersWithTrust,
             Self::UnwireMembers => MobMachineInputVariant::UnwireMembers,
             Self::WireExternalPeer => MobMachineInputVariant::WireExternalPeer,
             Self::RegisterMemberPeer => MobMachineInputVariant::RegisterMemberPeer,
@@ -577,6 +580,7 @@ impl MobMachineCatalogInput {
             Self::Respawn => "Respawn",
             Self::RetireAll => "RetireAll",
             Self::WireMembers => "WireMembers",
+            Self::WireMembersWithTrust => "WireMembersWithTrust",
             Self::UnwireMembers => "UnwireMembers",
             Self::WireExternalPeer => "WireExternalPeer",
             Self::RegisterMemberPeer => "RegisterMemberPeer",
@@ -935,7 +939,9 @@ const fn mob_machine_command_classification(
             MobMachineCatalogInput::WireExternalPeer,
         ]),
         MobMachineCommandVariant::WireMembersBatch => {
-            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::WireMembers)
+            MobMachineCommandClassification::CatalogInput(
+                MobMachineCatalogInput::WireMembersWithTrust,
+            )
         }
         MobMachineCommandVariant::Unwire => MobMachineCommandClassification::CatalogInputs(&[
             MobMachineCatalogInput::UnwireMembers,

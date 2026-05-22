@@ -7637,6 +7637,31 @@ macro_rules! meerkat_catalog_machine_dsl {
                 response_terminality: None
             }
         }
+        transition ClassifyExternalEnvelopeRequestSupervisorSilentIdle {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_silent_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "supervisor.bridge"
+                && self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Idle
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::SilentRequest,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
         transition ClassifyExternalEnvelopeRequestSupervisorSilentRunning {
             on signal ClassifyExternalEnvelope {
                 item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
@@ -7732,6 +7757,31 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ActionableRequest,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSupervisorIdle {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "supervisor.bridge"
+                && !self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Idle
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,

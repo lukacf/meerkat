@@ -620,6 +620,68 @@ mod tests {
     }
 
     #[test]
+    fn runtime_peer_comms_handle_classifies_idle_supervisor_bridge() {
+        let handle = handle_for_phase(mm_dsl::MeerkatPhase::Idle);
+
+        let admission = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "supervisor-request".to_string(),
+                from_peer: "mob/__mob_supervisor__".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "supervisor.bridge".to_string(),
+                    params: serde_json::json!({}),
+                },
+            })
+            .expect("idle session should classify supervisor bridge requests");
+        assert_eq!(
+            admission.classification.class,
+            meerkat_core::PeerInputClass::ActionableRequest
+        );
+        assert_eq!(
+            admission.classification.auth,
+            meerkat_core::PeerIngressAuthDecision::Exempt(
+                meerkat_core::PeerIngressAuthExemption::SupervisorBridge
+            )
+        );
+
+        let state = mm_dsl::MeerkatMachineState {
+            lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
+            session_id: Some(mm_dsl::SessionId("session-1".to_string())),
+            silent_intent_overrides: BTreeSet::from(["supervisor.bridge".to_string()]),
+            ..Default::default()
+        };
+        let authority = Arc::new(Mutex::new(
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+                .expect("test MeerkatMachine state must be recoverable"),
+        ));
+        let silent_handle =
+            RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(authority)));
+
+        let silent = silent_handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "supervisor-silent".to_string(),
+                from_peer: "mob/__mob_supervisor__".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "supervisor.bridge".to_string(),
+                    params: serde_json::json!({}),
+                },
+            })
+            .expect("idle session should classify silent supervisor bridge requests");
+        assert_eq!(
+            silent.classification.class,
+            meerkat_core::PeerInputClass::SilentRequest
+        );
+        assert_eq!(
+            silent.classification.auth,
+            meerkat_core::PeerIngressAuthDecision::Exempt(
+                meerkat_core::PeerIngressAuthExemption::SupervisorBridge
+            )
+        );
+    }
+
+    #[test]
     fn runtime_peer_comms_handle_drains_terminal_cleanup_without_reopening_topology_adds() {
         for phase in [mm_dsl::MeerkatPhase::Retired, mm_dsl::MeerkatPhase::Stopped] {
             let handle = handle_for_phase(phase);

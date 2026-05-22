@@ -626,6 +626,7 @@ pub enum MeerkatMachineRuntimeInternalReason {
     CancellationLifecycle,
     LiveTopologyReconfiguration,
     InteractionStreamLifecycle,
+    EventStreamLifecycle,
     CommsIngressLifecycle,
     SupervisorTrustLifecycle,
     PeerRequestLifecycle,
@@ -724,6 +725,14 @@ meerkat_machine_runtime_internal_inputs!(
         InteractionStreamCompleted,
         InteractionStreamExpired,
         InteractionStreamReserved,
+    ],
+    EventStreamLifecycle => [
+        RecordMobEventStreamOpened,
+        RecordMobEventStreamTerminated,
+        RecordSessionEventStreamOpened,
+        RecordSessionEventStreamTerminated,
+        ResolveMobEventStreamClose,
+        ResolveSessionEventStreamClose,
     ],
     CommsIngressLifecycle => [
         AddDirectPeerEndpoint,

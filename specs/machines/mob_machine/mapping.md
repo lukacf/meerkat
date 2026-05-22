@@ -771,6 +771,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `WireMembersRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
+- `WireMembersWithTrustRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `WireMembersWithTrustAlreadyWired`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
 - `WireMembersAlreadyWired`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`

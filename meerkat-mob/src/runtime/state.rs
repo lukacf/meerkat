@@ -116,6 +116,14 @@ pub(crate) struct MobDslT2Snapshot {
         crate::machines::mob_machine::AgentIdentity,
         crate::machines::mob_machine::AgentRuntimeId,
     >,
+    pub identity_runtime_generations: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::Generation,
+    >,
+    pub identity_runtime_fence_tokens: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::FenceToken,
+    >,
     pub member_peer_ids: std::collections::BTreeMap<
         crate::machines::mob_machine::AgentIdentity,
         crate::machines::mob_machine::PeerId,
@@ -153,6 +161,22 @@ pub(crate) struct MobDslT2Snapshot {
     >,
     pub spawn_policy_resolution_absent:
         std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
+    pub spawn_profile_authority_profile_names:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub spawn_profile_authority_models:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub spawn_profile_authority_material_digests:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub spawn_profile_authority_tool_config_digests:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub spawn_profile_authority_skills_digests:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub spawn_profile_authority_provider_params_digests:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, Option<String>>,
+    pub spawn_profile_authority_output_schema_digests:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, Option<String>>,
+    pub spawn_profile_authority_external_addressable:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, bool>,
 }
 
 #[derive(Debug, Clone, Default)]

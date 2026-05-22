@@ -1328,6 +1328,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyExternalEnvelopeRequestSupervisorSilentAttached`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestSupervisorSilentIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeRequestSupervisorSilentRunning`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -1338,6 +1341,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeRequestSupervisorAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestSupervisorIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeRequestSupervisorRunning`

@@ -147,6 +147,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Respawn`(agent_runtime_id: AgentRuntimeId)
 - `RetireAll`
 - `WireMembers`(edge: WiringEdge)
+- `WireMembersWithTrust`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `UnwireMembers`(edge: WiringEdge)
 - `WireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
 - `RegisterMemberPeer`(agent_identity: AgentIdentity, peer_endpoint: MemberPeerEndpoint)
@@ -2333,6 +2334,28 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `edge_not_already_wired`
 - Emits: `WiringGraphChanged`, `EmitWiringLifecycleNotice`
+- To: `Running`
+
+### `WireMembersWithTrustRunning`
+- From: `Running`
+- On: `WireMembersWithTrust`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_not_already_wired`
+  - `edge_matches_members`
+  - `a_member_peer_registered`
+  - `b_member_peer_registered`
+  - `a_member_endpoint_registered`
+  - `b_member_endpoint_registered`
+- Emits: `WiringGraphChanged`, `MemberTrustWiringRequested`, `EmitWiringLifecycleNotice`
+- To: `Running`
+
+### `WireMembersWithTrustAlreadyWired`
+- From: `Running`
+- On: `WireMembersWithTrust`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_already_wired`
+  - `edge_matches_members`
+- Emits: `WiringTrustRepairRequested`
 - To: `Running`
 
 ### `WireMembersAlreadyWired`

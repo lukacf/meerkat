@@ -2861,6 +2861,12 @@ pub mod inputs {
         pub edge: WiringEdge,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct WireMembersWithTrust {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub b_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct UnwireMembers {
         pub edge: WiringEdge,
     }
@@ -3105,6 +3111,7 @@ pub enum Input {
     Respawn(inputs::Respawn),
     RetireAll(inputs::RetireAll),
     WireMembers(inputs::WireMembers),
+    WireMembersWithTrust(inputs::WireMembersWithTrust),
     UnwireMembers(inputs::UnwireMembers),
     WireExternalPeer(inputs::WireExternalPeer),
     RegisterMemberPeer(inputs::RegisterMemberPeer),
@@ -3188,6 +3195,7 @@ impl Input {
             Self::Respawn(_) => InputKind::Respawn,
             Self::RetireAll(_) => InputKind::RetireAll,
             Self::WireMembers(_) => InputKind::WireMembers,
+            Self::WireMembersWithTrust(_) => InputKind::WireMembersWithTrust,
             Self::UnwireMembers(_) => InputKind::UnwireMembers,
             Self::WireExternalPeer(_) => InputKind::WireExternalPeer,
             Self::RegisterMemberPeer(_) => InputKind::RegisterMemberPeer,
@@ -3278,6 +3286,7 @@ pub enum InputKind {
     Respawn,
     RetireAll,
     WireMembers,
+    WireMembersWithTrust,
     UnwireMembers,
     WireExternalPeer,
     RegisterMemberPeer,
@@ -4290,6 +4299,8 @@ pub enum TransitionId {
     CompleteRunning,
     ResetToRunning,
     WireMembersRunning,
+    WireMembersWithTrustRunning,
+    WireMembersWithTrustAlreadyWired,
     WireMembersAlreadyWired,
     RecoverRosterWiringRunning,
     RecoverRosterWiringAlreadyRecovered,

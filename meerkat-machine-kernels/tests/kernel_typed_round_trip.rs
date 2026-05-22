@@ -123,10 +123,50 @@ fn mob_spawn_produces_typed_effect_variants() {
     let kernel = GeneratedMachineKernel::new(mob_machine());
     let state = kernel.initial_state().expect("initial state");
     assert_eq!(state.phase, phase("Running"));
+    let profile_material_digest = "profile.worker.1";
+
+    let authorized: TransitionOutcome = kernel
+        .transition(
+            &state,
+            &KernelInput {
+                variant: input("AuthorizeSpawnProfile"),
+                fields: BTreeMap::from([
+                    (
+                        field("agent_identity"),
+                        named_string("AgentIdentity", "agent.worker"),
+                    ),
+                    (
+                        field("profile_name"),
+                        KernelValue::String("worker".to_owned()),
+                    ),
+                    (field("model"), KernelValue::String("test-model".to_owned())),
+                    (
+                        field("profile_material_digest"),
+                        KernelValue::String(profile_material_digest.to_owned()),
+                    ),
+                    (
+                        field("tool_config_digest"),
+                        KernelValue::String("tool-config.worker.1".to_owned()),
+                    ),
+                    (
+                        field("skills_digest"),
+                        KernelValue::String("skills.worker.1".to_owned()),
+                    ),
+                    (field("provider_params_digest"), KernelValue::None),
+                    (field("output_schema_digest"), KernelValue::None),
+                    (field("external_addressable"), KernelValue::Bool(false)),
+                ]),
+            },
+        )
+        .expect("authorize spawn profile");
+    assert_eq!(
+        authorized.transition,
+        transition("AuthorizeSpawnProfileRunning")
+    );
 
     let outcome: TransitionOutcome = kernel
         .transition(
-            &state,
+            &authorized.next_state,
             &KernelInput {
                 variant: input("Spawn"),
                 fields: BTreeMap::from([
@@ -140,6 +180,10 @@ fn mob_spawn_produces_typed_effect_variants() {
                     ),
                     (field("fence_token"), named_u64("FenceToken", 1)),
                     (field("generation"), named_u64("Generation", 1)),
+                    (
+                        field("profile_material_digest"),
+                        KernelValue::String(profile_material_digest.to_owned()),
+                    ),
                     (field("external_addressable"), KernelValue::Bool(false)),
                     (
                         field("bridge_session_id"),

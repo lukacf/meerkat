@@ -10,6 +10,7 @@ machine! {
             live_runtime_ids: Set<AgentRuntimeId>,
             externally_addressable_runtime_ids: Set<AgentRuntimeId>,
             runtime_fence_tokens: Map<AgentRuntimeId, FenceToken>,
+            spawn_profile_authority_material_digests: Map<AgentIdentity, String>,
             active_run_count: u64,
             pending_spawn_count: u64,
             coordinator_bound: bool,
@@ -19,6 +20,7 @@ machine! {
             live_runtime_ids = EmptySet,
             externally_addressable_runtime_ids = EmptySet,
             runtime_fence_tokens = EmptyMap,
+            spawn_profile_authority_material_digests = EmptyMap,
             active_run_count = 0,
             pending_spawn_count = 0,
             coordinator_bound = true,
@@ -37,7 +39,8 @@ machine! {
             RunFlow,
             CancelFlow,
             FlowStatus,
-            Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool },
+            Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: bool },
+            AuthorizeSpawnProfile { agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: bool },
             Retire { agent_runtime_id: AgentRuntimeId },
             Respawn { agent_runtime_id: AgentRuntimeId },
             RetireAll,
@@ -156,10 +159,21 @@ machine! {
 
         // Spawn is a Running self-loop: the real runtime starts in Running
         // and does not expose a durable pre-start top-level phase.
-        transition SpawnRunning {
-            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
+        transition AuthorizeSpawnProfileRunning {
+            on input AuthorizeSpawnProfile { agent_identity, profile_name, model, profile_material_digest, tool_config_digest, skills_digest, provider_params_digest, output_schema_digest, external_addressable }
             guard { self.lifecycle_phase == Phase::Running }
             guard "coordinator_bound" { self.coordinator_bound == true }
+            update {
+                self.spawn_profile_authority_material_digests.insert(agent_identity, profile_material_digest);
+            }
+            to Running
+        }
+
+        transition SpawnRunning {
+            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "coordinator_bound" { self.coordinator_bound == true }
+            guard "spawn_profile_authorized" { self.spawn_profile_authority_material_digests.get_cloned(agent_identity) == Some(profile_material_digest) }
             update {
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
@@ -1066,6 +1080,23 @@ mod tests {
     #[test]
     fn spawn_and_retire_lifecycle() {
         let mut auth = MobMachineAuthority::new();
+        let profile_material_digest = "profile.agent-1";
+
+        MobMachineMutator::apply(
+            &mut auth,
+            MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: AgentIdentity::from("agent-1"),
+                profile_name: "worker".to_owned(),
+                model: "test-model".to_owned(),
+                profile_material_digest: profile_material_digest.to_owned(),
+                tool_config_digest: "tool-config.agent-1".to_owned(),
+                skills_digest: "skills.agent-1".to_owned(),
+                provider_params_digest: None,
+                output_schema_digest: None,
+                external_addressable: true,
+            },
+        )
+        .unwrap();
 
         // Spawn a member
         let r = MobMachineMutator::apply(
@@ -1075,6 +1106,7 @@ mod tests {
                 agent_runtime_id: AgentRuntimeId::from("rt-1"),
                 fence_token: FenceToken(1),
                 generation: Generation(0),
+                profile_material_digest: profile_material_digest.to_owned(),
                 external_addressable: true,
             },
         )
@@ -1226,6 +1258,74 @@ mod tests {
 
         let mut auth = MobMachineAuthority::new();
         let mut kernel_state = kernel.initial_state().unwrap();
+        let profile_material_digest = "profile.agent-1";
+
+        let dsl_r = MobMachineMutator::apply(
+            &mut auth,
+            MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: AgentIdentity::from("agent-1"),
+                profile_name: "worker".to_owned(),
+                model: "test-model".to_owned(),
+                profile_material_digest: profile_material_digest.to_owned(),
+                tool_config_digest: "tool-config.agent-1".to_owned(),
+                skills_digest: "skills.agent-1".to_owned(),
+                provider_params_digest: None,
+                output_schema_digest: None,
+                external_addressable: true,
+            },
+        )
+        .unwrap();
+        let kernel_input = meerkat_machine_kernels::test_oracle::KernelInput {
+            variant: ivid("AuthorizeSpawnProfile"),
+            fields: std::collections::BTreeMap::from([
+                (
+                    fid("agent_identity"),
+                    named_string("AgentIdentity", "agent-1"),
+                ),
+                (
+                    fid("profile_name"),
+                    meerkat_machine_kernels::test_oracle::KernelValue::String("worker".into()),
+                ),
+                (
+                    fid("model"),
+                    meerkat_machine_kernels::test_oracle::KernelValue::String("test-model".into()),
+                ),
+                (
+                    fid("profile_material_digest"),
+                    meerkat_machine_kernels::test_oracle::KernelValue::String(
+                        profile_material_digest.into(),
+                    ),
+                ),
+                (
+                    fid("tool_config_digest"),
+                    meerkat_machine_kernels::test_oracle::KernelValue::String(
+                        "tool-config.agent-1".into(),
+                    ),
+                ),
+                (
+                    fid("skills_digest"),
+                    meerkat_machine_kernels::test_oracle::KernelValue::String(
+                        "skills.agent-1".into(),
+                    ),
+                ),
+                (
+                    fid("provider_params_digest"),
+                    meerkat_machine_kernels::test_oracle::KernelValue::None,
+                ),
+                (
+                    fid("output_schema_digest"),
+                    meerkat_machine_kernels::test_oracle::KernelValue::None,
+                ),
+                (
+                    fid("external_addressable"),
+                    meerkat_machine_kernels::test_oracle::KernelValue::Bool(true),
+                ),
+            ]),
+        };
+        let kernel_r = kernel.transition(&kernel_state, &kernel_input).unwrap();
+        assert_phase_eq(&dsl_r.to_phase, &kernel_r.next_state.phase);
+        assert_eq!(dsl_r.effects.len(), kernel_r.effects.len());
+        kernel_state = kernel_r.next_state;
 
         // Run Spawn through both
         let dsl_r = MobMachineMutator::apply(
@@ -1235,6 +1335,7 @@ mod tests {
                 agent_runtime_id: AgentRuntimeId::from("rt-1"),
                 fence_token: FenceToken(1),
                 generation: Generation(0),
+                profile_material_digest: profile_material_digest.to_owned(),
                 external_addressable: true,
             },
         )
@@ -1253,6 +1354,12 @@ mod tests {
                 ),
                 (fid("fence_token"), named_u64("FenceToken", 1)),
                 (fid("generation"), named_u64("Generation", 0)),
+                (
+                    fid("profile_material_digest"),
+                    meerkat_machine_kernels::test_oracle::KernelValue::String(
+                        profile_material_digest.into(),
+                    ),
+                ),
                 (
                     fid("external_addressable"),
                     meerkat_machine_kernels::test_oracle::KernelValue::Bool(true),

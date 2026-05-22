@@ -1673,23 +1673,43 @@ pub async fn get_auth_status(
         )
             .into_response();
     }
-    let snapshot = state.auth_lease.snapshot(&lease_key);
+    let mut snapshot = state.auth_lease.snapshot(&lease_key);
     let expected_mode = persisted_auth_mode_for_auth_method(&auth_profile.auth_method);
     let source_uses_store = credential_source_uses_persisted_store(&auth_profile.source);
     let oauth_mode = expected_mode
         .map(persisted_auth_mode_is_oauth_login)
         .unwrap_or(false);
     let phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
-    let stored = if phase == meerkat_core::AuthStatusPhase::Unknown {
-        None
-    } else {
-        state
-            .token_store
-            .load(&TokenKey::from_auth_binding(&auth_binding))
+    let mut stored = None;
+    if source_uses_store {
+        if phase == meerkat_core::AuthStatusPhase::Unknown
+            && let Some(expected_mode) = expected_mode
+            && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_tokens_for_status(
+                state.token_store.as_ref(),
+                state.auth_lease.as_ref(),
+                &auth_binding,
+                expected_mode,
+                now,
+            )
             .await
-            .ok()
-            .flatten()
-    };
+        {
+            stored = Some(rehydrated);
+            snapshot = state.auth_lease.snapshot(&lease_key);
+        } else if phase != meerkat_core::AuthStatusPhase::Unknown {
+            stored = state
+                .token_store
+                .load(&TokenKey::from_auth_binding(&auth_binding))
+                .await
+                .ok()
+                .flatten();
+        }
+    }
+    if stored
+        .as_ref()
+        .is_some_and(|tokens| Some(tokens.auth_mode) != expected_mode)
+    {
+        stored = None;
+    }
     let oauth_source_rejected = expected_mode
         .map(|mode| persisted_auth_mode_is_oauth_login(mode) && !source_uses_store)
         .unwrap_or(false);
@@ -3563,7 +3583,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_auth_status_does_not_rehydrate_marked_oauth_token_after_restart() {
+    async fn rest_auth_status_rehydrates_marked_oauth_token_after_restart() {
         let temp = tempfile::tempdir().unwrap();
         let mut state = AppState::load_from(temp.path().to_path_buf())
             .await
@@ -3602,13 +3622,13 @@ mod tests {
         )
         .await;
 
-        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Unknown);
-        assert_eq!(detail.expires_at, None);
-        assert_eq!(detail.account_id, None);
-        assert!(!detail.has_refresh_token);
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Valid);
+        assert!(detail.expires_at.is_some());
+        assert_eq!(detail.account_id.as_deref(), Some("acct-1"));
+        assert!(detail.has_refresh_token);
         let snapshot = state.auth_lease.snapshot(&lease_key);
-        assert_eq!(snapshot.phase, None);
-        assert!(!snapshot.credential_present);
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+        assert!(snapshot.credential_present);
     }
 
     #[tokio::test]

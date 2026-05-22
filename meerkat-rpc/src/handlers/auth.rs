@@ -1754,24 +1754,46 @@ pub async fn handle_auth_status_get(
             format!("AuthMachine freshness observation failed: {err}"),
         );
     }
-    let snapshot = auth_lease.snapshot(&lease_key);
+    let mut snapshot = auth_lease.snapshot(&lease_key);
     let expected_mode = persisted_auth_mode_for_auth_method(&auth_profile.auth_method);
     let source_uses_store = credential_source_uses_persisted_store(&auth_profile.source);
     let oauth_mode = expected_mode
         .map(persisted_auth_mode_is_oauth_login)
         .unwrap_or(false);
     let phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
-    let stored = if phase == meerkat_core::AuthStatusPhase::Unknown {
-        None
-    } else if let Some(store) = runtime.token_store() {
-        store
-            .load(&TokenKey::from_auth_binding(&auth_binding))
+    let token_store = runtime.token_store();
+    let mut stored = None;
+    if source_uses_store {
+        if phase == meerkat_core::AuthStatusPhase::Unknown
+            && let Some(expected_mode) = expected_mode
+            && let Some(store) = token_store.as_ref()
+            && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_tokens_for_status(
+                store.as_ref(),
+                auth_lease.as_ref(),
+                &auth_binding,
+                expected_mode,
+                now,
+            )
             .await
-            .ok()
-            .flatten()
-    } else {
-        None
-    };
+        {
+            stored = Some(rehydrated);
+            snapshot = auth_lease.snapshot(&lease_key);
+        } else if phase != meerkat_core::AuthStatusPhase::Unknown
+            && let Some(store) = token_store.as_ref()
+        {
+            stored = store
+                .load(&TokenKey::from_auth_binding(&auth_binding))
+                .await
+                .ok()
+                .flatten();
+        }
+    }
+    if stored
+        .as_ref()
+        .is_some_and(|tokens| Some(tokens.auth_mode) != expected_mode)
+    {
+        stored = None;
+    }
     let oauth_source_rejected = expected_mode
         .map(|mode| persisted_auth_mode_is_oauth_login(mode) && !source_uses_store)
         .unwrap_or(false);
@@ -1783,23 +1805,13 @@ pub async fn handle_auth_status_get(
     } else {
         true
     };
-    let unknown_snapshot;
     let marker_projection_snapshot;
-    let (projection_tokens, projection_snapshot) = if oauth_source_rejected {
-        unknown_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
-            phase: None,
-            expires_at: None,
-            credential_present: false,
-            generation: snapshot.generation,
-            credential_published_at_millis: None,
-        };
-        (None, &unknown_snapshot)
-    } else if token_matches_binding {
+    let (projection_tokens, projection_snapshot) = if token_matches_binding {
         marker_projection_snapshot = stored.as_ref().filter(|_| oauth_mode).and_then(|tokens| {
             meerkat_core::oauth_status_projection_snapshot_from_newer_marker(&snapshot, tokens)
         });
         (
-            if source_uses_store {
+            if source_uses_store && !oauth_source_rejected {
                 stored.as_ref()
             } else {
                 None
@@ -1807,14 +1819,7 @@ pub async fn handle_auth_status_get(
             marker_projection_snapshot.as_ref().unwrap_or(&snapshot),
         )
     } else {
-        unknown_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
-            phase: None,
-            expires_at: None,
-            credential_present: false,
-            generation: snapshot.generation,
-            credential_published_at_millis: None,
-        };
-        (None, &unknown_snapshot)
+        (None, &snapshot)
     };
     let projection =
         meerkat_core::project_published_auth_status(now, projection_tokens, projection_snapshot);
@@ -3125,7 +3130,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_status_does_not_rehydrate_marked_oauth_token_after_restart() {
+    async fn auth_status_rehydrates_marked_oauth_token_after_restart() {
         let runtime = test_runtime_with_config(config_with_openai_oauth_binding(
             CredentialSourceSpec::ManagedStore,
         ));
@@ -3149,13 +3154,13 @@ mod tests {
             handle_auth_status_get(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
 
         let status = auth_status_value(resp);
-        assert_eq!(status["state"], "unknown");
-        assert!(status.get("expires_at").is_none());
-        assert!(status.get("account_id").is_none());
-        assert_eq!(status["has_refresh_token"], false);
+        assert_eq!(status["state"], "valid");
+        assert!(status.get("expires_at").is_some());
+        assert_eq!(status["account_id"], "acct-1");
+        assert_eq!(status["has_refresh_token"], true);
         let snapshot = runtime.auth_lease_handle().snapshot(&lease_key);
-        assert_eq!(snapshot.phase, None);
-        assert!(!snapshot.credential_present);
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+        assert!(snapshot.credential_present);
     }
 
     #[tokio::test]
@@ -3192,7 +3197,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_status_hides_wrong_mode_token_even_with_auth_machine_lifecycle() {
+    async fn auth_status_hides_wrong_mode_token_without_hiding_lifecycle() {
         let runtime = test_runtime_with_config(config_with_openai_oauth_binding(
             CredentialSourceSpec::ManagedStore,
         ));
@@ -3225,15 +3230,15 @@ mod tests {
             handle_auth_status_get(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
 
         let status = auth_status_value(resp);
-        assert_eq!(status["state"], "unknown");
-        assert!(status.get("expires_at").is_none());
+        assert_eq!(status["state"], "valid");
+        assert!(status.get("expires_at").is_some());
         assert!(status.get("last_refresh_at").is_none());
         assert!(status.get("account_id").is_none());
         assert_eq!(status["has_refresh_token"], false);
     }
 
     #[tokio::test]
-    async fn auth_status_hides_wrong_source_oauth_token_even_with_auth_machine_lifecycle() {
+    async fn auth_status_hides_wrong_source_oauth_token_without_hiding_lifecycle() {
         let runtime = test_runtime_with_config(config_with_openai_oauth_binding(
             CredentialSourceSpec::ExternalResolver {
                 handle: "external-chatgpt".into(),
@@ -3278,8 +3283,8 @@ mod tests {
             handle_auth_status_get(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
 
         let status = auth_status_value(resp);
-        assert_eq!(status["state"], "unknown");
-        assert!(status.get("expires_at").is_none());
+        assert_eq!(status["state"], "valid");
+        assert!(status.get("expires_at").is_some());
         assert!(status.get("last_refresh_at").is_none());
         assert!(status.get("account_id").is_none());
         assert_eq!(status["has_refresh_token"], false);

@@ -11058,22 +11058,6 @@ impl MobActor {
         });
     }
 
-    fn spawn_turn_admission_detached(
-        provisioner: Arc<dyn MobProvisioner>,
-        member_ref: MemberRef,
-        req: Box<meerkat_core::service::StartTurnRequest>,
-    ) {
-        tokio::spawn(async move {
-            if let Err(error) = provisioner.admit_turn(&member_ref, *req).await {
-                tracing::warn!(
-                    member_ref = ?member_ref,
-                    error = %error,
-                    "detached turn admission failed"
-                );
-            }
-        });
-    }
-
     async fn dispatch_turn_driven_spawn_initial_turn(
         &mut self,
         agent_identity: &MeerkatId,
@@ -11250,10 +11234,7 @@ impl MobActor {
                 provisioner,
                 member_ref,
                 req,
-            } => {
-                Self::spawn_turn_admission_detached(provisioner, member_ref, req);
-                Ok(())
-            }
+            } => provisioner.admit_turn(&member_ref, *req).await,
             SubmitWorkDispatchCompletion::AwaitTurnCompletion {
                 provisioner,
                 member_ref,
@@ -11404,22 +11385,20 @@ impl MobActor {
 
             match adapter.runtime_state(session_id).await {
                 Ok(meerkat_runtime::RuntimeState::Running) => return Ok(true),
-                Ok(_) => {}
+                Ok(_) => return Ok(false),
                 Err(error) => {
                     tracing::debug!(
                         agent_identity = %entry.agent_identity,
                         session_id = %session_id,
                         error = %error,
-                        "runtime state unavailable while checking autonomous steer admission barrier; falling back to session activity"
+                        "runtime state unavailable while checking autonomous steer admission barrier"
                     );
+                    return Ok(false);
                 }
             }
         }
 
-        Ok(matches!(
-            self.provisioner.is_member_active(&entry.member_ref).await?,
-            Some(true)
-        ))
+        Ok(false)
     }
 
     async fn handle_run_flow(

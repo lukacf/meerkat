@@ -3592,6 +3592,102 @@ mod tests {
         }
     }
 
+    struct BoundaryContextRecordingClient {
+        call_count: Mutex<u32>,
+        seen_system_messages: Mutex<Vec<String>>,
+    }
+
+    impl BoundaryContextRecordingClient {
+        fn new() -> Self {
+            Self {
+                call_count: Mutex::new(0),
+                seen_system_messages: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_system_messages(&self) -> Vec<String> {
+            self.seen_system_messages.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for BoundaryContextRecordingClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            self.seen_system_messages.lock().unwrap().push(
+                messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::System(system) => Some(system.content.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+
+            let mut calls = self.call_count.lock().unwrap();
+            let response = if *calls == 0 {
+                super::LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "call-slow".to_string(),
+                        name: "slow_tool".into(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                    Usage::default(),
+                )
+            } else {
+                super::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "done".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                )
+            };
+            *calls += 1;
+            Ok(response)
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    struct BlockingToolDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for BlockingToolDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            self.started.notify_waiters();
+            self.release.notified().await;
+            Ok(ToolResult::new(call.id.to_string(), "released".to_string(), false).into())
+        }
+    }
+
     struct PlaneAwareToolDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
         catalog: Arc<[crate::ToolCatalogEntry]>,
@@ -4201,6 +4297,73 @@ mod tests {
         with_test_turn_state_handle(AgentBuilder::new())
             .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
             .await
+    }
+
+    #[tokio::test]
+    async fn active_turn_system_context_is_visible_after_tool_boundary() {
+        let client = Arc::new(BoundaryContextRecordingClient::new());
+        let tool_started = Arc::new(Notify::new());
+        let release_tool = Arc::new(Notify::new());
+        let tools = Arc::new(BlockingToolDispatcher {
+            tools: Arc::from([Arc::new(ToolDef::new(
+                "slow_tool",
+                "blocks until the test releases it",
+                serde_json::json!({ "type": "object" }),
+            ))]),
+            started: Arc::clone(&tool_started),
+            release: Arc::clone(&release_tool),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .system_prompt("base system prompt")
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+        let state = agent.system_context_state();
+
+        let (tx, mut rx) = mpsc::channel(32);
+        let run = tokio::spawn(async move {
+            agent
+                .run_with_events("start with a tool".to_string().into(), tx)
+                .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), tool_started.notified())
+            .await
+            .expect("tool should start");
+
+        {
+            let mut guard = state.lock().unwrap();
+            guard
+                .stage_active_turn_append(
+                    &crate::service::AppendSystemContextRequest {
+                        text: "STEER_MARKER_visible_after_tool".to_string(),
+                        source: Some("test:active-steer".to_string()),
+                        idempotency_key: Some("test:active-steer".to_string()),
+                    },
+                    crate::time_compat::SystemTime::now(),
+                )
+                .expect("active-turn append should stage");
+        }
+
+        release_tool.notify_waiters();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .expect("run should complete")
+            .expect("run task should join")
+            .expect("agent run should succeed");
+        assert_eq!(result.turns, 2);
+
+        while rx.try_recv().is_ok() {}
+        let seen = client.seen_system_messages();
+        assert!(
+            seen.len() >= 2,
+            "client should have seen both pre-tool and post-tool model requests: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .skip(1)
+                .any(|system| system.contains("STEER_MARKER_visible_after_tool")),
+            "active-turn staged context must be present on the model request after the tool boundary; seen={seen:?}"
+        );
     }
 
     fn start_test_conversation_turn(handle: &dyn crate::TurnStateHandle) {

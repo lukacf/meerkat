@@ -678,6 +678,12 @@ where
             pending
         };
 
+        if !pending.is_empty() {
+            tracing::debug!(
+                pending_count = pending.len(),
+                "applying pending runtime system context at model boundary"
+            );
+        }
         self.sync_system_context_state_to_session();
         pending
     }

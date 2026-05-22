@@ -1460,6 +1460,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     ))
                 })?;
         }
+        tracing::debug!(
+            session_id = %id,
+            pending_count = candidate.pending.len(),
+            active_turn_pending_count = candidate.active_turn_pending_keys.len(),
+            "staged active-turn runtime system context"
+        );
         *guard = candidate;
 
         Ok(())

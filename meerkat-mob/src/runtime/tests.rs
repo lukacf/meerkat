@@ -24003,6 +24003,7 @@ struct RuntimeBackedRealCommsSessionService {
     applied_runtime_context_appends: RwLock<HashMap<SessionId, Vec<AppendSystemContextRequest>>>,
     applied_runtime_render_metadata:
         RwLock<HashMap<SessionId, Vec<Option<meerkat_core::types::RenderMetadata>>>>,
+    active_runtime_runs: RwLock<HashMap<SessionId, meerkat_core::RunId>>,
 }
 
 impl RuntimeBackedRealCommsSessionService {
@@ -24024,6 +24025,7 @@ impl RuntimeBackedRealCommsSessionService {
             applied_runtime_prompts: RwLock::new(HashMap::new()),
             applied_runtime_context_appends: RwLock::new(HashMap::new()),
             applied_runtime_render_metadata: RwLock::new(HashMap::new()),
+            active_runtime_runs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -24443,6 +24445,10 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .entry(session_id.clone())
             .or_default()
             .push(req.runtime.render_metadata.clone());
+        self.active_runtime_runs
+            .write()
+            .await
+            .insert(session_id.clone(), run_id.clone());
 
         if self.block_runtime_turns.load(Ordering::Relaxed) {
             self.runtime_turn_started.notify_waiters();
@@ -24461,6 +24467,8 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         {
             notifier.notified().await;
         }
+
+        self.active_runtime_runs.write().await.remove(session_id);
 
         Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
             receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
@@ -24547,6 +24555,41 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         Ok(())
     }
 
+    async fn stage_runtime_system_context_for_active_turn(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &meerkat_core::RunId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+    ) -> Result<Option<Vec<u8>>, SessionError> {
+        let active_run = self
+            .active_runtime_runs
+            .read()
+            .await
+            .get(session_id)
+            .cloned();
+        if active_run.as_ref() != Some(expected_run_id) {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::NoPendingBoundary,
+            ));
+        }
+
+        self.apply_runtime_system_context_for_turn(session_id, appends)
+            .await?;
+        Ok(None)
+    }
+
+    async fn active_turn_system_context_boundary_available(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<bool>, SessionError> {
+        Ok(Some(
+            self.active_runtime_runs
+                .read()
+                .await
+                .contains_key(session_id),
+        ))
+    }
+
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
         self.sessions.write().await.remove(session_id);
         self.keep_alive_notifiers.write().await.remove(session_id);
@@ -24563,6 +24606,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .write()
             .await
             .remove(session_id);
+        self.active_runtime_runs.write().await.remove(session_id);
         Ok(())
     }
 }

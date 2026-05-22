@@ -30,18 +30,24 @@ impl RuntimeExternalToolSurfaceHandle {
     }
 
     /// Construct a handle backed by an ephemeral DSL authority.
+    #[allow(clippy::expect_used)]
     pub fn ephemeral() -> Self {
-        let state = mm_dsl::MeerkatMachineState {
-            lifecycle_phase: mm_dsl::MeerkatPhase::Attached,
-            ..Default::default()
-        };
-        let shared = Arc::new(std::sync::Mutex::new(
-            crate::meerkat_machine::recover_projected_authority(
-                state,
-                "ephemeral external tool surface state must be recoverable",
-            ),
-        ));
-        Self::new(Arc::new(HandleDslAuthority::from_shared(shared)))
+        let dsl = Arc::new(HandleDslAuthority::ephemeral());
+        dsl.apply_signal(
+            mm_dsl::MeerkatMachineSignal::Initialize,
+            "RuntimeExternalToolSurfaceHandle::ephemeral initialize",
+        )
+        .expect(
+            "generated MeerkatMachine authority must initialize ephemeral external tool surface",
+        );
+        dsl.apply_input(
+            mm_dsl::MeerkatMachineInput::EnsureSessionWithExecutor {
+                session_id: mm_dsl::SessionId::from("ephemeral-external-tool-surface"),
+            },
+            "RuntimeExternalToolSurfaceHandle::ephemeral attach",
+        )
+        .expect("generated MeerkatMachine authority must attach ephemeral external tool surface");
+        Self::new(dsl)
     }
 }
 
@@ -553,6 +559,17 @@ mod tests {
         let beta = handle.surface_snapshot("beta").expect("beta snapshot");
         assert_eq!(beta.staged_op, ExternalToolSurfaceStagedOp::Add);
         assert_eq!(beta.staged_intent_sequence, Some(3));
+    }
+
+    #[test]
+    fn ephemeral_handle_accepts_surface_inputs_after_generated_attach() {
+        let handle = RuntimeExternalToolSurfaceHandle::ephemeral();
+
+        handle.stage_add("alpha".to_owned(), 10).expect("stage add");
+
+        let snapshot = handle.surface_snapshot("alpha").expect("add snapshot");
+        assert_eq!(snapshot.staged_op, ExternalToolSurfaceStagedOp::Add);
+        assert_eq!(snapshot.staged_intent_sequence, Some(1));
     }
 
     #[test]

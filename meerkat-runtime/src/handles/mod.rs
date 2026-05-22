@@ -98,22 +98,16 @@ impl HandleDslAuthority {
         Self { inner }
     }
 
-    /// Construct a handle with its own ephemeral DSL authority at the initial
-    /// state.
+    /// Construct a handle with its own ephemeral DSL authority at the
+    /// generated initial state.
     ///
     /// Legacy callers without access to a session-owned authority use this for
     /// compile-time correctness of `SessionRuntimeBindings`. Transitions fired
     /// through a handle backed by this authority are not visible to any other
     /// session state.
     pub fn ephemeral() -> Self {
-        let state = mm_dsl::MeerkatMachineState::default();
         Self {
-            inner: Arc::new(Mutex::new(
-                crate::meerkat_machine::recover_projected_authority(
-                    state,
-                    "default MeerkatMachine state must be recoverable",
-                ),
-            )),
+            inner: Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::new())),
         }
     }
 

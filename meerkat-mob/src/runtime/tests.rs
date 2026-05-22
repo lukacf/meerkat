@@ -26548,6 +26548,89 @@ async fn test_turn_completed_submission_does_not_block_actor_commands() {
     turn_task.abort();
 }
 
+#[tokio::test]
+async fn test_internal_queued_submit_work_drains_after_running_turn() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = MeerkatId::from("lead-internal-queue-drain");
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven lead");
+
+    let entry = handle
+        .get_member(&AgentIdentity::from(member_id.as_str()))
+        .await
+        .expect("member exists");
+    service.set_start_turn_delay_ms(500);
+
+    handle
+        .submit_work_with_mode(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new(
+                "first internal queued turn".to_string(),
+                WorkOrigin::Internal,
+            ),
+            HandlingMode::Queue,
+        )
+        .await
+        .expect("first internal queued turn should be admitted");
+
+    wait_for_start_turn_call_count(
+        &service,
+        1,
+        "first internal queued turn should start running",
+    )
+    .await;
+
+    handle
+        .submit_work_with_mode(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new(
+                "second internal queued turn".to_string(),
+                WorkOrigin::Internal,
+            ),
+            HandlingMode::Queue,
+        )
+        .await
+        .expect("second internal queued turn should be admitted while first is running");
+
+    wait_for_start_turn_call_count(
+        &service,
+        2,
+        "second internal queued turn should drain after the running turn completes",
+    )
+    .await;
+
+    let prompts: Vec<String> = service
+        .recorded_start_turn_prompts()
+        .await
+        .into_iter()
+        .map(|(_, prompt)| prompt)
+        .collect();
+    assert!(
+        prompts
+            .iter()
+            .any(|prompt| prompt == "first internal queued turn"),
+        "first prompt should be delivered to runtime: {prompts:?}"
+    );
+    assert!(
+        prompts
+            .iter()
+            .any(|prompt| prompt == "second internal queued turn"),
+        "second prompt should drain to runtime after first completes: {prompts:?}"
+    );
+}
+
 static REAL_COMMS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[tokio::test]

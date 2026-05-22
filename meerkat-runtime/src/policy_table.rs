@@ -87,11 +87,7 @@ impl DefaultPolicyTable {
             return match mode {
                 meerkat_core::types::HandlingMode::Queue => pd(
                     ApplyMode::StageRunStart,
-                    if runtime_idle {
-                        WakeMode::WakeIfIdle
-                    } else {
-                        WakeMode::None
-                    },
+                    WakeMode::WakeIfIdle,
                     QueueMode::Fifo,
                     ConsumePoint::OnRunComplete,
                     DrainPolicy::QueueNextTurn,

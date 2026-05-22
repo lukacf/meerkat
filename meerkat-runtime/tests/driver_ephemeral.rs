@@ -31,6 +31,33 @@ fn make_prompt_input(text: &str) -> Input {
     })
 }
 
+fn make_prompt_input_with_handling_mode(
+    text: &str,
+    handling_mode: meerkat_core::types::HandlingMode,
+) -> Input {
+    Input::Prompt(PromptInput {
+        header: InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: InputOrigin::Operator,
+            durability: InputDurability::Durable,
+            visibility: InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        text: text.into(),
+        blocks: None,
+        typed_turn_appends: Vec::new(),
+        turn_metadata: Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(handling_mode),
+                ..Default::default()
+            },
+        ),
+    })
+}
+
 fn make_peer_terminal(body: &str) -> Input {
     Input::Peer(PeerInput {
         header: InputHeader {
@@ -171,6 +198,26 @@ async fn accept_prompt_running_queues_and_wakes() {
     // Prompt always wakes (but runtime is running so wake_mode is still WakeIfIdle,
     // but runtime_idle=false so wake_requested should be false)
     assert!(!driver.take_wake_requested());
+}
+
+#[tokio::test]
+async fn accept_explicit_queue_prompt_running_wakes_after_current_turn() {
+    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+    bind_running(&mut driver, RunId::new(), RuntimeState::Idle);
+
+    let input = make_prompt_input_with_handling_mode(
+        "queued direct console input",
+        meerkat_core::types::HandlingMode::Queue,
+    );
+    let result = driver.accept_input(input).await.unwrap();
+
+    assert!(result.is_accepted());
+    assert_machine_owned_admission_signal(&result, false, PostAdmissionSignal::WakeLoop);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::WakeLoop,
+        "explicit HandlingMode::Queue while running must wake the loop after the active turn"
+    );
 }
 
 // WIP: see `accept_prompt_idle_queues_and_wakes` for the shared

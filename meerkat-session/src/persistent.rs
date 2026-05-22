@@ -1962,6 +1962,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
     }
 
+    pub async fn active_turn_system_context_boundary_available(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<bool>, SessionError> {
+        self.inner
+            .active_turn_system_context_boundary_available(id)
+            .await
+    }
+
     async fn fail_closed_runtime_projection_update(
         &self,
         id: &SessionId,

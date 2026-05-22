@@ -333,6 +333,13 @@ pub trait MobSessionService:
         Ok(None)
     }
 
+    async fn active_turn_system_context_boundary_available(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<bool>, SessionError> {
+        Ok(None)
+    }
+
     async fn checkpoint_committed_runtime_session_snapshot(
         &self,
         _session_id: &SessionId,
@@ -542,6 +549,16 @@ where
         )
         .await?;
         Ok(None)
+    }
+
+    async fn active_turn_system_context_boundary_available(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<bool>, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::active_turn_system_context_boundary_available(
+            self, session_id,
+        )
+        .await
     }
 }
 
@@ -757,6 +774,16 @@ where
     ) -> Result<Option<Vec<u8>>, SessionError> {
         meerkat_session::PersistentSessionService::<B>::stage_live_system_context_boundary_snapshot(
             self, session_id, appends,
+        )
+        .await
+    }
+
+    async fn active_turn_system_context_boundary_available(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<bool>, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::active_turn_system_context_boundary_available(
+            self, session_id,
         )
         .await
     }

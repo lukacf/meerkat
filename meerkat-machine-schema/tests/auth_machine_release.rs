@@ -28,6 +28,87 @@ fn release_transition_is_valid_on_input_release() -> Result<(), String> {
 }
 
 #[test]
+fn credential_release_terminality_is_generated_from_oauth_membership() {
+    let schema = dsl_auth_machine();
+    for (transition_name, target_phase, guard_name) in [
+        (
+            "ReleaseCredentialLifecycleWithOAuth",
+            "ReauthRequired",
+            "oauth_membership_present",
+        ),
+        (
+            "ReleaseCredentialLifecycleWithoutOAuth",
+            "Released",
+            "oauth_membership_absent",
+        ),
+    ] {
+        let transition = schema
+            .transitions
+            .iter()
+            .find(|transition| transition.name.as_str() == transition_name)
+            .unwrap_or_else(|| panic!("AuthMachine must declare `{transition_name}`"));
+        match &transition.on {
+            TriggerMatch::Input { variant, .. } => {
+                assert_eq!(variant.as_str(), "ReleaseCredentialLifecycle")
+            }
+            other => panic!("`{transition_name}` must be input-triggered, got {other:?}"),
+        }
+        assert_eq!(transition.to.as_str(), target_phase);
+        assert!(
+            transition
+                .guards
+                .iter()
+                .any(|guard| guard.name == guard_name),
+            "`{transition_name}` must carry generated guard `{guard_name}`"
+        );
+    }
+}
+
+#[test]
+fn restore_snapshot_no_credential_terminality_is_generated_from_oauth_observation() {
+    let schema = dsl_auth_machine();
+    for (transition_name, target_phase, guard_name) in [
+        (
+            "RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth",
+            "ReauthRequired",
+            "restore_oauth_membership_present",
+        ),
+        (
+            "RestoreCredentialLifecycleSnapshotNoCredentialWithoutOAuth",
+            "Released",
+            "restore_oauth_membership_absent",
+        ),
+    ] {
+        let transition = schema
+            .transitions
+            .iter()
+            .find(|transition| transition.name.as_str() == transition_name)
+            .unwrap_or_else(|| panic!("AuthMachine must declare `{transition_name}`"));
+        match &transition.on {
+            TriggerMatch::Input { variant, .. } => {
+                assert_eq!(variant.as_str(), "RestoreCredentialLifecycleSnapshot")
+            }
+            other => panic!("`{transition_name}` must be input-triggered, got {other:?}"),
+        }
+        assert_eq!(transition.to.as_str(), target_phase);
+        assert!(
+            transition
+                .guards
+                .iter()
+                .any(|guard| guard.name == "restore_snapshot_has_no_credential"),
+            "`{transition_name}` must identify the no-credential restore case in generated authority"
+        );
+        assert!(
+            transition
+                .guards
+                .iter()
+                .any(|guard| guard.name == guard_name),
+            "`{transition_name}` must carry generated guard `{guard_name}`"
+        );
+    }
+}
+
+#[test]
 fn release_transition_emits_lifecycle_event_with_publication_facts() -> Result<(), String> {
     let release = release_transition()?;
 

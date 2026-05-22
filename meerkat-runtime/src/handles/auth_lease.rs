@@ -108,80 +108,6 @@ impl ReleasedOAuthFlows {
     }
 }
 
-fn has_oauth_membership(state: &auth_dsl::AuthMachineState) -> bool {
-    !state.oauth_browser_flow_ids.is_empty()
-        || !state.oauth_device_flow_ids.is_empty()
-        || !state.oauth_device_poll_ids.is_empty()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn merge_oauth_membership(
-    restored: &mut auth_dsl::AuthMachineState,
-    current: &auth_dsl::AuthMachineState,
-) {
-    for flow_id in &current.oauth_browser_flow_ids {
-        restored.oauth_browser_flow_ids.insert(flow_id.clone());
-        if let Some(provider) = current.oauth_browser_flow_providers.get(flow_id).cloned() {
-            restored
-                .oauth_browser_flow_providers
-                .insert(flow_id.clone(), provider);
-        }
-        if let Some(redirect_uri) = current
-            .oauth_browser_flow_redirect_uris
-            .get(flow_id)
-            .cloned()
-        {
-            restored
-                .oauth_browser_flow_redirect_uris
-                .insert(flow_id.clone(), redirect_uri);
-        }
-        if let Some(expires_at_millis) = current
-            .oauth_browser_flow_expires_at_millis
-            .get(flow_id)
-            .copied()
-        {
-            restored
-                .oauth_browser_flow_expires_at_millis
-                .insert(flow_id.clone(), expires_at_millis);
-        }
-    }
-    for flow_id in &current.oauth_device_flow_ids {
-        restored.oauth_device_flow_ids.insert(flow_id.clone());
-        if let Some(provider) = current.oauth_device_flow_providers.get(flow_id).cloned() {
-            restored
-                .oauth_device_flow_providers
-                .insert(flow_id.clone(), provider);
-        }
-        if let Some(expires_at_millis) = current
-            .oauth_device_flow_expires_at_millis
-            .get(flow_id)
-            .copied()
-        {
-            restored
-                .oauth_device_flow_expires_at_millis
-                .insert(flow_id.clone(), expires_at_millis);
-        }
-    }
-    for poll_id in &current.oauth_device_poll_ids {
-        restored.oauth_device_poll_ids.insert(poll_id.clone());
-    }
-    let browser_count = u64::try_from(restored.oauth_browser_flow_ids.len()).unwrap_or(u64::MAX);
-    let device_count = u64::try_from(restored.oauth_device_flow_ids.len()).unwrap_or(u64::MAX);
-    restored.oauth_outstanding_flow_count = browser_count.saturating_add(device_count);
-}
-
-fn restore_input_from_state(state: &auth_dsl::AuthMachineState) -> auth_dsl::AuthMachineInput {
-    restore_input_from_lifecycle(
-        state.lifecycle_phase,
-        state.expires_at,
-        state.last_refresh,
-        state.refresh_attempt,
-        state.credential_present,
-        state.credential_generation,
-        state.credential_published_at_millis,
-    )
-}
-
 fn restore_phase_to_dsl(phase: AuthLeasePhase) -> auth_dsl::AuthLifecyclePhase {
     match phase {
         AuthLeasePhase::Valid => auth_dsl::AuthLifecyclePhase::Valid,
@@ -213,10 +139,33 @@ fn restore_input_from_lifecycle(
     }
 }
 
-fn restore_oauth_inputs_from_state(
+fn restore_credential_lifecycle_snapshot_input(
+    lifecycle_phase: Option<auth_dsl::AuthLifecyclePhase>,
+    expires_at: Option<u64>,
+    last_refresh: Option<u64>,
+    refresh_attempt: u64,
+    credential_present: bool,
+    credential_generation: u64,
+    credential_published_at_millis: Option<u64>,
+    restored_oauth_membership_observed: bool,
+) -> auth_dsl::AuthMachineInput {
+    auth_dsl::AuthMachineInput::RestoreCredentialLifecycleSnapshot {
+        lifecycle_phase,
+        expires_at,
+        last_refresh,
+        refresh_attempt,
+        credential_present,
+        credential_generation,
+        credential_published_at_millis,
+        restored_oauth_membership_observed,
+    }
+}
+
+fn append_restore_oauth_inputs_from_state(
+    inputs: &mut Vec<auth_dsl::AuthMachineInput>,
+    poll_inputs: &mut Vec<auth_dsl::AuthMachineInput>,
     state: &auth_dsl::AuthMachineState,
-) -> Vec<auth_dsl::AuthMachineInput> {
-    let mut inputs = Vec::new();
+) {
     for flow_id in &state.oauth_browser_flow_ids {
         inputs.push(auth_dsl::AuthMachineInput::RestoreOAuthBrowserFlow {
             flow_id: flow_id.clone(),
@@ -239,11 +188,28 @@ fn restore_oauth_inputs_from_state(
         });
     }
     for poll_id in &state.oauth_device_poll_ids {
-        inputs.push(auth_dsl::AuthMachineInput::RestoreOAuthDevicePoll {
+        poll_inputs.push(auth_dsl::AuthMachineInput::RestoreOAuthDevicePoll {
             flow_id: poll_id.clone(),
         });
     }
+}
+
+fn restore_oauth_inputs_from_states(
+    states: &[&auth_dsl::AuthMachineState],
+) -> Vec<auth_dsl::AuthMachineInput> {
+    let mut inputs = Vec::new();
+    let mut poll_inputs = Vec::new();
+    for state in states {
+        append_restore_oauth_inputs_from_state(&mut inputs, &mut poll_inputs, state);
+    }
+    inputs.extend(poll_inputs);
     inputs
+}
+
+fn restore_oauth_membership_observed(states: &[&auth_dsl::AuthMachineState]) -> bool {
+    states
+        .iter()
+        .any(|state| state.oauth_outstanding_flow_count > 0)
 }
 
 fn map_auth_machine_error(
@@ -333,11 +299,30 @@ fn restore_state_to_registry(
     state: &auth_dsl::AuthMachineState,
     context: &'static str,
 ) -> Result<(AuthLeasePhase, AuthLeaseTransition), DslTransitionError> {
-    let oauth_inputs = restore_oauth_inputs_from_state(state);
+    restore_state_with_oauth_sources_to_registry(registry, lease_key, state, &[state], context)
+}
+
+fn restore_state_with_oauth_sources_to_registry(
+    registry: &mut AuthLeaseRegistry,
+    lease_key: &LeaseKey,
+    lifecycle_state: &auth_dsl::AuthMachineState,
+    oauth_sources: &[&auth_dsl::AuthMachineState],
+    context: &'static str,
+) -> Result<(AuthLeasePhase, AuthLeaseTransition), DslTransitionError> {
+    let oauth_inputs = restore_oauth_inputs_from_states(oauth_sources);
     apply_restore_inputs_to_registry(
         registry,
         lease_key,
-        restore_input_from_state(state),
+        restore_credential_lifecycle_snapshot_input(
+            Some(lifecycle_state.lifecycle_phase),
+            lifecycle_state.expires_at,
+            lifecycle_state.last_refresh,
+            lifecycle_state.refresh_attempt,
+            lifecycle_state.credential_present,
+            lifecycle_state.credential_generation,
+            lifecycle_state.credential_published_at_millis,
+            restore_oauth_membership_observed(oauth_sources),
+        ),
         oauth_inputs,
         context,
     )
@@ -356,18 +341,20 @@ fn restore_lifecycle_with_oauth_to_registry(
     credential_published_at_millis: Option<u64>,
     context: &'static str,
 ) -> Result<(AuthLeasePhase, AuthLeaseTransition), DslTransitionError> {
-    let oauth_inputs = restore_oauth_inputs_from_state(oauth);
+    let oauth_sources = [oauth];
+    let oauth_inputs = restore_oauth_inputs_from_states(&oauth_sources);
     apply_restore_inputs_to_registry(
         registry,
         lease_key,
-        restore_input_from_lifecycle(
-            lifecycle_phase,
+        restore_credential_lifecycle_snapshot_input(
+            Some(lifecycle_phase),
             expires_at,
             last_refresh,
             refresh_attempt,
             credential_present,
             credential_generation,
             credential_published_at_millis,
+            restore_oauth_membership_observed(&oauth_sources),
         ),
         oauth_inputs,
         context,
@@ -498,6 +485,17 @@ fn run_release_after_accept_hook(lease_key: &LeaseKey) {
 #[derive(Default)]
 struct AuthLeaseRegistry {
     authorities: HashMap<LeaseKey, auth_dsl::AuthMachineAuthority>,
+}
+
+fn registry_phase_or_released(
+    registry: &AuthLeaseRegistry,
+    lease_key: &LeaseKey,
+) -> AuthLeasePhase {
+    registry
+        .authorities
+        .get(lease_key)
+        .map(|current| map_phase(current.state().lifecycle_phase))
+        .unwrap_or(AuthLeasePhase::Released)
 }
 
 impl std::fmt::Debug for RuntimeAuthLeaseHandle {
@@ -854,19 +852,23 @@ impl RuntimeAuthLeaseHandle {
             .as_ref()
             .map(|state| state.credential_generation)
             .unwrap_or(0);
-        if current_generation > previous_generation_value {
-            let to_phase = match previous_state {
+        let restore_result = if current_generation > previous_generation_value {
+            match previous_state {
                 Some(previous_state) => {
-                    if let Some(current) = guard.authorities.get(lease_key) {
-                        let mut current_state = current.state().clone();
-                        merge_oauth_membership(&mut current_state, &previous_state);
-                        restore_state_to_registry(&mut guard, lease_key, &current_state, CONTEXT)
+                    if let Some(current_state) = guard
+                        .authorities
+                        .get(lease_key)
+                        .map(|current| current.state().clone())
+                    {
+                        restore_state_with_oauth_sources_to_registry(
+                            &mut guard,
+                            lease_key,
+                            &current_state,
+                            &[&current_state, &previous_state],
+                            CONTEXT,
+                        )
                         .map(|(phase, _)| phase)
-                        .unwrap_or_else(|err| {
-                            tracing::error!(%lease_key, error = %err, "failed to restore AuthMachine after release observer failure");
-                            AuthLeasePhase::Released
-                        })
-                    } else if has_oauth_membership(&previous_state) {
+                    } else {
                         restore_lifecycle_with_oauth_to_registry(
                             &mut guard,
                             lease_key,
@@ -881,76 +883,48 @@ impl RuntimeAuthLeaseHandle {
                             CONTEXT,
                         )
                         .map(|(phase, _)| phase)
-                        .unwrap_or_else(|err| {
-                            tracing::error!(%lease_key, error = %err, "failed to restore AuthMachine OAuth membership after release observer failure");
-                            AuthLeasePhase::Released
-                        })
-                    } else {
-                        AuthLeasePhase::Released
                     }
                 }
-                None => guard
-                    .authorities
-                    .get(lease_key)
-                    .map(|current| map_phase(current.state().lifecycle_phase))
-                    .unwrap_or(AuthLeasePhase::Released),
-            };
-            drop(guard);
-            emit_audit(
-                lease_key,
-                "rollback_release_lease",
-                AuthLeasePhase::Released,
-                to_phase,
-            );
-            return;
-        }
-        let to_phase = if let Some(mut restored_state) = previous_state {
-            if let Some(current) = guard.authorities.get(lease_key) {
-                if current.state().credential_present {
-                    let mut current_state = current.state().clone();
-                    merge_oauth_membership(&mut current_state, &restored_state);
-                    let to_phase = restore_state_to_registry(
+                None => Ok(registry_phase_or_released(&guard, lease_key)),
+            }
+        } else if let Some(restored_state) = previous_state {
+            match guard
+                .authorities
+                .get(lease_key)
+                .map(|current| current.state().clone())
+            {
+                Some(current_state) if current_state.credential_present => {
+                    restore_state_with_oauth_sources_to_registry(
                         &mut guard,
                         lease_key,
                         &current_state,
+                        &[&current_state, &restored_state],
                         CONTEXT,
                     )
                     .map(|(phase, _)| phase)
-                    .unwrap_or_else(|err| {
-                        tracing::error!(%lease_key, error = %err, "failed to restore current AuthMachine credential after release observer failure");
-                        AuthLeasePhase::Released
-                    });
-                    drop(guard);
-                    emit_audit(
-                        lease_key,
-                        "rollback_release_lease",
-                        AuthLeasePhase::Released,
-                        to_phase,
-                    );
-                    return;
                 }
-                merge_oauth_membership(&mut restored_state, current.state());
-            }
-            let to_phase = restore_state_to_registry(&mut guard, lease_key, &restored_state, CONTEXT)
-            .map(|(phase, _)| phase)
-            .unwrap_or_else(|err| {
-                tracing::error!(%lease_key, error = %err, "failed to restore previous AuthMachine state after release observer failure");
-                AuthLeasePhase::Released
-            });
-            to_phase
-        } else if let Some(current) = guard.authorities.get(lease_key) {
-            let state = current.state();
-            if state.lifecycle_phase != auth_dsl::AuthLifecyclePhase::Released
-                || state.credential_present
-                || has_oauth_membership(state)
-            {
-                map_phase(state.lifecycle_phase)
-            } else {
-                AuthLeasePhase::Released
+                Some(current_state) => restore_state_with_oauth_sources_to_registry(
+                    &mut guard,
+                    lease_key,
+                    &restored_state,
+                    &[&restored_state, &current_state],
+                    CONTEXT,
+                )
+                .map(|(phase, _)| phase),
+                None => restore_state_to_registry(&mut guard, lease_key, &restored_state, CONTEXT)
+                    .map(|(phase, _)| phase),
             }
         } else {
-            AuthLeasePhase::Released
+            Ok(registry_phase_or_released(&guard, lease_key))
         };
+        let to_phase = restore_result.unwrap_or_else(|err| {
+            tracing::error!(
+                %lease_key,
+                error = %err,
+                "generated AuthMachine rollback after release observer failure was rejected"
+            );
+            registry_phase_or_released(&guard, lease_key)
+        });
         drop(guard);
         emit_audit(
             lease_key,
@@ -972,9 +946,15 @@ impl RuntimeAuthLeaseHandle {
             auth_dsl::AuthMachineInput::RefreshFailed { .. } => "refresh_failed",
             auth_dsl::AuthMachineInput::MarkReauthRequired => "mark_reauth_required",
             auth_dsl::AuthMachineInput::ClearCredentialLifecycle => "clear_credential_lifecycle",
+            auth_dsl::AuthMachineInput::ReleaseCredentialLifecycle => {
+                "release_credential_lifecycle"
+            }
             auth_dsl::AuthMachineInput::Release => "release_lease",
             auth_dsl::AuthMachineInput::RestoreAuthoritySnapshot { .. } => {
                 "restore_authority_snapshot"
+            }
+            auth_dsl::AuthMachineInput::RestoreCredentialLifecycleSnapshot { .. } => {
+                "restore_credential_lifecycle_snapshot"
             }
             auth_dsl::AuthMachineInput::RestoreOAuthBrowserFlow { .. } => {
                 "restore_oauth_browser_flow"
@@ -1230,12 +1210,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                 .authorities
                 .entry(lease_key.clone())
                 .or_insert_with(auth_dsl::AuthMachineAuthority::new);
-            let has_oauth_membership = has_oauth_membership(entry.state());
-            let input = if has_oauth_membership {
-                auth_dsl::AuthMachineInput::ClearCredentialLifecycle
-            } else {
-                auth_dsl::AuthMachineInput::Release
-            };
+            let input = auth_dsl::AuthMachineInput::ReleaseCredentialLifecycle;
             let from_phase = map_phase(entry.state().lifecycle_phase);
             let transition = auth_dsl::AuthMachineMutator::apply(entry, input.clone())
                 .map_err(|err| map_auth_machine_error(err, context))?;
@@ -1280,73 +1255,18 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             .get(lease_key)
             .map(|authority| map_phase(authority.state().lifecycle_phase))
             .unwrap_or(AuthLeasePhase::Released);
-        let existing_oauth = guard
-            .authorities
-            .get(lease_key)
-            .map(|authority| authority.state().clone());
-        let has_oauth_membership = existing_oauth.as_ref().is_some_and(has_oauth_membership);
-
-        if !snapshot.credential_present
-            || snapshot.phase.is_none()
-            || snapshot.phase == Some(AuthLeasePhase::Released)
-        {
-            let to_phase = if has_oauth_membership {
-                let (to_phase, _) = apply_restore_input_to_registry(
-                    &mut guard,
-                    lease_key,
-                    restore_input_from_lifecycle(
-                        auth_dsl::AuthLifecyclePhase::ReauthRequired,
-                        None,
-                        None,
-                        0,
-                        false,
-                        snapshot.generation,
-                        None,
-                    ),
-                    "AuthLeaseHandle::restore_auth_lifecycle_snapshot",
-                )?;
-                to_phase
-            } else {
-                let (to_phase, _) = apply_restore_input_to_registry(
-                    &mut guard,
-                    lease_key,
-                    restore_input_from_lifecycle(
-                        auth_dsl::AuthLifecyclePhase::Released,
-                        None,
-                        None,
-                        0,
-                        false,
-                        snapshot.generation,
-                        None,
-                    ),
-                    "AuthLeaseHandle::restore_auth_lifecycle_snapshot",
-                )?;
-                to_phase
-            };
-            emit_audit(
-                lease_key,
-                "restore_auth_lifecycle_snapshot",
-                from_phase,
-                to_phase,
-            );
-            return Ok(None);
-        }
-
-        let Some(phase) = snapshot.phase else {
-            return Ok(None);
-        };
-        let expires_at = snapshot.expires_at;
         let (to_phase, auth_transition) = apply_restore_input_to_registry(
             &mut guard,
             lease_key,
-            restore_input_from_lifecycle(
-                restore_phase(phase),
-                expires_at,
+            restore_credential_lifecycle_snapshot_input(
+                snapshot.phase.map(restore_phase),
+                snapshot.expires_at,
                 None,
                 0,
-                true,
+                snapshot.credential_present,
                 snapshot.generation,
                 snapshot.credential_published_at_millis,
+                false,
             ),
             "AuthLeaseHandle::restore_auth_lifecycle_snapshot",
         )?;
@@ -1356,7 +1276,14 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             from_phase,
             to_phase,
         );
-        Ok(Some(auth_transition))
+        if snapshot.credential_present
+            && snapshot.phase.is_some()
+            && snapshot.phase != Some(AuthLeasePhase::Released)
+        {
+            Ok(Some(auth_transition))
+        } else {
+            Ok(None)
+        }
     }
 
     fn auth_lifecycle_restore_instance_id(&self) -> usize {
@@ -1846,7 +1773,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_released_oauth_membership_rejected_by_generated_authority() {
+    fn restore_released_oauth_membership_reauths_through_generated_authority() {
         let mut registry = AuthLeaseRegistry::default();
         let key = lease("dev", "restore_released_oauth");
         let mut state = empty_auth_state();
@@ -1866,23 +1793,23 @@ mod tests {
             .insert("browser-flow".to_string(), 1_900_000_000);
         state.oauth_outstanding_flow_count = 1;
 
-        let err = restore_state_to_registry(
+        let (phase, transition) = restore_state_to_registry(
             &mut registry,
             &key,
             &state,
             "test_restore_released_oauth_membership",
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(
-            err.is_guard_rejected(),
-            "released restored OAuth membership must be refused by generated authority: {err:?}"
+        assert_eq!(phase, AuthLeasePhase::ReauthRequired);
+        assert_eq!(transition.phase(), AuthLeasePhase::ReauthRequired);
+        let restored = registry.authorities.get(&key).unwrap().state();
+        assert_eq!(
+            restored.lifecycle_phase,
+            auth_dsl::AuthLifecyclePhase::ReauthRequired
         );
-        assert!(
-            err.reason.contains("RestoreOAuthBrowserFlow"),
-            "rejection should name the generated restore input: {err:?}"
-        );
-        assert!(!registry.authorities.contains_key(&key));
+        assert!(restored.oauth_browser_flow_ids.contains("browser-flow"));
+        assert_eq!(restored.oauth_outstanding_flow_count, 1);
     }
 
     #[test]

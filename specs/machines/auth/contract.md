@@ -32,8 +32,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RefreshFailed`(http_status: Option<u64>, oauth_error_code: Option<String>, local_credential_unusable: Bool)
 - `MarkReauthRequired`
 - `ClearCredentialLifecycle`
+- `ReleaseCredentialLifecycle`
 - `Release`
 - `RestoreAuthoritySnapshot`(lifecycle_phase: AuthLifecyclePhase, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, credential_generation: u64, credential_published_at_millis: Option<u64>)
+- `RestoreCredentialLifecycleSnapshot`(lifecycle_phase: Option<AuthLifecyclePhase>, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, credential_generation: u64, credential_published_at_millis: Option<u64>, restored_oauth_membership_observed: Bool)
 - `RestoreOAuthBrowserFlow`(flow_id: String, provider: Option<String>, redirect_uri: Option<String>, expires_at_millis: Option<u64>)
 - `RestoreOAuthDeviceFlow`(flow_id: String, provider: Option<String>, expires_at_millis: Option<u64>)
 - `RestoreOAuthDevicePoll`(flow_id: String)
@@ -207,9 +209,83 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 
+### `ReleaseCredentialLifecycleWithOAuth`
+- From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `ReleaseCredentialLifecycle`()
+- Guards:
+  - `oauth_membership_present`
+- Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
+### `ReleaseCredentialLifecycleWithoutOAuth`
+- From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `ReleaseCredentialLifecycle`()
+- Guards:
+  - `oauth_membership_absent`
+- Emits: `EmitLifecycleEvent`
+- To: `Released`
+
 ### `Release`
 - From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
 - On: `Release`()
+- Emits: `EmitLifecycleEvent`
+- To: `Released`
+
+### `RestoreCredentialLifecycleSnapshotValid`
+- From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed)
+- Guards:
+  - ``
+- Emits: `EmitLifecycleEvent`
+- To: `Valid`
+
+### `RestoreCredentialLifecycleSnapshotExpiring`
+- From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed)
+- Guards:
+  - ``
+- Emits: `EmitLifecycleEvent`
+- To: `Expiring`
+
+### `RestoreCredentialLifecycleSnapshotRefreshing`
+- From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed)
+- Guards:
+  - ``
+- Emits: `EmitLifecycleEvent`
+- To: `Refreshing`
+
+### `RestoreCredentialLifecycleSnapshotExpired`
+- From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed)
+- Guards:
+  - ``
+- Emits: `EmitLifecycleEvent`
+- To: `Expired`
+
+### `RestoreCredentialLifecycleSnapshotReauthRequired`
+- From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed)
+- Guards:
+  - ``
+- Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
+### `RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth`
+- From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed)
+- Guards:
+  - `restore_snapshot_has_no_credential`
+  - `restore_oauth_membership_present`
+- Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
+### `RestoreCredentialLifecycleSnapshotNoCredentialWithoutOAuth`
+- From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed)
+- Guards:
+  - `restore_snapshot_has_no_credential`
+  - `restore_oauth_membership_absent`
 - Emits: `EmitLifecycleEvent`
 - To: `Released`
 

@@ -84,9 +84,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClearCredentialLifecycle`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
+- `ReleaseCredentialLifecycleWithOAuth`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ReleaseCredentialLifecycleWithoutOAuth`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
 - `Release`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
+- `RestoreCredentialLifecycleSnapshotValid`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `RestoreCredentialLifecycleSnapshotExpiring`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `RestoreCredentialLifecycleSnapshotRefreshing`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `RestoreCredentialLifecycleSnapshotExpired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `RestoreCredentialLifecycleSnapshotReauthRequired`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `RestoreCredentialLifecycleSnapshotNoCredentialWithoutOAuth`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
 - `RestoreAuthoritySnapshotValid`
   - anchors: `oauth_flow_handle`
   - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`

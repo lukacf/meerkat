@@ -93,6 +93,7 @@ macro_rules! auth_catalog_machine_dsl {
                 },
                 MarkReauthRequired,
                 ClearCredentialLifecycle,
+                ReleaseCredentialLifecycle,
                 Release,
                 RestoreAuthoritySnapshot {
                     lifecycle_phase: AuthLifecyclePhase,
@@ -102,6 +103,16 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_present: bool,
                     credential_generation: u64,
                     credential_published_at_millis: Option<u64>,
+                },
+                RestoreCredentialLifecycleSnapshot {
+                    lifecycle_phase: Option<Enum<AuthLifecyclePhase>>,
+                    expires_at: Option<u64>,
+                    last_refresh: Option<u64>,
+                    refresh_attempt: u64,
+                    credential_present: bool,
+                    credential_generation: u64,
+                    credential_published_at_millis: Option<u64>,
+                    restored_oauth_membership_observed: bool,
                 },
                 RestoreOAuthBrowserFlow { flow_id: String, provider: Option<String>, redirect_uri: Option<String>, expires_at_millis: Option<u64> },
                 RestoreOAuthDeviceFlow { flow_id: String, provider: Option<String>, expires_at_millis: Option<u64> },
@@ -520,6 +531,53 @@ macro_rules! auth_catalog_machine_dsl {
                 }
             }
 
+            transition ReleaseCredentialLifecycleWithOAuth {
+                on input ReleaseCredentialLifecycle
+                guard "oauth_membership_present" { self.oauth_outstanding_flow_count > 0 }
+                update {
+                    self.expires_at = None;
+                    self.last_refresh = None;
+                    self.refresh_attempt = 0;
+                    self.credential_present = false;
+                    self.credential_published_at_millis = None;
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition ReleaseCredentialLifecycleWithoutOAuth {
+                on input ReleaseCredentialLifecycle
+                guard "oauth_membership_absent" { self.oauth_outstanding_flow_count == 0 }
+                update {
+                    self.expires_at = None;
+                    self.last_refresh = None;
+                    self.refresh_attempt = 0;
+                    self.credential_present = false;
+                    self.credential_published_at_millis = None;
+                    self.oauth_browser_flow_ids = EmptySet;
+                    self.oauth_browser_flow_providers = EmptyMap;
+                    self.oauth_browser_flow_redirect_uris = EmptyMap;
+                    self.oauth_browser_flow_expires_at_millis = EmptyMap;
+                    self.oauth_device_flow_ids = EmptySet;
+                    self.oauth_device_flow_providers = EmptyMap;
+                    self.oauth_device_flow_expires_at_millis = EmptyMap;
+                    self.oauth_device_poll_ids = EmptySet;
+                    self.oauth_outstanding_flow_count = 0;
+                }
+                to Released
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
             transition Release {
                 on input Release
                 update {
@@ -527,6 +585,234 @@ macro_rules! auth_catalog_machine_dsl {
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
                     self.credential_present = false;
+                    self.credential_published_at_millis = None;
+                    self.oauth_browser_flow_ids = EmptySet;
+                    self.oauth_browser_flow_providers = EmptyMap;
+                    self.oauth_browser_flow_redirect_uris = EmptyMap;
+                    self.oauth_browser_flow_expires_at_millis = EmptyMap;
+                    self.oauth_device_flow_ids = EmptySet;
+                    self.oauth_device_flow_providers = EmptyMap;
+                    self.oauth_device_flow_expires_at_millis = EmptyMap;
+                    self.oauth_device_poll_ids = EmptySet;
+                    self.oauth_outstanding_flow_count = 0;
+                }
+                to Released
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition RestoreCredentialLifecycleSnapshotValid {
+                on input RestoreCredentialLifecycleSnapshot {
+                    lifecycle_phase,
+                    expires_at,
+                    last_refresh,
+                    refresh_attempt,
+                    credential_present,
+                    credential_generation,
+                    credential_published_at_millis,
+                    restored_oauth_membership_observed
+                }
+                guard { lifecycle_phase == Some(AuthLifecyclePhase::Valid) && credential_present && credential_published_at_millis != None }
+                update {
+                    self.expires_at = expires_at;
+                    self.last_refresh = last_refresh;
+                    self.refresh_attempt = refresh_attempt;
+                    self.credential_present = credential_present;
+                    if credential_generation > self.credential_generation {
+                        self.credential_generation = credential_generation;
+                    }
+                    self.credential_published_at_millis = credential_published_at_millis;
+                }
+                to Valid
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition RestoreCredentialLifecycleSnapshotExpiring {
+                on input RestoreCredentialLifecycleSnapshot {
+                    lifecycle_phase,
+                    expires_at,
+                    last_refresh,
+                    refresh_attempt,
+                    credential_present,
+                    credential_generation,
+                    credential_published_at_millis,
+                    restored_oauth_membership_observed
+                }
+                guard { lifecycle_phase == Some(AuthLifecyclePhase::Expiring) && credential_present && credential_published_at_millis != None }
+                update {
+                    self.expires_at = expires_at;
+                    self.last_refresh = last_refresh;
+                    self.refresh_attempt = refresh_attempt;
+                    self.credential_present = credential_present;
+                    if credential_generation > self.credential_generation {
+                        self.credential_generation = credential_generation;
+                    }
+                    self.credential_published_at_millis = credential_published_at_millis;
+                }
+                to Expiring
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition RestoreCredentialLifecycleSnapshotRefreshing {
+                on input RestoreCredentialLifecycleSnapshot {
+                    lifecycle_phase,
+                    expires_at,
+                    last_refresh,
+                    refresh_attempt,
+                    credential_present,
+                    credential_generation,
+                    credential_published_at_millis,
+                    restored_oauth_membership_observed
+                }
+                guard { lifecycle_phase == Some(AuthLifecyclePhase::Refreshing) && credential_present && credential_published_at_millis != None }
+                update {
+                    self.expires_at = expires_at;
+                    self.last_refresh = last_refresh;
+                    self.refresh_attempt = refresh_attempt;
+                    self.credential_present = credential_present;
+                    if credential_generation > self.credential_generation {
+                        self.credential_generation = credential_generation;
+                    }
+                    self.credential_published_at_millis = credential_published_at_millis;
+                }
+                to Refreshing
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition RestoreCredentialLifecycleSnapshotExpired {
+                on input RestoreCredentialLifecycleSnapshot {
+                    lifecycle_phase,
+                    expires_at,
+                    last_refresh,
+                    refresh_attempt,
+                    credential_present,
+                    credential_generation,
+                    credential_published_at_millis,
+                    restored_oauth_membership_observed
+                }
+                guard { lifecycle_phase == Some(AuthLifecyclePhase::Expired) && credential_present && credential_published_at_millis != None }
+                update {
+                    self.expires_at = expires_at;
+                    self.last_refresh = last_refresh;
+                    self.refresh_attempt = refresh_attempt;
+                    self.credential_present = credential_present;
+                    if credential_generation > self.credential_generation {
+                        self.credential_generation = credential_generation;
+                    }
+                    self.credential_published_at_millis = credential_published_at_millis;
+                }
+                to Expired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition RestoreCredentialLifecycleSnapshotReauthRequired {
+                on input RestoreCredentialLifecycleSnapshot {
+                    lifecycle_phase,
+                    expires_at,
+                    last_refresh,
+                    refresh_attempt,
+                    credential_present,
+                    credential_generation,
+                    credential_published_at_millis,
+                    restored_oauth_membership_observed
+                }
+                guard { lifecycle_phase == Some(AuthLifecyclePhase::ReauthRequired) && credential_present && credential_published_at_millis != None }
+                update {
+                    self.expires_at = expires_at;
+                    self.last_refresh = last_refresh;
+                    self.refresh_attempt = refresh_attempt;
+                    self.credential_present = credential_present;
+                    if credential_generation > self.credential_generation {
+                        self.credential_generation = credential_generation;
+                    }
+                    self.credential_published_at_millis = credential_published_at_millis;
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth {
+                on input RestoreCredentialLifecycleSnapshot {
+                    lifecycle_phase,
+                    expires_at,
+                    last_refresh,
+                    refresh_attempt,
+                    credential_present,
+                    credential_generation,
+                    credential_published_at_millis,
+                    restored_oauth_membership_observed
+                }
+                guard "restore_snapshot_has_no_credential" { credential_present == false || lifecycle_phase == None || lifecycle_phase == Some(AuthLifecyclePhase::Released) }
+                guard "restore_oauth_membership_present" { self.oauth_outstanding_flow_count > 0 || restored_oauth_membership_observed }
+                update {
+                    self.expires_at = None;
+                    self.last_refresh = None;
+                    self.refresh_attempt = 0;
+                    self.credential_present = false;
+                    if credential_generation > self.credential_generation {
+                        self.credential_generation = credential_generation;
+                    }
+                    self.credential_published_at_millis = None;
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition RestoreCredentialLifecycleSnapshotNoCredentialWithoutOAuth {
+                on input RestoreCredentialLifecycleSnapshot {
+                    lifecycle_phase,
+                    expires_at,
+                    last_refresh,
+                    refresh_attempt,
+                    credential_present,
+                    credential_generation,
+                    credential_published_at_millis,
+                    restored_oauth_membership_observed
+                }
+                guard "restore_snapshot_has_no_credential" { credential_present == false || lifecycle_phase == None || lifecycle_phase == Some(AuthLifecyclePhase::Released) }
+                guard "restore_oauth_membership_absent" { self.oauth_outstanding_flow_count == 0 && restored_oauth_membership_observed == false }
+                update {
+                    self.expires_at = None;
+                    self.last_refresh = None;
+                    self.refresh_attempt = 0;
+                    self.credential_present = false;
+                    if credential_generation > self.credential_generation {
+                        self.credential_generation = credential_generation;
+                    }
                     self.credential_published_at_millis = None;
                     self.oauth_browser_flow_ids = EmptySet;
                     self.oauth_browser_flow_providers = EmptyMap;

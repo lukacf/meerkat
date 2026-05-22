@@ -3,6 +3,14 @@
 use meerkat_machine_schema::catalog::dsl::dsl_auth_machine;
 use meerkat_machine_schema::{TriggerMatch, TypeRef};
 
+fn is_optional_auth_lifecycle_phase(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Option(inner)
+            if matches!(inner.as_ref(), TypeRef::Enum(enum_id) if enum_id.as_str() == "AuthLifecyclePhase")
+    )
+}
+
 #[test]
 fn auth_machine_declares_oauth_flow_lifecycle_state() {
     let schema = dsl_auth_machine();
@@ -106,6 +114,27 @@ fn auth_machine_restore_snapshot_routes_oauth_membership_per_flow() {
         "bulk lifecycle restore must not carry OAuth membership maps"
     );
 
+    let credential_restore = schema
+        .inputs
+        .variant_named("RestoreCredentialLifecycleSnapshot")
+        .expect("AuthMachine must declare generated credential lifecycle restore input");
+    assert!(
+        is_optional_auth_lifecycle_phase(
+            &credential_restore
+                .field_named("lifecycle_phase")
+                .expect("credential lifecycle restore must carry optional phase observation")
+                .ty
+        ),
+        "credential lifecycle restore must carry lifecycle_phase as Option<AuthLifecyclePhase>"
+    );
+    assert_eq!(
+        credential_restore
+            .field_named("restored_oauth_membership_observed")
+            .expect("credential lifecycle restore must carry typed OAuth restore observation")
+            .ty,
+        TypeRef::Bool
+    );
+
     let browser = schema
         .inputs
         .variant_named("RestoreOAuthBrowserFlow")
@@ -165,6 +194,7 @@ fn auth_machine_restore_snapshot_routes_oauth_membership_per_flow() {
 
     for input in [
         "RestoreAuthoritySnapshot",
+        "RestoreCredentialLifecycleSnapshot",
         "RestoreOAuthBrowserFlow",
         "RestoreOAuthDeviceFlow",
         "RestoreOAuthDevicePoll",

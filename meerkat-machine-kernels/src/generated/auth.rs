@@ -153,6 +153,8 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClearCredentialLifecycle {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseCredentialLifecycle {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Release {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RestoreAuthoritySnapshot {
@@ -163,6 +165,17 @@ pub mod inputs {
         pub credential_present: bool,
         pub credential_generation: u64,
         pub credential_published_at_millis: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreCredentialLifecycleSnapshot {
+        pub lifecycle_phase: Option<AuthLifecyclePhase>,
+        pub expires_at: Option<u64>,
+        pub last_refresh: Option<u64>,
+        pub refresh_attempt: u64,
+        pub credential_present: bool,
+        pub credential_generation: u64,
+        pub credential_published_at_millis: Option<u64>,
+        pub restored_oauth_membership_observed: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RestoreOAuthBrowserFlow {
@@ -259,8 +272,10 @@ pub enum Input {
     RefreshFailed(inputs::RefreshFailed),
     MarkReauthRequired(inputs::MarkReauthRequired),
     ClearCredentialLifecycle(inputs::ClearCredentialLifecycle),
+    ReleaseCredentialLifecycle(inputs::ReleaseCredentialLifecycle),
     Release(inputs::Release),
     RestoreAuthoritySnapshot(inputs::RestoreAuthoritySnapshot),
+    RestoreCredentialLifecycleSnapshot(inputs::RestoreCredentialLifecycleSnapshot),
     RestoreOAuthBrowserFlow(inputs::RestoreOAuthBrowserFlow),
     RestoreOAuthDeviceFlow(inputs::RestoreOAuthDeviceFlow),
     RestoreOAuthDevicePoll(inputs::RestoreOAuthDevicePoll),
@@ -287,8 +302,12 @@ impl Input {
             Self::RefreshFailed(_) => InputKind::RefreshFailed,
             Self::MarkReauthRequired(_) => InputKind::MarkReauthRequired,
             Self::ClearCredentialLifecycle(_) => InputKind::ClearCredentialLifecycle,
+            Self::ReleaseCredentialLifecycle(_) => InputKind::ReleaseCredentialLifecycle,
             Self::Release(_) => InputKind::Release,
             Self::RestoreAuthoritySnapshot(_) => InputKind::RestoreAuthoritySnapshot,
+            Self::RestoreCredentialLifecycleSnapshot(_) => {
+                InputKind::RestoreCredentialLifecycleSnapshot
+            }
             Self::RestoreOAuthBrowserFlow(_) => InputKind::RestoreOAuthBrowserFlow,
             Self::RestoreOAuthDeviceFlow(_) => InputKind::RestoreOAuthDeviceFlow,
             Self::RestoreOAuthDevicePoll(_) => InputKind::RestoreOAuthDevicePoll,
@@ -316,8 +335,10 @@ pub enum InputKind {
     RefreshFailed,
     MarkReauthRequired,
     ClearCredentialLifecycle,
+    ReleaseCredentialLifecycle,
     Release,
     RestoreAuthoritySnapshot,
+    RestoreCredentialLifecycleSnapshot,
     RestoreOAuthBrowserFlow,
     RestoreOAuthDeviceFlow,
     RestoreOAuthDevicePoll,
@@ -384,7 +405,16 @@ pub enum TransitionId {
     MarkReauthRequiredFromExpired,
     MarkReauthRequiredFromRefreshing,
     ClearCredentialLifecycle,
+    ReleaseCredentialLifecycleWithOAuth,
+    ReleaseCredentialLifecycleWithoutOAuth,
     Release,
+    RestoreCredentialLifecycleSnapshotValid,
+    RestoreCredentialLifecycleSnapshotExpiring,
+    RestoreCredentialLifecycleSnapshotRefreshing,
+    RestoreCredentialLifecycleSnapshotExpired,
+    RestoreCredentialLifecycleSnapshotReauthRequired,
+    RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth,
+    RestoreCredentialLifecycleSnapshotNoCredentialWithoutOAuth,
     RestoreAuthoritySnapshotValid,
     RestoreAuthoritySnapshotExpiring,
     RestoreAuthoritySnapshotRefreshing,

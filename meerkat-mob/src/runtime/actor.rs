@@ -11385,7 +11385,17 @@ impl MobActor {
 
             match adapter.runtime_state(session_id).await {
                 Ok(meerkat_runtime::RuntimeState::Running) => return Ok(true),
-                Ok(_) => return Ok(false),
+                Ok(_) => {
+                    if self
+                        .provisioner
+                        .is_member_active(&entry.member_ref)
+                        .await?
+                        .unwrap_or(false)
+                    {
+                        return Ok(true);
+                    }
+                    return Ok(false);
+                }
                 Err(error) => {
                     tracing::debug!(
                         agent_identity = %entry.agent_identity,

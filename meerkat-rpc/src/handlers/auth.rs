@@ -368,7 +368,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
 ) -> Result<TokenCommitSnapshot, RpcResponse> {
     let key = TokenKey::from_auth_binding(auth_binding);
     let lease_key = LeaseKey::from_auth_binding(auth_binding);
-    let auth_lease = runtime.auth_lease_handle();
+    let auth_lease = runtime.generated_auth_lease_handle();
     let previous_lifecycle_restore = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
     let previous_lifecycle = previous_lifecycle_restore.snapshot().clone();
     let previous = match store.load(&key).await {
@@ -1741,6 +1741,7 @@ pub async fn handle_auth_status_get(
         Err(r) => return r.with_id(id),
     };
     let auth_lease = runtime.auth_lease_handle();
+    let generated_auth_lease = runtime.generated_auth_lease_handle();
     let lease_key = LeaseKey::from_auth_binding(&auth_binding);
     let now = chrono::Utc::now();
     if let Err(err) = auth_lease.observe_credential_freshness(
@@ -1769,7 +1770,7 @@ pub async fn handle_auth_status_get(
             && let Some(store) = token_store.as_ref()
             && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_tokens_for_status(
                 store.as_ref(),
-                auth_lease.as_ref(),
+                &generated_auth_lease,
                 &auth_binding,
                 expected_mode,
                 now,

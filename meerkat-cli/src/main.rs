@@ -3601,7 +3601,7 @@ async fn handle_auth_command(
                     None
                 };
             let projection = project_cli_auth_status(
-                scope.auth_lease.as_ref(),
+                &scope.auth_lease,
                 token_store.as_deref(),
                 &auth_binding,
                 profile,
@@ -5213,7 +5213,7 @@ struct CliAuthStatusProjection {
 }
 
 async fn project_cli_auth_status(
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     token_store: Option<&dyn meerkat_providers::auth_store::TokenStore>,
     auth_binding: &AuthBindingRef,
     auth_profile: &meerkat_core::AuthProfile,
@@ -12404,13 +12404,13 @@ mod tests {
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
     async fn test_cli_login_save_boundary_publishes_binding_scoped_auth_lease() {
-        use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+        use meerkat_core::handles::{AuthLeasePhase, LeaseKey};
         use meerkat_providers::auth_store::{
             EphemeralTokenStore, PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
         };
 
         let store = EphemeralTokenStore::new();
-        let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let auth_lease = new_cli_auth_handles().0;
         let auth_binding = meerkat_core::AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
@@ -12428,7 +12428,7 @@ mod tests {
             metadata: serde_json::Value::Null,
         };
 
-        save_cli_tokens_and_publish_lifecycle(&store, &auth_lease, &auth_binding, &tokens)
+        save_cli_tokens_and_publish_lifecycle(&store, auth_lease.as_ref(), &auth_binding, &tokens)
             .await
             .expect("login save boundary should publish lease lifecycle");
 
@@ -12839,11 +12839,11 @@ mod tests {
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
     async fn test_cli_auth_status_rehydrates_marked_oauth_token_after_restart() {
-        use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
+        use meerkat_core::handles::LeaseKey;
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
 
         let store = EphemeralTokenStore::new();
-        let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let auth_lease = new_cli_auth_handles().0;
         let auth_binding = openai_auth_binding();
         let tokens = openai_oauth_tokens();
         store
@@ -12890,9 +12890,14 @@ mod tests {
         use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
         use meerkat_providers::auth_store::TokenStore;
 
-        let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let raw_auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let auth_lease =
+            meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+                Arc::clone(&raw_auth_lease),
+            )
+            .expect("CLI test AuthLeaseHandle is certified by generated AuthMachine authority");
         let auth_binding = openai_auth_binding();
-        auth_lease
+        raw_auth_lease
             .acquire_lease(
                 &LeaseKey::from_auth_binding(&auth_binding),
                 (chrono::Utc::now() + chrono::Duration::minutes(30)).timestamp() as u64,

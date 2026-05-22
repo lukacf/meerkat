@@ -22,7 +22,7 @@ use crate::connection::AuthBindingRef;
 use crate::generated::auth_lease_durable_lifecycle_marker as durable_marker;
 use crate::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot,
-    AuthLeaseTransition, DslTransitionError, LeaseKey,
+    AuthLeaseTransition, DslTransitionError, GeneratedAuthLeaseHandle, LeaseKey,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -110,6 +110,7 @@ pub enum TokenLifecycleMarkerError {
 }
 
 fn mark_tokens_lifecycle_published_inner(
+    key: &TokenKey,
     tokens: &PersistedTokens,
     phase: AuthLeasePhase,
     generation: u64,
@@ -119,6 +120,7 @@ fn mark_tokens_lifecycle_published_inner(
     marked.metadata = durable_marker::metadata_with_marker(
         &marked.metadata,
         durable_marker::DurableAuthLifecycleMarker {
+            token_key: key.clone(),
             phase,
             expires_at: persisted_token_expires_at_epoch_secs(tokens),
             generation,
@@ -129,8 +131,8 @@ fn mark_tokens_lifecycle_published_inner(
 }
 
 #[cfg(test)]
-fn mark_tokens_lifecycle_published(tokens: &PersistedTokens) -> PersistedTokens {
-    mark_tokens_lifecycle_published_inner(tokens, AuthLeasePhase::Valid, 1, 1)
+fn mark_tokens_lifecycle_published(key: &TokenKey, tokens: &PersistedTokens) -> PersistedTokens {
+    mark_tokens_lifecycle_published_inner(key, tokens, AuthLeasePhase::Valid, 1, 1)
 }
 
 pub fn mark_tokens_lifecycle_published_for_transition(
@@ -157,6 +159,7 @@ pub fn mark_tokens_lifecycle_published_for_transition(
         .credential_published_at_millis()
         .ok_or(TokenLifecycleMarkerError::CredentialPublicationTimeMissing)?;
     Ok(mark_tokens_lifecycle_published_inner(
+        key,
         tokens,
         transition.phase(),
         transition.generation(),
@@ -340,11 +343,13 @@ pub enum AuthStatusRehydrateError {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn restore_marked_token_lifecycle(
-    auth_lease: &dyn AuthLeaseHandle,
+    auth_lease: &GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
 ) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
-    let Some(publication) = durable_marker::restore_publication_from_metadata(&tokens.metadata)
+    let key = TokenKey::from_auth_binding(auth_binding);
+    let Some(publication) =
+        durable_marker::restore_publication_from_metadata(&tokens.metadata, &key)
     else {
         return Ok(None);
     };
@@ -361,7 +366,7 @@ pub(crate) fn restore_marked_token_lifecycle(
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn rehydrate_marked_tokens_for_status(
     token_store: &dyn TokenStore,
-    auth_lease: &dyn AuthLeaseHandle,
+    auth_lease: &GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     expected_mode: PersistedAuthMode,
     now: DateTime<Utc>,
@@ -438,28 +443,80 @@ mod tests {
         }
     }
 
+    fn marker_test_key() -> TokenKey {
+        TokenKey::parse("dev", "default_openai").unwrap()
+    }
+
     #[test]
     fn lifecycle_marker_is_added_to_managed_store_tokens() {
+        let key = marker_test_key();
         let api_key = PersistedTokens::api_key("sk-test");
-        let marked_api_key = mark_tokens_lifecycle_published(&api_key);
+        let marked_api_key = mark_tokens_lifecycle_published(&key, &api_key);
         assert!(tokens_lifecycle_published(&marked_api_key));
 
         let oauth = oauth_tokens_with_metadata(serde_json::Value::Null);
-        let marked = mark_tokens_lifecycle_published(&oauth);
+        let marked = mark_tokens_lifecycle_published(&key, &oauth);
         assert!(tokens_lifecycle_published(&marked));
         assert!(!tokens_lifecycle_published(&oauth));
     }
 
     #[test]
     fn lifecycle_marker_preserves_existing_object_metadata() {
+        let key = marker_test_key();
         let oauth = oauth_tokens_with_metadata(serde_json::json!({
             "provider": "openai",
         }));
 
-        let marked = mark_tokens_lifecycle_published(&oauth);
+        let marked = mark_tokens_lifecycle_published(&key, &oauth);
 
         assert!(tokens_lifecycle_published(&marked));
         assert_eq!(marked.metadata["provider"], "openai");
+    }
+
+    #[test]
+    fn lifecycle_marker_restore_is_bound_to_token_identity() {
+        let key = marker_test_key();
+        let wrong_key = TokenKey::parse("dev", "other_openai").unwrap();
+        let oauth = oauth_tokens_with_metadata(serde_json::Value::Null);
+        let marked = mark_tokens_lifecycle_published(&key, &oauth);
+
+        assert!(
+            durable_marker::restore_publication_from_metadata(&marked.metadata, &key).is_some()
+        );
+        assert!(
+            durable_marker::restore_publication_from_metadata(&marked.metadata, &wrong_key)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lifecycle_marker_relation_is_bound_to_token_identity() {
+        let key = marker_test_key();
+        let wrong_key = TokenKey::parse("dev", "other_openai").unwrap();
+        let oauth = oauth_tokens_with_metadata(serde_json::Value::Null);
+        let marked = mark_tokens_lifecycle_published(&key, &oauth);
+        let snapshot = AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(u64::MAX),
+            credential_present: true,
+            generation: 1,
+            credential_published_at_millis: Some(1),
+        };
+
+        assert!(durable_marker::marker_payload_valid_for_tokens(
+            &marked, &key
+        ));
+        assert!(!durable_marker::marker_payload_valid_for_tokens(
+            &marked, &wrong_key
+        ));
+        assert_eq!(
+            durable_marker::marker_relation_for_tokens_and_snapshot(&marked, &snapshot, &key),
+            durable_marker::AuthLeaseDurableMarkerRelation::Matches
+        );
+        assert_eq!(
+            durable_marker::marker_relation_for_tokens_and_snapshot(&marked, &snapshot, &wrong_key),
+            durable_marker::AuthLeaseDurableMarkerRelation::Invalid
+        );
     }
 
     #[test]

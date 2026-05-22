@@ -1823,7 +1823,7 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
     )?;
     writeln!(
         &mut out,
-        "// Durable marker source fields: {}->{}, {}->{}, {}->{}, {}->{}",
+        "// Durable marker source fields: {}->{}, {}->{}, {}->{}, {}->{}, identity fields: {}, {}, {}",
         contract.phase.marker_field,
         contract.phase.obligation_field,
         contract.expires_at.marker_field,
@@ -1832,10 +1832,13 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
         contract.generation.obligation_field,
         contract.credential_published_at_millis.marker_field,
         contract.credential_published_at_millis.obligation_field,
+        contract.realm_field,
+        contract.binding_field,
+        contract.profile_field,
     )?;
     writeln!(&mut out, "// Durable marker relation: {relation_label}")?;
     writeln!(&mut out)?;
-    writeln!(&mut out, "use crate::auth::PersistedTokens;")?;
+    writeln!(&mut out, "use crate::auth::{{PersistedTokens, TokenKey}};")?;
     writeln!(
         &mut out,
         "use crate::handles::{{AuthLeasePhase, AuthLeaseSnapshot}};"
@@ -1873,6 +1876,21 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
     )?;
     writeln!(
         &mut out,
+        "const FIELD_REALM: &str = {:?};",
+        contract.realm_field
+    )?;
+    writeln!(
+        &mut out,
+        "const FIELD_BINDING: &str = {:?};",
+        contract.binding_field
+    )?;
+    writeln!(
+        &mut out,
+        "const FIELD_PROFILE: &str = {:?};",
+        contract.profile_field
+    )?;
+    writeln!(
+        &mut out,
         "const FIELD_PHASE: &str = {:?};",
         contract.phase.marker_field
     )?;
@@ -1907,8 +1925,9 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
         protocol.name.as_str()
     )?;
     writeln!(&mut out)?;
-    writeln!(&mut out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
+    writeln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]")?;
     writeln!(&mut out, "pub(crate) struct DurableAuthLifecycleMarker {{")?;
+    writeln!(&mut out, "    pub token_key: TokenKey,")?;
     writeln!(&mut out, "    pub phase: AuthLeasePhase,")?;
     writeln!(&mut out, "    pub expires_at: u64,")?;
     writeln!(&mut out, "    pub generation: u64,")?;
@@ -1925,6 +1944,7 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
     writeln!(&mut out)?;
     writeln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]")?;
     writeln!(&mut out, "pub struct AuthLeaseDurableRestorePublication {{")?;
+    writeln!(&mut out, "    token_key: TokenKey,")?;
     writeln!(&mut out, "    phase: AuthLeasePhase,")?;
     writeln!(&mut out, "    expires_at: u64,")?;
     writeln!(&mut out, "    generation: u64,")?;
@@ -1932,6 +1952,10 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
     writeln!(&mut out, "}}")?;
     writeln!(&mut out)?;
     writeln!(&mut out, "impl AuthLeaseDurableRestorePublication {{")?;
+    writeln!(&mut out, "    pub fn token_key(&self) -> &TokenKey {{")?;
+    writeln!(&mut out, "        &self.token_key")?;
+    writeln!(&mut out, "    }}")?;
+    writeln!(&mut out)?;
     writeln!(&mut out, "    pub fn phase(&self) -> AuthLeasePhase {{")?;
     writeln!(&mut out, "        self.phase")?;
     writeln!(&mut out, "    }}")?;
@@ -1952,12 +1976,14 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
     writeln!(&mut out, "    }}")?;
     writeln!(&mut out)?;
     writeln!(&mut out, "    fn from_marker_contract(")?;
+    writeln!(&mut out, "        token_key: TokenKey,")?;
     writeln!(&mut out, "        phase: AuthLeasePhase,")?;
     writeln!(&mut out, "        expires_at: u64,")?;
     writeln!(&mut out, "        generation: u64,")?;
     writeln!(&mut out, "        credential_published_at_millis: u64,")?;
     writeln!(&mut out, "    ) -> Self {{")?;
     writeln!(&mut out, "        Self {{")?;
+    writeln!(&mut out, "            token_key,")?;
     writeln!(&mut out, "            phase,")?;
     writeln!(&mut out, "            expires_at,")?;
     writeln!(&mut out, "            generation,")?;
@@ -2048,6 +2074,28 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
     )?;
     writeln!(
         &mut out,
+        "    map.insert(FIELD_REALM.to_string(), serde_json::Value::String(marker.token_key.realm.as_str().to_string()));"
+    )?;
+    writeln!(
+        &mut out,
+        "    map.insert(FIELD_BINDING.to_string(), serde_json::Value::String(marker.token_key.binding.as_str().to_string()));"
+    )?;
+    writeln!(
+        &mut out,
+        "    if let Some(profile) = marker.token_key.profile.as_ref() {{"
+    )?;
+    writeln!(
+        &mut out,
+        "        map.insert(FIELD_PROFILE.to_string(), serde_json::Value::String(profile.as_str().to_string()));"
+    )?;
+    writeln!(&mut out, "    }} else {{")?;
+    writeln!(
+        &mut out,
+        "        map.insert(FIELD_PROFILE.to_string(), serde_json::Value::Null);"
+    )?;
+    writeln!(&mut out, "    }}")?;
+    writeln!(
+        &mut out,
         "    map.insert(FIELD_PHASE.to_string(), serde_json::Value::String(phase_to_wire(marker.phase).to_string()));"
     )?;
     writeln!(
@@ -2085,7 +2133,19 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
         &mut out,
         "    (value.get(FIELD_PROTOCOL)?.as_str()? == PROTOCOL).then_some(())?;"
     )?;
+    writeln!(
+        &mut out,
+        "    let token_key = TokenKey::parse_with_profile("
+    )?;
+    writeln!(&mut out, "        value.get(FIELD_REALM)?.as_str()?,")?;
+    writeln!(&mut out, "        value.get(FIELD_BINDING)?.as_str()?,")?;
+    writeln!(
+        &mut out,
+        "        value.get(FIELD_PROFILE).and_then(serde_json::Value::as_str),"
+    )?;
+    writeln!(&mut out, "    ).ok()?;")?;
     writeln!(&mut out, "    Some(DurableAuthLifecycleMarker {{")?;
+    writeln!(&mut out, "        token_key,")?;
     writeln!(
         &mut out,
         "        phase: phase_from_wire(value.get(FIELD_PHASE)?)?,"
@@ -2170,7 +2230,7 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
     writeln!(&mut out)?;
     writeln!(
         &mut out,
-        "pub(crate) fn restore_publication_from_metadata(metadata: &serde_json::Value) -> Option<AuthLeaseDurableRestorePublication> {{"
+        "pub(crate) fn restore_publication_from_metadata(metadata: &serde_json::Value, expected_key: &TokenKey) -> Option<AuthLeaseDurableRestorePublication> {{"
     )?;
     writeln!(
         &mut out,
@@ -2178,8 +2238,13 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
     )?;
     writeln!(
         &mut out,
+        "    (&marker.token_key == expected_key).then_some(())?;"
+    )?;
+    writeln!(
+        &mut out,
         "    Some(AuthLeaseDurableRestorePublication::from_marker_contract("
     )?;
+    writeln!(&mut out, "            marker.token_key,")?;
     writeln!(&mut out, "            marker.phase,")?;
     writeln!(&mut out, "            marker.expires_at,")?;
     writeln!(&mut out, "            marker.generation,")?;
@@ -2192,7 +2257,7 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
     writeln!(&mut out)?;
     writeln!(
         &mut out,
-        "pub fn marker_payload_valid_for_tokens(tokens: &PersistedTokens) -> bool {{"
+        "pub fn marker_payload_valid_for_tokens(tokens: &PersistedTokens, expected_key: &TokenKey) -> bool {{"
     )?;
     writeln!(
         &mut out,
@@ -2202,7 +2267,7 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
     writeln!(&mut out, "    }};")?;
     writeln!(
         &mut out,
-        "    marker.expires_at == crate::persisted_token_expires_at_epoch_secs(tokens)"
+        "    marker.token_key == *expected_key && marker.expires_at == crate::persisted_token_expires_at_epoch_secs(tokens)"
     )?;
     writeln!(&mut out, "}}")?;
     writeln!(&mut out)?;
@@ -2213,6 +2278,7 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
     writeln!(&mut out, "pub fn marker_relation_for_tokens_and_snapshot(")?;
     writeln!(&mut out, "    tokens: &PersistedTokens,")?;
     writeln!(&mut out, "    snapshot: &AuthLeaseSnapshot,")?;
+    writeln!(&mut out, "    expected_key: &TokenKey,")?;
     writeln!(&mut out, ") -> AuthLeaseDurableMarkerRelation {{")?;
     writeln!(
         &mut out,
@@ -2223,6 +2289,12 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
         "        return AuthLeaseDurableMarkerRelation::Invalid;"
     )?;
     writeln!(&mut out, "    }};")?;
+    writeln!(&mut out, "    if marker.token_key != *expected_key {{")?;
+    writeln!(
+        &mut out,
+        "        return AuthLeaseDurableMarkerRelation::Invalid;"
+    )?;
+    writeln!(&mut out, "    }}")?;
     writeln!(
         &mut out,
         "    let token_expires_at = crate::persisted_token_expires_at_epoch_secs(tokens);"

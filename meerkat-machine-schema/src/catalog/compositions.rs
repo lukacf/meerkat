@@ -1848,7 +1848,10 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
                 version_field: "version".into(),
                 authority_field: "authority".into(),
                 protocol_field: "protocol".into(),
-                schema_version: 3,
+                realm_field: "realm".into(),
+                binding_field: "binding".into(),
+                profile_field: "profile".into(),
+                schema_version: 4,
                 phase: DurableMarkerFieldBinding {
                     marker_field: "phase".into(),
                     obligation_field: fld_id("new_state"),

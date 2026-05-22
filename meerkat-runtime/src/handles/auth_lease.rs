@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::AuthBindingRef;
 use meerkat_core::RefreshFailureObservation;
+use meerkat_core::auth::TokenKey;
 use meerkat_core::generated::auth_lease_durable_lifecycle_marker::AuthLeaseDurableRestorePublication;
 use meerkat_core::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot,
@@ -1296,6 +1297,17 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         publication: &AuthLeaseDurableRestorePublication,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
         let context = "AuthLeaseHandle::restore_published_credential_lifecycle";
+        let lease_token_key = TokenKey::new_with_profile(
+            lease_key.realm.clone(),
+            lease_key.binding.clone(),
+            lease_key.profile.clone(),
+        );
+        if publication.token_key() != &lease_token_key {
+            return Err(DslTransitionError::new(
+                context,
+                "durable auth lifecycle marker identity does not match restore lease key",
+            ));
+        }
         let mut guard = self
             .machines
             .lock()
@@ -1942,8 +1954,13 @@ mod tests {
             }
         }
 
-        let source = RuntimeAuthLeaseHandle::new();
-        let restored = RuntimeAuthLeaseHandle::new();
+        let source = Arc::new(RuntimeAuthLeaseHandle::new());
+        let restored = Arc::new(RuntimeAuthLeaseHandle::new());
+        let generated_restored =
+            crate::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+                Arc::clone(&restored),
+            )
+            .expect("test AuthLeaseHandle must be generated-authority certified");
         let key = lease("dev", "shared");
         let transition = source.acquire_lease(&key, 1_800_000_000).unwrap();
         let published_at = transition
@@ -1986,7 +2003,7 @@ mod tests {
         };
         meerkat_core::rehydrate_marked_tokens_for_status(
             &store,
-            &restored,
+            &generated_restored,
             &auth_binding,
             meerkat_core::auth::PersistedAuthMode::ChatgptOauth,
             chrono::Utc::now(),

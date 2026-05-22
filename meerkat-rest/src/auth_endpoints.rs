@@ -1686,7 +1686,7 @@ pub async fn get_auth_status(
             && let Some(expected_mode) = expected_mode
             && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_tokens_for_status(
                 state.token_store.as_ref(),
-                state.auth_lease.as_ref(),
+                &state.auth_lease,
                 &auth_binding,
                 expected_mode,
                 now,

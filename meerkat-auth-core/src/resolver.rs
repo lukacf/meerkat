@@ -243,7 +243,7 @@ async fn restore_marked_token_lifecycle_if_absent(
     }
     meerkat_core::rehydrate_marked_tokens_for_status(
         store,
-        auth_lease.as_ref(),
+        auth_lease,
         binding.auth_binding_ref(),
         expected_mode,
         now,
@@ -285,7 +285,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         .ok_or_else(|| interactive_login_error(binding))?;
     let expected_mode = require_persisted_auth_mode(&tokens, &binding.auth_profile().auth_method)?;
     let is_oauth_login = crate::auth_store::persisted_auth_mode_is_oauth_login(expected_mode);
-    if is_oauth_login && !durable_marker::marker_payload_valid_for_tokens(&tokens) {
+    if is_oauth_login && !durable_marker::marker_payload_valid_for_tokens(&tokens, &key) {
         return Err(stale_credential_error());
     }
 
@@ -321,7 +321,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
             )
         )
     {
-        match durable_marker::marker_relation_for_tokens_and_snapshot(&tokens, &snapshot) {
+        match durable_marker::marker_relation_for_tokens_and_snapshot(&tokens, &snapshot, &key) {
             durable_marker::AuthLeaseDurableMarkerRelation::Matches => {}
             durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer
             | durable_marker::AuthLeaseDurableMarkerRelation::TokenStale
@@ -742,8 +742,11 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
     if current_tokens.as_ref() != Some(&previous.tokens) {
         if let Some(current) = current_tokens.as_ref()
             && persisted_token_material_matches(current, refreshed)
-            && durable_marker::marker_relation_for_tokens_and_snapshot(current, &current_snapshot)
-                == durable_marker::AuthLeaseDurableMarkerRelation::Matches
+            && durable_marker::marker_relation_for_tokens_and_snapshot(
+                current,
+                &current_snapshot,
+                &previous.key,
+            ) == durable_marker::AuthLeaseDurableMarkerRelation::Matches
         {
             return Ok(current.clone());
         }
@@ -1155,12 +1158,7 @@ mod tests {
         tokens: &PersistedTokens,
         transition: &AuthLeaseTransition,
     ) -> PersistedTokens {
-        let lease_key = default_test_lease_key();
-        let key = TokenKey::new_with_profile(
-            lease_key.realm.clone(),
-            lease_key.binding.clone(),
-            lease_key.profile.clone(),
-        );
+        let key = default_test_token_key();
         meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, tokens, transition)
             .expect("generated AuthMachine transition marks fixture tokens")
     }
@@ -1370,6 +1368,12 @@ mod tests {
             binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
             profile: None,
         })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn default_test_token_key() -> TokenKey {
+        let lease_key = default_test_lease_key();
+        TokenKey::new_with_profile(lease_key.realm, lease_key.binding, lease_key.profile)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2113,17 +2117,29 @@ mod tests {
         };
 
         assert_eq!(
-            durable_marker::marker_relation_for_tokens_and_snapshot(&older, &snapshot),
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &older,
+                &snapshot,
+                &default_test_token_key()
+            ),
             durable_marker::AuthLeaseDurableMarkerRelation::TokenStale
         );
 
         assert_eq!(
-            durable_marker::marker_relation_for_tokens_and_snapshot(&newer, &snapshot),
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &newer,
+                &snapshot,
+                &default_test_token_key()
+            ),
             durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer
         );
 
         assert_eq!(
-            durable_marker::marker_relation_for_tokens_and_snapshot(&matching, &snapshot),
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &matching,
+                &snapshot,
+                &default_test_token_key()
+            ),
             durable_marker::AuthLeaseDurableMarkerRelation::Matches
         );
     }
@@ -2152,7 +2168,11 @@ mod tests {
         };
 
         assert_eq!(
-            durable_marker::marker_relation_for_tokens_and_snapshot(&older_longer, &snapshot),
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &older_longer,
+                &snapshot,
+                &default_test_token_key()
+            ),
             durable_marker::AuthLeaseDurableMarkerRelation::TokenStale
         );
 
@@ -2164,7 +2184,11 @@ mod tests {
             snapshot_published_at,
         );
         assert_eq!(
-            durable_marker::marker_relation_for_tokens_and_snapshot(&newer_shorter, &snapshot),
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &newer_shorter,
+                &snapshot,
+                &default_test_token_key()
+            ),
             durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer
         );
     }
@@ -2187,7 +2211,11 @@ mod tests {
             )),
         };
         assert_eq!(
-            durable_marker::marker_relation_for_tokens_and_snapshot(&same_time_longer, &snapshot),
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &same_time_longer,
+                &snapshot,
+                &default_test_token_key()
+            ),
             durable_marker::AuthLeaseDurableMarkerRelation::Invalid,
             "same-ms publication ties must not adopt a token as newer based on expiry drift"
         );
@@ -2205,7 +2233,11 @@ mod tests {
             )),
         };
         assert_eq!(
-            durable_marker::marker_relation_for_tokens_and_snapshot(&same_time_shorter, &snapshot),
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &same_time_shorter,
+                &snapshot,
+                &default_test_token_key()
+            ),
             durable_marker::AuthLeaseDurableMarkerRelation::Invalid,
             "same-ms publication ties with expiry drift are inconsistent, not ordered"
         );
@@ -2227,7 +2259,8 @@ mod tests {
         assert_eq!(
             durable_marker::marker_relation_for_tokens_and_snapshot(
                 &same_time_same_expiry_future_generation,
-                &snapshot
+                &snapshot,
+                &default_test_token_key()
             ),
             durable_marker::AuthLeaseDurableMarkerRelation::Invalid
         );
@@ -2251,7 +2284,11 @@ mod tests {
         };
 
         assert_eq!(
-            durable_marker::marker_relation_for_tokens_and_snapshot(&stale_same_time, &snapshot),
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &stale_same_time,
+                &snapshot,
+                &default_test_token_key()
+            ),
             durable_marker::AuthLeaseDurableMarkerRelation::Invalid,
             "same-ms publication ties must not let older credential generations masquerade as current"
         );
@@ -2273,7 +2310,11 @@ mod tests {
         let marker = mark_tokens_lifecycle_published_for_test(&tokens, 1);
 
         assert_eq!(
-            durable_marker::marker_relation_for_tokens_and_snapshot(&marker, &snapshot),
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &marker,
+                &snapshot,
+                &default_test_token_key()
+            ),
             durable_marker::AuthLeaseDurableMarkerRelation::Invalid,
             "equal finite expiry alone must not let an older marker match a newer AuthMachine snapshot"
         );

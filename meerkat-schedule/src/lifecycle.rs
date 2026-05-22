@@ -865,8 +865,7 @@ fn classify_occurrence_transition_failure(
     authority: &mut occ_dsl::OccurrenceLifecycleMachineAuthority,
     error: &occ_dsl::OccurrenceLifecycleMachineTransitionError,
 ) -> Result<occ_dsl::OccurrenceTransitionFailureClassKind, OccurrenceLifecycleError> {
-    let (refusal_kind, trigger) = occurrence_transition_refusal_evidence(error);
-    let trigger = occurrence_transition_failure_trigger(trigger)?;
+    let (refusal_kind, trigger) = occurrence_transition_refusal_evidence(error)?;
     let phase = authority.state().lifecycle_phase;
     let transition = occ_dsl::OccurrenceLifecycleMachineMutator::apply(
         authority,
@@ -913,30 +912,35 @@ fn classify_occurrence_transition_failure(
 
 fn occurrence_transition_refusal_evidence(
     error: &occ_dsl::OccurrenceLifecycleMachineTransitionError,
-) -> (occ_dsl::OccurrenceTransitionFailureRefusalKind, &str) {
+) -> Result<
+    (
+        occ_dsl::OccurrenceTransitionFailureRefusalKind,
+        occ_dsl::OccurrenceLifecycleInputVariant,
+    ),
+    OccurrenceLifecycleError,
+> {
     match error {
         occ_dsl::OccurrenceLifecycleMachineTransitionError::NoMatchingTransition {
-            trigger,
+            trigger: occ_dsl::OccurrenceLifecycleMachineTransitionTrigger::Input(trigger),
             ..
-        } => (
+        } => Ok((
             occ_dsl::OccurrenceTransitionFailureRefusalKind::NoMatchingTransition,
-            trigger.as_str(),
-        ),
-        occ_dsl::OccurrenceLifecycleMachineTransitionError::GuardRejected { trigger, .. } => (
+            *trigger,
+        )),
+        occ_dsl::OccurrenceLifecycleMachineTransitionError::GuardRejected {
+            trigger: occ_dsl::OccurrenceLifecycleMachineTransitionTrigger::Input(trigger),
+            ..
+        } => Ok((
             occ_dsl::OccurrenceTransitionFailureRefusalKind::GuardRejected,
-            trigger.as_str(),
-        ),
+            *trigger,
+        )),
+        occ_dsl::OccurrenceLifecycleMachineTransitionError::RecoveredStateInvariantRejected {
+            invariant,
+            ..
+        } => Err(OccurrenceLifecycleError::UnknownTransitionFailureTrigger {
+            trigger: format!("recovered_state_invariant:{invariant}"),
+        }),
     }
-}
-
-fn occurrence_transition_failure_trigger(
-    trigger: &str,
-) -> Result<occ_dsl::OccurrenceLifecycleInputVariant, OccurrenceLifecycleError> {
-    occ_dsl::OccurrenceLifecycleInputVariant::try_from(trigger).map_err(|_| {
-        OccurrenceLifecycleError::UnknownTransitionFailureTrigger {
-            trigger: trigger.to_owned(),
-        }
-    })
 }
 
 fn occurrence_error_from_transition_failure_class(

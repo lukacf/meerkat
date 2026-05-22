@@ -42,6 +42,9 @@ fn map_kernel_error(
         mm_dsl::MeerkatMachineTransitionError::NoMatchingTransition { .. } => {
             DslTransitionError::no_matching(context, reason)
         }
+        mm_dsl::MeerkatMachineTransitionError::RecoveredStateInvariantRejected { .. } => {
+            DslTransitionError::guard_rejected(context, reason)
+        }
     }
 }
 

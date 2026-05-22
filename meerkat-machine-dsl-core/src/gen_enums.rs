@@ -80,29 +80,6 @@ fn gen_enum(enum_def: &EnumDef) -> TokenStream {
             }
         }
 
-        impl std::convert::TryFrom<&str> for #variant_name {
-            type Error = String;
-
-            fn try_from(value: &str) -> Result<Self, Self::Error> {
-                match value {
-                    #(stringify!(#variant_idents) => Ok(Self::#variant_idents),)*
-                    other => Err(format!(
-                        "invalid {} variant `{}`",
-                        stringify!(#variant_name),
-                        other
-                    )),
-                }
-            }
-        }
-
-        impl std::convert::TryFrom<String> for #variant_name {
-            type Error = String;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::try_from(value.as_str())
-            }
-        }
-
         impl std::fmt::Display for #variant_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(self.as_str())

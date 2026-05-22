@@ -309,6 +309,9 @@ fn map_auth_machine_error(
         auth_dsl::AuthMachineTransitionError::NoMatchingTransition { .. } => {
             DslTransitionError::no_matching(context, reason)
         }
+        auth_dsl::AuthMachineTransitionError::RecoveredStateInvariantRejected { .. } => {
+            DslTransitionError::guard_rejected(context, reason)
+        }
     }
 }
 

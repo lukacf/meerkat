@@ -18,12 +18,14 @@ pub(crate) enum FieldPrefix {
 pub fn generate(def: &MachineDef) -> TokenStream {
     let state_name = state_struct_name(def);
     let input_name = &def.inputs.name;
+    let input_variant_name = format_ident!("{}Variant", input_name);
     let phase_name = &def.phase_enum.name;
     let effect_name = &def.effects.name;
     let machine_name = &def.name;
 
     let transition_name = format_ident!("{}Transition", machine_name);
     let error_name = format_ident!("{}TransitionError", machine_name);
+    let trigger_name = format_ident!("{}TransitionTrigger", machine_name);
     let authority_name = format_ident!("{}Authority", machine_name);
     let authority_snapshot_name = format_ident!("{}AuthoritySnapshot", machine_name);
     let mutator_trait = format_ident!("{}Mutator", machine_name);
@@ -39,12 +41,39 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         .filter(|t| matches!(t.trigger.kind, TriggerKindDef::Signal))
         .collect();
 
-    let input_arms = gen_match_arms(def, &input_transitions, input_name, &error_name);
+    let input_arms = gen_match_arms(
+        def,
+        &input_transitions,
+        input_name,
+        &error_name,
+        &input_variant_name,
+        quote! { #trigger_name::Input },
+    );
 
     let has_signals = !def.signals.variants.is_empty() && !signal_transitions.is_empty();
     let signal_name = &def.signals.name;
+    let signal_variant_name = format_ident!("{}Variant", signal_name);
     let signal_arms = if has_signals {
-        gen_match_arms(def, &signal_transitions, signal_name, &error_name)
+        gen_match_arms(
+            def,
+            &signal_transitions,
+            signal_name,
+            &error_name,
+            &signal_variant_name,
+            quote! { #trigger_name::Signal },
+        )
+    } else {
+        TokenStream::new()
+    };
+    let signal_trigger_variant = if !def.signals.variants.is_empty() {
+        quote! { Signal(#signal_variant_name), }
+    } else {
+        TokenStream::new()
+    };
+    let signal_trigger_display = if !def.signals.variants.is_empty() {
+        quote! {
+            Self::Signal(variant) => write!(f, "signal::{variant}"),
+        }
     } else {
         TokenStream::new()
     };
@@ -68,9 +97,9 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             let check = gen_expr(&inv.expr, FieldPrefix::AuthorityState);
             quote! {
                 if !(#check) {
-                    return Err(#error_name::GuardRejected {
-                        phase: format!("{:?}", self.state.phase()),
-                        trigger: format!("recover authority state violated invariant '{}'", #inv_name_str),
+                    return Err(#error_name::RecoveredStateInvariantRejected {
+                        phase: self.state.phase(),
+                        invariant: #inv_name_str,
                     });
                 }
             }
@@ -83,14 +112,15 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         quote! {
             pub fn apply_signal(&mut self, signal: #signal_name) -> Result<#transition_name, #error_name> {
                 let from_phase = self.state.phase();
+                let signal_variant = signal.variant();
                 let mut effects = Vec::new();
 
                 match signal {
                     #signal_arms
                     #[allow(unreachable_patterns)]
                     _ => return Err(#error_name::NoMatchingTransition {
-                        phase: format!("{:?}", from_phase),
-                        trigger: format!("{:?}", signal),
+                        phase: from_phase,
+                        trigger: #trigger_name::Signal(signal_variant),
                     }),
                 }
 
@@ -137,7 +167,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             /// the current phase. Shell callers should treat this as a hard
             /// error: firing the wrong input for the current phase is a
             /// programming mistake.
-            NoMatchingTransition { phase: String, trigger: String },
+            NoMatchingTransition { phase: #phase_name, trigger: #trigger_name },
             /// A transition is declared for this `(phase, trigger)` pair
             /// but every candidate transition's guard(s) evaluated false.
             /// Typed signal that the input was *rejected on state*, not
@@ -146,17 +176,43 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             /// observed `TurnCommitted` event, expecting the DSL to drop
             /// duplicates) should treat this as a successful no-op rather
             /// than an error.
-            GuardRejected { phase: String, trigger: String },
+            GuardRejected { phase: #phase_name, trigger: #trigger_name },
+            /// A recovered authority state violated a generated invariant
+            /// before any transition was attempted.
+            RecoveredStateInvariantRejected { phase: #phase_name, invariant: &'static str },
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum #trigger_name {
+            Input(#input_variant_name),
+            #signal_trigger_variant
+        }
+
+        impl std::fmt::Display for #trigger_name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    Self::Input(variant) => write!(f, "input::{variant}"),
+                    #signal_trigger_display
+                }
+            }
         }
 
         impl std::fmt::Display for #error_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 match self {
                     Self::NoMatchingTransition { phase, trigger } => {
-                        write!(f, "no matching transition from phase {} for {}", phase, trigger)
+                        write!(f, "no matching transition from phase {:?} for {}", phase, trigger)
                     }
                     Self::GuardRejected { phase, trigger } => {
-                        write!(f, "guard rejected transition from phase {} for {}", phase, trigger)
+                        write!(f, "guard rejected transition from phase {:?} for {}", phase, trigger)
+                    }
+                    Self::RecoveredStateInvariantRejected { phase, invariant } => {
+                        write!(
+                            f,
+                            "recovered authority state violated invariant '{}' in phase {:?}",
+                            invariant,
+                            phase
+                        )
                     }
                 }
             }
@@ -250,6 +306,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         impl #mutator_trait for #authority_name {
             fn apply(&mut self, input: #input_name) -> Result<#transition_name, #error_name> {
                 let from_phase = self.state.phase();
+                let input_variant = input.variant();
                 #[allow(unused_mut)]
                 let mut effects = Vec::new();
 
@@ -257,8 +314,8 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                     #input_arms
                     #[allow(unreachable_patterns)]
                     _ => return Err(#error_name::NoMatchingTransition {
-                        phase: format!("{:?}", from_phase),
-                        trigger: format!("{:?}", input),
+                        phase: from_phase,
+                        trigger: #trigger_name::Input(input_variant),
                     }),
                 }
 
@@ -280,6 +337,8 @@ fn gen_match_arms(
     transitions: &[&TransitionDef],
     enum_name: &Ident,
     error_name: &Ident,
+    variant_enum_name: &Ident,
+    trigger_ctor: TokenStream,
 ) -> TokenStream {
     let mut groups: Vec<(&Ident, Vec<&&TransitionDef>)> = Vec::new();
     for t in transitions {
@@ -301,7 +360,8 @@ fn gen_match_arms(
                 quote! { { #(#bindings),* } }
             };
 
-            let body = gen_transition_chain(def, transitions, error_name);
+            let trigger = quote! { #trigger_ctor(#variant_enum_name::#variant) };
+            let body = gen_transition_chain(def, transitions, error_name, trigger);
 
             quote! {
                 #enum_name::#variant #binding_pattern => {
@@ -318,6 +378,7 @@ fn gen_transition_chain(
     def: &MachineDef,
     transitions: &[&&TransitionDef],
     error_name: &Ident,
+    trigger: TokenStream,
 ) -> TokenStream {
     if transitions.len() == 1 {
         let t = transitions[0];
@@ -329,14 +390,13 @@ fn gen_transition_chain(
                 .collect();
             let combined = quote! { #(#guard_exprs)&&* };
             let body = gen_transition_body(def, t);
-            let variant_str = t.trigger.variant.to_string();
             quote! {
                 if #combined {
                     #body
                 } else {
                     return Err(#error_name::GuardRejected {
-                        phase: format!("{:?}", from_phase),
-                        trigger: #variant_str.to_string(),
+                        phase: from_phase,
+                        trigger: #trigger,
                     });
                 }
             }
@@ -365,11 +425,10 @@ fn gen_transition_chain(
         }
         let last_has_guard = transitions.last().is_none_or(|t| t.has_guards());
         if last_has_guard {
-            let variant_str = transitions[0].trigger.variant.to_string();
             arms.push(quote! { else {
                 return Err(#error_name::GuardRejected {
-                    phase: format!("{:?}", from_phase),
-                    trigger: #variant_str.to_string(),
+                    phase: from_phase,
+                    trigger: #trigger,
                 });
             } });
         }

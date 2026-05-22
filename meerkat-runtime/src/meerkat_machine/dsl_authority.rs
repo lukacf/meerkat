@@ -16,11 +16,21 @@ use meerkat_core::types::SessionId;
 pub(crate) fn map_error(err: mm_dsl::MeerkatMachineTransitionError, context: &str) -> String {
     match err {
         mm_dsl::MeerkatMachineTransitionError::NoMatchingTransition { phase, trigger } => {
-            format!("DSL authority ({context}): no matching transition from {phase} for {trigger}")
+            format!(
+                "DSL authority ({context}): no matching transition from {phase:?} for {trigger}"
+            )
         }
         mm_dsl::MeerkatMachineTransitionError::GuardRejected { phase, trigger } => {
             format!(
-                "DSL authority ({context}): guard rejected transition from {phase} for {trigger}"
+                "DSL authority ({context}): guard rejected transition from {phase:?} for {trigger}"
+            )
+        }
+        mm_dsl::MeerkatMachineTransitionError::RecoveredStateInvariantRejected {
+            phase,
+            invariant,
+        } => {
+            format!(
+                "DSL authority ({context}): recovered state violated invariant {invariant} in phase {phase:?}"
             )
         }
     }
@@ -262,8 +272,10 @@ mod tests {
     #[test]
     fn map_error_includes_context() {
         let err = mm_dsl::MeerkatMachineTransitionError::NoMatchingTransition {
-            phase: "Idle".into(),
-            trigger: "Destroy".into(),
+            phase: mm_dsl::MeerkatPhase::Idle,
+            trigger: mm_dsl::MeerkatMachineTransitionTrigger::Input(
+                mm_dsl::MeerkatMachineInputVariant::Destroy,
+            ),
         };
         let msg = map_error(err, "test_context");
         assert!(msg.contains("test_context"));

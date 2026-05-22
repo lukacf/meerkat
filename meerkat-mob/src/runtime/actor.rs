@@ -41,10 +41,6 @@ impl InitialTurnHandle {
 
 enum SubmitWorkDispatchCompletion {
     Completed,
-    AwaitInteractionAdmission {
-        interaction_id: meerkat_core::interaction::InteractionId,
-        events: mpsc::Receiver<meerkat_core::AgentEvent>,
-    },
     AwaitTurnAdmission {
         provisioner: Arc<dyn MobProvisioner>,
         member_ref: MemberRef,
@@ -3470,16 +3466,6 @@ impl MobActor {
                     match Box::pin(self.handle_submit_work(payload)).await {
                         Ok(SubmitWorkDispatchCompletion::Completed) => {
                             let _ = reply_tx.send(Ok(()));
-                        }
-                        Ok(SubmitWorkDispatchCompletion::AwaitInteractionAdmission {
-                            interaction_id,
-                            events,
-                        }) => {
-                            Self::spawn_interaction_admission_reply(
-                                interaction_id,
-                                events,
-                                reply_tx,
-                            );
                         }
                         Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
                             provisioner,
@@ -11060,68 +11046,6 @@ impl MobActor {
         });
     }
 
-    fn spawn_interaction_admission_reply(
-        interaction_id: meerkat_core::interaction::InteractionId,
-        events: mpsc::Receiver<meerkat_core::AgentEvent>,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
-    ) {
-        tokio::spawn(async move {
-            let result = Self::await_interaction_admission(interaction_id, events).await;
-            let _ = reply_tx.send(result);
-        });
-    }
-
-    fn spawn_interaction_admission_detached(
-        interaction_id: meerkat_core::interaction::InteractionId,
-        events: mpsc::Receiver<meerkat_core::AgentEvent>,
-    ) {
-        tokio::spawn(async move {
-            if let Err(error) = Self::await_interaction_admission(interaction_id, events).await {
-                tracing::warn!(
-                    %interaction_id,
-                    error = %error,
-                    "detached autonomous interaction admission failed"
-                );
-            }
-        });
-    }
-
-    async fn await_interaction_admission(
-        interaction_id: meerkat_core::interaction::InteractionId,
-        mut events: mpsc::Receiver<meerkat_core::AgentEvent>,
-    ) -> Result<(), MobError> {
-        while let Some(event) = events.recv().await {
-            match event {
-                meerkat_core::AgentEvent::InteractionComplete {
-                    interaction_id: observed,
-                    ..
-                } if observed == interaction_id => return Ok(()),
-                meerkat_core::AgentEvent::InteractionFailed {
-                    interaction_id: observed,
-                    error,
-                } if observed == interaction_id => {
-                    return Err(MobError::Internal(format!(
-                        "autonomous interaction admission failed for '{interaction_id}': {error}"
-                    )));
-                }
-                meerkat_core::AgentEvent::InteractionCallbackPending {
-                    interaction_id: observed,
-                    tool_name,
-                    args,
-                } if observed == interaction_id => {
-                    return Err(MobError::Internal(format!(
-                        "autonomous interaction admission reached callback boundary for '{interaction_id}' via tool '{tool_name}': {args}"
-                    )));
-                }
-                _ => {}
-            }
-        }
-
-        Err(MobError::Internal(format!(
-            "autonomous interaction admission stream closed before terminal outcome for '{interaction_id}'"
-        )))
-    }
-
     fn spawn_turn_admission_reply(
         provisioner: Arc<dyn MobProvisioner>,
         member_ref: MemberRef,
@@ -11322,13 +11246,6 @@ impl MobActor {
     ) -> Result<(), MobError> {
         match completion {
             SubmitWorkDispatchCompletion::Completed => Ok(()),
-            SubmitWorkDispatchCompletion::AwaitInteractionAdmission {
-                interaction_id,
-                events,
-            } => {
-                Self::spawn_interaction_admission_detached(interaction_id, events);
-                Ok(())
-            }
             SubmitWorkDispatchCompletion::AwaitTurnAdmission {
                 provisioner,
                 member_ref,
@@ -11386,6 +11303,29 @@ impl MobActor {
                 self.ensure_autonomous_runtime_ready(&entry.agent_identity, &entry.member_ref)
                     .await?;
 
+                if self
+                    .autonomous_steer_requires_admission_barrier(entry, handling_mode, ack_mode)
+                    .await?
+                {
+                    let req = meerkat_core::service::StartTurnRequest {
+                        prompt: content,
+                        system_prompt: None,
+                        event_tx: None,
+                        runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                            render_metadata,
+                            handling_mode,
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                        ),
+                    };
+                    return Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
+                        provisioner: self.provisioner.clone(),
+                        member_ref: entry.member_ref.clone(),
+                        req: Box::new(req),
+                    });
+                }
                 let injector = self
                     .provisioner
                     .interaction_event_injector(bridge_session_id)
@@ -11395,28 +11335,6 @@ impl MobActor {
                         capability: crate::error::MobMemberCapability::InteractionEventInjector,
                         context: "autonomous direct turn delivery",
                     })?;
-                if self
-                    .autonomous_steer_requires_admission_barrier(entry, handling_mode, ack_mode)
-                    .await?
-                {
-                    let subscription = injector
-                        .inject_with_subscription(
-                            content,
-                            meerkat_core::PlainEventSource::Rpc,
-                            handling_mode,
-                            render_metadata,
-                        )
-                        .map_err(|error| {
-                            MobError::Internal(format!(
-                                "autonomous steer dispatch inject failed for '{}': {}",
-                                entry.agent_identity, error
-                            ))
-                        })?;
-                    return Ok(SubmitWorkDispatchCompletion::AwaitInteractionAdmission {
-                        interaction_id: subscription.id,
-                        events: subscription.events,
-                    });
-                }
                 injector
                     .inject(
                         content,

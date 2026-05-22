@@ -585,7 +585,6 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
 
         use super::*;
         use crate::identifiers::LogicalRuntimeId;
-        use crate::input_state::StoredInputState;
         use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
         use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 
@@ -600,8 +599,11 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             LogicalRuntimeId("runtime-1".to_string())
         }
 
-        fn input_state() -> StoredInputState {
-            StoredInputState::new_accepted(InputId::new())
+        fn input_state() -> InputStatePersistenceRecord {
+            InputStatePersistenceRecord::from_machine_snapshot(StoredInputState::new_accepted(
+                InputId::new(),
+            ))
+            .expect("accepted test input state seed must be machine-authorized")
         }
 
         fn receipt_row_count(store: &SqliteRuntimeStore) -> usize {

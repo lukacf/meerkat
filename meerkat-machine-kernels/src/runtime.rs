@@ -2856,9 +2856,51 @@ mod tests {
         let kernel = GeneratedMachineKernel::new(mob_machine());
         let state = kernel.initial_state().expect("initial state");
         assert_eq!(state.phase, phase_id("Running"));
-        let running = kernel
+        let profile_material_digest = "profile.worker.1";
+        let authorized = kernel
             .transition(
                 &state,
+                &KernelInput {
+                    variant: input_id("AuthorizeSpawnProfile"),
+                    fields: BTreeMap::from([
+                        (
+                            field_id("agent_identity"),
+                            named_string("AgentIdentity", "agent.worker"),
+                        ),
+                        (
+                            field_id("profile_name"),
+                            KernelValue::String("worker".to_owned()),
+                        ),
+                        (
+                            field_id("model"),
+                            KernelValue::String("test-model".to_owned()),
+                        ),
+                        (
+                            field_id("profile_material_digest"),
+                            KernelValue::String(profile_material_digest.to_owned()),
+                        ),
+                        (
+                            field_id("tool_config_digest"),
+                            KernelValue::String("tool-config.worker.1".to_owned()),
+                        ),
+                        (
+                            field_id("skills_digest"),
+                            KernelValue::String("skills.worker.1".to_owned()),
+                        ),
+                        (field_id("provider_params_digest"), KernelValue::None),
+                        (field_id("output_schema_digest"), KernelValue::None),
+                        (field_id("external_addressable"), KernelValue::Bool(false)),
+                    ]),
+                },
+            )
+            .expect("authorize spawn profile");
+        assert_eq!(
+            authorized.transition,
+            transition_id("AuthorizeSpawnProfileRunning")
+        );
+        let running = kernel
+            .transition(
+                &authorized.next_state,
                 &KernelInput {
                     variant: input_id("Spawn"),
                     fields: BTreeMap::from([
@@ -2872,6 +2914,10 @@ mod tests {
                         ),
                         (field_id("fence_token"), named_u64("FenceToken", 41)),
                         (field_id("generation"), named_u64("Generation", 2)),
+                        (
+                            field_id("profile_material_digest"),
+                            KernelValue::String(profile_material_digest.to_owned()),
+                        ),
                         (field_id("external_addressable"), KernelValue::Bool(false)),
                         // W3-H-1: new realtime-binding fields. `replacing`
                         // is None (no prior binding) so the Fresh branch

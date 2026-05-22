@@ -378,10 +378,25 @@ impl SignalConsumerSurface for MobSignalConsumerSurface {
         projected_fields: Vec<(FieldId, OwnedFieldValue)>,
     ) -> Result<(), String> {
         let signal = build_mob_signal(&variant, &projected_fields)?;
-        self.command_tx
-            .send(super::state::MobCommand::ProjectMachineSignal { signal })
-            .await
-            .map_err(|error| format!("mob actor signal queue closed: {error}"))
+        let command = super::state::MobCommand::ProjectMachineSignal { signal };
+        match self.command_tx.try_send(command) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(command)) => {
+                let command_tx = self.command_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = command_tx.send(command).await {
+                        tracing::warn!(
+                            error = %error,
+                            "mob actor signal queue closed before deferred lifecycle signal delivery"
+                        );
+                    }
+                });
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_command)) => {
+                Err("mob actor signal queue closed".to_string())
+            }
+        }
     }
 }
 
@@ -662,7 +677,7 @@ mod tests {
 
     #[cfg(feature = "runtime-adapter")]
     #[tokio::test]
-    async fn mob_signal_consumer_backpressures_when_actor_queue_is_full() {
+    async fn mob_signal_consumer_defers_when_actor_queue_is_full() {
         use super::super::state::MobCommand;
         use std::time::Duration;
 
@@ -678,26 +693,22 @@ mod tests {
             .expect("test precondition: bounded actor queue is full");
 
         let consumer = MobSignalConsumerSurface::new(command_tx);
-        let mut receive = tokio::spawn(async move {
-            consumer
-                .receive_signal(
-                    seam_facts::signals::observe_runtime_ready(),
-                    vec![
-                        (
-                            seam_facts::fields::agent_runtime_id(),
-                            OwnedFieldValue::Str("rt-backpressured".to_string()),
-                        ),
-                        (seam_facts::fields::fence_token(), OwnedFieldValue::U64(7)),
-                    ],
-                )
-                .await
-        });
-
-        let premature = tokio::time::timeout(Duration::from_millis(50), &mut receive).await;
-        assert!(
-            premature.is_err(),
-            "full actor queue must backpressure routed lifecycle signals instead of failing fast"
-        );
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            consumer.receive_signal(
+                seam_facts::signals::observe_runtime_ready(),
+                vec![
+                    (
+                        seam_facts::fields::agent_runtime_id(),
+                        OwnedFieldValue::Str("rt-deferred".to_string()),
+                    ),
+                    (seam_facts::fields::fence_token(), OwnedFieldValue::U64(7)),
+                ],
+            ),
+        )
+        .await
+        .expect("full actor queue must not block routed lifecycle signal dispatch")
+        .expect("deferred signal delivery should be accepted");
 
         match command_rx.recv().await.expect("first queued command") {
             MobCommand::ProjectMachineSignal { signal } => assert!(matches!(
@@ -710,22 +721,17 @@ mod tests {
             _ => panic!("unexpected command in test queue"),
         }
 
-        receive
+        match tokio::time::timeout(Duration::from_secs(1), command_rx.recv())
             .await
-            .expect("signal receive task should not panic")
-            .expect("backpressured signal enqueue should complete once capacity opens");
-
-        match command_rx
-            .recv()
-            .await
-            .expect("backpressured signal command")
+            .expect("deferred signal should enqueue once capacity opens")
+            .expect("deferred signal command")
         {
             MobCommand::ProjectMachineSignal { signal } => assert!(matches!(
                 signal,
                 mob_dsl::MobMachineSignal::ObserveRuntimeReady {
                     agent_runtime_id,
                     fence_token: mob_dsl::FenceToken(7),
-                } if agent_runtime_id.0 == "rt-backpressured"
+                } if agent_runtime_id.0 == "rt-deferred"
             )),
             _ => panic!("unexpected command in test queue"),
         }

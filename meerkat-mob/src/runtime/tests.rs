@@ -26497,6 +26497,57 @@ async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
     steer_task.abort();
 }
 
+#[tokio::test]
+async fn test_turn_completed_submission_does_not_block_actor_commands() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_start_turn_delay_ms(600_000);
+
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            MeerkatId::from("lead-completed-busy"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven lead");
+
+    let turn_handle = handle.clone();
+    let turn_task = tokio::spawn(async move {
+        turn_handle
+            .internal_turn_for_member(
+                MeerkatId::from("lead-completed-busy"),
+                ContentInput::Text("hold turn-completed submission open".into()),
+            )
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while service.start_turn_call_count() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("runtime should start the long-running turn");
+
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        handle.spawn_with_options(
+            ProfileName::from("worker"),
+            MeerkatId::from("worker-after-turn-completed"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        ),
+    )
+    .await
+    .expect("turn-completed submission must not park the mob actor")
+    .expect("unrelated actor command should still be processed");
+
+    turn_task.abort();
+}
+
 static REAL_COMMS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[tokio::test]

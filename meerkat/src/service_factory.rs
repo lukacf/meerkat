@@ -977,7 +977,8 @@ mod tests {
         ) -> Result<ProviderImageGenerationOutput, meerkat_llm_core::LlmError> {
             Ok(ProviderImageGenerationOutput {
                 operation_id: request.operation_id,
-                terminal: meerkat_core::ImageOperationTerminalClass::Failed,
+                terminal_observation:
+                    meerkat_core::ImageProviderTerminalObservation::ExecutionFailed,
                 images: Vec::new(),
                 provider_text: None,
                 revised_prompt: meerkat_core::RevisedPromptDisposition::NotRequested,

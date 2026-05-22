@@ -5274,18 +5274,9 @@ async fn project_cli_auth_status(
                 && !source_uses_store
         })
         .unwrap_or(false);
-    let oauth_store_missing = source_uses_store && oauth_mode && stored.is_none();
-    let unknown_snapshot;
     let marker_projection_snapshot;
-    let (projection_tokens, projection_snapshot) = if oauth_source_rejected || oauth_store_missing {
-        unknown_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
-            phase: None,
-            expires_at: None,
-            credential_present: false,
-            generation: snapshot.generation,
-            credential_published_at_millis: None,
-        };
-        (None, &unknown_snapshot)
+    let (projection_tokens, projection_snapshot) = if oauth_source_rejected {
+        (None, &snapshot)
     } else {
         marker_projection_snapshot = stored.as_ref().filter(|_| oauth_mode).and_then(|tokens| {
             meerkat_core::oauth_status_projection_snapshot_from_newer_marker(&snapshot, tokens)
@@ -12895,7 +12886,7 @@ mod tests {
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
-    async fn test_cli_auth_status_hides_non_store_oauth_lifecycle() {
+    async fn test_cli_auth_status_reports_non_store_oauth_lifecycle_without_tokens() {
         use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
         use meerkat_providers::auth_store::TokenStore;
 
@@ -12931,8 +12922,8 @@ mod tests {
         .await
         .expect("AuthMachine freshness observation succeeds");
 
-        assert_eq!(projection.phase, AuthStatusPhase::Unknown);
-        assert!(projection.expires_at.is_none());
+        assert_eq!(projection.phase, AuthStatusPhase::Valid);
+        assert!(projection.expires_at.is_some());
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]

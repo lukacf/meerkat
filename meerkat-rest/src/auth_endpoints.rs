@@ -1701,23 +1701,13 @@ pub async fn get_auth_status(
     } else {
         true
     };
-    let unknown_snapshot;
     let marker_projection_snapshot;
-    let (projection_tokens, projection_snapshot) = if oauth_source_rejected {
-        unknown_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
-            phase: None,
-            expires_at: None,
-            credential_present: false,
-            generation: snapshot.generation,
-            credential_published_at_millis: None,
-        };
-        (None, &unknown_snapshot)
-    } else if token_matches_binding {
+    let (projection_tokens, projection_snapshot) = if token_matches_binding {
         marker_projection_snapshot = stored.as_ref().filter(|_| oauth_mode).and_then(|tokens| {
             meerkat_core::oauth_status_projection_snapshot_from_newer_marker(&snapshot, tokens)
         });
         (
-            if source_uses_store {
+            if source_uses_store && !oauth_source_rejected {
                 stored.as_ref()
             } else {
                 None
@@ -1725,14 +1715,7 @@ pub async fn get_auth_status(
             marker_projection_snapshot.as_ref().unwrap_or(&snapshot),
         )
     } else {
-        unknown_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
-            phase: None,
-            expires_at: None,
-            credential_present: false,
-            generation: snapshot.generation,
-            credential_published_at_millis: None,
-        };
-        (None, &unknown_snapshot)
+        (None, &snapshot)
     };
     let projection =
         meerkat_core::project_published_auth_status(now, projection_tokens, projection_snapshot);
@@ -3676,7 +3659,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_auth_status_hides_wrong_mode_token_even_with_auth_machine_lifecycle() {
+    async fn rest_auth_status_hides_wrong_mode_token_without_hiding_lifecycle() {
         let temp = tempfile::tempdir().unwrap();
         let mut state = AppState::load_from(temp.path().to_path_buf())
             .await
@@ -3724,15 +3707,15 @@ mod tests {
         )
         .await;
 
-        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Unknown);
-        assert_eq!(detail.expires_at, None);
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Valid);
+        assert!(detail.expires_at.is_some());
         assert_eq!(detail.last_refresh_at, None);
         assert_eq!(detail.account_id, None);
         assert!(!detail.has_refresh_token);
     }
 
     #[tokio::test]
-    async fn rest_auth_status_hides_wrong_source_oauth_token_even_with_auth_machine_lifecycle() {
+    async fn rest_auth_status_hides_wrong_source_oauth_token_without_hiding_lifecycle() {
         let temp = tempfile::tempdir().unwrap();
         let mut state = AppState::load_from(temp.path().to_path_buf())
             .await
@@ -3792,8 +3775,8 @@ mod tests {
         )
         .await;
 
-        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Unknown);
-        assert_eq!(detail.expires_at, None);
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Valid);
+        assert!(detail.expires_at.is_some());
         assert_eq!(detail.last_refresh_at, None);
         assert_eq!(detail.account_id, None);
         assert!(!detail.has_refresh_token);

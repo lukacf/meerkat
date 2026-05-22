@@ -2,14 +2,14 @@ from __future__ import annotations
 
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.6.22
+Contract version: 0.6.23
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, Optional, Required, TypedDict
 
 
-CONTRACT_VERSION = "0.6.22"
+CONTRACT_VERSION = "0.6.23"
 
 
 @dataclass

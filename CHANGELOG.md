@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.23] - 2026-05-22
+
+Meerkat 0.6.23 is a mob runtime hotfix release for nonblocking observation,
+profile-scoped auto-wiring, and active-turn steer admission.
+
+### Fixed
+
+- **Mob observation during active turns** (#738) — broad mob observation now
+  reads actor-published snapshots instead of querying each mob actor, so
+  `mob_list` and profile observation do not block behind in-flight member turns.
+- **Profile-scoped auto-wire spawns** (#738) — profile-scoped legacy
+  `spawn_member` calls can request `auto_wire_parent` without requiring full
+  manage authority, while preserving owner/profile context for agent mob spawns.
+- **Active-turn steer admission** (#738) — keeps operator and member steers
+  runnable during active turns, routes staging through runtime-backed live
+  boundary probes, keeps runtime steers transient, and rolls back staged live
+  boundary state on commit failure.
+
+### Changed
+
+- **Release packaging Python selection** (#738) — release packaging checks now
+  prefer Python 3.11 for more predictable local packaging validation.
+
 ## [0.6.22] - 2026-05-21
 
 Meerkat 0.6.22 is a mob runtime hotfix release for turn-completion caller

@@ -25914,6 +25914,104 @@ async fn test_turn_driven_submit_work_steer_admits_while_active_runtime_apply_bl
 }
 
 #[tokio::test]
+async fn test_member_send_steer_admits_while_active_runtime_apply_blocks() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+
+    let sid_worker = handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            MeerkatId::from("w-member-send-active-steer"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wait_for_ready(Some(Duration::from_secs(2)))
+        .await
+        .expect("startup should settle");
+
+    let prompt_baseline = service.applied_runtime_prompts(&sid_worker).await.len();
+    let context_baseline = service
+        .applied_runtime_context_appends(&sid_worker)
+        .await
+        .len();
+    let worker = handle
+        .member(&AgentIdentity::from("w-member-send-active-steer"))
+        .await
+        .expect("worker handle");
+
+    service.set_block_runtime_turns(true);
+    let first_worker = worker.clone();
+    let first_turn = tokio::spawn(async move {
+        first_worker
+            .send(
+                "first member send blocks inside runtime apply",
+                HandlingMode::Queue,
+            )
+            .await
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        service.runtime_turn_started.notified(),
+    )
+    .await
+    .expect("first runtime apply should start and block");
+    tokio::time::timeout(Duration::from_secs(2), first_turn)
+        .await
+        .expect("first member send admission should not wait for blocked apply")
+        .expect("first member send task should join")
+        .expect("first member send should be admitted");
+
+    service.set_block_session_reads(true);
+    let steer_worker = worker.clone();
+    let steer = tokio::spawn(async move {
+        steer_worker
+            .send(
+                "member send active steer must stage while apply is blocked",
+                HandlingMode::Steer,
+            )
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_millis(200), steer)
+        .await
+        .expect("active member-send steer admission must not wait for blocked runtime apply or session reads")
+        .expect("active member-send steer task should join")
+        .expect("active member-send steer should be admitted");
+
+    let appends = service.applied_runtime_context_appends(&sid_worker).await;
+    assert!(
+        appends.iter().skip(context_baseline).any(|append| append
+            .text
+            .contains("member send active steer must stage while apply is blocked")),
+        "member-send active steer should stage for the live boundary before the active apply releases; appends={appends:?}"
+    );
+    assert_eq!(
+        service.applied_runtime_prompts(&sid_worker).await.len(),
+        prompt_baseline + 1,
+        "active member-send steer must not schedule a second full turn while the first runtime apply is blocked"
+    );
+
+    service.set_block_session_reads(false);
+    service.release_session_reads();
+    service.set_block_runtime_turns(false);
+    service.release_runtime_turns();
+    tokio::time::timeout(Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop timeout after active member-send steer assertion")
+        .expect("stop after active member-send steer assertion");
+}
+
+#[tokio::test]
 async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let (handle, service) =
@@ -33496,7 +33594,7 @@ async fn mob_runtime_parity_execute_probe(
                 None,
             )
             .await
-            .map(|()| summarize_mob_runtime_success(probe, "bridge_session")),
+            .map(|_| summarize_mob_runtime_success(probe, "member_delivery")),
         MobRuntimeParityProbeInput::InternalTurn => fixture
             .handle
             .internal_turn(

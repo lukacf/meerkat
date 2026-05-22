@@ -3123,13 +3123,19 @@ impl MobHandle {
         message: meerkat_core::types::ContentInput,
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
-    ) -> Result<(), MobError> {
-        let snapshot = self
-            .member_status(&AgentIdentity::from(agent_identity.as_str()))
-            .await?;
+    ) -> Result<MemberDeliveryReceipt, MobError> {
+        let identity = AgentIdentity::from(agent_identity.as_str());
+        let entry = self
+            .get_member(&identity)
+            .await
+            .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+        if entry.state != crate::roster::MemberState::Active {
+            return Err(MobError::MemberNotFound(agent_identity));
+        }
+
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
-            runtime_id: snapshot.agent_runtime_id,
-            fence_token: snapshot.fence_token,
+            runtime_id: entry.agent_runtime_id.clone(),
+            fence_token: entry.fence_token,
             work_ref: WorkRef::new(),
             spec: WorkSpec::new(message, WorkOrigin::External),
             handling_mode,
@@ -3138,7 +3144,12 @@ impl MobHandle {
         });
         self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
             .await?;
-        Ok(())
+        Ok(MemberDeliveryReceipt {
+            identity,
+            agent_runtime_id: entry.agent_runtime_id,
+            fence_token: entry.fence_token,
+            handling_mode,
+        })
     }
 
     pub(super) async fn internal_turn_for_member(
@@ -4197,7 +4208,8 @@ impl MemberHandle {
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
     ) -> Result<MemberDeliveryReceipt, MobError> {
-        self.mob
+        let receipt = self
+            .mob
             .external_turn_for_member(
                 self.agent_identity.clone(),
                 content.into(),
@@ -4205,16 +4217,7 @@ impl MemberHandle {
                 render_metadata,
             )
             .await?;
-        let snapshot = self
-            .mob
-            .member_status(&AgentIdentity::from(self.agent_identity.as_str()))
-            .await?;
-        Ok(MemberDeliveryReceipt {
-            identity: self.identity(),
-            agent_runtime_id: snapshot.agent_runtime_id,
-            fence_token: snapshot.fence_token,
-            handling_mode,
-        })
+        Ok(receipt)
     }
 
     /// Send typed peer communication from this member to another mob member.

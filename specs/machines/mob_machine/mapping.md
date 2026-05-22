@@ -21,6 +21,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `operator-provenance-and-peer-input` — record operator action provenance, trust operation peer, admit peer input, append failure ledger, and surface peer-exposed member inputs
 
 ### Transitions
+- `ClassifyMemberWaitRuntimeMaterialPresentRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifyMemberWaitRuntimeMaterialPresentStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifyMemberWaitRuntimeMaterialPresentCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ClassifyMemberWaitRuntimeMaterialPresentDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ClassifyMemberWaitMissingRuntimeMaterialRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifyMemberWaitMissingRuntimeMaterialStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifyMemberWaitMissingRuntimeMaterialCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ClassifyMemberWaitMissingRuntimeMaterialDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `ClassifySpawnManyFailureProfileNotFoundRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
@@ -1406,6 +1430,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SpawnManyFailureClassified`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `MemberWaitClassified`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `WiringGraphChanged`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`

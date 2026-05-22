@@ -138,6 +138,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: Bool, bridge_session_id: SessionId, replacing: Option<SessionId>)
 - `AuthorizeSpawnProfile`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool)
 - `ClassifySpawnManyFailure`(observation: MobSpawnManyFailureObservationKind)
+- `ClassifyMemberWait`(agent_identity: AgentIdentity)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: SessionId)
@@ -282,6 +283,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SpawnPolicyResolutionRecorded`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
 - `RespawnTopologyRestoreResolved`(agent_identity: AgentIdentity, result: RespawnTopologyRestoreResultKind, failed_peer_ids: Seq<RespawnTopologyPeerId>)
 - `SpawnManyFailureClassified`(observation: MobSpawnManyFailureObservationKind, cause: MobSpawnManyFailureCauseKind)
+- `MemberWaitClassified`(agent_identity: AgentIdentity, result: MemberWaitClassificationKind)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
 - `MemberTrustWiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, a_endpoint: MemberPeerEndpoint, b_endpoint: MemberPeerEndpoint, epoch: u64)
@@ -312,6 +314,70 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `external_peer_edges_are_keyed_coherently`
 
 ## Transitions
+### `ClassifyMemberWaitRuntimeMaterialPresentRunning`
+- From: `Running`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_present`
+- Emits: `MemberWaitClassified`
+- To: `Running`
+
+### `ClassifyMemberWaitRuntimeMaterialPresentStopped`
+- From: `Stopped`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_present`
+- Emits: `MemberWaitClassified`
+- To: `Stopped`
+
+### `ClassifyMemberWaitRuntimeMaterialPresentCompleted`
+- From: `Completed`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_present`
+- Emits: `MemberWaitClassified`
+- To: `Completed`
+
+### `ClassifyMemberWaitRuntimeMaterialPresentDestroyed`
+- From: `Destroyed`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_present`
+- Emits: `MemberWaitClassified`
+- To: `Destroyed`
+
+### `ClassifyMemberWaitMissingRuntimeMaterialRunning`
+- From: `Running`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_missing`
+- Emits: `MemberWaitClassified`
+- To: `Running`
+
+### `ClassifyMemberWaitMissingRuntimeMaterialStopped`
+- From: `Stopped`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_missing`
+- Emits: `MemberWaitClassified`
+- To: `Stopped`
+
+### `ClassifyMemberWaitMissingRuntimeMaterialCompleted`
+- From: `Completed`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_missing`
+- Emits: `MemberWaitClassified`
+- To: `Completed`
+
+### `ClassifyMemberWaitMissingRuntimeMaterialDestroyed`
+- From: `Destroyed`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_missing`
+- Emits: `MemberWaitClassified`
+- To: `Destroyed`
+
 ### `ClassifySpawnManyFailureProfileNotFoundRunning`
 - From: `Running`
 - On: `ClassifySpawnManyFailure`(observation)

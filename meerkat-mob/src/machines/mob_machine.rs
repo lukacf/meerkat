@@ -642,6 +642,16 @@ pub enum MobMemberState {
     Retiring,
 }
 
+/// Typed public wait-admission result for member waits. MobMachine emits this
+/// class before wait surfaces decide whether an absent runtime-material
+/// snapshot is a hard failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberWaitClassificationKind {
+    #[default]
+    RuntimeMaterialPresent,
+    MissingRuntimeMaterial,
+}
+
 /// Typed public rejection class for [`MobMachineInput::SubmitWork`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SubmitWorkRejectReasonKind {

@@ -1518,6 +1518,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum("MobMemberState", &["Active", "Retiring"]),
             NamedTypeBinding::string_enum(
+                "MemberWaitClassificationKind",
+                &["RuntimeMaterialPresent", "MissingRuntimeMaterial"],
+            ),
+            NamedTypeBinding::string_enum(
                 "MobPhase",
                 &["Running", "Stopped", "Completed", "Destroyed"],
             ),

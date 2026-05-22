@@ -1339,6 +1339,58 @@ impl std::fmt::Display for MemberLifecycleKind {
     }
 }
 pub type MemberPeerEndpoint = meerkat_machine_schema::catalog::dsl::mob_machine::MemberPeerEndpoint;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberWaitClassificationKind {
+    #[default]
+    #[serde(rename = "RuntimeMaterialPresent")]
+    RuntimeMaterialPresent,
+    #[serde(rename = "MissingRuntimeMaterial")]
+    MissingRuntimeMaterial,
+}
+impl MemberWaitClassificationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RuntimeMaterialPresent => "RuntimeMaterialPresent",
+            Self::MissingRuntimeMaterial => "MissingRuntimeMaterial",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberWaitClassificationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RuntimeMaterialPresent" => Ok(Self::RuntimeMaterialPresent),
+            "MissingRuntimeMaterial" => Ok(Self::MissingRuntimeMaterial),
+            other => Err(format!(
+                "invalid MemberWaitClassificationKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberWaitClassificationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberWaitClassificationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -2768,6 +2820,10 @@ pub mod inputs {
         pub observation: MobSpawnManyFailureObservationKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyMemberWait {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnsureMember {
         pub agent_identity: AgentIdentity,
     }
@@ -3038,6 +3094,7 @@ pub enum Input {
     Spawn(inputs::Spawn),
     AuthorizeSpawnProfile(inputs::AuthorizeSpawnProfile),
     ClassifySpawnManyFailure(inputs::ClassifySpawnManyFailure),
+    ClassifyMemberWait(inputs::ClassifyMemberWait),
     EnsureMember(inputs::EnsureMember),
     Reconcile(inputs::Reconcile),
     Retire(inputs::Retire),
@@ -3120,6 +3177,7 @@ impl Input {
             Self::Spawn(_) => InputKind::Spawn,
             Self::AuthorizeSpawnProfile(_) => InputKind::AuthorizeSpawnProfile,
             Self::ClassifySpawnManyFailure(_) => InputKind::ClassifySpawnManyFailure,
+            Self::ClassifyMemberWait(_) => InputKind::ClassifyMemberWait,
             Self::EnsureMember(_) => InputKind::EnsureMember,
             Self::Reconcile(_) => InputKind::Reconcile,
             Self::Retire(_) => InputKind::Retire,
@@ -3211,6 +3269,7 @@ pub enum InputKind {
     Spawn,
     AuthorizeSpawnProfile,
     ClassifySpawnManyFailure,
+    ClassifyMemberWait,
     EnsureMember,
     Reconcile,
     Retire,
@@ -3730,6 +3789,11 @@ pub mod effects {
         pub cause: MobSpawnManyFailureCauseKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberWaitClassified {
+        pub agent_identity: AgentIdentity,
+        pub result: MemberWaitClassificationKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WiringGraphChanged {
         pub epoch: u64,
     }
@@ -3893,6 +3957,7 @@ pub enum Effect {
     SpawnPolicyResolutionRecorded(effects::SpawnPolicyResolutionRecorded),
     RespawnTopologyRestoreResolved(effects::RespawnTopologyRestoreResolved),
     SpawnManyFailureClassified(effects::SpawnManyFailureClassified),
+    MemberWaitClassified(effects::MemberWaitClassified),
     WiringGraphChanged(effects::WiringGraphChanged),
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
     MemberTrustWiringRequested(effects::MemberTrustWiringRequested),
@@ -3946,6 +4011,7 @@ pub enum EffectKind {
     SpawnPolicyResolutionRecorded,
     RespawnTopologyRestoreResolved,
     SpawnManyFailureClassified,
+    MemberWaitClassified,
     WiringGraphChanged,
     MemberSessionBindingChanged,
     MemberTrustWiringRequested,
@@ -3974,6 +4040,14 @@ pub enum EffectKind {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
+    ClassifyMemberWaitRuntimeMaterialPresentRunning,
+    ClassifyMemberWaitRuntimeMaterialPresentStopped,
+    ClassifyMemberWaitRuntimeMaterialPresentCompleted,
+    ClassifyMemberWaitRuntimeMaterialPresentDestroyed,
+    ClassifyMemberWaitMissingRuntimeMaterialRunning,
+    ClassifyMemberWaitMissingRuntimeMaterialStopped,
+    ClassifyMemberWaitMissingRuntimeMaterialCompleted,
+    ClassifyMemberWaitMissingRuntimeMaterialDestroyed,
     ClassifySpawnManyFailureProfileNotFoundRunning,
     ClassifySpawnManyFailureProfileNotFoundStopped,
     ClassifySpawnManyFailureProfileNotFoundCompleted,

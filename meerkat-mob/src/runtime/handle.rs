@@ -4284,23 +4284,53 @@ impl MobHandle {
         agent_identity: &MeerkatId,
     ) -> Result<MobMemberSnapshot, MobError> {
         loop {
-            let snapshot = self
-                .member_status(&AgentIdentity::from(agent_identity.as_str()))
-                .await?;
-            if snapshot.status == MobMemberStatus::Unknown
-                && snapshot.agent_runtime_id.is_none()
-                && snapshot.fence_token.is_none()
-                && snapshot.current_bridge_session_id().is_none()
-            {
+            let wait_class = self.classify_member_wait(agent_identity).await?;
+            if wait_class == mob_dsl::MemberWaitClassificationKind::MissingRuntimeMaterial {
                 return Err(MobError::Internal(format!(
                     "MobMachine runtime material is absent for member '{agent_identity}'"
                 )));
             }
+            let snapshot = self
+                .member_status(&AgentIdentity::from(agent_identity.as_str()))
+                .await?;
             if snapshot.is_final {
                 return Ok(snapshot);
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+    }
+
+    async fn classify_member_wait(
+        &self,
+        agent_identity: &MeerkatId,
+    ) -> Result<mob_dsl::MemberWaitClassificationKind, MobError> {
+        let dsl_identity =
+            mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(agent_identity.as_str()));
+        let effects = self
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ClassifyMemberWait {
+                agent_identity: dsl_identity.clone(),
+            })
+            .await?;
+        let (effect_identity, result) = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::MemberWaitClassified {
+                    agent_identity,
+                    result,
+                } => Some((agent_identity, result)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted member wait classification but emitted no result".into(),
+                )
+            })?;
+        if effect_identity != dsl_identity {
+            return Err(MobError::Internal(format!(
+                "MobMachine member wait classification drift: input={dsl_identity:?}, effect={effect_identity:?}"
+            )));
+        }
+        Ok(result)
     }
 
     /// Get a point-in-time execution snapshot for a member.

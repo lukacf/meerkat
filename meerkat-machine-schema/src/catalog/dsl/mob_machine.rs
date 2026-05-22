@@ -379,6 +379,7 @@ macro_rules! mob_catalog_machine_dsl {
             Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: bool, bridge_session_id: SessionId, replacing: Option<SessionId> },
             AuthorizeSpawnProfile { agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: bool },
             ClassifySpawnManyFailure { observation: Enum<MobSpawnManyFailureObservationKind> },
+            ClassifyMemberWait { agent_identity: AgentIdentity },
             EnsureMember { agent_identity: AgentIdentity },
             Reconcile { desired: Set<AgentIdentity>, retire_stale: bool },
             Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: SessionId },
@@ -534,6 +535,7 @@ macro_rules! mob_catalog_machine_dsl {
             SpawnPolicyResolutionRecorded { agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<Enum<SpawnPolicyRuntimeMode>> },
             RespawnTopologyRestoreResolved { agent_identity: AgentIdentity, result: Enum<RespawnTopologyRestoreResultKind>, failed_peer_ids: Seq<RespawnTopologyPeerId> },
             SpawnManyFailureClassified { observation: Enum<MobSpawnManyFailureObservationKind>, cause: Enum<MobSpawnManyFailureCauseKind> },
+            MemberWaitClassified { agent_identity: AgentIdentity, result: Enum<MemberWaitClassificationKind> },
             // Track-B (R5): canonical topology-change signals consumed by
             // the `RecomputeMobPeerOverlay` composition driver.
             //
@@ -613,6 +615,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition SpawnPolicyResolutionRecorded => local,
         disposition RespawnTopologyRestoreResolved => local,
         disposition SpawnManyFailureClassified => local,
+        disposition MemberWaitClassified => local,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
         disposition MemberTrustWiringRequested => external handoff mob_member_trust_wiring,
@@ -669,6 +672,110 @@ macro_rules! mob_catalog_machine_dsl {
         // =====================================================================
         // Direct transitions
         // =====================================================================
+
+        transition ClassifyMemberWaitRuntimeMaterialPresentRunning {
+            on input ClassifyMemberWait { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "runtime_material_present" {
+                self.identity_to_runtime.contains_key(agent_identity) == true
+                && self.identity_runtime_generations.contains_key(agent_identity) == true
+                && self.identity_runtime_fence_tokens.contains_key(agent_identity) == true
+            }
+            update {}
+            to Running
+            emit MemberWaitClassified { agent_identity: agent_identity, result: MemberWaitClassificationKind::RuntimeMaterialPresent }
+        }
+
+        transition ClassifyMemberWaitRuntimeMaterialPresentStopped {
+            on input ClassifyMemberWait { agent_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "runtime_material_present" {
+                self.identity_to_runtime.contains_key(agent_identity) == true
+                && self.identity_runtime_generations.contains_key(agent_identity) == true
+                && self.identity_runtime_fence_tokens.contains_key(agent_identity) == true
+            }
+            update {}
+            to Stopped
+            emit MemberWaitClassified { agent_identity: agent_identity, result: MemberWaitClassificationKind::RuntimeMaterialPresent }
+        }
+
+        transition ClassifyMemberWaitRuntimeMaterialPresentCompleted {
+            on input ClassifyMemberWait { agent_identity }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "runtime_material_present" {
+                self.identity_to_runtime.contains_key(agent_identity) == true
+                && self.identity_runtime_generations.contains_key(agent_identity) == true
+                && self.identity_runtime_fence_tokens.contains_key(agent_identity) == true
+            }
+            update {}
+            to Completed
+            emit MemberWaitClassified { agent_identity: agent_identity, result: MemberWaitClassificationKind::RuntimeMaterialPresent }
+        }
+
+        transition ClassifyMemberWaitRuntimeMaterialPresentDestroyed {
+            on input ClassifyMemberWait { agent_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "runtime_material_present" {
+                self.identity_to_runtime.contains_key(agent_identity) == true
+                && self.identity_runtime_generations.contains_key(agent_identity) == true
+                && self.identity_runtime_fence_tokens.contains_key(agent_identity) == true
+            }
+            update {}
+            to Destroyed
+            emit MemberWaitClassified { agent_identity: agent_identity, result: MemberWaitClassificationKind::RuntimeMaterialPresent }
+        }
+
+        transition ClassifyMemberWaitMissingRuntimeMaterialRunning {
+            on input ClassifyMemberWait { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "runtime_material_missing" {
+                self.identity_to_runtime.contains_key(agent_identity) == false
+                || self.identity_runtime_generations.contains_key(agent_identity) == false
+                || self.identity_runtime_fence_tokens.contains_key(agent_identity) == false
+            }
+            update {}
+            to Running
+            emit MemberWaitClassified { agent_identity: agent_identity, result: MemberWaitClassificationKind::MissingRuntimeMaterial }
+        }
+
+        transition ClassifyMemberWaitMissingRuntimeMaterialStopped {
+            on input ClassifyMemberWait { agent_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "runtime_material_missing" {
+                self.identity_to_runtime.contains_key(agent_identity) == false
+                || self.identity_runtime_generations.contains_key(agent_identity) == false
+                || self.identity_runtime_fence_tokens.contains_key(agent_identity) == false
+            }
+            update {}
+            to Stopped
+            emit MemberWaitClassified { agent_identity: agent_identity, result: MemberWaitClassificationKind::MissingRuntimeMaterial }
+        }
+
+        transition ClassifyMemberWaitMissingRuntimeMaterialCompleted {
+            on input ClassifyMemberWait { agent_identity }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "runtime_material_missing" {
+                self.identity_to_runtime.contains_key(agent_identity) == false
+                || self.identity_runtime_generations.contains_key(agent_identity) == false
+                || self.identity_runtime_fence_tokens.contains_key(agent_identity) == false
+            }
+            update {}
+            to Completed
+            emit MemberWaitClassified { agent_identity: agent_identity, result: MemberWaitClassificationKind::MissingRuntimeMaterial }
+        }
+
+        transition ClassifyMemberWaitMissingRuntimeMaterialDestroyed {
+            on input ClassifyMemberWait { agent_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "runtime_material_missing" {
+                self.identity_to_runtime.contains_key(agent_identity) == false
+                || self.identity_runtime_generations.contains_key(agent_identity) == false
+                || self.identity_runtime_fence_tokens.contains_key(agent_identity) == false
+            }
+            update {}
+            to Destroyed
+            emit MemberWaitClassified { agent_identity: agent_identity, result: MemberWaitClassificationKind::MissingRuntimeMaterial }
+        }
 
         transition ClassifySpawnManyFailureProfileNotFound {
             per_phase [Running, Stopped, Completed, Destroyed]
@@ -5987,6 +6094,16 @@ pub enum MobMemberState {
     #[default]
     Active,
     Retiring,
+}
+
+/// Typed public wait-admission result for member waits. MobMachine emits this
+/// class before wait surfaces decide whether an absent runtime-material
+/// snapshot is a hard failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberWaitClassificationKind {
+    #[default]
+    RuntimeMaterialPresent,
+    MissingRuntimeMaterial,
 }
 
 /// Typed public rejection class for [`MobMachineInput::SubmitWork`].

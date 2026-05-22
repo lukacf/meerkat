@@ -129,6 +129,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::Spawn { .. }
             | mob_dsl::MobMachineInput::AuthorizeSpawnProfile { .. }
             | mob_dsl::MobMachineInput::ClassifySpawnManyFailure { .. }
+            | mob_dsl::MobMachineInput::ClassifyMemberWait { .. }
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }
             | mob_dsl::MobMachineInput::Retire { .. }
@@ -1216,6 +1217,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::Spawn { .. }
             | mob_dsl::MobMachineInput::AuthorizeSpawnProfile { .. }
             | mob_dsl::MobMachineInput::ClassifySpawnManyFailure { .. }
+            | mob_dsl::MobMachineInput::ClassifyMemberWait { .. }
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }
             | mob_dsl::MobMachineInput::Retire { .. }

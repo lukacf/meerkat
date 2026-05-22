@@ -10106,8 +10106,33 @@ impl MobActor {
             .member_retire_trust_cleanup_plan(agent_identity, &entry)
             .await?;
 
-        let prepared_retire =
-            self.prepare_dsl_input_transition(retire_input, "handle_retire_inner_mark_retiring")?;
+        let prepared_retire = self.prepare_dsl_input_transition(
+            retire_input.clone(),
+            "handle_retire_inner_mark_retiring",
+        )?;
+        Self::require_member_lifecycle_journal_effect(
+            &prepared_retire.transition,
+            mob_dsl::MobLifecycleJournalKind::MemberRetired,
+            &entry.agent_identity,
+            &entry.agent_runtime_id,
+            None,
+            entry.generation,
+            Some(session_id_for_route.clone()),
+            "handle_retire_inner_mark_retiring",
+        )?;
+        if !retire_event_already_present
+            && let Err(error) = self.append_retire_event_for_entry(&entry).await
+        {
+            return Err(error);
+        }
+
+        self.cleanup_retiring_external_peer_edges(&domain_identity)
+            .await?;
+
+        let prepared_retire = self.prepare_dsl_input_transition(
+            retire_input,
+            "handle_retire_inner_mark_retiring_after_external_cleanup",
+        )?;
         Self::require_member_lifecycle_journal_effect(
             &prepared_retire.transition,
             mob_dsl::MobLifecycleJournalKind::MemberRetired,
@@ -10116,13 +10141,9 @@ impl MobActor {
             None,
             entry.generation,
             Some(session_id_for_route),
-            "handle_retire_inner_mark_retiring",
+            "handle_retire_inner_mark_retiring_after_external_cleanup",
         )?;
-        if !retire_event_already_present
-            && let Err(error) = self.append_retire_event_for_entry(&entry).await
-        {
-            return Err(error);
-        }
+
         let mut detach_obligations =
             crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(
                 &prepared_retire.transition,
@@ -10698,7 +10719,24 @@ impl MobActor {
     ) -> BTreeSet<AgentIdentity> {
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
         let state = self.dsl_authority.state();
-        let mut wired_to = state
+        let mut wired_to = self.machine_member_wired_peer_identities_for(identity);
+        wired_to.extend(
+            state
+                .external_peer_edges
+                .iter()
+                .filter(|edge| edge.local == dsl_identity)
+                .map(|edge| AgentIdentity::from(edge.endpoint.name.0.as_str())),
+        );
+        wired_to
+    }
+
+    fn machine_member_wired_peer_identities_for(
+        &self,
+        identity: &AgentIdentity,
+    ) -> BTreeSet<AgentIdentity> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        self.dsl_authority
+            .state()
             .wiring_edges
             .iter()
             .filter_map(|edge| {
@@ -10710,15 +10748,42 @@ impl MobActor {
                     None
                 }
             })
-            .collect::<BTreeSet<_>>();
-        wired_to.extend(
-            state
-                .external_peer_edges
-                .iter()
-                .filter(|edge| edge.local == dsl_identity)
-                .map(|edge| AgentIdentity::from(edge.endpoint.name.0.as_str())),
-        );
-        wired_to
+            .collect()
+    }
+
+    fn machine_external_peer_edges_for(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Vec<mob_dsl::ExternalPeerEdge> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        self.dsl_authority
+            .state()
+            .external_peer_edges
+            .iter()
+            .filter(|edge| edge.local == dsl_identity)
+            .cloned()
+            .collect()
+    }
+
+    async fn cleanup_retiring_external_peer_edges(
+        &mut self,
+        retiring_identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        let local = MeerkatId::from(retiring_identity.as_str());
+        for edge in self.machine_external_peer_edges_for(retiring_identity) {
+            let peer_name = meerkat_core::comms::PeerName::new(edge.endpoint.name.0.clone())
+                .map_err(|error| {
+                    MobError::WiringError(format!(
+                        "retire external cleanup has invalid peer name '{}': {error}",
+                        edge.endpoint.name.0
+                    ))
+                })?;
+            let stale_cleanup_spec =
+                Self::trusted_peer_descriptor_from_machine_endpoint(&edge.endpoint)?;
+            self.handle_unwire_external(local.clone(), peer_name, Some(stale_cleanup_spec))
+                .await?;
+        }
+        Ok(())
     }
 
     async fn member_retire_trust_cleanup_plan(
@@ -10728,7 +10793,7 @@ impl MobActor {
     ) -> Result<RetireTrustCleanupPlan, MobError> {
         let retiring_identity = AgentIdentity::from(agent_identity.as_str());
         let machine_wired_peer_identities =
-            self.machine_wired_peer_identities_for(&retiring_identity);
+            self.machine_member_wired_peer_identities_for(&retiring_identity);
         if machine_wired_peer_identities.is_empty() {
             return Ok(RetireTrustCleanupPlan::empty());
         }

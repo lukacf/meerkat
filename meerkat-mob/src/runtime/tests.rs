@@ -15970,6 +15970,77 @@ async fn test_unwire_external_removes_trust_and_projection() {
     );
 }
 
+#[tokio::test]
+async fn test_retire_unwires_external_peer_edge_before_releasing_member_peer() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    let external = test_trusted_peer_descriptor(
+        "remote-mob/worker/retire-agent",
+        "inproc://remote-mob/worker/retire-agent",
+    );
+
+    handle
+        .wire(
+            AgentIdentity::from("l-1"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("wire external");
+
+    let external_key = crate::machines::mob_machine::ExternalPeerKey::new(
+        crate::machines::mob_machine::AgentIdentity::from("l-1"),
+        crate::machines::mob_machine::PeerName::from(external.name.as_str()),
+    );
+    let external_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from("l-1"),
+        crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
+    );
+    let dsl_before = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("debug dsl snapshot before retire");
+    assert!(
+        dsl_before.external_peer_edges.contains(&external_edge),
+        "test setup must seed MobMachine external edge"
+    );
+
+    handle
+        .retire(AgentIdentity::from("l-1"))
+        .await
+        .expect("retire should clean external peer edge through MobMachine");
+
+    let dsl_after = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("debug dsl snapshot after retire");
+    assert!(
+        !dsl_after.external_peer_edges.contains(&external_edge),
+        "retire should remove descriptor-bearing external edge through generated external unwire"
+    );
+    assert!(
+        !dsl_after
+            .external_peer_edges_by_key
+            .contains_key(&external_key),
+        "retire should remove external edge key through generated external unwire"
+    );
+
+    let events = handle.events().replay_all().await.expect("replay events");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::ExternalPeerUnwired { local, peer_name }
+                    if local == &AgentIdentity::from("l-1")
+                        && peer_name.as_str() == external.name.as_str()
+            )
+        }),
+        "retire should persist the external unwire event before member peer material is released"
+    );
+}
+
 const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 const ED25519_PUBLIC_KEY_ZERO: &str = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 

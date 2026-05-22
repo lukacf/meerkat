@@ -23992,6 +23992,7 @@ struct RuntimeBackedRealCommsSessionService {
     session_counter: AtomicU64,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
+    append_system_context_delay_ms: AtomicU64,
     applied_runtime_prompts: RwLock<HashMap<SessionId, Vec<ContentInput>>>,
     applied_runtime_context_appends: RwLock<HashMap<SessionId, Vec<AppendSystemContextRequest>>>,
     applied_runtime_render_metadata:
@@ -24007,6 +24008,7 @@ impl RuntimeBackedRealCommsSessionService {
             session_counter: AtomicU64::new(0),
             runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
+            append_system_context_delay_ms: AtomicU64::new(0),
             applied_runtime_prompts: RwLock::new(HashMap::new()),
             applied_runtime_context_appends: RwLock::new(HashMap::new()),
             applied_runtime_render_metadata: RwLock::new(HashMap::new()),
@@ -24016,6 +24018,11 @@ impl RuntimeBackedRealCommsSessionService {
     fn set_keep_alive_turns_complete_immediately(&self, enabled: bool) {
         self.keep_alive_turns_complete_immediately
             .store(enabled, Ordering::Relaxed);
+    }
+
+    fn set_append_system_context_delay_ms(&self, delay_ms: u64) {
+        self.append_system_context_delay_ms
+            .store(delay_ms, Ordering::Relaxed);
     }
 
     async fn real_comms(&self, session_id: &SessionId) -> Option<Arc<meerkat_comms::CommsRuntime>> {
@@ -24286,6 +24293,10 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
     ) -> Result<AppendSystemContextResult, SessionControlError> {
         if !self.sessions.read().await.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() }.into());
+        }
+        let delay_ms = self.append_system_context_delay_ms.load(Ordering::Relaxed);
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
         let mut appends = self.applied_runtime_context_appends.write().await;
         let session_appends = appends.entry(id.clone()).or_default();
@@ -25523,6 +25534,125 @@ async fn test_running_peer_message_to_autonomous_member_live_injects_during_curr
         .await
         .expect("stop timeout after running peer message assertion")
         .expect("stop after running peer message assertion");
+}
+
+#[tokio::test]
+async fn test_active_autonomous_direct_steer_ack_waits_for_live_admission_not_turn_completion() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+
+    let sid_worker = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("w-direct-steer"),
+            None,
+        )
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wait_for_ready(Some(Duration::from_secs(2)))
+        .await
+        .expect("startup should settle");
+    handle
+        .wait_for_members_kickoff_complete(
+            &[AgentIdentity::from("w-direct-steer")],
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .expect("kickoff should resolve before blocked direct turn");
+
+    let prompt_baseline = service.applied_runtime_prompts(&sid_worker).await.len();
+    let context_baseline = service
+        .applied_runtime_context_appends(&sid_worker)
+        .await
+        .len();
+
+    service.set_keep_alive_turns_complete_immediately(false);
+    let worker = handle
+        .member(&AgentIdentity::from("w-direct-steer"))
+        .await
+        .expect("worker handle");
+    worker
+        .send(
+            "first direct prompt holds active apply",
+            HandlingMode::Steer,
+        )
+        .await
+        .expect("first direct steer should be admitted");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&sid_worker).await;
+            if prompts
+                .iter()
+                .skip(prompt_baseline)
+                .any(|prompt| prompt.text_content().contains("first direct prompt"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("first direct steer should enter active apply");
+
+    service.set_append_system_context_delay_ms(250);
+    let steer_worker = handle
+        .member(&AgentIdentity::from("w-direct-steer"))
+        .await
+        .expect("worker handle for active steer");
+    let steer_task = tokio::spawn(async move {
+        steer_worker
+            .send(
+                "second direct steer must stage before ack",
+                HandlingMode::Steer,
+            )
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !steer_task.is_finished(),
+        "active direct steer must not ack before runtime live-boundary admission completes"
+    );
+
+    tokio::time::timeout(Duration::from_millis(100), handle.list_members())
+        .await
+        .expect("actor mailbox should not wait behind active steer admission");
+
+    tokio::time::timeout(Duration::from_secs(2), steer_task)
+        .await
+        .expect("active steer admission should not wait for full active turn completion")
+        .expect("active steer task should join")
+        .expect("active steer should be admitted");
+
+    let appends = service.applied_runtime_context_appends(&sid_worker).await;
+    assert!(
+        appends.iter().skip(context_baseline).any(|append| append
+            .text
+            .contains("second direct steer must stage before ack")),
+        "active direct steer ack should imply the steer was staged for the live boundary; appends={appends:?}"
+    );
+    assert_eq!(
+        service.applied_runtime_prompts(&sid_worker).await.len(),
+        prompt_baseline + 1,
+        "active steer admission must not wait for or schedule a second full turn before the blocked apply is released"
+    );
+
+    service
+        .interrupt(&sid_worker)
+        .await
+        .expect("interrupt should release blocked worker apply");
+    tokio::time::timeout(Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop timeout after direct active steer assertion")
+        .expect("stop after direct active steer assertion");
 }
 
 #[tokio::test]

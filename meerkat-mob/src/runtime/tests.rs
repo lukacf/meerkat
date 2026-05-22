@@ -23993,6 +23993,12 @@ struct RuntimeBackedRealCommsSessionService {
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     append_system_context_delay_ms: AtomicU64,
+    block_runtime_turns: AtomicBool,
+    runtime_turn_started: tokio::sync::Notify,
+    release_runtime_turns: tokio::sync::Notify,
+    block_session_reads: AtomicBool,
+    session_read_entered: tokio::sync::Notify,
+    release_session_reads: tokio::sync::Notify,
     applied_runtime_prompts: RwLock<HashMap<SessionId, Vec<ContentInput>>>,
     applied_runtime_context_appends: RwLock<HashMap<SessionId, Vec<AppendSystemContextRequest>>>,
     applied_runtime_render_metadata:
@@ -24009,6 +24015,12 @@ impl RuntimeBackedRealCommsSessionService {
             runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             append_system_context_delay_ms: AtomicU64::new(0),
+            block_runtime_turns: AtomicBool::new(false),
+            runtime_turn_started: tokio::sync::Notify::new(),
+            release_runtime_turns: tokio::sync::Notify::new(),
+            block_session_reads: AtomicBool::new(false),
+            session_read_entered: tokio::sync::Notify::new(),
+            release_session_reads: tokio::sync::Notify::new(),
             applied_runtime_prompts: RwLock::new(HashMap::new()),
             applied_runtime_context_appends: RwLock::new(HashMap::new()),
             applied_runtime_render_metadata: RwLock::new(HashMap::new()),
@@ -24023,6 +24035,22 @@ impl RuntimeBackedRealCommsSessionService {
     fn set_append_system_context_delay_ms(&self, delay_ms: u64) {
         self.append_system_context_delay_ms
             .store(delay_ms, Ordering::Relaxed);
+    }
+
+    fn set_block_runtime_turns(&self, enabled: bool) {
+        self.block_runtime_turns.store(enabled, Ordering::Relaxed);
+    }
+
+    fn release_runtime_turns(&self) {
+        self.release_runtime_turns.notify_waiters();
+    }
+
+    fn set_block_session_reads(&self, enabled: bool) {
+        self.block_session_reads.store(enabled, Ordering::Relaxed);
+    }
+
+    fn release_session_reads(&self) {
+        self.release_session_reads.notify_waiters();
     }
 
     async fn real_comms(&self, session_id: &SessionId) -> Option<Arc<meerkat_comms::CommsRuntime>> {
@@ -24200,6 +24228,11 @@ impl SessionService for RuntimeBackedRealCommsSessionService {
         let sessions = self.sessions.read().await;
         if !sessions.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
+        }
+        drop(sessions);
+        if self.block_session_reads.load(Ordering::Relaxed) {
+            self.session_read_entered.notify_waiters();
+            self.release_session_reads.notified().await;
         }
         Ok(SessionView {
             state: SessionInfo {
@@ -24406,6 +24439,11 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .entry(session_id.clone())
             .or_default()
             .push(req.runtime.render_metadata.clone());
+
+        if self.block_runtime_turns.load(Ordering::Relaxed) {
+            self.runtime_turn_started.notify_waiters();
+            self.release_runtime_turns.notified().await;
+        }
 
         if let Some(notifier) = self
             .keep_alive_notifiers
@@ -25760,6 +25798,119 @@ async fn test_active_internal_submit_work_steer_live_injects_for_identity_bridge
         .await
         .expect("stop timeout after internal active steer assertion")
         .expect("stop after internal active steer assertion");
+}
+
+#[tokio::test]
+async fn test_turn_driven_submit_work_steer_admits_while_active_runtime_apply_blocks() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+
+    let sid_worker = handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            MeerkatId::from("w-turn-driven-active-steer"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wait_for_ready(Some(Duration::from_secs(2)))
+        .await
+        .expect("startup should settle");
+
+    let prompt_baseline = service.applied_runtime_prompts(&sid_worker).await.len();
+    let context_baseline = service
+        .applied_runtime_context_appends(&sid_worker)
+        .await
+        .len();
+    let entry = handle
+        .get_member(&AgentIdentity::from("w-turn-driven-active-steer"))
+        .await
+        .expect("member entry");
+
+    service.set_block_runtime_turns(true);
+    let first_handle = handle.clone();
+    let first_runtime_id = entry.agent_runtime_id.clone();
+    let first_fence = entry.fence_token;
+    let first_turn = tokio::spawn(async move {
+        first_handle
+            .submit_work(
+                first_runtime_id,
+                first_fence,
+                WorkRef::new(),
+                WorkSpec::new(
+                    "first turn blocks inside runtime apply".to_string(),
+                    WorkOrigin::Internal,
+                ),
+            )
+            .await
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        service.runtime_turn_started.notified(),
+    )
+    .await
+    .expect("first runtime apply should start and block");
+    tokio::time::timeout(Duration::from_secs(2), first_turn)
+        .await
+        .expect("first ingress admission should not wait for blocked apply")
+        .expect("first submit task should join")
+        .expect("first submit should be admitted");
+
+    service.set_block_session_reads(true);
+    let steer_handle = handle.clone();
+    let steer_runtime_id = entry.agent_runtime_id.clone();
+    let steer_fence = entry.fence_token;
+    let steer = tokio::spawn(async move {
+        steer_handle
+            .submit_work_with_mode(
+                steer_runtime_id,
+                steer_fence,
+                WorkRef::new(),
+                WorkSpec::new(
+                    "turn-driven active steer must stage while apply is blocked".to_string(),
+                    WorkOrigin::Internal,
+                ),
+                HandlingMode::Steer,
+            )
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_millis(200), steer)
+        .await
+        .expect("active steer admission must not wait for blocked runtime apply or session reads")
+        .expect("steer submit task should join")
+        .expect("active steer should be admitted");
+
+    let appends = service.applied_runtime_context_appends(&sid_worker).await;
+    assert!(
+        appends.iter().skip(context_baseline).any(|append| append
+            .text
+            .contains("turn-driven active steer must stage while apply is blocked")),
+        "turn-driven active steer should stage for the live boundary before the active apply releases; appends={appends:?}"
+    );
+    assert_eq!(
+        service.applied_runtime_prompts(&sid_worker).await.len(),
+        prompt_baseline + 1,
+        "active steer must not schedule a second full turn while the first runtime apply is blocked"
+    );
+
+    service.set_block_session_reads(false);
+    service.release_session_reads();
+    service.set_block_runtime_turns(false);
+    service.release_runtime_turns();
+    tokio::time::timeout(Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop timeout after active steer runtime-apply assertion")
+        .expect("stop after active steer runtime-apply assertion");
 }
 
 #[tokio::test]

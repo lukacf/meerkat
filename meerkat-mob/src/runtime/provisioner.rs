@@ -1164,6 +1164,16 @@ impl CoreExecutorBoundaryHandle for MobSessionRuntimeBoundaryHandle {
     }
 
     async fn active_turn_boundary_available(&self) -> Result<bool, CoreExecutorError> {
+        if let Some(snapshot) = self
+            .runtime_adapter
+            .meerkat_machine_spine_snapshot(&self.bridge_session_id)
+            .await
+            && snapshot.control.phase == meerkat_runtime::RuntimeState::Running
+            && snapshot.control.current_run_id.is_some()
+        {
+            return Ok(true);
+        }
+
         self.session_service
             .read(&self.bridge_session_id)
             .await

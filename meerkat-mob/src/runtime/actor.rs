@@ -11252,9 +11252,13 @@ impl MobActor {
         ack_mode: crate::mob_machine::SubmitWorkAckMode,
     ) -> Result<SubmitWorkDispatchCompletion, MobError> {
         if let Some(bridge_session_id) = entry.member_ref.bridge_session_id() {
-            match self.session_service.read(bridge_session_id).await {
-                Ok(_) => {}
-                Err(meerkat_core::service::SessionError::NotFound { .. }) => {
+            match self
+                .session_service
+                .has_live_session(bridge_session_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {
                     let reason = self
                         .record_missing_member_bridge_session(
                             &entry.agent_identity,

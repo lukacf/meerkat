@@ -335,6 +335,29 @@ impl AgentMobToolSurface {
         Err(ToolError::access_denied(tool_name))
     }
 
+    fn ensure_spawn_member_scope(
+        &self,
+        tool_name: &str,
+        mob_id: &MobId,
+        args: &SpawnMemberArgs,
+    ) -> Result<(), ToolError> {
+        let authority = self.authority_context_snapshot();
+        if authority.can_manage_mob(mob_id.as_str()) {
+            return Ok(());
+        }
+        if args.runtime_mode.is_some()
+            || args.backend.is_some()
+            || args.tooling.is_some()
+            || args.auth_binding.is_some()
+        {
+            return Err(ToolError::access_denied(tool_name));
+        }
+        if authority.can_spawn_profile_in_mob(mob_id.as_str(), &args.profile) {
+            return Ok(());
+        }
+        Err(ToolError::access_denied(tool_name))
+    }
+
     /// Resolve spawn tooling into inherited tool filter and optional override profile.
     ///
     /// - `InheritParent`: snapshot parent's visible tools, apply overlays
@@ -766,7 +789,7 @@ impl AgentMobToolSurface {
         let args: MobIdArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-        let mob_id = MobId::from(args.mob_id);
+        let mob_id = MobId::from(args.mob_id.clone());
 
         self.ensure_mob_scope_authority(call.name, &mob_id).await?;
         let audit_handle = self.state.handle_for(&mob_id).await.ok();
@@ -805,9 +828,9 @@ impl AgentMobToolSurface {
         let args: SpawnMemberArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-        let mob_id = MobId::from(args.mob_id);
+        let mob_id = MobId::from(args.mob_id.clone());
 
-        self.ensure_mob_scope_authority(call.name, &mob_id).await?;
+        self.ensure_spawn_member_scope(call.name, &mob_id, &args)?;
         let audit_handle = self
             .state
             .handle_for(&mob_id)
@@ -2836,6 +2859,11 @@ mod tests {
             .with_managed_mob_scope([mob_id])
     }
 
+    fn spawn_profile_authority(mob_id: &str, profile: &str) -> MobToolAuthorityContext {
+        MobToolAuthorityContext::new(OpaquePrincipalToken::new("spawn-profile"), false)
+            .grant_spawn_profile_in_mob(mob_id, profile)
+    }
+
     fn create_only_authority_with_provenance() -> MobToolAuthorityContext {
         create_only_authority()
             .with_caller_provenance(
@@ -3552,6 +3580,90 @@ mod tests {
         assert_eq!(audit_events[0].0, "mob_spawn_member");
         assert_eq!(audit_events[0].1.as_str(), "scope-principal");
         assert_eq!(audit_events[0].2.as_deref(), Some("audit-scope"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_profile_scope_allows_spawn_but_not_privileged_overrides() {
+        let state = MobMcpState::new_in_memory();
+        let mob_id = state
+            .mob_create_definition(sample_definition("spawn-profile-scope"))
+            .await
+            .expect("create mob");
+        let surface = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            spawn_profile_authority(mob_id.as_str(), "worker"),
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+        );
+
+        let spawn_args = serde_json::value::RawValue::from_string(
+            json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "member_id": "w-1",
+                "auto_wire_parent": true,
+                "initial_message": "hello"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        surface
+            .dispatch(ToolCallView {
+                id: "spawn-profile-ok",
+                name: "mob_spawn_member",
+                args: &spawn_args,
+            })
+            .await
+            .expect("profile-scoped authority should spawn allowed definition profiles");
+
+        let runtime_override_args = serde_json::value::RawValue::from_string(
+            json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "member_id": "w-2",
+                "runtime_mode": "autonomous_host"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let runtime_override_error = surface
+            .dispatch(ToolCallView {
+                id: "spawn-profile-runtime-override",
+                name: "mob_spawn_member",
+                args: &runtime_override_args,
+            })
+            .await
+            .expect_err("profile-scoped authority must not override runtime binding policy");
+        assert!(matches!(
+            runtime_override_error,
+            ToolError::AccessDenied { .. }
+        ));
+
+        let unknown_profile_args = serde_json::value::RawValue::from_string(
+            json!({
+                "mob_id": mob_id,
+                "profile": "unknown",
+                "member_id": "w-3"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let unknown_profile_error = surface
+            .dispatch(ToolCallView {
+                id: "spawn-profile-unknown",
+                name: "mob_spawn_member",
+                args: &unknown_profile_args,
+            })
+            .await
+            .expect_err("profile-scoped authority must not spawn ungranted profiles");
+        assert!(matches!(
+            unknown_profile_error,
+            ToolError::AccessDenied { .. }
+        ));
     }
 
     #[tokio::test]

@@ -404,6 +404,7 @@ pub trait CoreExecutorBoundaryHandle: Send + Sync {
     /// authority may return `None`.
     async fn stage_system_context_at_boundary(
         &self,
+        _expected_run_id: &RunId,
         _appends: Vec<PendingSystemContextAppend>,
     ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
         Err(CoreExecutorError::Internal(

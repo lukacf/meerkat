@@ -1871,10 +1871,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     pub async fn stage_live_system_context_boundary_snapshot(
         &self,
         id: &SessionId,
+        expected_run_id: &RunId,
         appends: Vec<PendingSystemContextAppend>,
     ) -> Result<Option<Vec<u8>>, SessionError> {
         if appends.is_empty() {
             return Ok(None);
+        }
+
+        let turn_state_handle = self.inner.active_turn_state_handle(id).await?;
+        let turn_state_handle =
+            turn_state_handle.ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
+        let initial_token = EphemeralSessionService::<B>::active_turn_boundary_staging_token(
+            turn_state_handle.as_ref(),
+        )
+        .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
+        if initial_token.active_run_id != *expected_run_id {
+            return Err(SessionError::NotRunning { id: id.clone() });
         }
 
         let state_arc = self
@@ -1894,6 +1906,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     poisoned.into_inner()
                 }
             };
+            let locked_token = EphemeralSessionService::<B>::active_turn_boundary_staging_token(
+                turn_state_handle.as_ref(),
+            )
+            .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
+            if locked_token != initial_token {
+                return Err(SessionError::NotRunning { id: id.clone() });
+            }
             let snapshot_state = guard.clone();
             let mut candidate = snapshot_state.clone();
             for append in appends {
@@ -1905,6 +1924,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 candidate
                     .stage_active_turn_append(&req, append.accepted_at)
                     .map_err(|err| control_error_into_session_error(err.into_control_error(id)))?;
+            }
+            let staged_token = EphemeralSessionService::<B>::active_turn_boundary_staging_token(
+                turn_state_handle.as_ref(),
+            )
+            .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
+            if staged_token != initial_token {
+                return Err(SessionError::NotRunning { id: id.clone() });
             }
             *guard = candidate.clone();
             tracing::debug!(

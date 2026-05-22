@@ -263,7 +263,7 @@ impl MeerkatMachine {
 
                 let has_live_boundary_input = accepted_input_id_for_live_boundary.is_some();
                 let has_boundary_handle = boundary_handle.is_some();
-                if (state == RuntimeState::Running || active_turn_boundary_available)
+                if active_turn_boundary_available
                     && signal.should_interrupt_yielding()
                     && resolved.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
                     && let (Some(input_id), Some(boundary_handle)) =
@@ -297,7 +297,7 @@ impl MeerkatMachine {
                             "staging live boundary context for accepted steer input"
                         );
                         match boundary_handle
-                            .stage_system_context_at_boundary(appends)
+                            .stage_system_context_at_boundary(&run_id, appends)
                             .await
                         {
                             Ok(session_snapshot) => {

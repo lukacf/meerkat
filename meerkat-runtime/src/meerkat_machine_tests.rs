@@ -6005,6 +6005,7 @@ impl CoreExecutorBoundaryHandle for InterruptYieldingBoundaryHandle {
 
     async fn stage_system_context_at_boundary(
         &self,
+        _expected_run_id: &meerkat_core::RunId,
         appends: Vec<meerkat_core::PendingSystemContextAppend>,
     ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
         self.probe
@@ -6234,6 +6235,7 @@ async fn explicit_running_steer_admission_injects_live_boundary_context_once() {
 
         async fn stage_system_context_at_boundary(
             &self,
+            _expected_run_id: &meerkat_core::RunId,
             appends: Vec<meerkat_core::PendingSystemContextAppend>,
         ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
             self.stage_calls.fetch_add(1, Ordering::SeqCst);

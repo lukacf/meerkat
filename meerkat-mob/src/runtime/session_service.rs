@@ -326,11 +326,13 @@ pub trait MobSessionService:
     async fn stage_runtime_system_context_for_active_turn(
         &self,
         session_id: &SessionId,
+        expected_run_id: &RunId,
         appends: Vec<PendingSystemContextAppend>,
     ) -> Result<Option<Vec<u8>>, SessionError> {
-        self.apply_runtime_system_context_for_turn(session_id, appends)
-            .await?;
-        Ok(None)
+        let _ = (session_id, expected_run_id, appends);
+        Err(SessionError::Agent(
+            meerkat_core::error::AgentError::NoPendingBoundary,
+        ))
     }
 
     async fn active_turn_system_context_boundary_available(
@@ -542,10 +544,14 @@ where
     async fn stage_runtime_system_context_for_active_turn(
         &self,
         session_id: &SessionId,
+        expected_run_id: &RunId,
         appends: Vec<PendingSystemContextAppend>,
     ) -> Result<Option<Vec<u8>>, SessionError> {
         meerkat_session::EphemeralSessionService::<B>::stage_runtime_system_context_for_active_turn(
-            self, session_id, appends,
+            self,
+            session_id,
+            expected_run_id,
+            appends,
         )
         .await?;
         Ok(None)
@@ -770,10 +776,14 @@ where
     async fn stage_runtime_system_context_for_active_turn(
         &self,
         session_id: &SessionId,
+        expected_run_id: &RunId,
         appends: Vec<PendingSystemContextAppend>,
     ) -> Result<Option<Vec<u8>>, SessionError> {
         meerkat_session::PersistentSessionService::<B>::stage_live_system_context_boundary_snapshot(
-            self, session_id, appends,
+            self,
+            session_id,
+            expected_run_id,
+            appends,
         )
         .await
     }

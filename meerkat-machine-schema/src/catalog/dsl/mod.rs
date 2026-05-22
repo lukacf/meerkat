@@ -1695,7 +1695,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
-                "OccurrenceTransitionFailureObservationKind",
+                "OccurrenceLifecycleInputVariant",
                 &[
                     "PlanOccurrence",
                     "SyncTargetSnapshot",
@@ -1712,6 +1712,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "DeliveryFailed",
                     "LeaseExpired",
                     "ReleaseLeaseForPausedSchedule",
+                    "ClassifyTransitionFailure",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -1721,12 +1722,17 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "TargetSyncRejected",
                     "ReceiptRecordRejected",
                     "DueClassificationRejected",
+                    "ClaimRejected",
                     "NotPendingForClaim",
                     "NotClaimed",
                     "NotDispatching",
                     "NotLeaseHolding",
                     "NotLiveForTerminal",
                 ],
+            ),
+            NamedTypeBinding::string_enum(
+                "OccurrenceTransitionFailureRefusalKind",
+                &["NoMatchingTransition", "GuardRejected"],
             ),
             NamedTypeBinding::string_enum(
                 "RuntimeCompletionOutcome",

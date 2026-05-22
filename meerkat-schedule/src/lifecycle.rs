@@ -240,6 +240,8 @@ pub enum OccurrenceLifecycleError {
     AlreadyTerminal,
     #[error("occurrence must be pending before it can be claimed")]
     NotPendingForClaim,
+    #[error("generated occurrence authority rejected claim")]
+    ClaimRejected,
     #[error("occurrence must be claimed before dispatching")]
     NotClaimed,
     #[error("occurrence must be dispatching before awaiting completion")]
@@ -270,8 +272,11 @@ pub enum OccurrenceLifecycleError {
         "generated occurrence authority emitted transition failure classification for `{actual:?}` while classifying `{expected:?}`"
     )]
     TransitionFailureClassificationMismatch {
-        expected: occ_dsl::OccurrenceTransitionFailureObservationKind,
-        actual: occ_dsl::OccurrenceTransitionFailureObservationKind,
+        phase: occ_dsl::OccurrenceLifecycleState,
+        expected_refusal_kind: occ_dsl::OccurrenceTransitionFailureRefusalKind,
+        actual_refusal_kind: occ_dsl::OccurrenceTransitionFailureRefusalKind,
+        expected: occ_dsl::OccurrenceLifecycleInputVariant,
+        actual: occ_dsl::OccurrenceLifecycleInputVariant,
     },
     #[error("generated occurrence authority emitted multiple transition failure classifications")]
     TransitionFailureClassificationAmbiguous,
@@ -279,6 +284,10 @@ pub enum OccurrenceLifecycleError {
         "generated occurrence authority emitted transition failure classification during lifecycle mutation"
     )]
     UnexpectedTransitionFailureClassificationEffect,
+    #[error(
+        "generated occurrence authority cannot classify transition failure trigger `{trigger}`"
+    )]
+    UnknownTransitionFailureTrigger { trigger: String },
     #[error("OccurrenceLifecycleMachine emitted invalid occurrence id `{id}`: {source}")]
     InvalidOccurrenceId { id: String, source: uuid::Error },
     #[error("OccurrenceLifecycleMachine emitted invalid schedule id `{id}`: {source}")]
@@ -375,7 +384,7 @@ impl Occurrence {
         let dsl_input = convert_occurrence_input(&input)?;
         let mut dsl_auth = occ_dsl::OccurrenceLifecycleMachineAuthority::new();
         occ_dsl::OccurrenceLifecycleMachineMutator::apply(&mut dsl_auth, dsl_input)
-            .map_err(|e| map_occurrence_error(e, &input))?;
+            .map_err(|e| map_occurrence_error(&mut dsl_auth, e))?;
         occurrence_from_planned_state(dsl_auth.state(), schedule, target_snapshot, Utc::now())
     }
 
@@ -402,7 +411,7 @@ impl Occurrence {
                 .map_err(|source| OccurrenceLifecycleError::AuthorityRecoveryRejected { source })?;
         let transition =
             occ_dsl::OccurrenceLifecycleMachineMutator::apply(&mut dsl_auth, dsl_input)
-                .map_err(|e| map_occurrence_error(e, &input))?;
+                .map_err(|e| map_occurrence_error(&mut dsl_auth, e))?;
 
         // 4. Write DSL state → occurrence
         write_back_occurrence(dsl_auth.state(), &mut self, &input)?;
@@ -843,23 +852,28 @@ fn write_back_occurrence(
 
 /// Map DSL error to the appropriate domain error variant.
 fn map_occurrence_error(
-    _error: occ_dsl::OccurrenceLifecycleMachineTransitionError,
-    input: &OccurrenceLifecycleInput,
+    authority: &mut occ_dsl::OccurrenceLifecycleMachineAuthority,
+    error: occ_dsl::OccurrenceLifecycleMachineTransitionError,
 ) -> OccurrenceLifecycleError {
-    match classify_occurrence_transition_failure(input) {
+    match classify_occurrence_transition_failure(authority, &error) {
         Ok(public_class) => occurrence_error_from_transition_failure_class(public_class),
         Err(error) => error,
     }
 }
 
 fn classify_occurrence_transition_failure(
-    input: &OccurrenceLifecycleInput,
+    authority: &mut occ_dsl::OccurrenceLifecycleMachineAuthority,
+    error: &occ_dsl::OccurrenceLifecycleMachineTransitionError,
 ) -> Result<occ_dsl::OccurrenceTransitionFailureClassKind, OccurrenceLifecycleError> {
-    let observation = occurrence_transition_failure_observation(input);
-    let mut classifier = occ_dsl::OccurrenceLifecycleMachineAuthority::new();
+    let (refusal_kind, trigger) = occurrence_transition_refusal_evidence(error);
+    let trigger = occurrence_transition_failure_trigger(trigger)?;
+    let phase = authority.state().lifecycle_phase;
     let transition = occ_dsl::OccurrenceLifecycleMachineMutator::apply(
-        &mut classifier,
-        occ_dsl::OccurrenceLifecycleInput::ClassifyTransitionFailure { observation },
+        authority,
+        occ_dsl::OccurrenceLifecycleInput::ClassifyTransitionFailure {
+            refusal_kind,
+            trigger,
+        },
     )
     .map_err(
         |source| OccurrenceLifecycleError::TransitionFailureClassificationRejected { source },
@@ -868,15 +882,23 @@ fn classify_occurrence_transition_failure(
     let mut classified = None;
     for effect in transition.effects() {
         if let occ_dsl::OccurrenceLifecycleEffect::TransitionFailureClassified {
-            observation: emitted_observation,
+            phase: emitted_phase,
+            refusal_kind: emitted_refusal_kind,
+            trigger: emitted_trigger,
             public_class,
         } = effect
         {
-            if *emitted_observation != observation {
+            if *emitted_phase != phase
+                || *emitted_refusal_kind != refusal_kind
+                || *emitted_trigger != trigger
+            {
                 return Err(
                     OccurrenceLifecycleError::TransitionFailureClassificationMismatch {
-                        expected: observation,
-                        actual: *emitted_observation,
+                        phase: *emitted_phase,
+                        expected_refusal_kind: refusal_kind,
+                        actual_refusal_kind: *emitted_refusal_kind,
+                        expected: trigger,
+                        actual: *emitted_trigger,
                     },
                 );
             }
@@ -889,56 +911,32 @@ fn classify_occurrence_transition_failure(
     classified.ok_or(OccurrenceLifecycleError::TransitionFailureClassificationMissing)
 }
 
-fn occurrence_transition_failure_observation(
-    input: &OccurrenceLifecycleInput,
-) -> occ_dsl::OccurrenceTransitionFailureObservationKind {
-    match input {
-        OccurrenceLifecycleInput::PlanOccurrence { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::PlanOccurrence
-        }
-        OccurrenceLifecycleInput::SyncTargetSnapshot { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::SyncTargetSnapshot
-        }
-        OccurrenceLifecycleInput::RecordReceipt { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::RecordReceipt
-        }
-        OccurrenceLifecycleInput::ClassifyDue { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::ClassifyDue
-        }
-        OccurrenceLifecycleInput::Claim { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::Claim
-        }
-        OccurrenceLifecycleInput::DispatchStarted { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::DispatchStarted
-        }
-        OccurrenceLifecycleInput::AwaitCompletion { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::AwaitCompletion
-        }
-        OccurrenceLifecycleInput::Complete { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::Complete
-        }
-        OccurrenceLifecycleInput::ResolveRuntimeCompletion { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::ResolveRuntimeCompletion
-        }
-        OccurrenceLifecycleInput::Skip { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::Skip
-        }
-        OccurrenceLifecycleInput::Misfire { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::Misfire
-        }
-        OccurrenceLifecycleInput::Supersede { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::Supersede
-        }
-        OccurrenceLifecycleInput::DeliveryFailed { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::DeliveryFailed
-        }
-        OccurrenceLifecycleInput::LeaseExpired { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::LeaseExpired
-        }
-        OccurrenceLifecycleInput::ReleaseLeaseForPausedSchedule { .. } => {
-            occ_dsl::OccurrenceTransitionFailureObservationKind::ReleaseLeaseForPausedSchedule
-        }
+fn occurrence_transition_refusal_evidence(
+    error: &occ_dsl::OccurrenceLifecycleMachineTransitionError,
+) -> (occ_dsl::OccurrenceTransitionFailureRefusalKind, &str) {
+    match error {
+        occ_dsl::OccurrenceLifecycleMachineTransitionError::NoMatchingTransition {
+            trigger,
+            ..
+        } => (
+            occ_dsl::OccurrenceTransitionFailureRefusalKind::NoMatchingTransition,
+            trigger.as_str(),
+        ),
+        occ_dsl::OccurrenceLifecycleMachineTransitionError::GuardRejected { trigger, .. } => (
+            occ_dsl::OccurrenceTransitionFailureRefusalKind::GuardRejected,
+            trigger.as_str(),
+        ),
     }
+}
+
+fn occurrence_transition_failure_trigger(
+    trigger: &str,
+) -> Result<occ_dsl::OccurrenceLifecycleInputVariant, OccurrenceLifecycleError> {
+    occ_dsl::OccurrenceLifecycleInputVariant::try_from(trigger).map_err(|_| {
+        OccurrenceLifecycleError::UnknownTransitionFailureTrigger {
+            trigger: trigger.to_owned(),
+        }
+    })
 }
 
 fn occurrence_error_from_transition_failure_class(
@@ -956,6 +954,9 @@ fn occurrence_error_from_transition_failure_class(
         }
         occ_dsl::OccurrenceTransitionFailureClassKind::DueClassificationRejected => {
             OccurrenceLifecycleError::DueClassificationRejected
+        }
+        occ_dsl::OccurrenceTransitionFailureClassKind::ClaimRejected => {
+            OccurrenceLifecycleError::ClaimRejected
         }
         occ_dsl::OccurrenceTransitionFailureClassKind::NotPendingForClaim => {
             OccurrenceLifecycleError::NotPendingForClaim
@@ -2100,19 +2101,57 @@ mod tests {
             .into_occurrence()
     }
 
+    fn sample_completed_occurrence() -> Occurrence {
+        sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("corr-1".into()),
+                at_utc: Utc::now(),
+            })
+            .expect("dispatch should pass generated authority")
+            .into_occurrence()
+            .apply(OccurrenceLifecycleInput::Complete { at_utc: Utc::now() })
+            .expect("completion should pass generated authority")
+            .into_occurrence()
+    }
+
+    fn classify_rejected_occurrence_input(
+        occurrence: &Occurrence,
+        input: OccurrenceLifecycleInput,
+    ) -> occ_dsl::OccurrenceTransitionFailureClassKind {
+        let dsl_state = occurrence_machine_state_for_authority(occurrence)
+            .expect("test occurrence projection should match authority");
+        let mut authority =
+            occ_dsl::OccurrenceLifecycleMachineAuthority::recover_from_state(dsl_state)
+                .expect("test occurrence state should recover");
+        let dsl_input = convert_occurrence_input(&input).expect("test input should convert");
+        let error = occ_dsl::OccurrenceLifecycleMachineMutator::apply(&mut authority, dsl_input)
+            .expect_err("test input should be rejected by generated authority");
+        classify_occurrence_transition_failure(&mut authority, &error)
+            .expect("generated authority should classify its rejection")
+    }
+
     #[test]
     fn transition_failure_public_class_comes_from_occurrence_authority() {
         let now = Utc::now();
         let schedule = sample_schedule();
-        let occurrence = sample_occurrence();
+        let pending = sample_occurrence();
+        let claimed = sample_claimed_occurrence();
+        let completed = sample_completed_occurrence();
         let receipt = DeliveryReceipt::new(
-            occurrence.occurrence_id.clone(),
-            occurrence.attempt_count,
+            pending.occurrence_id.clone(),
+            pending.attempt_count,
             DeliveryReceiptStage::Claimed,
         );
+        let future = Occurrence::planned_from_schedule(
+            &sample_schedule(),
+            crate::OccurrenceOrdinal(1),
+            now + Duration::minutes(5),
+        )
+        .expect("future occurrence planning should pass generated authority");
 
         let cases = vec![
             (
+                &claimed,
                 OccurrenceLifecycleInput::PlanOccurrence {
                     occurrence_id: crate::types::OccurrenceId::new(),
                     schedule_id: schedule.schedule_id.clone(),
@@ -2128,12 +2167,14 @@ mod tests {
                 occ_dsl::OccurrenceTransitionFailureClassKind::PlanRejected,
             ),
             (
+                &completed,
                 OccurrenceLifecycleInput::SyncTargetSnapshot {
                     target_snapshot: schedule.target.clone(),
                 },
                 occ_dsl::OccurrenceTransitionFailureClassKind::TargetSyncRejected,
             ),
             (
+                &pending,
                 OccurrenceLifecycleInput::RecordReceipt {
                     receipt,
                     runtime_outcome: None,
@@ -2141,10 +2182,17 @@ mod tests {
                 occ_dsl::OccurrenceTransitionFailureClassKind::ReceiptRecordRejected,
             ),
             (
-                OccurrenceLifecycleInput::ClassifyDue { now_utc: now },
-                occ_dsl::OccurrenceTransitionFailureClassKind::DueClassificationRejected,
+                &future,
+                OccurrenceLifecycleInput::Claim {
+                    owner_id: "owner".into(),
+                    at_utc: now,
+                    lease_expires_at_utc: now + Duration::seconds(30),
+                    claim_token: Uuid::now_v7(),
+                },
+                occ_dsl::OccurrenceTransitionFailureClassKind::ClaimRejected,
             ),
             (
+                &claimed,
                 OccurrenceLifecycleInput::Claim {
                     owner_id: "owner".into(),
                     at_utc: now,
@@ -2154,6 +2202,7 @@ mod tests {
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotPendingForClaim,
             ),
             (
+                &pending,
                 OccurrenceLifecycleInput::DispatchStarted {
                     correlation_id: Some("corr-1".into()),
                     at_utc: now,
@@ -2161,14 +2210,17 @@ mod tests {
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotClaimed,
             ),
             (
+                &pending,
                 OccurrenceLifecycleInput::AwaitCompletion { at_utc: now },
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotDispatching,
             ),
             (
+                &pending,
                 OccurrenceLifecycleInput::Complete { at_utc: now },
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal,
             ),
             (
+                &pending,
                 OccurrenceLifecycleInput::ResolveRuntimeCompletion {
                     outcome: RuntimeCompletionOutcome::Completed,
                     detail: None,
@@ -2177,6 +2229,7 @@ mod tests {
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal,
             ),
             (
+                &completed,
                 OccurrenceLifecycleInput::Skip {
                     detail: None,
                     failure_class: None,
@@ -2185,6 +2238,7 @@ mod tests {
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal,
             ),
             (
+                &completed,
                 OccurrenceLifecycleInput::Misfire {
                     detail: None,
                     failure_class: None,
@@ -2193,6 +2247,7 @@ mod tests {
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal,
             ),
             (
+                &completed,
                 OccurrenceLifecycleInput::Supersede {
                     superseded_by_revision: ScheduleRevision(2),
                     at_utc: now,
@@ -2200,6 +2255,7 @@ mod tests {
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal,
             ),
             (
+                &pending,
                 OccurrenceLifecycleInput::DeliveryFailed {
                     failure_class: OccurrenceFailureClass::InternalError,
                     detail: None,
@@ -2208,19 +2264,20 @@ mod tests {
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal,
             ),
             (
+                &pending,
                 OccurrenceLifecycleInput::LeaseExpired { at_utc: now },
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotLeaseHolding,
             ),
             (
+                &pending,
                 OccurrenceLifecycleInput::ReleaseLeaseForPausedSchedule { at_utc: now },
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotLeaseHolding,
             ),
         ];
 
-        for (input, expected) in cases {
+        for (occurrence, input, expected) in cases {
             assert_eq!(
-                classify_occurrence_transition_failure(&input)
-                    .expect("generated authority should classify transition failure"),
+                classify_rejected_occurrence_input(occurrence, input),
                 expected
             );
         }
@@ -2281,7 +2338,7 @@ mod tests {
                 lease_expires_at_utc: now + Duration::seconds(30),
                 claim_token: Uuid::now_v7(),
             }),
-            Err(OccurrenceLifecycleError::NotPendingForClaim)
+            Err(OccurrenceLifecycleError::ClaimRejected)
         ));
 
         let overdue = Occurrence::planned_from_schedule(

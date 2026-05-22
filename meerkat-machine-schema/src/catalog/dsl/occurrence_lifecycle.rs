@@ -3,7 +3,7 @@ use meerkat_machine_dsl::machine;
 
 machine! {
     machine OccurrenceLifecycleMachine {
-        version: 4,
+        version: 5,
         rust: "self" / "catalog::dsl::occurrence_lifecycle",
 
         state {
@@ -144,7 +144,10 @@ machine! {
             DeliveryFailed { failure_class: Enum<OccurrenceFailureClass>, detail: Option<String>, at_utc_ms: u64 },
             LeaseExpired { at_utc_ms: u64 },
             ReleaseLeaseForPausedSchedule { at_utc_ms: u64 },
-            ClassifyTransitionFailure { observation: Enum<OccurrenceTransitionFailureObservationKind> },
+            ClassifyTransitionFailure {
+                refusal_kind: Enum<OccurrenceTransitionFailureRefusalKind>,
+                trigger: Enum<OccurrenceLifecycleInputVariant>
+            },
         }
 
         effect OccurrenceLifecycleEffect {
@@ -169,7 +172,9 @@ machine! {
             DeliveryFailed,
             LeaseExpired,
             TransitionFailureClassified {
-                observation: Enum<OccurrenceTransitionFailureObservationKind>,
+                phase: Enum<OccurrenceLifecycleState>,
+                refusal_kind: Enum<OccurrenceTransitionFailureRefusalKind>,
+                trigger: Enum<OccurrenceLifecycleInputVariant>,
                 public_class: Enum<OccurrenceTransitionFailureClassKind>,
             },
         }
@@ -212,125 +217,214 @@ machine! {
 
         // --- Transition failure classification ---
         //
-        // Public occurrence lifecycle error class is a machine fact. Shells may
-        // report the typed input they attempted, but the generated occurrence
-        // authority owns the mapping from that observation to the public class
-        // exposed by the domain API.
+        // Public occurrence lifecycle error class is a machine fact. Shells
+        // feed back the typed refusal evidence emitted by this generated
+        // authority, and the occurrence machine owns the mapping from that
+        // refusal to the public class exposed by the domain API.
 
         transition ClassifyTransitionFailurePlanRejected {
             per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
-            on input ClassifyTransitionFailure { observation }
-            guard "plan_rejected" { observation == OccurrenceTransitionFailureObservationKind::PlanOccurrence }
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "plan_rejected" {
+                trigger == OccurrenceLifecycleInputVariant::PlanOccurrence
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
             update {}
             to Pending
             emit TransitionFailureClassified {
-                observation: observation,
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
                 public_class: OccurrenceTransitionFailureClassKind::PlanRejected
             }
         }
 
         transition ClassifyTransitionFailureTargetSyncRejected {
             per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
-            on input ClassifyTransitionFailure { observation }
-            guard "target_sync_rejected" { observation == OccurrenceTransitionFailureObservationKind::SyncTargetSnapshot }
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "target_sync_rejected" {
+                trigger == OccurrenceLifecycleInputVariant::SyncTargetSnapshot
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
             update {}
             to Pending
             emit TransitionFailureClassified {
-                observation: observation,
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
                 public_class: OccurrenceTransitionFailureClassKind::TargetSyncRejected
             }
         }
 
         transition ClassifyTransitionFailureReceiptRecordRejected {
             per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
-            on input ClassifyTransitionFailure { observation }
-            guard "receipt_record_rejected" { observation == OccurrenceTransitionFailureObservationKind::RecordReceipt }
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "receipt_record_rejected" {
+                trigger == OccurrenceLifecycleInputVariant::RecordReceipt
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
             update {}
             to Pending
             emit TransitionFailureClassified {
-                observation: observation,
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
                 public_class: OccurrenceTransitionFailureClassKind::ReceiptRecordRejected
             }
         }
 
         transition ClassifyTransitionFailureDueClassificationRejected {
             per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
-            on input ClassifyTransitionFailure { observation }
-            guard "due_classification_rejected" { observation == OccurrenceTransitionFailureObservationKind::ClassifyDue }
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "due_classification_rejected" {
+                trigger == OccurrenceLifecycleInputVariant::ClassifyDue
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
             update {}
             to Pending
             emit TransitionFailureClassified {
-                observation: observation,
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
                 public_class: OccurrenceTransitionFailureClassKind::DueClassificationRejected
             }
         }
 
-        transition ClassifyTransitionFailureNotPendingForClaim {
-            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
-            on input ClassifyTransitionFailure { observation }
-            guard "not_pending_for_claim" { observation == OccurrenceTransitionFailureObservationKind::Claim }
+        transition ClassifyTransitionFailureClaimRejectedPending {
+            per_phase [Pending]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "claim_rejected_pending" {
+                trigger == OccurrenceLifecycleInputVariant::Claim
+                && refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+            }
             update {}
             to Pending
             emit TransitionFailureClassified {
-                observation: observation,
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::ClaimRejected
+            }
+        }
+
+        transition ClassifyTransitionFailureNotPendingForClaim {
+            per_phase [Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "not_pending_for_claim" {
+                trigger == OccurrenceLifecycleInputVariant::Claim
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
                 public_class: OccurrenceTransitionFailureClassKind::NotPendingForClaim
             }
         }
 
         transition ClassifyTransitionFailureNotClaimed {
             per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
-            on input ClassifyTransitionFailure { observation }
-            guard "not_claimed" { observation == OccurrenceTransitionFailureObservationKind::DispatchStarted }
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "not_claimed" {
+                trigger == OccurrenceLifecycleInputVariant::DispatchStarted
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
             update {}
             to Pending
             emit TransitionFailureClassified {
-                observation: observation,
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
                 public_class: OccurrenceTransitionFailureClassKind::NotClaimed
             }
         }
 
         transition ClassifyTransitionFailureNotDispatching {
             per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
-            on input ClassifyTransitionFailure { observation }
-            guard "not_dispatching" { observation == OccurrenceTransitionFailureObservationKind::AwaitCompletion }
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "not_dispatching" {
+                trigger == OccurrenceLifecycleInputVariant::AwaitCompletion
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
             update {}
             to Pending
             emit TransitionFailureClassified {
-                observation: observation,
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
                 public_class: OccurrenceTransitionFailureClassKind::NotDispatching
             }
         }
 
         transition ClassifyTransitionFailureNotLeaseHolding {
             per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
-            on input ClassifyTransitionFailure { observation }
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
             guard "not_lease_holding" {
-                observation == OccurrenceTransitionFailureObservationKind::LeaseExpired
-                || observation == OccurrenceTransitionFailureObservationKind::ReleaseLeaseForPausedSchedule
+                (
+                    trigger == OccurrenceLifecycleInputVariant::LeaseExpired
+                    || trigger == OccurrenceLifecycleInputVariant::ReleaseLeaseForPausedSchedule
+                )
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
             }
             update {}
             to Pending
             emit TransitionFailureClassified {
-                observation: observation,
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
                 public_class: OccurrenceTransitionFailureClassKind::NotLeaseHolding
             }
         }
 
         transition ClassifyTransitionFailureNotLiveForTerminal {
             per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
-            on input ClassifyTransitionFailure { observation }
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
             guard "not_live_for_terminal" {
-                observation == OccurrenceTransitionFailureObservationKind::Complete
-                || observation == OccurrenceTransitionFailureObservationKind::ResolveRuntimeCompletion
-                || observation == OccurrenceTransitionFailureObservationKind::Skip
-                || observation == OccurrenceTransitionFailureObservationKind::Misfire
-                || observation == OccurrenceTransitionFailureObservationKind::Supersede
-                || observation == OccurrenceTransitionFailureObservationKind::DeliveryFailed
+                (
+                    trigger == OccurrenceLifecycleInputVariant::Complete
+                    || trigger == OccurrenceLifecycleInputVariant::ResolveRuntimeCompletion
+                    || trigger == OccurrenceLifecycleInputVariant::Skip
+                    || trigger == OccurrenceLifecycleInputVariant::Misfire
+                    || trigger == OccurrenceLifecycleInputVariant::Supersede
+                    || trigger == OccurrenceLifecycleInputVariant::DeliveryFailed
+                )
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
             }
             update {}
             to Pending
             emit TransitionFailureClassified {
-                observation: observation,
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
                 public_class: OccurrenceTransitionFailureClassKind::NotLiveForTerminal
             }
         }
@@ -1248,22 +1342,9 @@ pub enum DeliveryReceiptStage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OccurrenceTransitionFailureObservationKind {
-    PlanOccurrence,
-    SyncTargetSnapshot,
-    RecordReceipt,
-    ClassifyDue,
-    Claim,
-    DispatchStarted,
-    AwaitCompletion,
-    Complete,
-    ResolveRuntimeCompletion,
-    Skip,
-    Misfire,
-    Supersede,
-    DeliveryFailed,
-    LeaseExpired,
-    ReleaseLeaseForPausedSchedule,
+pub enum OccurrenceTransitionFailureRefusalKind {
+    NoMatchingTransition,
+    GuardRejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1272,6 +1353,7 @@ pub enum OccurrenceTransitionFailureClassKind {
     TargetSyncRejected,
     ReceiptRecordRejected,
     DueClassificationRejected,
+    ClaimRejected,
     NotPendingForClaim,
     NotClaimed,
     NotDispatching,

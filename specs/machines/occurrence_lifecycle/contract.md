@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `4`
+- Version: `5`
 - Rust owner: `self` / `catalog::dsl::occurrence_lifecycle`
 
 ## State
@@ -62,7 +62,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DeliveryFailed`(failure_class: OccurrenceFailureClass, detail: Option<String>, at_utc_ms: u64)
 - `LeaseExpired`(at_utc_ms: u64)
 - `ReleaseLeaseForPausedSchedule`(at_utc_ms: u64)
-- `ClassifyTransitionFailure`(observation: OccurrenceTransitionFailureObservationKind)
+- `ClassifyTransitionFailure`(refusal_kind: OccurrenceTransitionFailureRefusalKind, trigger: OccurrenceLifecycleInputVariant)
 
 ## Signals
 
@@ -81,7 +81,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DueLeaseExpired`
 - `DeliveryFailed`
 - `LeaseExpired`
-- `TransitionFailureClassified`(observation: OccurrenceTransitionFailureObservationKind, public_class: OccurrenceTransitionFailureClassKind)
+- `TransitionFailureClassified`(phase: OccurrenceLifecycleState, refusal_kind: OccurrenceTransitionFailureRefusalKind, trigger: OccurrenceLifecycleInputVariant, public_class: OccurrenceTransitionFailureClassKind)
 
 ## Helpers
 - `is_live_claim_phase`(phase: OccurrenceLifecycleState) -> `Bool`
@@ -95,7 +95,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Transitions
 ### `ClassifyTransitionFailurePlanRejectedPending`
 - From: `Pending`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `plan_rejected`
 - Emits: `TransitionFailureClassified`
@@ -103,7 +103,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailurePlanRejectedClaimed`
 - From: `Claimed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `plan_rejected`
 - Emits: `TransitionFailureClassified`
@@ -111,7 +111,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailurePlanRejectedDispatching`
 - From: `Dispatching`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `plan_rejected`
 - Emits: `TransitionFailureClassified`
@@ -119,7 +119,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailurePlanRejectedAwaitingCompletion`
 - From: `AwaitingCompletion`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `plan_rejected`
 - Emits: `TransitionFailureClassified`
@@ -127,7 +127,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailurePlanRejectedCompleted`
 - From: `Completed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `plan_rejected`
 - Emits: `TransitionFailureClassified`
@@ -135,7 +135,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailurePlanRejectedSkipped`
 - From: `Skipped`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `plan_rejected`
 - Emits: `TransitionFailureClassified`
@@ -143,7 +143,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailurePlanRejectedMisfired`
 - From: `Misfired`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `plan_rejected`
 - Emits: `TransitionFailureClassified`
@@ -151,7 +151,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailurePlanRejectedSuperseded`
 - From: `Superseded`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `plan_rejected`
 - Emits: `TransitionFailureClassified`
@@ -159,7 +159,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailurePlanRejectedDeliveryFailed`
 - From: `DeliveryFailed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `plan_rejected`
 - Emits: `TransitionFailureClassified`
@@ -167,7 +167,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureTargetSyncRejectedPending`
 - From: `Pending`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `target_sync_rejected`
 - Emits: `TransitionFailureClassified`
@@ -175,7 +175,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureTargetSyncRejectedClaimed`
 - From: `Claimed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `target_sync_rejected`
 - Emits: `TransitionFailureClassified`
@@ -183,7 +183,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureTargetSyncRejectedDispatching`
 - From: `Dispatching`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `target_sync_rejected`
 - Emits: `TransitionFailureClassified`
@@ -191,7 +191,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureTargetSyncRejectedAwaitingCompletion`
 - From: `AwaitingCompletion`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `target_sync_rejected`
 - Emits: `TransitionFailureClassified`
@@ -199,7 +199,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureTargetSyncRejectedCompleted`
 - From: `Completed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `target_sync_rejected`
 - Emits: `TransitionFailureClassified`
@@ -207,7 +207,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureTargetSyncRejectedSkipped`
 - From: `Skipped`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `target_sync_rejected`
 - Emits: `TransitionFailureClassified`
@@ -215,7 +215,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureTargetSyncRejectedMisfired`
 - From: `Misfired`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `target_sync_rejected`
 - Emits: `TransitionFailureClassified`
@@ -223,7 +223,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureTargetSyncRejectedSuperseded`
 - From: `Superseded`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `target_sync_rejected`
 - Emits: `TransitionFailureClassified`
@@ -231,7 +231,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureTargetSyncRejectedDeliveryFailed`
 - From: `DeliveryFailed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `target_sync_rejected`
 - Emits: `TransitionFailureClassified`
@@ -239,7 +239,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureReceiptRecordRejectedPending`
 - From: `Pending`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `receipt_record_rejected`
 - Emits: `TransitionFailureClassified`
@@ -247,7 +247,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureReceiptRecordRejectedClaimed`
 - From: `Claimed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `receipt_record_rejected`
 - Emits: `TransitionFailureClassified`
@@ -255,7 +255,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureReceiptRecordRejectedDispatching`
 - From: `Dispatching`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `receipt_record_rejected`
 - Emits: `TransitionFailureClassified`
@@ -263,7 +263,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureReceiptRecordRejectedAwaitingCompletion`
 - From: `AwaitingCompletion`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `receipt_record_rejected`
 - Emits: `TransitionFailureClassified`
@@ -271,7 +271,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureReceiptRecordRejectedCompleted`
 - From: `Completed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `receipt_record_rejected`
 - Emits: `TransitionFailureClassified`
@@ -279,7 +279,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureReceiptRecordRejectedSkipped`
 - From: `Skipped`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `receipt_record_rejected`
 - Emits: `TransitionFailureClassified`
@@ -287,7 +287,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureReceiptRecordRejectedMisfired`
 - From: `Misfired`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `receipt_record_rejected`
 - Emits: `TransitionFailureClassified`
@@ -295,7 +295,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureReceiptRecordRejectedSuperseded`
 - From: `Superseded`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `receipt_record_rejected`
 - Emits: `TransitionFailureClassified`
@@ -303,7 +303,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureReceiptRecordRejectedDeliveryFailed`
 - From: `DeliveryFailed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `receipt_record_rejected`
 - Emits: `TransitionFailureClassified`
@@ -311,7 +311,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureDueClassificationRejectedPending`
 - From: `Pending`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `due_classification_rejected`
 - Emits: `TransitionFailureClassified`
@@ -319,7 +319,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureDueClassificationRejectedClaimed`
 - From: `Claimed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `due_classification_rejected`
 - Emits: `TransitionFailureClassified`
@@ -327,7 +327,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureDueClassificationRejectedDispatching`
 - From: `Dispatching`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `due_classification_rejected`
 - Emits: `TransitionFailureClassified`
@@ -335,7 +335,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureDueClassificationRejectedAwaitingCompletion`
 - From: `AwaitingCompletion`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `due_classification_rejected`
 - Emits: `TransitionFailureClassified`
@@ -343,7 +343,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureDueClassificationRejectedCompleted`
 - From: `Completed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `due_classification_rejected`
 - Emits: `TransitionFailureClassified`
@@ -351,7 +351,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureDueClassificationRejectedSkipped`
 - From: `Skipped`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `due_classification_rejected`
 - Emits: `TransitionFailureClassified`
@@ -359,7 +359,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureDueClassificationRejectedMisfired`
 - From: `Misfired`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `due_classification_rejected`
 - Emits: `TransitionFailureClassified`
@@ -367,7 +367,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureDueClassificationRejectedSuperseded`
 - From: `Superseded`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `due_classification_rejected`
 - Emits: `TransitionFailureClassified`
@@ -375,23 +375,23 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed`
 - From: `DeliveryFailed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `due_classification_rejected`
 - Emits: `TransitionFailureClassified`
 - To: `DeliveryFailed`
 
-### `ClassifyTransitionFailureNotPendingForClaimPending`
+### `ClassifyTransitionFailureClaimRejectedPendingPending`
 - From: `Pending`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
-  - `not_pending_for_claim`
+  - `claim_rejected_pending`
 - Emits: `TransitionFailureClassified`
 - To: `Pending`
 
 ### `ClassifyTransitionFailureNotPendingForClaimClaimed`
 - From: `Claimed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_pending_for_claim`
 - Emits: `TransitionFailureClassified`
@@ -399,7 +399,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotPendingForClaimDispatching`
 - From: `Dispatching`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_pending_for_claim`
 - Emits: `TransitionFailureClassified`
@@ -407,7 +407,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion`
 - From: `AwaitingCompletion`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_pending_for_claim`
 - Emits: `TransitionFailureClassified`
@@ -415,7 +415,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotPendingForClaimCompleted`
 - From: `Completed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_pending_for_claim`
 - Emits: `TransitionFailureClassified`
@@ -423,7 +423,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotPendingForClaimSkipped`
 - From: `Skipped`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_pending_for_claim`
 - Emits: `TransitionFailureClassified`
@@ -431,7 +431,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotPendingForClaimMisfired`
 - From: `Misfired`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_pending_for_claim`
 - Emits: `TransitionFailureClassified`
@@ -439,7 +439,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotPendingForClaimSuperseded`
 - From: `Superseded`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_pending_for_claim`
 - Emits: `TransitionFailureClassified`
@@ -447,7 +447,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotPendingForClaimDeliveryFailed`
 - From: `DeliveryFailed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_pending_for_claim`
 - Emits: `TransitionFailureClassified`
@@ -455,7 +455,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotClaimedPending`
 - From: `Pending`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_claimed`
 - Emits: `TransitionFailureClassified`
@@ -463,7 +463,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotClaimedClaimed`
 - From: `Claimed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_claimed`
 - Emits: `TransitionFailureClassified`
@@ -471,7 +471,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotClaimedDispatching`
 - From: `Dispatching`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_claimed`
 - Emits: `TransitionFailureClassified`
@@ -479,7 +479,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotClaimedAwaitingCompletion`
 - From: `AwaitingCompletion`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_claimed`
 - Emits: `TransitionFailureClassified`
@@ -487,7 +487,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotClaimedCompleted`
 - From: `Completed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_claimed`
 - Emits: `TransitionFailureClassified`
@@ -495,7 +495,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotClaimedSkipped`
 - From: `Skipped`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_claimed`
 - Emits: `TransitionFailureClassified`
@@ -503,7 +503,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotClaimedMisfired`
 - From: `Misfired`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_claimed`
 - Emits: `TransitionFailureClassified`
@@ -511,7 +511,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotClaimedSuperseded`
 - From: `Superseded`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_claimed`
 - Emits: `TransitionFailureClassified`
@@ -519,7 +519,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotClaimedDeliveryFailed`
 - From: `DeliveryFailed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_claimed`
 - Emits: `TransitionFailureClassified`
@@ -527,7 +527,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotDispatchingPending`
 - From: `Pending`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_dispatching`
 - Emits: `TransitionFailureClassified`
@@ -535,7 +535,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotDispatchingClaimed`
 - From: `Claimed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_dispatching`
 - Emits: `TransitionFailureClassified`
@@ -543,7 +543,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotDispatchingDispatching`
 - From: `Dispatching`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_dispatching`
 - Emits: `TransitionFailureClassified`
@@ -551,7 +551,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotDispatchingAwaitingCompletion`
 - From: `AwaitingCompletion`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_dispatching`
 - Emits: `TransitionFailureClassified`
@@ -559,7 +559,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotDispatchingCompleted`
 - From: `Completed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_dispatching`
 - Emits: `TransitionFailureClassified`
@@ -567,7 +567,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotDispatchingSkipped`
 - From: `Skipped`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_dispatching`
 - Emits: `TransitionFailureClassified`
@@ -575,7 +575,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotDispatchingMisfired`
 - From: `Misfired`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_dispatching`
 - Emits: `TransitionFailureClassified`
@@ -583,7 +583,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotDispatchingSuperseded`
 - From: `Superseded`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_dispatching`
 - Emits: `TransitionFailureClassified`
@@ -591,7 +591,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotDispatchingDeliveryFailed`
 - From: `DeliveryFailed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_dispatching`
 - Emits: `TransitionFailureClassified`
@@ -599,7 +599,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLeaseHoldingPending`
 - From: `Pending`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_lease_holding`
 - Emits: `TransitionFailureClassified`
@@ -607,7 +607,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLeaseHoldingClaimed`
 - From: `Claimed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_lease_holding`
 - Emits: `TransitionFailureClassified`
@@ -615,7 +615,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLeaseHoldingDispatching`
 - From: `Dispatching`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_lease_holding`
 - Emits: `TransitionFailureClassified`
@@ -623,7 +623,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLeaseHoldingAwaitingCompletion`
 - From: `AwaitingCompletion`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_lease_holding`
 - Emits: `TransitionFailureClassified`
@@ -631,7 +631,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLeaseHoldingCompleted`
 - From: `Completed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_lease_holding`
 - Emits: `TransitionFailureClassified`
@@ -639,7 +639,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLeaseHoldingSkipped`
 - From: `Skipped`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_lease_holding`
 - Emits: `TransitionFailureClassified`
@@ -647,7 +647,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLeaseHoldingMisfired`
 - From: `Misfired`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_lease_holding`
 - Emits: `TransitionFailureClassified`
@@ -655,7 +655,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLeaseHoldingSuperseded`
 - From: `Superseded`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_lease_holding`
 - Emits: `TransitionFailureClassified`
@@ -663,7 +663,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed`
 - From: `DeliveryFailed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_lease_holding`
 - Emits: `TransitionFailureClassified`
@@ -671,7 +671,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLiveForTerminalPending`
 - From: `Pending`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_live_for_terminal`
 - Emits: `TransitionFailureClassified`
@@ -679,7 +679,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLiveForTerminalClaimed`
 - From: `Claimed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_live_for_terminal`
 - Emits: `TransitionFailureClassified`
@@ -687,7 +687,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLiveForTerminalDispatching`
 - From: `Dispatching`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_live_for_terminal`
 - Emits: `TransitionFailureClassified`
@@ -695,7 +695,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion`
 - From: `AwaitingCompletion`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_live_for_terminal`
 - Emits: `TransitionFailureClassified`
@@ -703,7 +703,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLiveForTerminalCompleted`
 - From: `Completed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_live_for_terminal`
 - Emits: `TransitionFailureClassified`
@@ -711,7 +711,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLiveForTerminalSkipped`
 - From: `Skipped`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_live_for_terminal`
 - Emits: `TransitionFailureClassified`
@@ -719,7 +719,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLiveForTerminalMisfired`
 - From: `Misfired`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_live_for_terminal`
 - Emits: `TransitionFailureClassified`
@@ -727,7 +727,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLiveForTerminalSuperseded`
 - From: `Superseded`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_live_for_terminal`
 - Emits: `TransitionFailureClassified`
@@ -735,7 +735,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed`
 - From: `DeliveryFailed`
-- On: `ClassifyTransitionFailure`(observation)
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `not_live_for_terminal`
 - Emits: `TransitionFailureClassified`

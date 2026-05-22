@@ -125,7 +125,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_terminal_classification`
-- `ClassifyTransitionFailureNotPendingForClaimPending`
+- `ClassifyTransitionFailureClaimRejectedPendingPending`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_start_complete_fail`, `occurrence_claim_dispatch_completion`
 - `ClassifyTransitionFailureNotPendingForClaimClaimed`

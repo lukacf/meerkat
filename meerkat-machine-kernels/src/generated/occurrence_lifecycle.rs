@@ -342,6 +342,114 @@ impl std::fmt::Display for OccurrenceId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum OccurrenceLifecycleInputVariant {
+    #[default]
+    #[serde(rename = "PlanOccurrence")]
+    PlanOccurrence,
+    #[serde(rename = "SyncTargetSnapshot")]
+    SyncTargetSnapshot,
+    #[serde(rename = "RecordReceipt")]
+    RecordReceipt,
+    #[serde(rename = "ClassifyDue")]
+    ClassifyDue,
+    #[serde(rename = "Claim")]
+    Claim,
+    #[serde(rename = "DispatchStarted")]
+    DispatchStarted,
+    #[serde(rename = "AwaitCompletion")]
+    AwaitCompletion,
+    #[serde(rename = "Complete")]
+    Complete,
+    #[serde(rename = "ResolveRuntimeCompletion")]
+    ResolveRuntimeCompletion,
+    #[serde(rename = "Skip")]
+    Skip,
+    #[serde(rename = "Misfire")]
+    Misfire,
+    #[serde(rename = "Supersede")]
+    Supersede,
+    #[serde(rename = "DeliveryFailed")]
+    DeliveryFailed,
+    #[serde(rename = "LeaseExpired")]
+    LeaseExpired,
+    #[serde(rename = "ReleaseLeaseForPausedSchedule")]
+    ReleaseLeaseForPausedSchedule,
+    #[serde(rename = "ClassifyTransitionFailure")]
+    ClassifyTransitionFailure,
+}
+impl OccurrenceLifecycleInputVariant {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PlanOccurrence => "PlanOccurrence",
+            Self::SyncTargetSnapshot => "SyncTargetSnapshot",
+            Self::RecordReceipt => "RecordReceipt",
+            Self::ClassifyDue => "ClassifyDue",
+            Self::Claim => "Claim",
+            Self::DispatchStarted => "DispatchStarted",
+            Self::AwaitCompletion => "AwaitCompletion",
+            Self::Complete => "Complete",
+            Self::ResolveRuntimeCompletion => "ResolveRuntimeCompletion",
+            Self::Skip => "Skip",
+            Self::Misfire => "Misfire",
+            Self::Supersede => "Supersede",
+            Self::DeliveryFailed => "DeliveryFailed",
+            Self::LeaseExpired => "LeaseExpired",
+            Self::ReleaseLeaseForPausedSchedule => "ReleaseLeaseForPausedSchedule",
+            Self::ClassifyTransitionFailure => "ClassifyTransitionFailure",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OccurrenceLifecycleInputVariant {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PlanOccurrence" => Ok(Self::PlanOccurrence),
+            "SyncTargetSnapshot" => Ok(Self::SyncTargetSnapshot),
+            "RecordReceipt" => Ok(Self::RecordReceipt),
+            "ClassifyDue" => Ok(Self::ClassifyDue),
+            "Claim" => Ok(Self::Claim),
+            "DispatchStarted" => Ok(Self::DispatchStarted),
+            "AwaitCompletion" => Ok(Self::AwaitCompletion),
+            "Complete" => Ok(Self::Complete),
+            "ResolveRuntimeCompletion" => Ok(Self::ResolveRuntimeCompletion),
+            "Skip" => Ok(Self::Skip),
+            "Misfire" => Ok(Self::Misfire),
+            "Supersede" => Ok(Self::Supersede),
+            "DeliveryFailed" => Ok(Self::DeliveryFailed),
+            "LeaseExpired" => Ok(Self::LeaseExpired),
+            "ReleaseLeaseForPausedSchedule" => Ok(Self::ReleaseLeaseForPausedSchedule),
+            "ClassifyTransitionFailure" => Ok(Self::ClassifyTransitionFailure),
+            other => Err(format!(
+                "invalid OccurrenceLifecycleInputVariant value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OccurrenceLifecycleInputVariant {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OccurrenceLifecycleInputVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum OccurrenceLifecycleState {
     #[default]
     #[serde(rename = "Pending")]
@@ -430,6 +538,8 @@ pub enum OccurrenceTransitionFailureClassKind {
     ReceiptRecordRejected,
     #[serde(rename = "DueClassificationRejected")]
     DueClassificationRejected,
+    #[serde(rename = "ClaimRejected")]
+    ClaimRejected,
     #[serde(rename = "NotPendingForClaim")]
     NotPendingForClaim,
     #[serde(rename = "NotClaimed")]
@@ -448,6 +558,7 @@ impl OccurrenceTransitionFailureClassKind {
             Self::TargetSyncRejected => "TargetSyncRejected",
             Self::ReceiptRecordRejected => "ReceiptRecordRejected",
             Self::DueClassificationRejected => "DueClassificationRejected",
+            Self::ClaimRejected => "ClaimRejected",
             Self::NotPendingForClaim => "NotPendingForClaim",
             Self::NotClaimed => "NotClaimed",
             Self::NotDispatching => "NotDispatching",
@@ -464,6 +575,7 @@ impl std::convert::TryFrom<&str> for OccurrenceTransitionFailureClassKind {
             "TargetSyncRejected" => Ok(Self::TargetSyncRejected),
             "ReceiptRecordRejected" => Ok(Self::ReceiptRecordRejected),
             "DueClassificationRejected" => Ok(Self::DueClassificationRejected),
+            "ClaimRejected" => Ok(Self::ClaimRejected),
             "NotPendingForClaim" => Ok(Self::NotPendingForClaim),
             "NotClaimed" => Ok(Self::NotClaimed),
             "NotDispatching" => Ok(Self::NotDispatching),
@@ -500,92 +612,40 @@ impl std::fmt::Display for OccurrenceTransitionFailureClassKind {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum OccurrenceTransitionFailureObservationKind {
+pub enum OccurrenceTransitionFailureRefusalKind {
     #[default]
-    #[serde(rename = "PlanOccurrence")]
-    PlanOccurrence,
-    #[serde(rename = "SyncTargetSnapshot")]
-    SyncTargetSnapshot,
-    #[serde(rename = "RecordReceipt")]
-    RecordReceipt,
-    #[serde(rename = "ClassifyDue")]
-    ClassifyDue,
-    #[serde(rename = "Claim")]
-    Claim,
-    #[serde(rename = "DispatchStarted")]
-    DispatchStarted,
-    #[serde(rename = "AwaitCompletion")]
-    AwaitCompletion,
-    #[serde(rename = "Complete")]
-    Complete,
-    #[serde(rename = "ResolveRuntimeCompletion")]
-    ResolveRuntimeCompletion,
-    #[serde(rename = "Skip")]
-    Skip,
-    #[serde(rename = "Misfire")]
-    Misfire,
-    #[serde(rename = "Supersede")]
-    Supersede,
-    #[serde(rename = "DeliveryFailed")]
-    DeliveryFailed,
-    #[serde(rename = "LeaseExpired")]
-    LeaseExpired,
-    #[serde(rename = "ReleaseLeaseForPausedSchedule")]
-    ReleaseLeaseForPausedSchedule,
+    #[serde(rename = "NoMatchingTransition")]
+    NoMatchingTransition,
+    #[serde(rename = "GuardRejected")]
+    GuardRejected,
 }
-impl OccurrenceTransitionFailureObservationKind {
+impl OccurrenceTransitionFailureRefusalKind {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::PlanOccurrence => "PlanOccurrence",
-            Self::SyncTargetSnapshot => "SyncTargetSnapshot",
-            Self::RecordReceipt => "RecordReceipt",
-            Self::ClassifyDue => "ClassifyDue",
-            Self::Claim => "Claim",
-            Self::DispatchStarted => "DispatchStarted",
-            Self::AwaitCompletion => "AwaitCompletion",
-            Self::Complete => "Complete",
-            Self::ResolveRuntimeCompletion => "ResolveRuntimeCompletion",
-            Self::Skip => "Skip",
-            Self::Misfire => "Misfire",
-            Self::Supersede => "Supersede",
-            Self::DeliveryFailed => "DeliveryFailed",
-            Self::LeaseExpired => "LeaseExpired",
-            Self::ReleaseLeaseForPausedSchedule => "ReleaseLeaseForPausedSchedule",
+            Self::NoMatchingTransition => "NoMatchingTransition",
+            Self::GuardRejected => "GuardRejected",
         }
     }
 }
-impl std::convert::TryFrom<&str> for OccurrenceTransitionFailureObservationKind {
+impl std::convert::TryFrom<&str> for OccurrenceTransitionFailureRefusalKind {
     type Error = String;
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "PlanOccurrence" => Ok(Self::PlanOccurrence),
-            "SyncTargetSnapshot" => Ok(Self::SyncTargetSnapshot),
-            "RecordReceipt" => Ok(Self::RecordReceipt),
-            "ClassifyDue" => Ok(Self::ClassifyDue),
-            "Claim" => Ok(Self::Claim),
-            "DispatchStarted" => Ok(Self::DispatchStarted),
-            "AwaitCompletion" => Ok(Self::AwaitCompletion),
-            "Complete" => Ok(Self::Complete),
-            "ResolveRuntimeCompletion" => Ok(Self::ResolveRuntimeCompletion),
-            "Skip" => Ok(Self::Skip),
-            "Misfire" => Ok(Self::Misfire),
-            "Supersede" => Ok(Self::Supersede),
-            "DeliveryFailed" => Ok(Self::DeliveryFailed),
-            "LeaseExpired" => Ok(Self::LeaseExpired),
-            "ReleaseLeaseForPausedSchedule" => Ok(Self::ReleaseLeaseForPausedSchedule),
+            "NoMatchingTransition" => Ok(Self::NoMatchingTransition),
+            "GuardRejected" => Ok(Self::GuardRejected),
             other => Err(format!(
-                "invalid OccurrenceTransitionFailureObservationKind value `{other}`"
+                "invalid OccurrenceTransitionFailureRefusalKind value `{other}`"
             )),
         }
     }
 }
-impl std::convert::TryFrom<String> for OccurrenceTransitionFailureObservationKind {
+impl std::convert::TryFrom<String> for OccurrenceTransitionFailureRefusalKind {
     type Error = String;
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::try_from(value.as_str())
     }
 }
-impl std::fmt::Display for OccurrenceTransitionFailureObservationKind {
+impl std::fmt::Display for OccurrenceTransitionFailureRefusalKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -925,7 +985,8 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyTransitionFailure {
-        pub observation: OccurrenceTransitionFailureObservationKind,
+        pub refusal_kind: OccurrenceTransitionFailureRefusalKind,
+        pub trigger: OccurrenceLifecycleInputVariant,
     }
 }
 
@@ -1026,7 +1087,9 @@ pub mod effects {
     pub struct LeaseExpired {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TransitionFailureClassified {
-        pub observation: OccurrenceTransitionFailureObservationKind,
+        pub phase: OccurrenceLifecycleState,
+        pub refusal_kind: OccurrenceTransitionFailureRefusalKind,
+        pub trigger: OccurrenceLifecycleInputVariant,
         pub public_class: OccurrenceTransitionFailureClassKind,
     }
 }
@@ -1107,7 +1170,7 @@ pub enum TransitionId {
     ClassifyTransitionFailureDueClassificationRejectedMisfired,
     ClassifyTransitionFailureDueClassificationRejectedSuperseded,
     ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed,
-    ClassifyTransitionFailureNotPendingForClaimPending,
+    ClassifyTransitionFailureClaimRejectedPendingPending,
     ClassifyTransitionFailureNotPendingForClaimClaimed,
     ClassifyTransitionFailureNotPendingForClaimDispatching,
     ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion,

@@ -1174,7 +1174,7 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "OccurrenceLifecycleMachine",
             "TransitionFailureClassified",
             SeamClassification::SurfaceResultAlignment,
-            "Occurrence transition failure public result class must align with generated occurrence failure-observation classification",
+            "Occurrence transition failure public result class must align with generated occurrence refusal-evidence classification",
         ),
         //
         // =========================================================================

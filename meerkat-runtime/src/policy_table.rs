@@ -711,8 +711,8 @@ mod tests {
         );
         assert_eq!(
             running_decision.wake_mode,
-            WakeMode::None,
-            "explicit queue means next boundary, not interrupt-yielding, while the target is running"
+            WakeMode::WakeIfIdle,
+            "explicit queue means next boundary and may wake the loop once idle, but must not interrupt-yield while the target is running"
         );
     }
 

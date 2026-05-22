@@ -11,6 +11,7 @@ machine! {
             externally_addressable_runtime_ids: Set<AgentRuntimeId>,
             runtime_fence_tokens: Map<AgentRuntimeId, FenceToken>,
             spawn_profile_authority_material_digests: Map<AgentIdentity, String>,
+            spawn_profile_authority_external_addressable: Map<AgentIdentity, bool>,
             active_run_count: u64,
             pending_spawn_count: u64,
             coordinator_bound: bool,
@@ -21,6 +22,7 @@ machine! {
             externally_addressable_runtime_ids = EmptySet,
             runtime_fence_tokens = EmptyMap,
             spawn_profile_authority_material_digests = EmptyMap,
+            spawn_profile_authority_external_addressable = EmptyMap,
             active_run_count = 0,
             pending_spawn_count = 0,
             coordinator_bound = true,
@@ -165,6 +167,7 @@ machine! {
             guard "coordinator_bound" { self.coordinator_bound == true }
             update {
                 self.spawn_profile_authority_material_digests.insert(agent_identity, profile_material_digest);
+                self.spawn_profile_authority_external_addressable.insert(agent_identity, external_addressable);
             }
             to Running
         }
@@ -174,6 +177,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "coordinator_bound" { self.coordinator_bound == true }
             guard "spawn_profile_authorized" { self.spawn_profile_authority_material_digests.get_cloned(agent_identity) == Some(profile_material_digest) }
+            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
             update {
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
@@ -184,6 +188,8 @@ machine! {
                     self.externally_addressable_runtime_ids.remove(agent_runtime_id);
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
+                self.spawn_profile_authority_material_digests.remove(agent_identity);
+                self.spawn_profile_authority_external_addressable.remove(agent_identity);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
@@ -1141,6 +1147,49 @@ mod tests {
             .unwrap();
         assert_eq!(r.to_phase, MobPhase::Stopped);
         assert!(auth.state().live_runtime_ids.is_empty());
+    }
+
+    #[test]
+    fn spawn_rejects_unauthorized_addressability() {
+        let mut auth = MobMachineAuthority::new();
+        let profile_material_digest = "profile.agent-1";
+
+        MobMachineMutator::apply(
+            &mut auth,
+            MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: AgentIdentity::from("agent-1"),
+                profile_name: "worker".to_owned(),
+                model: "test-model".to_owned(),
+                profile_material_digest: profile_material_digest.to_owned(),
+                tool_config_digest: "tool-config.agent-1".to_owned(),
+                skills_digest: "skills.agent-1".to_owned(),
+                provider_params_digest: None,
+                output_schema_digest: None,
+                external_addressable: false,
+            },
+        )
+        .unwrap();
+
+        let result = MobMachineMutator::apply(
+            &mut auth,
+            MobMachineInput::Spawn {
+                agent_identity: AgentIdentity::from("agent-1"),
+                agent_runtime_id: AgentRuntimeId::from("rt-1"),
+                fence_token: FenceToken(1),
+                generation: Generation(0),
+                profile_material_digest: profile_material_digest.to_owned(),
+                external_addressable: true,
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(auth.state().live_runtime_ids.is_empty());
+        assert!(
+            !auth
+                .state()
+                .externally_addressable_runtime_ids
+                .contains(&AgentRuntimeId::from("rt-1"))
+        );
     }
 
     #[test]

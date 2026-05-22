@@ -609,9 +609,8 @@ impl AgentMobToolSurface {
                 identity.clone(),
                 meerkat_mob::PeerTarget::External(parent_spec),
             )
-            .await
-            .is_ok();
-        if !helper_trusts_parent {
+            .await;
+        if helper_trusts_parent.is_err() {
             return false;
         }
 
@@ -2409,6 +2408,7 @@ mod tests {
         peer_id: PeerId,
         public_key_bytes: [u8; 32],
         trusted: tokio::sync::RwLock<HashMap<String, TrustedPeerDescriptor>>,
+        mob_machine_trust_owner: std::sync::RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
         inbox: tokio::sync::RwLock<Vec<InboxInteraction>>,
         notify: Arc<tokio::sync::Notify>,
         registry: Arc<TestCommsRegistry>,
@@ -2432,12 +2432,29 @@ mod tests {
                 peer_id,
                 public_key_bytes,
                 trusted: tokio::sync::RwLock::new(HashMap::new()),
+                mob_machine_trust_owner: std::sync::RwLock::new(None),
                 inbox: tokio::sync::RwLock::new(Vec::new()),
                 notify: Arc::new(tokio::sync::Notify::new()),
                 registry,
             });
             runtime.registry.insert(runtime.clone()).await;
             runtime
+        }
+
+        fn validate_mob_trust_authority_owner(
+            &self,
+            authority: &meerkat_core::comms::CommsTrustMutationAuthority,
+        ) -> Result<(), SendError> {
+            if !authority.is_mob_machine_source() {
+                return Ok(());
+            }
+            let expected = self
+                .mob_machine_trust_owner
+                .read()
+                .expect("poisoned mob_machine_trust_owner lock in test comms runtime");
+            authority
+                .validate_source_owner_token(expected.as_ref())
+                .map_err(SendError::Validation)
         }
     }
 
@@ -2474,6 +2491,7 @@ mod tests {
         ) -> Result<CommsTrustMutationResult, SendError> {
             match mutation {
                 CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority)?;
                     authority
                         .validate_public_add(self.peer_id(), &peer)
                         .map_err(SendError::Validation)?;
@@ -2481,6 +2499,7 @@ mod tests {
                     Ok(CommsTrustMutationResult::Added)
                 }
                 CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority)?;
                     let parsed_peer_id = PeerId::parse(&peer_id)
                         .map_err(|err| SendError::Validation(err.to_string()))?;
                     authority
@@ -2490,6 +2509,7 @@ mod tests {
                     Ok(CommsTrustMutationResult::Removed { removed })
                 }
                 CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority)?;
                     authority
                         .validate_private_add(self.peer_id(), &peer)
                         .map_err(SendError::Validation)?;
@@ -2497,6 +2517,7 @@ mod tests {
                     Ok(CommsTrustMutationResult::Added)
                 }
                 CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority)?;
                     let parsed_peer_id = PeerId::parse(&peer_id)
                         .map_err(|err| SendError::Validation(err.to_string()))?;
                     authority
@@ -2506,6 +2527,39 @@ mod tests {
                     Ok(CommsTrustMutationResult::Removed { removed })
                 }
             }
+        }
+
+        async fn install_generated_mob_trust_owner(
+            &self,
+            owner: Arc<dyn std::any::Any + Send + Sync>,
+        ) -> Result<(), SendError> {
+            let mut expected = self
+                .mob_machine_trust_owner
+                .write()
+                .expect("poisoned mob_machine_trust_owner lock in test comms runtime");
+            if let Some(existing) = expected.as_ref() {
+                if Arc::ptr_eq(existing, &owner) {
+                    return Ok(());
+                }
+                return Err(SendError::Validation(
+                    "target runtime is already bound to a different generated MobMachine trust owner"
+                        .to_string(),
+                ));
+            }
+            *expected = Some(owner);
+            Ok(())
+        }
+
+        async fn install_recovered_generated_mob_trust_owner(
+            &self,
+            owner: Arc<dyn std::any::Any + Send + Sync>,
+        ) -> Result<(), SendError> {
+            *self
+                .mob_machine_trust_owner
+                .write()
+                .expect("poisoned mob_machine_trust_owner lock in test comms runtime") =
+                Some(owner);
+            Ok(())
         }
 
         async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {

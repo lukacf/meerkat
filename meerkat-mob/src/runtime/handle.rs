@@ -4287,6 +4287,15 @@ impl MobHandle {
             let snapshot = self
                 .member_status(&AgentIdentity::from(agent_identity.as_str()))
                 .await?;
+            if snapshot.status == MobMemberStatus::Unknown
+                && snapshot.agent_runtime_id.is_none()
+                && snapshot.fence_token.is_none()
+                && snapshot.current_bridge_session_id().is_none()
+            {
+                return Err(MobError::Internal(format!(
+                    "MobMachine runtime material is absent for member '{agent_identity}'"
+                )));
+            }
             if snapshot.is_final {
                 return Ok(snapshot);
             }

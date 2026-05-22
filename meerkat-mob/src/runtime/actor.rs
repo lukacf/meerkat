@@ -171,6 +171,8 @@ struct BatchInstalledTrust {
 }
 
 struct RetireTrustCleanupPlan {
+    retiring_comms: Option<Arc<dyn CoreCommsRuntime>>,
+    retiring_spec: Option<TrustedPeerDescriptor>,
     machine_wired_peer_identities: BTreeSet<AgentIdentity>,
     trust_unwire_authority_by_peer: BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
 }
@@ -178,6 +180,8 @@ struct RetireTrustCleanupPlan {
 impl RetireTrustCleanupPlan {
     fn empty() -> Self {
         Self {
+            retiring_comms: None,
+            retiring_spec: None,
             machine_wired_peer_identities: BTreeSet::new(),
             trust_unwire_authority_by_peer: BTreeMap::new(),
         }
@@ -10164,6 +10168,10 @@ impl MobActor {
         };
         let report = self.dispose_member(&ctx, policy.as_mut()).await;
 
+        // Once generated Retire has accepted, machine-owned topology cleanup is
+        // independent from best-effort shell notification/trust cleanup.
+        self.cleanup_retired_member_machine_wiring(&ctx)?;
+
         // ArchiveSession is critical: a skipped archive means an orphan session
         // the caller believes was cleaned up. Surface the error.
         // Comms steps (NotifyPeers, RemoveTrustEdges) remain best-effort.
@@ -10182,9 +10190,6 @@ impl MobActor {
             return Err(MobError::Internal(format!(
                 "disposal aborted at ArchiveSession: {error}"
             )));
-        }
-        if Self::disposal_step_succeeded(&report, DisposalStep::NotifyPeers) {
-            self.cleanup_retired_member_machine_wiring(&ctx)?;
         }
 
         self.delete_external_binding_overlay_for_member(&entry.agent_identity, entry.generation)
@@ -10727,11 +10732,14 @@ impl MobActor {
         if machine_wired_peer_identities.is_empty() {
             return Ok(RetireTrustCleanupPlan::empty());
         }
-        let retiring_spec = match self
+        let (retiring_spec, retiring_comms) = match self
             .resolve_wiring_endpoint(entry, "retire trust authority retiring member")
             .await?
         {
-            WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
+            WiringEndpoint::Local { spec, comms, .. } => (spec, Some(comms)),
+            WiringEndpoint::PeerOnly { spec, .. } => {
+                (spec, Some(self.supervisor_bridge.runtime_core().await))
+            }
         };
         let retiring_peer_id = Self::trusted_peer_removal_key(&retiring_spec);
         let mut authorities = BTreeMap::new();
@@ -10754,6 +10762,8 @@ impl MobActor {
             authorities.insert(peer_identity.clone(), authority);
         }
         Ok(RetireTrustCleanupPlan {
+            retiring_comms,
+            retiring_spec: Some(retiring_spec),
             machine_wired_peer_identities,
             trust_unwire_authority_by_peer: authorities,
         })
@@ -10774,6 +10784,8 @@ impl MobActor {
             agent_identity: agent_identity.clone(),
             entry: entry.clone(),
             retiring_key,
+            retiring_comms: trust_cleanup_plan.retiring_comms,
+            retiring_spec: trust_cleanup_plan.retiring_spec,
             machine_wired_peer_identities: trust_cleanup_plan.machine_wired_peer_identities,
             trust_unwire_authority_by_peer: trust_cleanup_plan.trust_unwire_authority_by_peer,
         }
@@ -10868,12 +10880,6 @@ impl MobActor {
             .map(|(step, error)| format!("disposal completed but {step} failed: {error}"))
     }
 
-    fn disposal_step_succeeded(report: &DisposalReport, step: DisposalStep) -> bool {
-        report.completed.contains(&step)
-            && !matches!(report.aborted_at.as_ref(), Some((aborted, _)) if *aborted == step)
-            && !report.skipped.iter().any(|(skipped, _)| *skipped == step)
-    }
-
     fn cleanup_retired_member_machine_wiring(
         &mut self,
         ctx: &DisposalContext,
@@ -10948,14 +10954,20 @@ impl MobActor {
     /// Iterates the MobMachine-owned wiring snapshot; skips absent peers.
     /// Returns the first error encountered, if any.
     async fn dispose_notify_peers(&self, ctx: &DisposalContext) -> Result<(), MobError> {
-        let Some(retiring_comms) = self.sender_runtime_for_entry(&ctx.entry).await else {
+        if ctx.machine_wired_peer_identities.is_empty() {
             return Ok(());
+        }
+        let Some(retiring_comms) = ctx.retiring_comms.as_ref() else {
+            return Err(MobError::WiringError(format!(
+                "dispose_notify_peers missing machine-resolved retiring comms for '{}'",
+                ctx.agent_identity
+            )));
         };
-        let retiring_spec = match self
-            .resolve_wiring_endpoint(&ctx.entry, "dispose_notify_peers retiring member")
-            .await?
-        {
-            WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
+        let Some(retiring_spec) = ctx.retiring_spec.as_ref() else {
+            return Err(MobError::WiringError(format!(
+                "dispose_notify_peers missing machine-resolved retiring endpoint for '{}'",
+                ctx.agent_identity
+            )));
         };
         let peer_identities = ctx
             .machine_wired_peer_identities
@@ -10997,6 +11009,7 @@ impl MobActor {
                             &recipient_spec,
                             &ctx.agent_identity,
                             &ctx.entry,
+                            &retiring_spec,
                             &retiring_comms,
                         )
                         .await
@@ -14830,6 +14843,12 @@ impl MobActor {
                         "spawn rollback requires sender runtime for '{agent_identity}'"
                     ))
                 })?;
+            let spawned_spec = match self
+                .resolve_wiring_endpoint(spawned_entry, "spawn rollback spawned member")
+                .await?
+            {
+                WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
+            };
             for peer_meerkat_id in &wired_peers {
                 let peer_spec = {
                     let roster = self.roster.read().await;
@@ -14851,6 +14870,7 @@ impl MobActor {
                     &peer_spec,
                     agent_identity,
                     spawned_entry,
+                    &spawned_spec,
                     &spawned_sender,
                 )
                 .await?;
@@ -14903,6 +14923,8 @@ impl MobActor {
                 }
             }),
             retiring_key: spawned_comms.as_ref().and_then(|c| c.public_key()),
+            retiring_comms: None,
+            retiring_spec: None,
             machine_wired_peer_identities: BTreeSet::new(),
             trust_unwire_authority_by_peer: BTreeMap::new(),
         };
@@ -15172,16 +15194,36 @@ impl MobActor {
         {
             WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
         };
+        self.notify_peer_event_with_spec(
+            intent,
+            recipient_spec,
+            other_peer_id,
+            other_peer_entry,
+            &other_peer_spec,
+            sender_comms,
+        )
+        .await
+    }
+
+    async fn notify_peer_event_with_spec(
+        &self,
+        intent: &'static str,
+        recipient_spec: &TrustedPeerDescriptor,
+        other_peer_id: &MeerkatId,
+        other_peer_entry: &RosterEntry,
+        other_peer_spec: &TrustedPeerDescriptor,
+        sender_comms: &Arc<dyn CoreCommsRuntime>,
+    ) -> Result<(), MobError> {
         let peer_route =
             PeerRoute::with_display_name(recipient_spec.peer_id, recipient_spec.name.clone());
 
         let params = serde_json::json!({
             "peer": other_peer_id.as_str(),
             "role": other_peer_entry.role.as_str(),
-            "peer_name": other_peer_spec.name,
+            "peer_name": other_peer_spec.name.clone(),
             "peer_id": other_peer_spec.peer_id,
-            "address": other_peer_spec.address,
-            "peer_spec": other_peer_spec,
+            "address": other_peer_spec.address.clone(),
+            "peer_spec": other_peer_spec.clone(),
         });
 
         let cmd = match intent {
@@ -15278,13 +15320,15 @@ impl MobActor {
         recipient_spec: &TrustedPeerDescriptor,
         retired_id: &MeerkatId,
         retired_entry: &RosterEntry,
+        retired_spec: &TrustedPeerDescriptor,
         retiring_comms: &Arc<dyn CoreCommsRuntime>,
     ) -> Result<(), MobError> {
-        self.notify_peer_event(
+        self.notify_peer_event_with_spec(
             "mob.peer_retired",
             recipient_spec,
             retired_id,
             retired_entry,
+            retired_spec,
             retiring_comms,
         )
         .await

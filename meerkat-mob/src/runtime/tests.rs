@@ -28969,6 +28969,80 @@ async fn test_external_tools_name_collision_profile_wins() {
 }
 
 #[tokio::test]
+async fn test_spawn_member_with_initial_turn_returns_before_child_turn_completion() {
+    let mut definition = sample_definition_with_mob_tools();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(|binding| binding.as_inline_mut())
+        .expect("worker profile")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let member_ref = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("spawner"),
+            None,
+        )
+        .await
+        .expect("spawn should expose spawn_member");
+    let session_id = member_ref
+        .bridge_session_id()
+        .expect("session-backed spawner")
+        .clone();
+
+    service.set_start_turn_delay_ms(600_000);
+    let raw_args = serde_json::json!({
+        "profile": "worker",
+        "member_id": "child-with-slow-initial-turn",
+        "initial_message": "hold child turn open"
+    });
+
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(250),
+        service.dispatch_external_tool_outcome(&session_id, "spawn_member", raw_args),
+    )
+    .await
+    .expect("spawn_member tool must return after child turn ingress admission")
+    .expect("spawn_member should dispatch");
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&outcome.result.text_content()).expect("spawn result json");
+    assert_eq!(
+        payload["agent_identity"],
+        serde_json::json!("child-with-slow-initial-turn")
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while service.start_turn_call_count() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("detached child initial turn should start after spawn_member returns");
+
+    let child = tokio::time::timeout(
+        Duration::from_millis(250),
+        handle.get_member(&AgentIdentity::from("child-with-slow-initial-turn")),
+    )
+    .await
+    .expect("actor must stay responsive while child initial turn is still running")
+    .expect("child should be visible in roster");
+    assert_eq!(
+        child.agent_identity,
+        AgentIdentity::from("child-with-slow-initial-turn")
+    );
+}
+
+#[tokio::test]
 async fn test_default_helper_spawns_remain_ephemeral() {
     let definition = sample_definition();
     let service = Arc::new(MockSessionService::new());

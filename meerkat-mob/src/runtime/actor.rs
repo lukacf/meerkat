@@ -3379,6 +3379,12 @@ impl MobActor {
                     ops_registry,
                     reply_tx,
                 } => {
+                    tracing::debug!(
+                        member_id = %spec.identity,
+                        profile = %spec.role_name,
+                        owner_bound = owner_bridge_session_id.is_some(),
+                        "MobActor received Spawn command"
+                    );
                     Box::pin(self.enqueue_spawn(
                         *spec,
                         spawn_source,

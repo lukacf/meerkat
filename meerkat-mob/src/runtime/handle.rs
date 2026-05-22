@@ -1449,6 +1449,12 @@ impl MobHandle {
                 spawn_source,
                 owner_context,
             } => {
+                tracing::debug!(
+                    member_id = %spec.identity,
+                    profile = %spec.role_name,
+                    owner_bound = owner_context.is_some(),
+                    "MobHandle::execute_machine_command spawn dispatch"
+                );
                 let (owner_bridge_session_id, ops_registry) = match owner_context {
                     Some(ctx) => (Some(ctx.owner_bridge_session_id), Some(ctx.ops_registry)),
                     None => (None, None),

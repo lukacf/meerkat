@@ -200,6 +200,10 @@ impl SessionService for MockSessionService {
         }
         Ok(())
     }
+
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        Ok(self.sessions.read().await.contains_key(id))
+    }
 }
 
 #[async_trait]

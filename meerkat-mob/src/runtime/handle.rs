@@ -1404,10 +1404,20 @@ impl MobHandle {
         build: impl FnOnce(oneshot::Sender<R>) -> MobCommand,
     ) -> Result<R, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
+        let command = build(reply_tx);
+        let command_kind = command.kind();
+        tracing::debug!(
+            command_kind,
+            "MobHandle::send_actor_command sending command"
+        );
         self.command_tx
-            .send(build(reply_tx))
+            .send(command)
             .await
             .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        tracing::debug!(
+            command_kind,
+            "MobHandle::send_actor_command command sent; awaiting reply"
+        );
         reply_rx
             .await
             .map_err(|_| MobError::Internal("actor reply dropped".into()))
@@ -1449,6 +1459,12 @@ impl MobHandle {
                 spawn_source,
                 owner_context,
             } => {
+                tracing::debug!(
+                    member_id = %spec.identity,
+                    profile = %spec.role_name,
+                    owner_bound = owner_context.is_some(),
+                    "MobHandle::execute_machine_command spawn dispatch"
+                );
                 let (owner_bridge_session_id, ops_registry) = match owner_context {
                     Some(ctx) => (Some(ctx.owner_bridge_session_id), Some(ctx.ops_registry)),
                     None => (None, None),
@@ -1836,6 +1852,15 @@ impl MobHandle {
         }
     }
 
+    /// Last actor-published mob lifecycle phase.
+    ///
+    /// Observation-only surfaces use this when they must remain live while the
+    /// mob actor is awaiting an in-flight member turn. Control paths that need
+    /// the authoritative current phase must keep using [`Self::status`].
+    pub fn status_observation_snapshot(&self) -> MobState {
+        *self.phase_watch_rx.borrow()
+    }
+
     /// Access the mob definition.
     pub fn definition(&self) -> &MobDefinition {
         &self.definition
@@ -1986,6 +2011,24 @@ impl MobHandle {
             }
             Err(_) => Vec::new(),
         }
+    }
+
+    /// Observation-only member projection that never enters the mob actor queue.
+    ///
+    /// Source truth is the shared roster projection plus the actor-published
+    /// MobMachine state watch. The actor is the sole writer for the machine
+    /// watch; this handle only reads the last published value, so the status
+    /// fields can be stale until the actor publishes the next transition.
+    ///
+    /// Use boundary: console/event observation and backfill discovery only.
+    /// This includes retiring rows so observers can keep showing in-flight
+    /// teardown. Control paths that decide routability, mutation legality, or
+    /// active-membership policy must keep using the identity-native command
+    /// APIs; this projection must not become a parallel authority.
+    pub async fn list_members_observation_snapshot(&self) -> Vec<MobMemberListEntry> {
+        let entries = self.roster.read().await.list_all().cloned().collect();
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        self.project_member_list_entries_from_machine_state(entries, &machine_state)
     }
 
     async fn inflight_retiring_member_list(&self) -> Option<Vec<MobMemberListEntry>> {
@@ -2156,6 +2199,23 @@ impl MobHandle {
             .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
     }
 
+    /// Observation-only bridge-session lookup that never enters the actor queue.
+    ///
+    /// This reads the roster's current member binding as a projection for
+    /// observers that need to attach to session event/history streams. It is
+    /// not a control admission seam and must not be used to decide membership
+    /// legality.
+    pub async fn resolve_bridge_session_id_observation(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<SessionId> {
+        self.roster
+            .read()
+            .await
+            .get_by_identity(identity)
+            .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
+    }
+
     /// Acquire a capability-bearing handle for a specific active member.
     pub async fn member(&self, identity: &AgentIdentity) -> Result<MemberHandle, MobError> {
         let meerkat_id = MeerkatId::from(identity);
@@ -2227,6 +2287,43 @@ impl MobHandle {
                 "unexpected command result variant".into(),
             )),
         }
+    }
+
+    /// Observation-only event subscription that reads the session binding from
+    /// the roster directly instead of sending a command through the mob actor.
+    ///
+    /// The subscription authority remains the session service for the resolved
+    /// bridge session. This helper only projects the identity-to-session
+    /// binding for observation surfaces that cannot queue behind the mob actor.
+    pub async fn subscribe_agent_events_observation(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<EventStream, MobError> {
+        let session_id = {
+            let roster = self.roster.read().await;
+            let entry = roster
+                .get_by_identity(identity)
+                .ok_or_else(|| MobError::MemberNotFound(MeerkatId::from(identity)))?;
+            entry
+                .member_ref
+                .bridge_session_id()
+                .cloned()
+                .ok_or_else(|| MobError::UnsupportedForMode {
+                    mode: entry.runtime_mode,
+                    reason: "agent event subscriptions are not supported for peer-only members"
+                        .to_string(),
+                })?
+        };
+        crate::runtime::session_service::MobSessionService::subscribe_session_events(
+            self.session_service.as_ref(),
+            &session_id,
+        )
+        .await
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "failed to subscribe to agent events for '{identity}': {error}"
+            ))
+        })
     }
 
     /// Subscribe to agent events for all active members (point-in-time snapshot).
@@ -2449,6 +2546,38 @@ impl MobHandle {
         // The roster is updated synchronously during spawn finalization,
         // so the entry is guaranteed to be present by the time the reply
         // arrives.
+        let entry = self.get_member(&identity).await.ok_or_else(|| {
+            MobError::Internal(format!(
+                "spawn succeeded but roster entry missing for '{identity}'"
+            ))
+        })?;
+        Ok(SpawnResult {
+            agent_identity: entry.agent_identity,
+            agent_runtime_id: entry.agent_runtime_id,
+            fence_token: entry.fence_token,
+        })
+    }
+
+    /// Spawn a member from an agent-owned tool call.
+    ///
+    /// This preserves the owning bridge session so MobMachine-owned spawn
+    /// policies such as `auto_wire_parent` can resolve the actual spawning
+    /// member rather than falling back to ownerless consumer semantics.
+    pub async fn spawn_spec_with_owner_context(
+        &self,
+        spec: SpawnMemberSpec,
+        owner_bridge_session_id: SessionId,
+        ops_registry: Arc<dyn OpsLifecycleRegistry>,
+    ) -> Result<SpawnResult, MobError> {
+        let identity = spec.identity.clone();
+        self.spawn_spec_receipt_with_owner_context(
+            spec,
+            CanonicalOpsOwnerContext {
+                owner_bridge_session_id,
+                ops_registry,
+            },
+        )
+        .await?;
         let entry = self.get_member(&identity).await.ok_or_else(|| {
             MobError::Internal(format!(
                 "spawn succeeded but roster entry missing for '{identity}'"
@@ -3034,13 +3163,19 @@ impl MobHandle {
         message: meerkat_core::types::ContentInput,
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
-    ) -> Result<(), MobError> {
-        let snapshot = self
-            .member_status(&AgentIdentity::from(agent_identity.as_str()))
-            .await?;
+    ) -> Result<MemberDeliveryReceipt, MobError> {
+        let identity = AgentIdentity::from(agent_identity.as_str());
+        let entry = self
+            .get_member(&identity)
+            .await
+            .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+        if entry.state != crate::roster::MemberState::Active {
+            return Err(MobError::MemberNotFound(agent_identity));
+        }
+
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
-            runtime_id: snapshot.agent_runtime_id,
-            fence_token: snapshot.fence_token,
+            runtime_id: entry.agent_runtime_id.clone(),
+            fence_token: entry.fence_token,
             work_ref: WorkRef::new(),
             spec: WorkSpec::new(message, WorkOrigin::External),
             handling_mode,
@@ -3049,7 +3184,12 @@ impl MobHandle {
         });
         self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
             .await?;
-        Ok(())
+        Ok(MemberDeliveryReceipt {
+            identity,
+            agent_runtime_id: entry.agent_runtime_id,
+            fence_token: entry.fence_token,
+            handling_mode,
+        })
     }
 
     pub(super) async fn internal_turn_for_member(
@@ -3104,12 +3244,30 @@ impl MobHandle {
         work_ref: WorkRef,
         spec: WorkSpec,
     ) -> Result<WorkDeliveryReceipt, MobError> {
+        self.submit_work_with_mode(runtime_id, fence_token, work_ref, spec, HandlingMode::Queue)
+            .await
+    }
+
+    /// Submit a unit of work to a mob member with an explicit turn handling mode.
+    ///
+    /// This is the ingress-acknowledged work-lane counterpart to member send.
+    /// The caller supplies the already-authorized runtime binding and fence
+    /// token; the mob machine still owns work-origin legality and stale-fence
+    /// rejection.
+    pub async fn submit_work_with_mode(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        work_ref: WorkRef,
+        spec: WorkSpec,
+        handling_mode: HandlingMode,
+    ) -> Result<WorkDeliveryReceipt, MobError> {
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
             runtime_id: runtime_id.clone(),
             fence_token,
             work_ref: work_ref.clone(),
             spec,
-            handling_mode: HandlingMode::Queue,
+            handling_mode,
             render_metadata: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
         });
@@ -4090,7 +4248,8 @@ impl MemberHandle {
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
     ) -> Result<MemberDeliveryReceipt, MobError> {
-        self.mob
+        let receipt = self
+            .mob
             .external_turn_for_member(
                 self.agent_identity.clone(),
                 content.into(),
@@ -4098,16 +4257,7 @@ impl MemberHandle {
                 render_metadata,
             )
             .await?;
-        let snapshot = self
-            .mob
-            .member_status(&AgentIdentity::from(self.agent_identity.as_str()))
-            .await?;
-        Ok(MemberDeliveryReceipt {
-            identity: self.identity(),
-            agent_runtime_id: snapshot.agent_runtime_id,
-            fence_token: snapshot.fence_token,
-            handling_mode,
-        })
+        Ok(receipt)
     }
 
     /// Send typed peer communication from this member to another mob member.

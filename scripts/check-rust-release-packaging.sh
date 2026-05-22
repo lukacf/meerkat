@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
-PYTHON="${PYTHON:-python3}"
+PYTHON="${PYTHON:-$(command -v python3.11 2>/dev/null || command -v python3)}"
 JOBS="${MEERKAT_RELEASE_PACKAGING_JOBS:-${MEERKAT_PUBLISH_DRY_RUN_JOBS:-4}}"
 TARGET_ROOT="${CARGO_TARGET_DIR:-/tmp/meerkat-release-packaging-target}"
 ISOLATED_TARGETS="${MEERKAT_RELEASE_PACKAGING_ISOLATED_TARGETS:-0}"

@@ -41,11 +41,26 @@ impl InitialTurnHandle {
 
 enum SubmitWorkDispatchCompletion {
     Completed,
+    AwaitTurnAdmission {
+        provisioner: Arc<dyn MobProvisioner>,
+        member_ref: MemberRef,
+        req: Box<meerkat_core::service::StartTurnRequest>,
+    },
     AwaitTurnCompletion {
         provisioner: Arc<dyn MobProvisioner>,
         member_ref: MemberRef,
         req: Box<meerkat_core::service::StartTurnRequest>,
     },
+}
+
+impl SubmitWorkDispatchCompletion {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::AwaitTurnAdmission { .. } => "AwaitTurnAdmission",
+            Self::AwaitTurnCompletion { .. } => "AwaitTurnCompletion",
+        }
+    }
 }
 
 // Sized for real mob-scale startup/shutdown fan-out (50+ members).
@@ -3366,6 +3381,7 @@ impl MobActor {
             } else {
                 break;
             };
+            tracing::debug!(command_kind = cmd.kind(), "MobActor received command");
             match cmd {
                 MobCommand::Spawn {
                     spec,
@@ -3374,6 +3390,12 @@ impl MobActor {
                     ops_registry,
                     reply_tx,
                 } => {
+                    tracing::debug!(
+                        member_id = %spec.identity,
+                        profile = %spec.role_name,
+                        owner_bound = owner_bridge_session_id.is_some(),
+                        "MobActor received Spawn command"
+                    );
                     Box::pin(self.enqueue_spawn(
                         *spec,
                         spawn_source,
@@ -3452,9 +3474,30 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SubmitWork { payload, reply_tx } => {
+                    tracing::debug!(
+                        agent_identity = %payload.runtime_id.identity,
+                        runtime_id = %payload.runtime_id,
+                        work_ref = %payload.work_ref,
+                        origin = ?payload.origin,
+                        handling_mode = ?payload.handling_mode,
+                        ack_mode = ?payload.ack_mode,
+                        "MobActor handling SubmitWork command"
+                    );
                     match Box::pin(self.handle_submit_work(payload)).await {
                         Ok(SubmitWorkDispatchCompletion::Completed) => {
                             let _ = reply_tx.send(Ok(()));
+                        }
+                        Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
+                            provisioner,
+                            member_ref,
+                            req,
+                        }) => {
+                            Self::spawn_turn_admission_reply(
+                                provisioner,
+                                member_ref,
+                                req,
+                                reply_tx,
+                            );
                         }
                         Ok(SubmitWorkDispatchCompletion::AwaitTurnCompletion {
                             provisioner,
@@ -10868,6 +10911,15 @@ impl MobActor {
             render_metadata,
             ack_mode,
         } = *payload;
+        tracing::debug!(
+            agent_identity = %runtime_id.identity,
+            runtime_id = %runtime_id,
+            work_ref = %work_ref,
+            origin = ?origin,
+            handling_mode = ?handling_mode,
+            ack_mode = ?ack_mode,
+            "handle_submit_work started"
+        );
         self.ensure_pending_spawn_alignment("handle_submit_work preflight")?;
 
         let agent_identity = MeerkatId::from(&runtime_id.identity);
@@ -11001,14 +11053,25 @@ impl MobActor {
             ));
         }
 
-        self.dispatch_member_turn_after_machine_admission(
-            &entry,
-            content,
-            handling_mode,
-            render_metadata,
-            ack_mode,
-        )
-        .await
+        let completion = self
+            .dispatch_member_turn_after_machine_admission(
+                &entry,
+                content,
+                handling_mode,
+                render_metadata,
+                ack_mode,
+            )
+            .await?;
+        tracing::debug!(
+            agent_identity = %entry.agent_identity,
+            runtime_id = %entry.agent_runtime_id,
+            work_ref = %work_ref,
+            handling_mode = ?handling_mode,
+            ack_mode = ?ack_mode,
+            completion = completion.kind(),
+            "handle_submit_work dispatched after machine admission"
+        );
+        Ok(completion)
     }
 
     fn spawn_turn_completed_reply(
@@ -11019,6 +11082,18 @@ impl MobActor {
     ) {
         tokio::spawn(async move {
             let result = provisioner.start_turn(&member_ref, *req).await;
+            let _ = reply_tx.send(result);
+        });
+    }
+
+    fn spawn_turn_admission_reply(
+        provisioner: Arc<dyn MobProvisioner>,
+        member_ref: MemberRef,
+        req: Box<meerkat_core::service::StartTurnRequest>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    ) {
+        tokio::spawn(async move {
+            let result = provisioner.admit_turn(&member_ref, *req).await;
             let _ = reply_tx.send(result);
         });
     }
@@ -11195,6 +11270,11 @@ impl MobActor {
     ) -> Result<(), MobError> {
         match completion {
             SubmitWorkDispatchCompletion::Completed => Ok(()),
+            SubmitWorkDispatchCompletion::AwaitTurnAdmission {
+                provisioner,
+                member_ref,
+                req,
+            } => provisioner.admit_turn(&member_ref, *req).await,
             SubmitWorkDispatchCompletion::AwaitTurnCompletion {
                 provisioner,
                 member_ref,
@@ -11211,10 +11291,26 @@ impl MobActor {
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         ack_mode: crate::mob_machine::SubmitWorkAckMode,
     ) -> Result<SubmitWorkDispatchCompletion, MobError> {
-        if let Some(bridge_session_id) = entry.member_ref.bridge_session_id() {
-            match self.session_service.read(bridge_session_id).await {
-                Ok(_) => {}
-                Err(meerkat_core::service::SessionError::NotFound { .. }) => {
+        tracing::debug!(
+            agent_identity = %entry.agent_identity,
+            runtime_id = %entry.agent_runtime_id,
+            runtime_mode = ?entry.runtime_mode,
+            handling_mode = ?handling_mode,
+            ack_mode = ?ack_mode,
+            "dispatch_member_turn_after_machine_admission started"
+        );
+        let live_steer_admission = handling_mode == meerkat_core::types::HandlingMode::Steer
+            && ack_mode == crate::mob_machine::SubmitWorkAckMode::IngressAccepted;
+        if !live_steer_admission
+            && let Some(bridge_session_id) = entry.member_ref.bridge_session_id()
+        {
+            match self
+                .session_service
+                .has_live_session(bridge_session_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {
                     let reason = self
                         .record_missing_member_bridge_session(
                             &entry.agent_identity,
@@ -11244,6 +11340,29 @@ impl MobActor {
                 self.ensure_autonomous_runtime_ready(&entry.agent_identity, &entry.member_ref)
                     .await?;
 
+                if self
+                    .autonomous_steer_requires_admission_barrier(entry, handling_mode, ack_mode)
+                    .await?
+                {
+                    let req = meerkat_core::service::StartTurnRequest {
+                        prompt: content,
+                        system_prompt: None,
+                        event_tx: None,
+                        runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                            render_metadata,
+                            handling_mode,
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                        ),
+                    };
+                    return Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
+                        provisioner: self.provisioner.clone(),
+                        member_ref: entry.member_ref.clone(),
+                        req: Box::new(req),
+                    });
+                }
                 let injector = self
                     .provisioner
                     .interaction_event_injector(bridge_session_id)
@@ -11284,8 +11403,11 @@ impl MobActor {
                 };
                 match ack_mode {
                     crate::mob_machine::SubmitWorkAckMode::IngressAccepted => {
-                        self.provisioner.admit_turn(&entry.member_ref, req).await?;
-                        Ok(SubmitWorkDispatchCompletion::Completed)
+                        Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
+                            provisioner: self.provisioner.clone(),
+                            member_ref: entry.member_ref.clone(),
+                            req: Box::new(req),
+                        })
                     }
                     crate::mob_machine::SubmitWorkAckMode::TurnCompleted => {
                         Ok(SubmitWorkDispatchCompletion::AwaitTurnCompletion {
@@ -11297,6 +11419,66 @@ impl MobActor {
                 }
             }
         }
+    }
+
+    async fn autonomous_steer_requires_admission_barrier(
+        &self,
+        entry: &RosterEntry,
+        handling_mode: meerkat_core::types::HandlingMode,
+        ack_mode: crate::mob_machine::SubmitWorkAckMode,
+    ) -> Result<bool, MobError> {
+        if handling_mode != meerkat_core::types::HandlingMode::Steer
+            || ack_mode != crate::mob_machine::SubmitWorkAckMode::IngressAccepted
+        {
+            return Ok(false);
+        }
+
+        #[cfg(feature = "runtime-adapter")]
+        if let (Some(adapter), Some(session_id)) =
+            (&self.runtime_adapter, entry.member_ref.bridge_session_id())
+        {
+            use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+
+            match adapter.runtime_state(session_id).await {
+                Ok(meerkat_runtime::RuntimeState::Running) => {
+                    tracing::debug!(
+                        agent_identity = %entry.agent_identity,
+                        session_id = %session_id,
+                        "active steer admission barrier enabled by running runtime state"
+                    );
+                    return Ok(true);
+                }
+                Ok(state) => {
+                    let session_active = self
+                        .provisioner
+                        .is_member_active(&entry.member_ref)
+                        .await?
+                        .unwrap_or(false);
+                    tracing::debug!(
+                        agent_identity = %entry.agent_identity,
+                        session_id = %session_id,
+                        runtime_state = ?state,
+                        session_active,
+                        "active steer admission barrier checked non-running runtime state"
+                    );
+                    if session_active {
+                        return Ok(true);
+                    }
+                    return Ok(false);
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        agent_identity = %entry.agent_identity,
+                        session_id = %session_id,
+                        error = %error,
+                        "runtime state unavailable while checking autonomous steer admission barrier"
+                    );
+                    return Ok(false);
+                }
+            }
+        }
+
+        Ok(false)
     }
 
     async fn handle_run_flow(

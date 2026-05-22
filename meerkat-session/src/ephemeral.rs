@@ -26,7 +26,7 @@ use meerkat_core::{
     DeferredFirstTurnPhase, InputId, PendingDeferredPrompt, PendingSystemContextAppend,
     PendingToolResultsMessage, RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent,
     RealtimeTranscriptMaterializedMessage, RunId, SessionDeferredTurnState, SessionLlmIdentity,
-    SessionSystemContextState,
+    SessionSystemContextState, TurnPhase, TurnStateHandle, TurnStateSnapshot,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -72,6 +72,12 @@ pub struct SessionSnapshot {
     pub total_tokens: u64,
     pub usage: Usage,
     pub last_assistant_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveTurnBoundaryStagingToken {
+    pub(crate) active_run_id: RunId,
+    pub(crate) boundary_count: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +219,8 @@ struct SessionHandle {
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     /// Shared runtime control state for system-context appends.
     system_context_state: Arc<std::sync::Mutex<SessionSystemContextState>>,
+    /// Runtime-owned turn phase handle for active-boundary probes.
+    turn_state_handle: Option<Arc<dyn TurnStateHandle>>,
     /// Shared control state for deferred first-turn prompt and staged tool results.
     deferred_turn_state: Arc<std::sync::Mutex<SessionDeferredTurnState>>,
     /// Capacity reserved for a deferred first turn while the session is staged.
@@ -548,6 +556,12 @@ pub trait SessionAgent: Send {
         None
     }
 
+    /// Runtime-owned turn-state handle, when the agent was built through a
+    /// machine-backed runtime binding.
+    fn turn_state_handle(&self) -> Option<Arc<dyn TurnStateHandle>> {
+        None
+    }
+
     /// Session-context advancement handle (W2-E / issue #264).
     ///
     /// Runtime-backed agents expose the session's DSL handle here. The
@@ -685,6 +699,28 @@ pub trait SessionAgent: Send {
     /// Synchronize the shared system-context control state into the canonical session metadata.
     fn sync_system_context_state(&mut self) {}
 
+    /// Drop active-turn-only context that missed the active turn's model
+    /// boundary so it cannot become ordinary context for the next run.
+    fn discard_unapplied_active_turn_system_context(&mut self) -> usize {
+        let discarded_count = {
+            let state = self.system_context_state();
+            let mut guard = match state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::warn!(
+                        "system-context state lock poisoned while discarding active-turn context"
+                    );
+                    poisoned.into_inner()
+                }
+            };
+            guard.discard_unapplied_active_turn_pending().len()
+        };
+        if discarded_count > 0 {
+            self.sync_system_context_state();
+        }
+        discarded_count
+    }
+
     /// Replace live semantic session state from durable authority while preserving live mechanics.
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     fn sync_session_from_durable_snapshot(
@@ -811,6 +847,41 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             }
             _ => None,
         }
+    }
+
+    pub(crate) fn active_turn_boundary_staging_token_from_snapshot(
+        snapshot: &TurnStateSnapshot,
+    ) -> Option<ActiveTurnBoundaryStagingToken> {
+        if matches!(
+            snapshot.turn_phase,
+            TurnPhase::ApplyingPrimitive | TurnPhase::WaitingForOps
+        ) {
+            return snapshot.active_run_id.clone().map(|active_run_id| {
+                ActiveTurnBoundaryStagingToken {
+                    active_run_id,
+                    boundary_count: snapshot.boundary_count,
+                }
+            });
+        }
+        None
+    }
+
+    pub(crate) fn active_turn_boundary_staging_token(
+        turn_state_handle: &dyn TurnStateHandle,
+    ) -> Option<ActiveTurnBoundaryStagingToken> {
+        let snapshot = turn_state_handle.snapshot();
+        Self::active_turn_boundary_staging_token_from_snapshot(&snapshot)
+    }
+
+    pub(crate) async fn active_turn_state_handle(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<Arc<dyn TurnStateHandle>>, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        Ok(handle.turn_state_handle.clone())
     }
 
     async fn build_runtime_output(
@@ -1389,6 +1460,153 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "Session task dropped the reply channel".to_string(),
             ))
         })
+    }
+
+    /// Stage runtime-owned context for the active turn's next model boundary.
+    ///
+    /// This path intentionally mutates the shared system-context state directly
+    /// instead of sending a command to the session task. During a long turn the
+    /// session task is busy inside `run_turn_with_events`, and mailbox delivery
+    /// would make an operator steer visible only after the turn had already
+    /// completed.
+    pub async fn stage_runtime_system_context_for_active_turn(
+        &self,
+        id: &SessionId,
+        expected_run_id: &RunId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<(), SessionError> {
+        if appends.is_empty() {
+            return Ok(());
+        }
+
+        let turn_state_handle = self.active_turn_state_handle(id).await?;
+        let turn_state_handle =
+            turn_state_handle.ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
+        let initial_token = Self::active_turn_boundary_staging_token(turn_state_handle.as_ref())
+            .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
+        if initial_token.active_run_id != *expected_run_id {
+            return Err(SessionError::NotRunning { id: id.clone() });
+        }
+
+        let state = self
+            .system_context_state(id)
+            .await
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+
+        let mut guard = match state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    session_id = %id,
+                    "system-context state lock poisoned while staging active-turn context"
+                );
+                poisoned.into_inner()
+            }
+        };
+
+        let locked_token = Self::active_turn_boundary_staging_token(turn_state_handle.as_ref())
+            .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
+        if locked_token != initial_token {
+            return Err(SessionError::NotRunning { id: id.clone() });
+        }
+
+        let mut candidate = guard.clone();
+        for append in appends {
+            let req = AppendSystemContextRequest {
+                text: append.text,
+                source: append.source,
+                idempotency_key: append.idempotency_key,
+            };
+            candidate
+                .stage_active_turn_append(&req, append.accepted_at)
+                .map_err(|err| {
+                    SessionError::Agent(AgentError::InternalError(
+                        err.into_control_error(id).to_string(),
+                    ))
+                })?;
+        }
+        let staged_token = Self::active_turn_boundary_staging_token(turn_state_handle.as_ref())
+            .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
+        if staged_token != initial_token {
+            return Err(SessionError::NotRunning { id: id.clone() });
+        }
+        tracing::debug!(
+            session_id = %id,
+            pending_count = candidate.pending.len(),
+            active_turn_pending_count = candidate.active_turn_pending_keys.len(),
+            "staged active-turn runtime system context"
+        );
+        *guard = candidate;
+
+        Ok(())
+    }
+
+    /// Roll back active-turn-only runtime context that is still pending.
+    ///
+    /// This is intentionally best-effort with respect to the current turn
+    /// phase: the runtime calls it after its own commit failed, and the cleanup
+    /// must still remove the staged session projection if the turn has already
+    /// advanced or finished.
+    pub async fn discard_runtime_system_context_for_active_turn(
+        &self,
+        id: &SessionId,
+        expected_run_id: &RunId,
+        idempotency_keys: Vec<String>,
+    ) -> Result<usize, SessionError> {
+        if idempotency_keys.is_empty() {
+            return Ok(0);
+        }
+
+        let state = self
+            .system_context_state(id)
+            .await
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+
+        let mut guard = match state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    session_id = %id,
+                    "system-context state lock poisoned while rolling back active-turn context"
+                );
+                poisoned.into_inner()
+            }
+        };
+
+        let discarded = guard.discard_active_turn_pending_by_keys(&idempotency_keys);
+        if !discarded.is_empty() {
+            tracing::debug!(
+                session_id = %id,
+                expected_run_id = %expected_run_id,
+                discarded_count = discarded.len(),
+                "rolled back staged active-turn runtime system context"
+            );
+        }
+        Ok(discarded.len())
+    }
+
+    /// Report whether the current runtime-owned turn phase still has a
+    /// cooperative model boundary that can consume active-turn system context.
+    pub async fn active_turn_system_context_boundary_available(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<bool>, SessionError> {
+        let turn_state_handle = self.active_turn_state_handle(id).await?;
+
+        let Some(turn_state_handle) = turn_state_handle else {
+            return Ok(None);
+        };
+
+        let snapshot = turn_state_handle.snapshot();
+        let available = Self::active_turn_boundary_staging_token_from_snapshot(&snapshot).is_some();
+        tracing::debug!(
+            session_id = %id,
+            active_run_id = ?snapshot.active_run_id,
+            turn_phase = %snapshot.turn_phase,
+            available,
+            "observed runtime turn phase for live system-context boundary"
+        );
+        Ok(Some(available))
     }
 
     pub async fn publish_runtime_system_context_events(
@@ -2225,6 +2443,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let interaction_event_injector = agent.interaction_event_injector();
         let comms_runtime = agent.comms_runtime();
         let cancel_after_boundary_handle = agent.cancel_after_boundary_handle();
+        let turn_state_handle = agent.turn_state_handle();
         let system_context_state = agent.system_context_state();
         // W2-E: capture the session-context DSL handle so the session task
         // can fire `AdvanceSessionContext` on every summary-publish site.
@@ -2298,6 +2517,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             interaction_event_injector,
             comms_runtime,
             system_context_state,
+            turn_state_handle,
             deferred_turn_state,
             staged_capacity_permit,
             active_capacity_lease,
@@ -3449,6 +3669,15 @@ async fn session_task<A: SessionAgent>(
                     continue;
                 }
 
+                let discarded_stale_active_context =
+                    agent.discard_unapplied_active_turn_system_context();
+                if discarded_stale_active_context > 0 {
+                    tracing::debug!(
+                        discarded_stale_active_context,
+                        "discarded stale active-turn system context before starting a new run"
+                    );
+                }
+
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
                     restore_deferred_turn_inputs(
@@ -3628,6 +3857,14 @@ async fn session_task<A: SessionAgent>(
 
                     (r, resolved_phase)
                 }; // run_fut dropped here
+
+                let discarded_active_context = agent.discard_unapplied_active_turn_system_context();
+                if discarded_active_context > 0 {
+                    tracing::debug!(
+                        discarded_active_context,
+                        "discarded active-turn system context that missed the run boundary"
+                    );
+                }
 
                 let resolve_phase = resolved_phase.or_else(|| {
                     let mut slot = lock_turn_admission(&control.turn_admission);
@@ -3908,12 +4145,14 @@ mod runtime_turn_metadata_tests {
     use super::*;
     use async_trait::async_trait;
     use meerkat_core::handles::SessionContextHandle;
+    use meerkat_core::handles::TurnStateHandle;
     use meerkat_core::lifecycle::RuntimeExecutionKind;
     use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
     use meerkat_core::service::{
         DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionService,
     };
     use meerkat_core::skills::{SkillKey, SkillName};
+    use meerkat_core::turn_execution_authority::{ContentShape, TurnPrimitiveKind};
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone)]
@@ -4106,6 +4345,357 @@ mod runtime_turn_metadata_tests {
                 Arc::clone(handle) as Arc<dyn meerkat_core::handles::SessionContextHandle>
             })
         }
+    }
+
+    #[derive(Clone)]
+    struct BlockingBoundaryBuilder {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        turn_state: Option<Arc<meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle>>,
+    }
+
+    struct BlockingBoundaryAgent {
+        session_id: SessionId,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        turn_state: Option<Arc<meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle>>,
+        system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgentBuilder for BlockingBoundaryBuilder {
+        type Agent = BlockingBoundaryAgent;
+
+        async fn build_agent(
+            &self,
+            _req: &CreateSessionRequest,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            Ok(BlockingBoundaryAgent {
+                session_id: SessionId::new(),
+                started: Arc::clone(&self.started),
+                release: Arc::clone(&self.release),
+                turn_state: self.turn_state.clone(),
+                system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            })
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgent for BlockingBoundaryAgent {
+        async fn run_with_events(
+            &mut self,
+            _prompt: ContentInput,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<RunResult, AgentError> {
+            if let Some(turn_state) = self.turn_state.as_ref() {
+                turn_state
+                    .start_conversation_run(
+                        RunId::new(),
+                        TurnPrimitiveKind::ConversationTurn,
+                        ContentShape::Conversation,
+                        false,
+                        false,
+                        0,
+                    )
+                    .map_err(|err| AgentError::InternalError(err.to_string()))?;
+            }
+            self.started.notify_waiters();
+            self.release.notified().await;
+            if let Some(turn_state) = self.turn_state.as_ref() {
+                turn_state
+                    .primitive_applied()
+                    .map_err(|err| AgentError::InternalError(err.to_string()))?;
+                turn_state
+                    .llm_returned_terminal()
+                    .map_err(|err| AgentError::InternalError(err.to_string()))?;
+            }
+            Ok(RunResult {
+                text: "released".to_string(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                terminal_cause_kind: None,
+                structured_output: None,
+                extraction_error: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
+        fn cancel(&mut self) {}
+
+        fn set_skill_references(&mut self, _refs: Option<Vec<SkillKey>>) {}
+
+        fn set_flow_tool_overlay(
+            &mut self,
+            _overlay: Option<TurnToolOverlay>,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            _client: Arc<dyn meerkat_core::AgentLlmClient>,
+            _identity: SessionLlmIdentity,
+            _request_policy: meerkat_core::SessionLlmRequestPolicy,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn session_id(&self) -> SessionId {
+            self.session_id.clone()
+        }
+
+        fn snapshot(&self) -> SessionSnapshot {
+            SessionSnapshot {
+                created_at: SystemTime::now(),
+                updated_at: SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                usage: Usage::default(),
+                last_assistant_text: None,
+            }
+        }
+
+        fn session_clone(&self) -> meerkat_core::Session {
+            let mut session = meerkat_core::Session::new();
+            let state = self
+                .system_context_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            session
+                .set_system_context_state(state)
+                .expect("test system context state should serialize");
+            session
+        }
+
+        fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]) {
+            let mut session = self.session_clone();
+            session.append_system_context_blocks(appends);
+            let state = session.system_context_state().unwrap_or_default();
+            *self
+                .system_context_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
+        }
+
+        fn turn_state_handle(&self) -> Option<Arc<dyn TurnStateHandle>> {
+            self.turn_state
+                .as_ref()
+                .map(|turn_state| Arc::clone(turn_state) as Arc<dyn TurnStateHandle>)
+        }
+
+        fn system_context_state(
+            &self,
+        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+            Arc::clone(&self.system_context_state)
+        }
+    }
+
+    #[derive(Clone)]
+    struct BoundaryPhaseProbeBuilder {
+        turn_state: Arc<meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle>,
+    }
+
+    struct BoundaryPhaseProbeAgent {
+        session_id: SessionId,
+        turn_state: Arc<meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle>,
+        system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgentBuilder for BoundaryPhaseProbeBuilder {
+        type Agent = BoundaryPhaseProbeAgent;
+
+        async fn build_agent(
+            &self,
+            _req: &CreateSessionRequest,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            Ok(BoundaryPhaseProbeAgent {
+                session_id: SessionId::new(),
+                turn_state: Arc::clone(&self.turn_state),
+                system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            })
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgent for BoundaryPhaseProbeAgent {
+        async fn run_with_events(
+            &mut self,
+            _prompt: ContentInput,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<RunResult, AgentError> {
+            Ok(RunResult {
+                text: "ok".to_string(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                terminal_cause_kind: None,
+                structured_output: None,
+                extraction_error: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
+        fn cancel(&mut self) {}
+
+        fn set_skill_references(&mut self, _refs: Option<Vec<SkillKey>>) {}
+
+        fn set_flow_tool_overlay(
+            &mut self,
+            _overlay: Option<TurnToolOverlay>,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            _client: Arc<dyn meerkat_core::AgentLlmClient>,
+            _identity: SessionLlmIdentity,
+            _request_policy: meerkat_core::SessionLlmRequestPolicy,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn session_id(&self) -> SessionId {
+            self.session_id.clone()
+        }
+
+        fn snapshot(&self) -> SessionSnapshot {
+            SessionSnapshot {
+                created_at: SystemTime::now(),
+                updated_at: SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                usage: Usage::default(),
+                last_assistant_text: None,
+            }
+        }
+
+        fn session_clone(&self) -> meerkat_core::Session {
+            meerkat_core::Session::with_id(self.session_id.clone())
+        }
+
+        fn turn_state_handle(&self) -> Option<Arc<dyn TurnStateHandle>> {
+            let handle: Arc<dyn TurnStateHandle> = self.turn_state.clone();
+            Some(handle)
+        }
+
+        fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]) {
+            let mut state = self
+                .system_context_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for append in appends {
+                state.pending.push(append.clone());
+            }
+        }
+
+        fn system_context_state(
+            &self,
+        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+            Arc::clone(&self.system_context_state)
+        }
+    }
+
+    #[tokio::test]
+    async fn active_turn_boundary_probe_uses_turn_phase_not_running_latch() {
+        let turn_state =
+            Arc::new(meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let service = EphemeralSessionService::new(
+            BoundaryPhaseProbeBuilder {
+                turn_state: Arc::clone(&turn_state),
+            },
+            1,
+        );
+        let created = service
+            .create_session(CreateSessionRequest {
+                model: "phase-probe".to_string(),
+                prompt: ContentInput::Text("hello".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create probe session");
+
+        assert_eq!(
+            service
+                .active_turn_system_context_boundary_available(&created.session_id)
+                .await
+                .expect("boundary probe should succeed"),
+            Some(false),
+            "no active run means no active-turn boundary"
+        );
+
+        let run_id = RunId::new();
+        turn_state
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .expect("start conversation run");
+        assert_eq!(
+            service
+                .active_turn_system_context_boundary_available(&created.session_id)
+                .await
+                .expect("boundary probe should succeed"),
+            Some(true),
+            "pre-LLM applying primitive can still consume staged context"
+        );
+
+        turn_state.primitive_applied().expect("enter calling LLM");
+        assert_eq!(
+            service
+                .active_turn_system_context_boundary_available(&created.session_id)
+                .await
+                .expect("boundary probe should succeed"),
+            Some(false),
+            "an in-flight model request has already built its context"
+        );
+
+        turn_state
+            .llm_returned_tool_calls(1)
+            .expect("enter waiting for ops");
+        assert_eq!(
+            service
+                .active_turn_system_context_boundary_available(&created.session_id)
+                .await
+                .expect("boundary probe should succeed"),
+            Some(true),
+            "tool execution phase has a deterministic post-tool model boundary"
+        );
+
+        turn_state.tool_calls_resolved().expect("drain boundary");
+        assert_eq!(
+            service
+                .active_turn_system_context_boundary_available(&created.session_id)
+                .await
+                .expect("boundary probe should succeed"),
+            Some(false),
+            "draining boundary is not enough to prove another LLM request remains"
+        );
     }
 
     #[tokio::test]
@@ -4376,6 +4966,369 @@ mod runtime_turn_metadata_tests {
         assert!(
             ticks.last().copied().unwrap_or_default() > stale_runtime_context_ms,
             "post-commit runtime context tick must move past the current projection watermark"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_turn_context_staging_does_not_wait_for_session_task_mailbox() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let turn_state =
+            Arc::new(meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let service = Arc::new(EphemeralSessionService::new(
+            BlockingBoundaryBuilder {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+                turn_state: Some(Arc::clone(&turn_state)),
+            },
+            1,
+        ));
+
+        let result = service
+            .create_session(CreateSessionRequest {
+                model: "blocking-boundary-model".to_string(),
+                prompt: ContentInput::Text("defer".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            })
+            .await
+            .expect("deferred blocking session should create");
+
+        let run_service = Arc::clone(&service);
+        let run_session_id = result.session_id.clone();
+        let run = tokio::spawn(async move {
+            run_service
+                .start_turn(
+                    &run_session_id,
+                    StartTurnRequest {
+                        prompt: ContentInput::Text("hold the turn open".to_string()),
+                        system_prompt: None,
+                        event_tx: None,
+                        runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                            None,
+                            meerkat_core::types::HandlingMode::Queue,
+                            None,
+                            None,
+                            Vec::new(),
+                            Some(RuntimeTurnMetadata {
+                                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                                ..Default::default()
+                            }),
+                        ),
+                    },
+                )
+                .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+            .await
+            .expect("turn should enter the blocking agent");
+        let active_run_id = turn_state
+            .snapshot()
+            .active_run_id
+            .expect("blocking turn should expose active run id");
+
+        let appends = vec![PendingSystemContextAppend {
+            text: "active-turn steer context".to_string(),
+            source: Some("console:steer:test".to_string()),
+            idempotency_key: Some("console:steer:test".to_string()),
+            accepted_at: meerkat_core::time_compat::SystemTime::now(),
+        }];
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            service.stage_runtime_system_context_for_active_turn(
+                &result.session_id,
+                &active_run_id,
+                appends,
+            ),
+        )
+        .await
+        .expect("active-turn staging must not wait for the busy session task")
+        .expect("active-turn staging should succeed");
+
+        let state = service
+            .system_context_state(&result.session_id)
+            .await
+            .expect("session state should exist");
+        let pending = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .clone();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].text, "active-turn steer context");
+
+        release.notify_waiters();
+        run.await
+            .expect("start_turn task should join")
+            .expect("blocked turn should complete after release");
+
+        let after = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(
+            after.pending.is_empty(),
+            "active-turn context that missed the run boundary must not leak into the next run"
+        );
+        assert!(
+            after.applied.is_empty(),
+            "missed active-turn context was never applied at an LLM boundary"
+        );
+        assert!(
+            after.seen.is_empty(),
+            "discarded active-turn context should not reserve idempotency keys"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_turn_context_staging_revalidates_after_positive_probe() {
+        let turn_state =
+            Arc::new(meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let service = EphemeralSessionService::new(
+            BoundaryPhaseProbeBuilder {
+                turn_state: Arc::clone(&turn_state),
+            },
+            1,
+        );
+
+        let result = service
+            .create_session(CreateSessionRequest {
+                model: "boundary-phase-probe".to_string(),
+                prompt: ContentInput::Text("defer".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            })
+            .await
+            .expect("deferred boundary probe session should create");
+
+        let run_id = RunId::new();
+        turn_state
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .expect("start active run");
+
+        assert_eq!(
+            service
+                .active_turn_system_context_boundary_available(&result.session_id)
+                .await
+                .expect("boundary probe should succeed"),
+            Some(true)
+        );
+
+        turn_state
+            .primitive_applied()
+            .expect("advance past boundary");
+
+        let err = service
+            .stage_runtime_system_context_for_active_turn(
+                &result.session_id,
+                &run_id,
+                vec![PendingSystemContextAppend {
+                    text: "STALE_ACTIVE_STEER_SHOULD_NOT_STAGE".to_string(),
+                    source: Some("console:steer:stale".to_string()),
+                    idempotency_key: Some("console:steer:stale".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+            )
+            .await
+            .expect_err("staging must revalidate the active turn phase");
+        assert!(
+            matches!(err, SessionError::NotRunning { .. }),
+            "unexpected error: {err}"
+        );
+
+        let state = service
+            .system_context_state(&result.session_id)
+            .await
+            .expect("session state should exist");
+        {
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(guard.pending.is_empty());
+            assert!(guard.applied.is_empty());
+            assert!(guard.active_turn_pending_keys.is_empty());
+            assert!(
+                guard.seen.is_empty(),
+                "discarded stale active-turn context should not reserve idempotency keys"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn active_turn_context_staging_rejects_wrong_run_token() {
+        let turn_state =
+            Arc::new(meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let service = EphemeralSessionService::new(
+            BoundaryPhaseProbeBuilder {
+                turn_state: Arc::clone(&turn_state),
+            },
+            1,
+        );
+
+        let result = service
+            .create_session(CreateSessionRequest {
+                model: "boundary-phase-probe".to_string(),
+                prompt: ContentInput::Text("defer".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            })
+            .await
+            .expect("deferred boundary probe session should create");
+
+        let run_id = RunId::new();
+        turn_state
+            .start_conversation_run(
+                run_id,
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .expect("start active run");
+
+        let wrong_run_id = RunId::new();
+        let err = service
+            .stage_runtime_system_context_for_active_turn(
+                &result.session_id,
+                &wrong_run_id,
+                vec![PendingSystemContextAppend {
+                    text: "WRONG_RUN_STEER_SHOULD_NOT_STAGE".to_string(),
+                    source: Some("console:steer:wrong-run".to_string()),
+                    idempotency_key: Some("console:steer:wrong-run".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+            )
+            .await
+            .expect_err("staging must be bound to the active run token");
+        assert!(
+            matches!(err, SessionError::NotRunning { .. }),
+            "unexpected error: {err}"
+        );
+
+        let state = service
+            .system_context_state(&result.session_id)
+            .await
+            .expect("session state should exist");
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(guard.pending.is_empty());
+        assert!(guard.active_turn_pending_keys.is_empty());
+        assert!(guard.seen.is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_turn_context_staging_is_atomic_on_batch_conflict() {
+        let turn_state =
+            Arc::new(meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let service = EphemeralSessionService::new(
+            BoundaryPhaseProbeBuilder {
+                turn_state: Arc::clone(&turn_state),
+            },
+            1,
+        );
+
+        let result = service
+            .create_session(CreateSessionRequest {
+                model: "blocking-boundary-model".to_string(),
+                prompt: ContentInput::Text("defer".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            })
+            .await
+            .expect("deferred blocking session should create");
+
+        let run_id = RunId::new();
+        turn_state
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .expect("start active run");
+
+        let accepted_at = meerkat_core::time_compat::SystemTime::now();
+        let err = service
+            .stage_runtime_system_context_for_active_turn(
+                &result.session_id,
+                &run_id,
+                vec![
+                    PendingSystemContextAppend {
+                        text: "first staged context".to_string(),
+                        source: Some("console:steer:test".to_string()),
+                        idempotency_key: Some("console:steer:conflict".to_string()),
+                        accepted_at,
+                    },
+                    PendingSystemContextAppend {
+                        text: "conflicting staged context".to_string(),
+                        source: Some("console:steer:test".to_string()),
+                        idempotency_key: Some("console:steer:conflict".to_string()),
+                        accepted_at,
+                    },
+                ],
+            )
+            .await
+            .expect_err("conflicting batch should fail");
+        assert!(
+            err.to_string().contains("idempotency conflict"),
+            "unexpected error: {err}"
+        );
+
+        let state = service
+            .system_context_state(&result.session_id)
+            .await
+            .expect("session state should exist");
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            guard.pending.is_empty(),
+            "failed active-turn staging batch must not leave partial pending context"
+        );
+        assert!(
+            guard.seen.is_empty(),
+            "failed active-turn staging batch must not reserve idempotency keys"
         );
     }
 

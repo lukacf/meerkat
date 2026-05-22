@@ -482,13 +482,39 @@ impl CoreExecutorBoundaryHandle for PersistentRuntimeBoundaryHandle {
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
 
+    async fn active_turn_boundary_available(&self) -> Result<bool, CoreExecutorError> {
+        Ok(self
+            .service
+            .active_turn_system_context_boundary_available(&self.session_id)
+            .await
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))?
+            .unwrap_or(false))
+    }
+
     async fn stage_system_context_at_boundary(
         &self,
+        expected_run_id: &meerkat_core::RunId,
         appends: Vec<meerkat_core::PendingSystemContextAppend>,
     ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
         self.service
-            .stage_live_system_context_boundary_snapshot(&self.session_id, appends)
+            .stage_live_system_context_boundary_snapshot(&self.session_id, expected_run_id, appends)
             .await
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
+
+    async fn discard_staged_system_context_at_boundary(
+        &self,
+        expected_run_id: &meerkat_core::RunId,
+        idempotency_keys: Vec<String>,
+    ) -> Result<(), CoreExecutorError> {
+        self.service
+            .discard_live_system_context_boundary_staging(
+                &self.session_id,
+                expected_run_id,
+                idempotency_keys,
+            )
+            .await
+            .map(|_| ())
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
 }
@@ -820,7 +846,7 @@ mod tests {
     ))]
     use std::collections::VecDeque;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[cfg(all(
         feature = "openai",
@@ -1063,6 +1089,87 @@ mod tests {
 
         async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
             Ok(())
+        }
+    }
+
+    struct OneToolThenOkClient {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for OneToolThenOkClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
+            let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+            let events = if call_index == 0 {
+                vec![
+                    LlmEvent::ToolCallComplete {
+                        id: "toolu_blocking".to_string(),
+                        name: "blocking_tool".to_string(),
+                        args: serde_json::json!({}),
+                        meta: None,
+                    },
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::ToolUse,
+                        },
+                    },
+                ]
+            } else {
+                vec![
+                    LlmEvent::TextDelta {
+                        delta: "ok".to_string(),
+                        meta: None,
+                    },
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::EndTurn,
+                        },
+                    },
+                ]
+            };
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+        }
+
+        fn provider(&self) -> &'static str {
+            "one-tool-then-ok-test"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    struct BlockingToolDispatcher {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::AgentToolDispatcher for BlockingToolDispatcher {
+        fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+            Arc::from([Arc::new(meerkat_core::ToolDef::new(
+                "blocking_tool",
+                "blocks until the test releases it",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            ))])
+        }
+
+        async fn dispatch(
+            &self,
+            call: meerkat_core::ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+            self.started.notify_waiters();
+            self.release.notified().await;
+            Ok(meerkat_core::ToolDispatchOutcome::sync_result(
+                meerkat_core::ToolResult::new(call.id.to_string(), "released".to_string(), false),
+            ))
         }
     }
 
@@ -1321,6 +1428,82 @@ mod tests {
             "shared default executor prompt",
         )
         .await;
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_boundary_handle_reports_active_tool_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service_with_llm(
+            &temp,
+            Arc::new(OneToolThenOkClient {
+                calls: AtomicUsize::new(0),
+            }),
+        )
+        .await;
+        let tool_started = Arc::new(Notify::new());
+        let tool_release = Arc::new(Notify::new());
+        let mut build = SessionBuildOptions {
+            external_tools: Some(Arc::new(BlockingToolDispatcher {
+                started: Arc::clone(&tool_started),
+                release: Arc::clone(&tool_release),
+            })),
+            ..Default::default()
+        };
+        build.override_builtins = meerkat_core::ToolCategoryOverride::Disable;
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(build),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("create runtime-backed tool session");
+
+        let (_outcome, completion) = adapter
+            .accept_input_with_completion(
+                &result.session_id,
+                Input::Prompt(PromptInput::new("run blocking tool", None)),
+            )
+            .await
+            .expect("accept runtime-backed prompt");
+        let completion = completion.expect("completion handle");
+
+        tokio::time::timeout(Duration::from_secs(2), tool_started.notified())
+            .await
+            .expect("tool should start");
+
+        let boundary = PersistentRuntimeBoundaryHandle {
+            service: Arc::clone(&service),
+            adapter: Arc::clone(&adapter),
+            session_id: result.session_id.clone(),
+        };
+        assert!(
+            boundary
+                .active_turn_boundary_available()
+                .await
+                .expect("boundary probe should succeed"),
+            "runtime-backed surface must expose the active post-tool LLM boundary"
+        );
+
+        tool_release.notify_waiters();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), completion.wait())
+            .await
+            .expect("prompt should complete");
+        assert!(
+            matches!(outcome, CompletionOutcome::Completed(ref run) if run.text == "ok"),
+            "unexpected completion outcome: {outcome:?}"
+        );
+
         service
             .discard_live_session(&result.session_id)
             .await

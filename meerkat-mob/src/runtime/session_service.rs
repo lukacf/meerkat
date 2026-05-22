@@ -319,6 +319,41 @@ pub trait MobSessionService:
         ))
     }
 
+    /// Stage runtime-owned context for an already-active turn's next LLM
+    /// boundary. Unlike `apply_runtime_system_context_for_turn`, this must not
+    /// route through the session task mailbox: the session task may be the
+    /// active turn currently waiting for that boundary.
+    async fn stage_runtime_system_context_for_active_turn(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &RunId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<Option<Vec<u8>>, SessionError> {
+        let _ = (session_id, expected_run_id, appends);
+        Err(SessionError::Agent(
+            meerkat_core::error::AgentError::NoPendingBoundary,
+        ))
+    }
+
+    async fn discard_runtime_system_context_for_active_turn(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &RunId,
+        idempotency_keys: Vec<String>,
+    ) -> Result<(), SessionError> {
+        let _ = (session_id, expected_run_id, idempotency_keys);
+        Err(SessionError::Agent(
+            meerkat_core::error::AgentError::NoPendingBoundary,
+        ))
+    }
+
+    async fn active_turn_system_context_boundary_available(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<bool>, SessionError> {
+        Ok(None)
+    }
+
     async fn checkpoint_committed_runtime_session_snapshot(
         &self,
         _session_id: &SessionId,
@@ -514,6 +549,48 @@ where
     ) -> Result<(), SessionError> {
         meerkat_session::EphemeralSessionService::<B>::apply_runtime_system_context(
             self, session_id, appends,
+        )
+        .await
+    }
+
+    async fn stage_runtime_system_context_for_active_turn(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &RunId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<Option<Vec<u8>>, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::stage_runtime_system_context_for_active_turn(
+            self,
+            session_id,
+            expected_run_id,
+            appends,
+        )
+        .await?;
+        Ok(None)
+    }
+
+    async fn discard_runtime_system_context_for_active_turn(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &RunId,
+        idempotency_keys: Vec<String>,
+    ) -> Result<(), SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::discard_runtime_system_context_for_active_turn(
+            self,
+            session_id,
+            expected_run_id,
+            idempotency_keys,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn active_turn_system_context_boundary_available(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<bool>, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::active_turn_system_context_boundary_available(
+            self, session_id,
         )
         .await
     }
@@ -720,6 +797,47 @@ where
     ) -> Result<(), SessionError> {
         meerkat_session::PersistentSessionService::<B>::apply_runtime_system_context_for_turn(
             self, session_id, appends,
+        )
+        .await
+    }
+
+    async fn stage_runtime_system_context_for_active_turn(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &RunId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<Option<Vec<u8>>, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::stage_live_system_context_boundary_snapshot(
+            self,
+            session_id,
+            expected_run_id,
+            appends,
+        )
+        .await
+    }
+
+    async fn discard_runtime_system_context_for_active_turn(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &RunId,
+        idempotency_keys: Vec<String>,
+    ) -> Result<(), SessionError> {
+        meerkat_session::PersistentSessionService::<B>::discard_live_system_context_boundary_staging(
+            self,
+            session_id,
+            expected_run_id,
+            idempotency_keys,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn active_turn_system_context_boundary_available(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<bool>, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::active_turn_system_context_boundary_available(
+            self, session_id,
         )
         .await
     }

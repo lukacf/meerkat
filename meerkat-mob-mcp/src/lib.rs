@@ -54,14 +54,16 @@ use meerkat_core::types::{
     ToolProvenance, ToolResult, ToolSourceKind, Usage,
 };
 use meerkat_core::{AgentEvent, EventEnvelope, EventStream, Provider, StreamError};
+use meerkat_mob::definition::SkillSource;
 use meerkat_mob::{
     AgentIdentity, FlowId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
-    MobRuntimeMode, MobSessionService, MobState, MobStorage, ProfileName, RunId, SpawnMemberSpec,
+    MobRuntimeMode, MobSessionService, MobState, MobStorage, ProfileBinding, ProfileName, RunId,
+    SpawnMemberSpec,
 };
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -223,6 +225,13 @@ pub struct MobMcpState {
     /// available on ephemeral surfaces. Persistent roots may upgrade that
     /// default to SQLite, but must not override an explicit caller-owned store.
     realm_profile_store_explicit: bool,
+    /// Skill sources seeded from the owning mob definition.
+    ///
+    /// Realm profiles carry skill names, not the source bodies/paths. When an
+    /// agent creates a child mob from a realm profile, copy matching source
+    /// definitions into the child so profile skills still assemble into the
+    /// spawned member's system prompt.
+    realm_skill_sources: BTreeMap<String, SkillSource>,
 }
 
 impl MobMcpState {
@@ -247,6 +256,7 @@ impl MobMcpState {
             restore_lock: Mutex::new(false),
             realm_profile_store: Some(Arc::new(meerkat_mob::InMemoryRealmProfileStore::new())),
             realm_profile_store_explicit: false,
+            realm_skill_sources: BTreeMap::new(),
         }
     }
 
@@ -311,6 +321,54 @@ impl MobMcpState {
         self
     }
 
+    /// Seed skill source definitions available to realm-referenced profiles.
+    pub fn with_realm_skill_sources(mut self, sources: BTreeMap<String, SkillSource>) -> Self {
+        self.realm_skill_sources = sources;
+        self
+    }
+
+    async fn hydrate_definition_skill_sources(
+        &self,
+        definition: &mut MobDefinition,
+    ) -> Result<(), MobError> {
+        if self.realm_skill_sources.is_empty() {
+            return Ok(());
+        }
+
+        let mut skill_names = BTreeSet::new();
+        for binding in definition.profiles.values() {
+            match binding {
+                ProfileBinding::Inline(profile) => {
+                    skill_names.extend(profile.skills.iter().cloned());
+                }
+                ProfileBinding::RealmRef { realm_profile } => {
+                    let Some(store) = &self.realm_profile_store else {
+                        continue;
+                    };
+                    let stored = store.get(realm_profile).await.map_err(|error| {
+                        MobError::Internal(format!(
+                            "failed to load realm profile '{realm_profile}' while hydrating skill sources: {error}"
+                        ))
+                    })?;
+                    if let Some(stored) = stored {
+                        skill_names.extend(stored.profile.skills.iter().cloned());
+                    }
+                }
+            }
+        }
+
+        for skill_name in skill_names {
+            if definition.skills.contains_key(&skill_name) {
+                continue;
+            }
+            if let Some(source) = self.realm_skill_sources.get(&skill_name) {
+                definition.skills.insert(skill_name, source.clone());
+            }
+        }
+
+        Ok(())
+    }
+
     fn persistent_mob_root(runtime_root: &Path) -> PathBuf {
         runtime_root.join("mobs")
     }
@@ -356,6 +414,11 @@ impl MobMcpState {
         builder
     }
 
+    fn bind_realm_profile_store(&self, mut storage: MobStorage) -> MobStorage {
+        storage.realm_profiles = self.realm_profile_store.clone();
+        storage
+    }
+
     async fn storage_for_new_mob(
         &self,
         mob_id: &MobId,
@@ -374,11 +437,11 @@ impl MobMcpState {
                 ))
             })?;
             let path = Self::persistent_storage_path(root, mob_id);
-            let storage = MobStorage::persistent(&path)?;
+            let storage = self.bind_realm_profile_store(MobStorage::persistent(&path)?);
             return Ok((storage, Some(path)));
         }
 
-        Ok((MobStorage::in_memory(), None))
+        Ok((self.bind_realm_profile_store(MobStorage::in_memory()), None))
     }
 
     async fn maybe_remove_storage_file(path: Option<&Path>) {
@@ -467,7 +530,7 @@ impl MobMcpState {
                     continue;
                 }
 
-                let storage = MobStorage::persistent(&path)?;
+                let storage = self.bind_realm_profile_store(MobStorage::persistent(&path)?);
                 if storage.events.replay_all().await?.is_empty() {
                     Self::maybe_remove_storage_file(Some(path.as_path())).await;
                     continue;
@@ -531,8 +594,10 @@ impl MobMcpState {
 
     pub async fn mob_create_definition(
         &self,
-        definition: MobDefinition,
+        mut definition: MobDefinition,
     ) -> Result<MobId, MobError> {
+        self.hydrate_definition_skill_sources(&mut definition)
+            .await?;
         let mob_id = definition.id.clone();
         self.ensure_restored().await?;
         if self.mobs.read().await.contains_key(&mob_id) {
@@ -577,27 +642,32 @@ impl MobMcpState {
         );
     }
 
-    pub async fn mob_list(&self) -> Vec<(MobId, MobState)> {
-        if !self.ensure_restored_best_effort("mob_list").await {
+    /// Return known mob handles without asking each mob actor for live status.
+    ///
+    /// Observation surfaces use this while child mobs are actively processing:
+    /// a status query would queue behind the same actor work the UI is trying
+    /// to observe.
+    pub async fn mob_handles_snapshot(&self) -> Vec<(MobId, MobHandle)> {
+        if !self
+            .ensure_restored_best_effort("mob_handles_snapshot")
+            .await
+        {
             return Vec::new();
         }
-        let snapshot: Vec<(MobId, meerkat_mob::MobHandle)> = self
-            .mobs
+        self.mobs
             .read()
             .await
             .iter()
             .map(|(id, managed)| (id.clone(), managed.handle.clone()))
-            .collect();
-        let mut out = Vec::with_capacity(snapshot.len());
-        for (id, handle) in snapshot {
-            match handle.status().await {
-                Ok(state) => out.push((id, state)),
-                Err(err) => {
-                    tracing::warn!(mob_id = %id, error = %err, "mob_list: skipping mob whose status read failed");
-                }
-            }
-        }
-        out
+            .collect()
+    }
+
+    pub async fn mob_list(&self) -> Vec<(MobId, MobState)> {
+        self.mob_handles_snapshot()
+            .await
+            .into_iter()
+            .map(|(id, handle)| (id, handle.status_observation_snapshot()))
+            .collect()
     }
 
     pub async fn mob_status(&self, mob_id: &MobId) -> Result<MobState, MobError> {
@@ -1015,7 +1085,7 @@ impl MobMcpState {
             return Ok(());
         }
 
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         loop {
             if !adapter.contains_session(bridge_session_id).await {
                 return Ok(());
@@ -3680,6 +3750,7 @@ mod tests {
         keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
         counter: AtomicU64,
         start_turn_delay_ms: AtomicU64,
+        start_turn_calls: AtomicU64,
         runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     }
 
@@ -3692,12 +3763,17 @@ mod tests {
                 keep_alive_notifiers: RwLock::new(HashMap::new()),
                 counter: AtomicU64::new(0),
                 start_turn_delay_ms: AtomicU64::new(0),
+                start_turn_calls: AtomicU64::new(0),
                 runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
             }
         }
 
         fn set_turn_delay_ms(&self, delay_ms: u64) {
             self.start_turn_delay_ms.store(delay_ms, Ordering::Relaxed);
+        }
+
+        fn start_turn_call_count(&self) -> u64 {
+            self.start_turn_calls.load(Ordering::Relaxed)
         }
 
         async fn insert_persisted_session(&self, session: Session) {
@@ -3813,6 +3889,7 @@ mod tests {
             if !self.sessions.read().await.contains_key(id) {
                 return Err(SessionError::NotFound { id: id.clone() });
             }
+            self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
             let delay_ms = self.start_turn_delay_ms.load(Ordering::Relaxed);
             if delay_ms > 0 {
                 sleep(Duration::from_millis(delay_ms)).await;
@@ -4835,6 +4912,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mob_list_observes_without_waiting_for_in_flight_member_turn() {
+        let svc = Arc::new(MockSessionSvc::new());
+        svc.set_turn_delay_ms(5_000);
+        let state = Arc::new(MobMcpState::new(svc.clone()));
+        let d = MobMcpDispatcher::new(Arc::clone(&state));
+
+        let mob_id = state
+            .mob_create_definition(explicit_definition("self-observation-mob"))
+            .await
+            .expect("create mob");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                AgentIdentity::from("worker-1"),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn worker");
+
+        let baseline_start_turn_calls = svc.start_turn_call_count();
+        let turn_handle = state.handle_for(&mob_id).await.expect("handle");
+        let in_flight_turn = tokio::spawn(async move {
+            turn_handle
+                .internal_turn(AgentIdentity::from("worker-1"), "observe the mob")
+                .await
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while svc.start_turn_call_count() <= baseline_start_turn_calls {
+            assert!(
+                Instant::now() < deadline,
+                "member turn should reach the delayed session service"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        let listed = tokio::time::timeout(
+            Duration::from_millis(100),
+            call_tool(&d, "mob_list", json!({})),
+        )
+        .await
+        .expect("mob_list must not wait behind the in-flight member turn");
+        assert_eq!(listed["mobs"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["mobs"][0]["status"], "Running");
+
+        let profiles = tokio::time::timeout(Duration::from_millis(100), state.realm_profile_list())
+            .await
+            .expect("profile observation should also remain available during the turn")
+            .expect("profile list should succeed");
+        drop(profiles);
+
+        in_flight_turn.abort();
+    }
+
+    #[tokio::test]
     async fn test_mcp_stop_resume_round_trip() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
@@ -5533,6 +5667,102 @@ mod tests {
             output_schema: None,
             provider_params: None,
         }
+    }
+
+    #[tokio::test]
+    async fn realm_profile_child_mobs_hydrate_seeded_skill_sources() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let store = Arc::new(meerkat_mob::InMemoryRealmProfileStore::new())
+            as Arc<dyn meerkat_mob::RealmProfileStore>;
+        let mut profile = sample_realm_profile("gpt-5.5");
+        profile.skills = vec!["ob3-investigation-worker".to_string()];
+        store
+            .create("investigation-worker", &profile)
+            .await
+            .expect("realm profile seeded");
+
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            "ob3-investigation-worker".to_string(),
+            SkillSource::Inline {
+                content: "investigation worker rules".to_string(),
+            },
+        );
+
+        let state = MobMcpState::new(svc)
+            .with_realm_profile_store(Some(store))
+            .with_realm_skill_sources(sources);
+        let mut definition = MobDefinition::explicit(MobId::from("child-mob"));
+        definition.profiles.insert(
+            ProfileName::from("investigation-worker"),
+            meerkat_mob::ProfileBinding::RealmRef {
+                realm_profile: "investigation-worker".to_string(),
+            },
+        );
+
+        state
+            .hydrate_definition_skill_sources(&mut definition)
+            .await
+            .expect("hydration succeeds");
+
+        let SkillSource::Inline { content } = definition
+            .skills
+            .get("ob3-investigation-worker")
+            .expect("seeded source copied")
+        else {
+            panic!("expected inline seeded skill source");
+        };
+        assert_eq!(content, "investigation worker rules");
+    }
+
+    #[tokio::test]
+    async fn realm_ref_mob_create_spawns_against_shared_profile_store() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = MobMcpState::new(svc);
+        let mut profile = sample_realm_profile("gpt-5.5");
+        profile.tools.comms = true;
+        state
+            .realm_profile_create("investigation-worker", &profile)
+            .await
+            .expect("realm profile seeded");
+        state
+            .realm_profile_create("person-worker", &profile)
+            .await
+            .expect("person profile seeded");
+
+        let mut definition = MobDefinition::explicit(MobId::from("nest-1779406812080"));
+        definition.wiring.auto_wire_orchestrator = true;
+        definition.profiles.insert(
+            ProfileName::from("investigation-worker"),
+            meerkat_mob::ProfileBinding::RealmRef {
+                realm_profile: "investigation-worker".to_string(),
+            },
+        );
+        definition.profiles.insert(
+            ProfileName::from("person-worker"),
+            meerkat_mob::ProfileBinding::RealmRef {
+                realm_profile: "person-worker".to_string(),
+            },
+        );
+
+        let mob_id = state
+            .mob_create_definition(definition)
+            .await
+            .expect("realm-ref mob create should succeed");
+        let mut spec = SpawnMemberSpec::new(
+            ProfileName::from("investigation-worker"),
+            AgentIdentity::from("investigation-worker-nest-1779406812080"),
+        );
+        spec.auto_wire_parent = true;
+
+        let result = state
+            .mob_spawn_spec(&mob_id, spec)
+            .await
+            .expect("realm-ref profile should resolve from shared state store");
+        assert_eq!(
+            result.agent_identity,
+            AgentIdentity::from("investigation-worker-nest-1779406812080")
+        );
     }
 
     #[tokio::test]

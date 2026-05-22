@@ -422,6 +422,11 @@ where
         Arc::clone(&self.cancel_after_boundary_requested)
     }
 
+    /// Get the runtime-backed turn-state handle, when this agent was built with one.
+    pub fn turn_state_handle(&self) -> Option<Arc<dyn crate::TurnStateHandle>> {
+        self.turn_state_handle.clone()
+    }
+
     /// Persist the currently committed visible tool set into canonical session metadata.
     pub(crate) fn publish_committed_visible_set(&mut self) -> Result<(), AgentError> {
         // Session metadata is a durable projection/export of the canonical
@@ -678,6 +683,12 @@ where
             pending
         };
 
+        if !pending.is_empty() {
+            tracing::debug!(
+                pending_count = pending.len(),
+                "applying pending runtime system context at model boundary"
+            );
+        }
         self.sync_system_context_state_to_session();
         pending
     }

@@ -298,6 +298,8 @@ pub struct SessionSystemContextState {
     pub applied: Vec<PendingSystemContextAppend>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub seen: std::collections::BTreeMap<String, SeenSystemContextKey>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub active_turn_pending_keys: std::collections::BTreeSet<String>,
 }
 
 /// Pending append request accepted by the control plane but not yet applied at an LLM boundary.
@@ -584,21 +586,133 @@ impl SessionSystemContextState {
         Ok(crate::service::AppendSystemContextStatus::Staged)
     }
 
+    /// Stage an append that is scoped to the currently-active turn only.
+    ///
+    /// If the active turn reaches another model boundary, normal pending
+    /// consumption moves it to `applied`. If the turn completes first, callers
+    /// should discard the still-pending active-turn keys so the context cannot
+    /// leak into an unrelated later run.
+    pub fn stage_active_turn_append(
+        &mut self,
+        req: &AppendSystemContextRequest,
+        accepted_at: SystemTime,
+    ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
+        let idempotency_key = req.idempotency_key.clone();
+        let status = self.stage_append(req, accepted_at)?;
+        if matches!(status, crate::service::AppendSystemContextStatus::Staged)
+            && let Some(key) = idempotency_key
+        {
+            self.active_turn_pending_keys.insert(key);
+        }
+        Ok(status)
+    }
+
     /// Mark all currently-pending appends as applied and clear the pending queue.
     pub fn mark_pending_applied(&mut self) {
         for pending in &self.pending {
+            if is_runtime_steer_append(pending) {
+                continue;
+            }
             if !self.applied.contains(pending) {
                 self.applied.push(pending.clone());
             }
         }
+        let mut seen_to_remove = Vec::new();
         for pending in &self.pending {
             if let Some(key) = pending.idempotency_key.as_ref()
                 && let Some(seen) = self.seen.get_mut(key)
             {
-                seen.state = SeenSystemContextState::Applied;
+                if is_runtime_steer_append(pending) {
+                    seen_to_remove.push(key.clone());
+                } else {
+                    seen.state = SeenSystemContextState::Applied;
+                }
             }
         }
+        for key in seen_to_remove {
+            self.seen.remove(&key);
+        }
         self.pending.clear();
+        self.active_turn_pending_keys.clear();
+    }
+
+    /// Discard active-turn-only appends that were not consumed by the turn's
+    /// next LLM boundary.
+    pub fn discard_unapplied_active_turn_pending(&mut self) -> Vec<PendingSystemContextAppend> {
+        if self.active_turn_pending_keys.is_empty() {
+            return Vec::new();
+        }
+
+        let active_keys = std::mem::take(&mut self.active_turn_pending_keys);
+        let mut discarded = Vec::new();
+        self.pending.retain(|append| {
+            let should_discard = append
+                .idempotency_key
+                .as_ref()
+                .is_some_and(|key| active_keys.contains(key));
+            if should_discard {
+                discarded.push(append.clone());
+            }
+            !should_discard
+        });
+
+        for append in &discarded {
+            if let Some(key) = append.idempotency_key.as_ref()
+                && self
+                    .seen
+                    .get(key)
+                    .is_some_and(|seen| seen.state == SeenSystemContextState::Pending)
+            {
+                self.seen.remove(key);
+            }
+        }
+
+        discarded
+    }
+
+    /// Discard specific active-turn-only appends that are still pending.
+    ///
+    /// This is the rollback companion for live-boundary staging. The runtime
+    /// owns the accepted input, so if that commit fails after the session has
+    /// staged context, the session-side projection must be removed by the same
+    /// idempotency keys before the caller reports failure.
+    pub fn discard_active_turn_pending_by_keys(
+        &mut self,
+        idempotency_keys: &[String],
+    ) -> Vec<PendingSystemContextAppend> {
+        if idempotency_keys.is_empty() || self.active_turn_pending_keys.is_empty() {
+            return Vec::new();
+        }
+
+        let requested_keys: std::collections::BTreeSet<&str> =
+            idempotency_keys.iter().map(String::as_str).collect();
+        let mut discarded = Vec::new();
+        let mut discarded_keys = Vec::new();
+        self.pending.retain(|append| {
+            let should_discard = append.idempotency_key.as_ref().is_some_and(|key| {
+                requested_keys.contains(key.as_str()) && self.active_turn_pending_keys.contains(key)
+            });
+            if should_discard {
+                if let Some(key) = append.idempotency_key.as_ref() {
+                    discarded_keys.push(key.clone());
+                }
+                discarded.push(append.clone());
+            }
+            !should_discard
+        });
+
+        for key in discarded_keys {
+            self.active_turn_pending_keys.remove(&key);
+            if self
+                .seen
+                .get(&key)
+                .is_some_and(|seen| seen.state == SeenSystemContextState::Pending)
+            {
+                self.seen.remove(&key);
+            }
+        }
+
+        discarded
     }
 }
 
@@ -698,6 +812,18 @@ fn render_system_context_block(append: &PendingSystemContextAppend) -> String {
     rendered.push_str("\n\n");
     rendered.push_str(&append.text);
     rendered
+}
+
+fn is_runtime_steer_key(value: &str) -> bool {
+    value.starts_with("runtime:steer:")
+}
+
+fn is_runtime_steer_append(append: &PendingSystemContextAppend) -> bool {
+    append.source.as_deref().is_some_and(is_runtime_steer_key)
+        || append
+            .idempotency_key
+            .as_deref()
+            .is_some_and(is_runtime_steer_key)
 }
 
 fn seen_system_context_matches(
@@ -1507,6 +1633,73 @@ impl Session {
             inner.insert(0, Message::System(SystemMessage::new(prompt)));
         }
         self.updated_at = SystemTime::now();
+    }
+
+    /// Remove transient active-turn steer context from persisted session state.
+    ///
+    /// Operator steers accepted into an already-running turn are request-local:
+    /// they should be visible to that turn's next model boundary, then vanish
+    /// instead of replaying into later turns after persistence or resume.
+    pub fn discard_transient_runtime_steer_context(&mut self) -> usize {
+        let mut removed = 0usize;
+
+        if let Some(Message::System(system)) = self.messages.first() {
+            let parts = system
+                .content
+                .split(SYSTEM_CONTEXT_SEPARATOR)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let original_len = parts.len();
+            let retained = parts
+                .into_iter()
+                .filter(|part| {
+                    !(part.starts_with("[Runtime System Context]")
+                        && part.contains("\nsource: runtime:steer:"))
+                })
+                .collect::<Vec<_>>();
+            let removed_blocks = original_len.saturating_sub(retained.len());
+            if removed_blocks > 0 {
+                removed += removed_blocks;
+                self.set_system_prompt(retained.join(SYSTEM_CONTEXT_SEPARATOR));
+            }
+        }
+
+        let mut state = self.system_context_state().unwrap_or_default();
+
+        let before_pending = state.pending.len();
+        state
+            .pending
+            .retain(|append| !is_runtime_steer_append(append));
+        removed += before_pending.saturating_sub(state.pending.len());
+
+        let before_applied = state.applied.len();
+        state
+            .applied
+            .retain(|append| !is_runtime_steer_append(append));
+        removed += before_applied.saturating_sub(state.applied.len());
+
+        let before_seen = state.seen.len();
+        state.seen.retain(|key, seen| {
+            !is_runtime_steer_key(key) && !seen.source.as_deref().is_some_and(is_runtime_steer_key)
+        });
+        removed += before_seen.saturating_sub(state.seen.len());
+
+        let before_active = state.active_turn_pending_keys.len();
+        state
+            .active_turn_pending_keys
+            .retain(|key| !is_runtime_steer_key(key));
+        removed += before_active.saturating_sub(state.active_turn_pending_keys.len());
+
+        if removed > 0
+            && let Err(err) = self.set_system_context_state(state)
+        {
+            tracing::warn!(
+                error = %err,
+                "failed to persist runtime steer context cleanup"
+            );
+        }
+
+        removed
     }
 
     /// Append one or more runtime system-context blocks to the canonical system prompt.
@@ -3932,6 +4125,174 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&state).expect("serialize state"))
                 .expect("deserialize state");
         assert_eq!(round_tripped.applied, state.applied);
+    }
+
+    #[test]
+    fn active_turn_system_context_is_discarded_when_not_applied() {
+        let mut state = SessionSystemContextState::default();
+        state
+            .stage_active_turn_append(
+                &AppendSystemContextRequest {
+                    text: "only for the active run".to_string(),
+                    source: Some("runtime:steer:input-1".to_string()),
+                    idempotency_key: Some("runtime:steer:input-1".to_string()),
+                },
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("active context should stage");
+
+        let discarded = state.discard_unapplied_active_turn_pending();
+
+        assert_eq!(discarded.len(), 1);
+        assert!(state.pending.is_empty());
+        assert!(state.applied.is_empty());
+        assert!(state.active_turn_pending_keys.is_empty());
+        assert!(
+            state.seen.is_empty(),
+            "discarded active-turn context should not block later idempotency keys"
+        );
+    }
+
+    #[test]
+    fn active_turn_system_context_can_roll_back_targeted_keys() {
+        let mut state = SessionSystemContextState::default();
+        for key in ["runtime:steer:input-1", "runtime:steer:input-2"] {
+            state
+                .stage_active_turn_append(
+                    &AppendSystemContextRequest {
+                        text: format!("context for {key}"),
+                        source: Some(key.to_string()),
+                        idempotency_key: Some(key.to_string()),
+                    },
+                    SystemTime::UNIX_EPOCH,
+                )
+                .expect("active context should stage");
+        }
+
+        let discarded =
+            state.discard_active_turn_pending_by_keys(&["runtime:steer:input-1".to_string()]);
+
+        assert_eq!(discarded.len(), 1);
+        assert_eq!(
+            discarded[0].idempotency_key.as_deref(),
+            Some("runtime:steer:input-1")
+        );
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(
+            state.pending[0].idempotency_key.as_deref(),
+            Some("runtime:steer:input-2")
+        );
+        assert!(!state.seen.contains_key("runtime:steer:input-1"));
+        assert!(state.seen.contains_key("runtime:steer:input-2"));
+        assert!(
+            !state
+                .active_turn_pending_keys
+                .contains("runtime:steer:input-1")
+        );
+        assert!(
+            state
+                .active_turn_pending_keys
+                .contains("runtime:steer:input-2")
+        );
+    }
+
+    #[test]
+    fn active_turn_system_context_is_transient_when_boundary_consumes_it() {
+        let mut state = SessionSystemContextState::default();
+        state
+            .stage_active_turn_append(
+                &AppendSystemContextRequest {
+                    text: "visible to this run".to_string(),
+                    source: Some("runtime:steer:input-2".to_string()),
+                    idempotency_key: Some("runtime:steer:input-2".to_string()),
+                },
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("active context should stage");
+
+        state.mark_pending_applied();
+        let discarded = state.discard_unapplied_active_turn_pending();
+
+        assert!(discarded.is_empty());
+        assert!(state.pending.is_empty());
+        assert!(state.applied.is_empty());
+        assert!(state.active_turn_pending_keys.is_empty());
+        assert_eq!(
+            state.seen.get("runtime:steer:input-2"),
+            None,
+            "consumed active-turn steer context must not become durable state"
+        );
+    }
+
+    #[test]
+    fn discard_transient_runtime_steer_context_removes_legacy_prompt_and_state() {
+        let mut session = Session::new();
+        session.set_system_prompt(format!(
+            "base{}{}{}{}",
+            SYSTEM_CONTEXT_SEPARATOR,
+            render_system_context_block(&PendingSystemContextAppend {
+                text: "old steer".to_string(),
+                source: Some("runtime:steer:old".to_string()),
+                idempotency_key: Some("runtime:steer:old".to_string()),
+                accepted_at: SystemTime::UNIX_EPOCH,
+            }),
+            SYSTEM_CONTEXT_SEPARATOR,
+            render_system_context_block(&PendingSystemContextAppend {
+                text: "durable peer fact".to_string(),
+                source: Some("peer_response_terminal:analyst:req".to_string()),
+                idempotency_key: Some("peer_response_terminal:analyst:req".to_string()),
+                accepted_at: SystemTime::UNIX_EPOCH,
+            })
+        ));
+        session
+            .set_system_context_state(SessionSystemContextState {
+                pending: vec![PendingSystemContextAppend {
+                    text: "pending steer".to_string(),
+                    source: Some("runtime:steer:pending".to_string()),
+                    idempotency_key: Some("runtime:steer:pending".to_string()),
+                    accepted_at: SystemTime::UNIX_EPOCH,
+                }],
+                applied: vec![
+                    PendingSystemContextAppend {
+                        text: "old steer".to_string(),
+                        source: Some("runtime:steer:old".to_string()),
+                        idempotency_key: Some("runtime:steer:old".to_string()),
+                        accepted_at: SystemTime::UNIX_EPOCH,
+                    },
+                    PendingSystemContextAppend {
+                        text: "durable peer fact".to_string(),
+                        source: Some("peer_response_terminal:analyst:req".to_string()),
+                        idempotency_key: Some("peer_response_terminal:analyst:req".to_string()),
+                        accepted_at: SystemTime::UNIX_EPOCH,
+                    },
+                ],
+                seen: BTreeMap::from([(
+                    "runtime:steer:old".to_string(),
+                    SeenSystemContextKey {
+                        text: "old steer".to_string(),
+                        source: Some("runtime:steer:old".to_string()),
+                        state: SeenSystemContextState::Applied,
+                    },
+                )]),
+                active_turn_pending_keys: BTreeSet::from(["runtime:steer:pending".to_string()]),
+            })
+            .expect("system context state should serialize");
+
+        let removed = session.discard_transient_runtime_steer_context();
+
+        assert!(removed >= 4);
+        let system_prompt = match session.messages().first() {
+            Some(Message::System(system)) => system.content.as_str(),
+            other => panic!("expected system prompt, got {other:?}"),
+        };
+        assert!(!system_prompt.contains("runtime:steer:"));
+        assert!(system_prompt.contains("durable peer fact"));
+        let state = session.system_context_state().unwrap_or_default();
+        assert!(state.pending.is_empty());
+        assert_eq!(state.applied.len(), 1);
+        assert_eq!(state.applied[0].text, "durable peer fact");
+        assert!(state.seen.is_empty());
+        assert!(state.active_turn_pending_keys.is_empty());
     }
 
     #[test]

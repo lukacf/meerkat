@@ -1163,15 +1163,43 @@ impl CoreExecutorBoundaryHandle for MobSessionRuntimeBoundaryHandle {
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
 
+    async fn active_turn_boundary_available(&self) -> Result<bool, CoreExecutorError> {
+        Ok(self
+            .session_service
+            .active_turn_system_context_boundary_available(&self.bridge_session_id)
+            .await
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))?
+            .unwrap_or(false))
+    }
+
     async fn stage_system_context_at_boundary(
         &self,
+        expected_run_id: &CoreRunId,
         appends: Vec<PendingSystemContextAppend>,
     ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
         self.session_service
-            .apply_runtime_system_context_for_turn(&self.bridge_session_id, appends)
+            .stage_runtime_system_context_for_active_turn(
+                &self.bridge_session_id,
+                expected_run_id,
+                appends,
+            )
             .await
-            .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()))?;
-        Ok(None)
+            .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()))
+    }
+
+    async fn discard_staged_system_context_at_boundary(
+        &self,
+        expected_run_id: &CoreRunId,
+        idempotency_keys: Vec<String>,
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .discard_runtime_system_context_for_active_turn(
+                &self.bridge_session_id,
+                expected_run_id,
+                idempotency_keys,
+            )
+            .await
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
 }
 

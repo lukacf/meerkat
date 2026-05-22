@@ -555,7 +555,6 @@ impl MobOperatorToolDispatcher {
             || args.launch_mode.is_some()
             || args.tool_access_policy.is_some()
             || args.budget_split_policy.is_some()
-            || args.auto_wire_parent.is_some()
         {
             return Err(ToolError::access_denied(tool_name));
         }
@@ -818,6 +817,12 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 let args: SpawnMemberArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                tracing::debug!(
+                    member_id = %args.member_id,
+                    profile = %args.profile,
+                    owner_bound = self.owner_bridge_session_id.is_some(),
+                    "MobOperatorToolDispatcher::spawn_member dispatch start"
+                );
                 self.ensure_spawn_member_scope(call.name, &args)?;
                 let agent_identity = AgentIdentity::from(args.member_id.as_str());
                 let mut spec = SpawnMemberSpec::from_wire(

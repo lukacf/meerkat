@@ -1356,6 +1356,12 @@ fn merge_runtime_system_context_state(
         }
     }
 
+    for key in &current_state.active_turn_pending_keys {
+        if !starting_state.active_turn_pending_keys.contains(key) {
+            agent_state.active_turn_pending_keys.insert(key.clone());
+        }
+    }
+
     agent_state
 }
 
@@ -2806,6 +2812,7 @@ capabilities = [{capability_values}]
                     state: SeenSystemContextState::Pending,
                 },
             )]),
+            active_turn_pending_keys: Default::default(),
         };
         let agent_state = SessionSystemContextState {
             pending: Vec::new(),
@@ -2818,6 +2825,7 @@ capabilities = [{capability_values}]
                     state: SeenSystemContextState::Applied,
                 },
             )]),
+            active_turn_pending_keys: Default::default(),
         };
         let current_registry_state = SessionSystemContextState {
             pending: vec![initial_pending, concurrent_pending.clone()],
@@ -2840,6 +2848,9 @@ capabilities = [{capability_values}]
                     },
                 ),
             ]),
+            active_turn_pending_keys: std::collections::BTreeSet::from([
+                "ctx-concurrent".to_string()
+            ]),
         };
 
         let merged = merge_runtime_system_context_state(
@@ -2857,6 +2868,7 @@ capabilities = [{capability_values}]
             merged.seen.get("ctx-concurrent").map(|seen| seen.state),
             Some(SeenSystemContextState::Pending)
         );
+        assert!(merged.active_turn_pending_keys.contains("ctx-concurrent"));
     }
 
     #[test]

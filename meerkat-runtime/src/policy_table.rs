@@ -87,11 +87,7 @@ impl DefaultPolicyTable {
             return match mode {
                 meerkat_core::types::HandlingMode::Queue => pd(
                     ApplyMode::StageRunStart,
-                    if runtime_idle {
-                        WakeMode::WakeIfIdle
-                    } else {
-                        WakeMode::None
-                    },
+                    WakeMode::WakeIfIdle,
                     QueueMode::Fifo,
                     ConsumePoint::OnRunComplete,
                     DrainPolicy::QueueNextTurn,
@@ -715,8 +711,8 @@ mod tests {
         );
         assert_eq!(
             running_decision.wake_mode,
-            WakeMode::None,
-            "explicit queue means next boundary, not interrupt-yielding, while the target is running"
+            WakeMode::WakeIfIdle,
+            "explicit queue means next boundary and may wake the loop once idle, but must not interrupt-yield while the target is running"
         );
     }
 

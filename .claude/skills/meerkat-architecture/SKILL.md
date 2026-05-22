@@ -56,10 +56,10 @@ For same-checkout multi-agent work, set distinct `RUST_LANE_ID` values when you
 want stable warm local output roots. Separate Git worktrees are isolated by path
 hash for both Cargo and BuildBuddy output roots.
 
-## Current 0.6.19 Release-Line Deltas
+## Current 0.6.22 Release-Line Deltas
 
 When updating architecture docs or reviewing current code, do not stop at the
-0.6.5 live-adapter picture. The 0.6.19 line also includes:
+0.6.5 live-adapter picture. The 0.6.22 line also includes:
 
 - `WorkGraphLifecycleMachine` as the sixth canonical machine, with
   `meerkat-workgraph` owning durable work items, dependencies, claims, evidence,
@@ -76,9 +76,14 @@ When updating architecture docs or reviewing current code, do not stop at the
 - Runtime-store checkpointing and runtime-committed session projection saves,
   preserving explicit broken/lost states and keeping MobKit/UnifiedRuntime
   projections in sync after the machine commit succeeds.
+- Active-turn live-boundary steer injection is a two-owner transaction:
+  session services may stage boundary context, but the runtime machine remains
+  the delivery authority. If the machine/runtime-store commit fails after
+  staging, the session-side staged context must be rolled back by the same
+  idempotency keys; otherwise the system has phantom or duplicate delivery.
 - Release/docs/SDK hardening: docs validation, version/schema freshness checks,
   BuildBuddy/Web SDK recovery lanes, Windows asset routing fixes, and current
-  contract/package examples at `0.6.19`.
+  contract/package examples at `0.6.22`.
 
 ## Runtime Dogma (first review lens)
 

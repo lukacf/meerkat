@@ -57,10 +57,49 @@ impl MeerkatMachine {
                     .unwrap_or(RuntimeState::Destroyed);
                 Self::reject_visible_terminal_ingress(visible_state)?;
 
+                let active_turn_boundary_available =
+                    if let Some(boundary_handle) = boundary_handle.as_ref() {
+                        boundary_handle
+                            .active_turn_boundary_available()
+                            .await
+                            .unwrap_or_else(|error| {
+                                tracing::debug!(
+                                    session_id = %session_id,
+                                    error = %error,
+                                    "active turn boundary availability check failed"
+                                );
+                                false
+                            })
+                    } else {
+                        false
+                    };
+                if active_turn_boundary_available {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        runtime_state = ?state,
+                        "active turn boundary available during ingress admission"
+                    );
+                }
+
                 let (resolved, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
-                    let runtime_idle = state.is_idle_or_attached();
+                    let input_kind = input.kind();
+                    let runtime_idle =
+                        state.is_idle_or_attached() && !active_turn_boundary_available;
                     let resolved = driver.resolve_admission_for_runtime_idle(&input, runtime_idle);
+                    tracing::debug!(
+                        session_id = %session_id,
+                        input_kind = ?input_kind,
+                        runtime_state = ?state,
+                        visible_state = ?visible_state,
+                        runtime_idle,
+                        active_turn_boundary_available,
+                        immediate = resolved.coarse_flags.request_immediate_processing,
+                        interrupt_yielding = resolved.coarse_flags.interrupt_yielding,
+                        wake_if_idle = resolved.coarse_flags.wake_if_idle,
+                        apply_mode = ?resolved.policy.apply_mode,
+                        "resolved runtime ingress admission"
+                    );
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
@@ -222,7 +261,9 @@ impl MeerkatMachine {
                     return Err(err);
                 }
 
-                if state == RuntimeState::Running
+                let has_live_boundary_input = accepted_input_id_for_live_boundary.is_some();
+                let has_boundary_handle = boundary_handle.is_some();
+                if active_turn_boundary_available
                     && signal.should_interrupt_yielding()
                     && resolved.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
                     && let (Some(input_id), Some(boundary_handle)) =
@@ -248,8 +289,19 @@ impl MeerkatMachine {
                     };
 
                     if let Some((run_id, appends, sequence)) = live_boundary_plan {
+                        let rollback_keys = appends
+                            .iter()
+                            .filter_map(|append| append.idempotency_key.clone())
+                            .collect::<Vec<_>>();
+                        tracing::debug!(
+                            session_id = %session_id,
+                            run_id = %run_id,
+                            input_id = %input_id,
+                            append_count = appends.len(),
+                            "staging live boundary context for accepted steer input"
+                        );
                         match boundary_handle
-                            .stage_system_context_at_boundary(appends)
+                            .stage_system_context_at_boundary(&run_id, appends)
                             .await
                         {
                             Ok(session_snapshot) => {
@@ -261,7 +313,7 @@ impl MeerkatMachine {
                                     message_count: 0,
                                     sequence,
                                 };
-                                {
+                                let commit_result = {
                                     let mut driver = driver.lock().await;
                                     driver
                                         .machine_realize_live_boundary_context_injected(
@@ -270,7 +322,41 @@ impl MeerkatMachine {
                                             &receipt,
                                             session_snapshot,
                                         )
-                                        .await?;
+                                        .await
+                                };
+                                if let Err(error) = commit_result {
+                                    let rollback_result = if rollback_keys.is_empty() {
+                                        Ok(())
+                                    } else {
+                                        boundary_handle
+                                            .discard_staged_system_context_at_boundary(
+                                                &run_id,
+                                                rollback_keys,
+                                            )
+                                            .await
+                                    };
+                                    match rollback_result {
+                                        Ok(()) => {
+                                            tracing::warn!(
+                                                session_id = %session_id,
+                                                run_id = %run_id,
+                                                input_id = %input_id,
+                                                error = %error,
+                                                "live boundary runtime commit failed; rolled back staged session context"
+                                            );
+                                        }
+                                        Err(rollback_error) => {
+                                            tracing::error!(
+                                                session_id = %session_id,
+                                                run_id = %run_id,
+                                                input_id = %input_id,
+                                                error = %error,
+                                                rollback_error = %rollback_error,
+                                                "live boundary runtime commit failed and staged session context rollback failed"
+                                            );
+                                        }
+                                    }
+                                    return Err(error);
                                 }
                                 let mut completions = completions.lock().await;
                                 completions.resolve_without_result(&input_id);
@@ -285,7 +371,26 @@ impl MeerkatMachine {
                                 );
                             }
                         }
+                    } else {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            input_id = %input_id,
+                            runtime_state = ?state,
+                            active_turn_boundary_available,
+                            "accepted steer input had no live boundary plan; leaving input queued for ordinary post-turn drain"
+                        );
                     }
+                } else if signal.should_interrupt_yielding()
+                    && resolved.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
+                {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        runtime_state = ?state,
+                        active_turn_boundary_available,
+                        has_boundary_handle,
+                        has_input_id = has_live_boundary_input,
+                        "accepted steer input did not meet live boundary staging preconditions"
+                    );
                 }
 
                 Ok(MeerkatMachineCommandResult::AcceptWithCompletion {

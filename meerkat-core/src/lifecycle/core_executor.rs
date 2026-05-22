@@ -389,6 +389,12 @@ impl CoreApplyOutput {
 pub trait CoreExecutorBoundaryHandle: Send + Sync {
     async fn cancel_after_boundary(&self, reason: String) -> Result<(), CoreExecutorError>;
 
+    /// Return true when the executor still has an active turn whose next
+    /// cooperative model boundary can receive staged system context.
+    async fn active_turn_boundary_available(&self) -> Result<bool, CoreExecutorError> {
+        Ok(false)
+    }
+
     /// Stage runtime-owned system context for the next cooperative LLM
     /// boundary of the active turn.
     ///
@@ -398,10 +404,23 @@ pub trait CoreExecutorBoundaryHandle: Send + Sync {
     /// authority may return `None`.
     async fn stage_system_context_at_boundary(
         &self,
+        _expected_run_id: &RunId,
         _appends: Vec<PendingSystemContextAppend>,
     ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
         Err(CoreExecutorError::Internal(
             "live boundary system-context staging is unsupported by this executor".to_string(),
+        ))
+    }
+
+    /// Roll back live-boundary system context that was staged for an accepted
+    /// input whose runtime/machine commit did not succeed.
+    async fn discard_staged_system_context_at_boundary(
+        &self,
+        _expected_run_id: &RunId,
+        _idempotency_keys: Vec<String>,
+    ) -> Result<(), CoreExecutorError> {
+        Err(CoreExecutorError::Internal(
+            "live boundary system-context rollback is unsupported by this executor".to_string(),
         ))
     }
 }

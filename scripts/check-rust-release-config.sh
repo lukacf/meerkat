@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-PYTHON="${PYTHON:-python3}"
+PYTHON="${PYTHON:-$(command -v python3.11 2>/dev/null || command -v python3)}"
 
 RELEASE_CRATES=()
 while IFS= read -r crate; do

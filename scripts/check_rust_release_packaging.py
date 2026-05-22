@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import pathlib
 import sys
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised only on Python < 3.11
+    import tomli as tomllib
 
 
 def main() -> int:

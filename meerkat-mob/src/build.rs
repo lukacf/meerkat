@@ -211,8 +211,19 @@ pub async fn build_agent_config(
         meerkat_core::ToolCategoryOverride::from_effective(profile.tools.schedule);
     config.override_image_generation =
         meerkat_core::ToolCategoryOverride::from_effective(profile.tools.image_generation);
-    let (override_mob, authority) =
+    let should_grant_default_spawn_profiles =
+        profile.tools.mob && mob_tool_authority_context.is_none();
+    let (override_mob, mut authority) =
         resolve_profile_mob_operator_access(profile, mob_tool_authority_context);
+    if should_grant_default_spawn_profiles && let Some(authority_context) = authority.take() {
+        let profile_names = definition
+            .profiles
+            .keys()
+            .map(|profile| profile.as_str().to_string())
+            .collect::<Vec<_>>();
+        authority =
+            Some(authority_context.grant_spawn_profiles_in_mob(mob_id.as_str(), profile_names));
+    }
     config.override_mob = override_mob;
     config.mob_tool_authority_context = authority;
 
@@ -837,7 +848,13 @@ mod tests {
             config.override_mob,
             meerkat_core::ToolCategoryOverride::Enable
         );
-        assert!(config.mob_tool_authority_context.is_some());
+        let authority = config
+            .mob_tool_authority_context
+            .as_ref()
+            .expect("mob profile should receive generated authority");
+        assert!(authority.can_spawn_profile_in_mob("test-mob", "lead"));
+        assert!(authority.can_spawn_profile_in_mob("test-mob", "worker"));
+        assert!(!authority.can_manage_mob("test-mob"));
         // Worker profile has builtins=true, shell=false, memory=false
         let worker = def.profiles[&ProfileName::from("worker")]
             .as_inline()

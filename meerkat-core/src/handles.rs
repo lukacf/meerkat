@@ -139,6 +139,9 @@ pub enum DslRejectionKind {
     /// firing idempotently treat this as a no-op; callers firing
     /// unconditionally treat it as a user-visible error.
     GuardRejected,
+    /// Generated authority rejected recovered state before any transition
+    /// was attempted. This is not an idempotent transition guard no-op.
+    RecoveredStateInvariantRejected,
 }
 
 /// Error surfaced when a DSL transition is rejected.
@@ -183,6 +186,18 @@ impl DslTransitionError {
         Self {
             context,
             kind: DslRejectionKind::GuardRejected,
+            reason: reason.into(),
+        }
+    }
+
+    /// Construct an error with `kind = RecoveredStateInvariantRejected`.
+    pub fn recovered_state_invariant_rejected(
+        context: &'static str,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            context,
+            kind: DslRejectionKind::RecoveredStateInvariantRejected,
             reason: reason.into(),
         }
     }
@@ -1918,15 +1933,24 @@ pub trait InteractionStreamCleanupObserver: Send + Sync {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::{
-        ExternalToolSurfaceEffect, ExternalToolSurfaceFailureCause, ExternalToolSurfaceInput,
-        PeerConversationProjection, PeerResponseProgressProjectionPhase,
-        PeerResponseTerminalCorrelationId, PeerResponseTerminalDisplayIdentity,
-        PeerResponseTerminalFact, PeerResponseTerminalFactError,
-        PeerResponseTerminalProjectionStatus, PeerResponseTerminalRenderPayload,
-        PeerResponseTerminalRouteIdentity, PeerResponseTerminalSource,
-        PeerResponseTerminalTransportIdentity, peer_response_terminal_context_key,
+        DslRejectionKind, DslTransitionError, ExternalToolSurfaceEffect,
+        ExternalToolSurfaceFailureCause, ExternalToolSurfaceInput, PeerConversationProjection,
+        PeerResponseProgressProjectionPhase, PeerResponseTerminalCorrelationId,
+        PeerResponseTerminalDisplayIdentity, PeerResponseTerminalFact,
+        PeerResponseTerminalFactError, PeerResponseTerminalProjectionStatus,
+        PeerResponseTerminalRenderPayload, PeerResponseTerminalRouteIdentity,
+        PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity,
+        peer_response_terminal_context_key,
     };
     use crate::tool_scope::{ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase};
+
+    #[test]
+    fn recovered_state_rejection_is_not_guard_noop() {
+        let err =
+            DslTransitionError::recovered_state_invariant_rejected("recover", "bad invariant");
+        assert_eq!(err.kind, DslRejectionKind::RecoveredStateInvariantRejected);
+        assert!(!err.is_guard_rejected());
+    }
 
     #[test]
     fn external_tool_surface_pending_failure_cause_projects_external_code() {

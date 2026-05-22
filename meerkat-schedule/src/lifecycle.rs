@@ -284,10 +284,6 @@ pub enum OccurrenceLifecycleError {
         "generated occurrence authority emitted transition failure classification during lifecycle mutation"
     )]
     UnexpectedTransitionFailureClassificationEffect,
-    #[error(
-        "generated occurrence authority cannot classify transition failure trigger `{trigger}`"
-    )]
-    UnknownTransitionFailureTrigger { trigger: String },
     #[error("OccurrenceLifecycleMachine emitted invalid occurrence id `{id}`: {source}")]
     InvalidOccurrenceId { id: String, source: uuid::Error },
     #[error("OccurrenceLifecycleMachine emitted invalid schedule id `{id}`: {source}")]
@@ -865,7 +861,8 @@ fn classify_occurrence_transition_failure(
     authority: &mut occ_dsl::OccurrenceLifecycleMachineAuthority,
     error: &occ_dsl::OccurrenceLifecycleMachineTransitionError,
 ) -> Result<occ_dsl::OccurrenceTransitionFailureClassKind, OccurrenceLifecycleError> {
-    let (refusal_kind, trigger) = occurrence_transition_refusal_evidence(error)?;
+    let (refusal_kind, trigger) = occurrence_transition_refusal_evidence(error)
+        .map_err(|source| OccurrenceLifecycleError::AuthorityRecoveryRejected { source })?;
     let phase = authority.state().lifecycle_phase;
     let transition = occ_dsl::OccurrenceLifecycleMachineMutator::apply(
         authority,
@@ -917,7 +914,7 @@ fn occurrence_transition_refusal_evidence(
         occ_dsl::OccurrenceTransitionFailureRefusalKind,
         occ_dsl::OccurrenceLifecycleInputVariant,
     ),
-    OccurrenceLifecycleError,
+    occ_dsl::OccurrenceLifecycleMachineTransitionError,
 > {
     match error {
         occ_dsl::OccurrenceLifecycleMachineTransitionError::NoMatchingTransition {
@@ -935,11 +932,8 @@ fn occurrence_transition_refusal_evidence(
             *trigger,
         )),
         occ_dsl::OccurrenceLifecycleMachineTransitionError::RecoveredStateInvariantRejected {
-            invariant,
             ..
-        } => Err(OccurrenceLifecycleError::UnknownTransitionFailureTrigger {
-            trigger: format!("recovered_state_invariant:{invariant}"),
-        }),
+        } => Err(error.clone()),
     }
 }
 

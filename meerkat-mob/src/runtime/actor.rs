@@ -11299,7 +11299,11 @@ impl MobActor {
             ack_mode = ?ack_mode,
             "dispatch_member_turn_after_machine_admission started"
         );
-        if let Some(bridge_session_id) = entry.member_ref.bridge_session_id() {
+        let live_steer_admission = handling_mode == meerkat_core::types::HandlingMode::Steer
+            && ack_mode == crate::mob_machine::SubmitWorkAckMode::IngressAccepted;
+        if !live_steer_admission
+            && let Some(bridge_session_id) = entry.member_ref.bridge_session_id()
+        {
             match self
                 .session_service
                 .has_live_session(bridge_session_id)

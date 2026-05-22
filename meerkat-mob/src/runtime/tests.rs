@@ -24270,6 +24270,10 @@ impl SessionService for RuntimeBackedRealCommsSessionService {
     }
 
     async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        if self.block_session_reads.load(Ordering::Relaxed) {
+            self.session_read_entered.notify_waiters();
+            self.release_session_reads.notified().await;
+        }
         Ok(self.sessions.read().await.contains_key(id))
     }
 

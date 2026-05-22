@@ -16041,6 +16041,63 @@ async fn test_retire_unwires_external_peer_edge_before_releasing_member_peer() {
     );
 }
 
+#[tokio::test]
+async fn test_retire_external_unwire_append_failure_does_not_persist_member_retired() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let (handle, _service) = create_test_mob_with_events(sample_definition(), events.clone()).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    let external = test_trusted_peer_descriptor(
+        "remote-mob/worker/retire-fail-agent",
+        "inproc://remote-mob/worker/retire-fail-agent",
+    );
+
+    handle
+        .wire(
+            AgentIdentity::from("l-1"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("wire external");
+    events.fail_appends_for("ExternalPeerUnwired").await;
+
+    let result = handle.retire(AgentIdentity::from("l-1")).await;
+    assert!(
+        matches!(result, Err(MobError::StorageError(_))),
+        "retire should surface external unwire append failure"
+    );
+
+    let recorded = handle.events().replay_all().await.expect("replay events");
+    assert!(
+        !recorded
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MemberRetired { .. })),
+        "fallible external cleanup must complete before durable MemberRetired is written"
+    );
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from("l-1"))
+            .await
+            .is_some(),
+        "failed pre-retire external cleanup must leave member retryable"
+    );
+
+    let external_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from("l-1"),
+        crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
+    );
+    let dsl_after = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("debug dsl snapshot after failed retire");
+    assert!(
+        dsl_after.external_peer_edges.contains(&external_edge),
+        "external unwire append failure should rollback generated external edge removal"
+    );
+}
+
 const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 const ED25519_PUBLIC_KEY_ZERO: &str = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 

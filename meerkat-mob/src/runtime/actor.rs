@@ -10120,11 +10120,6 @@ impl MobActor {
             Some(session_id_for_route.clone()),
             "handle_retire_inner_mark_retiring",
         )?;
-        if !retire_event_already_present
-            && let Err(error) = self.append_retire_event_for_entry(&entry).await
-        {
-            return Err(error);
-        }
 
         self.cleanup_retiring_external_peer_edges(&domain_identity)
             .await?;
@@ -10143,6 +10138,11 @@ impl MobActor {
             Some(session_id_for_route),
             "handle_retire_inner_mark_retiring_after_external_cleanup",
         )?;
+        if !retire_event_already_present
+            && let Err(error) = self.append_retire_event_for_entry(&entry).await
+        {
+            return Err(error);
+        }
 
         let mut detach_obligations =
             crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(

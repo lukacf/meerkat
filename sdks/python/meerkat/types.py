@@ -713,6 +713,7 @@ class SessionAssistantBlock:
     # Lane provenance for ``transcript`` blocks (e.g. ``"spoken"``).
     # ``None`` for non-transcript block types.
     source: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

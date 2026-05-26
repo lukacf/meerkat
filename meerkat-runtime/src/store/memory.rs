@@ -169,16 +169,33 @@ impl RuntimeStore for InMemoryRuntimeStore {
 
         // Session delta
         if let Some(delta) = session_delta {
-            if let Some(session_store_key) = session_store_key {
-                let session: meerkat_core::Session =
-                    serde_json::from_slice(&delta.session_snapshot)
-                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                if session.id() != &session_store_key {
-                    return Err(RuntimeStoreError::SessionKeyMismatch {
-                        expected: session_store_key,
-                        actual: session.id().clone(),
+            let incoming_session =
+                serde_json::from_slice::<meerkat_core::Session>(&delta.session_snapshot);
+            match (incoming_session, session_store_key) {
+                (Ok(incoming_session), session_store_key) => {
+                    if let Some(session_store_key) = session_store_key
+                        && incoming_session.id() != &session_store_key
+                    {
+                        return Err(RuntimeStoreError::SessionKeyMismatch {
+                            expected: session_store_key,
+                            actual: incoming_session.id().clone(),
+                        });
+                    }
+                    let previous_session = inner.sessions.get(&rid).and_then(|snapshot| {
+                        serde_json::from_slice::<meerkat_core::Session>(snapshot).ok()
                     });
+                    meerkat_core::session_store::run_boundary_snapshot_save_guard(
+                        &incoming_session,
+                        previous_session.as_ref(),
+                    )
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 }
+                (Err(err), Some(session_store_key)) => {
+                    return Err(RuntimeStoreError::WriteFailed(format!(
+                        "session snapshot for {session_store_key} is not a Session: {err}"
+                    )));
+                }
+                (Err(_), None) => {}
             }
             inner.sessions.insert(rid.clone(), delta.session_snapshot);
         }

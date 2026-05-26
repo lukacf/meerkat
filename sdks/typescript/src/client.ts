@@ -3806,13 +3806,10 @@ export class MeerkatClient {
   static serializeTranscriptRewriteMessage(
     message: TranscriptRewriteInputMessage,
   ): Record<string, unknown> {
-    const raw = (message as SessionMessage).raw;
-    if (raw !== undefined) {
-      return { ...raw };
-    }
     const camel = message as SessionMessage;
     if (camel.createdAt !== undefined) {
       const payload: Record<string, unknown> = {
+        ...(camel.raw ?? {}),
         role: camel.role,
         created_at: camel.createdAt,
       };
@@ -3836,7 +3833,9 @@ export class MeerkatClient {
         payload.stop_reason = camel.stopReason;
       }
       if (camel.blocks?.length > 0) {
-        payload.blocks = camel.blocks;
+        payload.blocks = camel.blocks.map((block) =>
+          MeerkatClient.serializeSessionAssistantBlock(block),
+        );
       }
       if (camel.results?.length > 0) {
         payload.results = camel.results.map((result) => ({
@@ -3848,6 +3847,31 @@ export class MeerkatClient {
       return payload;
     }
     return { ...(message as TranscriptRewriteMessage) };
+  }
+
+  static serializeSessionAssistantBlock(block: SessionAssistantBlock): Record<string, unknown> {
+    const data: Record<string, unknown> = {
+      ...((block.raw?.data as Record<string, unknown> | undefined) ?? {}),
+    };
+    setIfDefined(data, "text", block.text);
+    setIfDefined(data, "id", block.id);
+    setIfDefined(data, "name", block.name);
+    setIfDefined(data, "args", block.args);
+    setIfDefined(data, "image_id", block.imageId);
+    if (block.blobId !== undefined) {
+      data.blob_ref = { blob_id: block.blobId };
+    }
+    setIfDefined(data, "media_type", block.mediaType);
+    setIfDefined(data, "width", block.width);
+    setIfDefined(data, "height", block.height);
+    setIfDefined(data, "revised_prompt", block.revisedPrompt);
+    setIfDefined(data, "meta", block.meta);
+    setIfDefined(data, "source", block.source);
+    return {
+      ...(block.raw ?? {}),
+      block_type: block.blockType,
+      data,
+    };
   }
 
   static parseContentInput(value: unknown): ContentInput {
@@ -3916,6 +3940,7 @@ export class MeerkatClient {
       // Lane provenance for transcript blocks (typed enum on the wire,
       // serialized as a snake_case string — currently only "spoken").
       source: typeof blockData.source === "string" ? blockData.source : undefined,
+      raw: { ...data },
     };
   }
 

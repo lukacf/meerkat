@@ -3,6 +3,7 @@ import asyncio
 
 import base64
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal, get_args, get_origin, get_type_hints
 
@@ -832,6 +833,61 @@ def test_parse_session_history_preserves_assistant_image_blocks():
     assert block.height == 1536
     assert block.revised_prompt == {"disposition": "not_requested"}
     assert block.meta == {"provider": "open_ai", "target_model": "gpt-image-1"}
+
+
+def test_transcript_rewrite_serializes_edited_parsed_message_over_raw_payload():
+    parsed = MeerkatClient._parse_session_message(
+        {
+            "role": "assistant",
+            "content": "old",
+            "created_at": "2026-05-26T10:00:00Z",
+            "provider_trace_id": "trace-1",
+        }
+    )
+
+    edited = replace(parsed, content="new")
+    serialized = MeerkatClient._serialize_transcript_rewrite_message(edited)
+
+    assert serialized == {
+        "role": "assistant",
+        "content": "new",
+        "created_at": "2026-05-26T10:00:00Z",
+        "provider_trace_id": "trace-1",
+    }
+
+
+def test_transcript_rewrite_serializes_block_assistant_blocks_to_wire_shape():
+    parsed = MeerkatClient._parse_session_message(
+        {
+            "role": "block_assistant",
+            "created_at": "2026-05-26T10:00:00Z",
+            "blocks": [
+                {
+                    "block_type": "text",
+                    "data": {"text": "old", "source": "spoken"},
+                    "provider_block_id": "block-1",
+                }
+            ],
+        }
+    )
+
+    edited = replace(
+        parsed,
+        blocks=[replace(parsed.blocks[0], text="new")],
+    )
+    serialized = MeerkatClient._serialize_transcript_rewrite_message(edited)
+
+    assert serialized == {
+        "role": "block_assistant",
+        "created_at": "2026-05-26T10:00:00Z",
+        "blocks": [
+            {
+                "block_type": "text",
+                "data": {"text": "new", "source": "spoken"},
+                "provider_block_id": "block-1",
+            }
+        ],
+    }
 
 
 def test_skill_key_export():

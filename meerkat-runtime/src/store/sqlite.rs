@@ -359,6 +359,22 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 let tx = begin_runtime_transaction(&mut conn)?;
 
                 if let Some(session) = session_snapshot.as_ref() {
+                    let previous = tx
+                        .query_row(
+                            "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                            params![runtime_id_text(&runtime_id)],
+                            |row| row.get::<_, Vec<u8>>(0),
+                        )
+                        .optional()
+                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                        .map(|bytes| serde_json::from_slice::<meerkat_core::Session>(&bytes))
+                        .transpose()
+                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+                    meerkat_core::session_store::run_boundary_snapshot_save_guard(
+                        session,
+                        previous.as_ref(),
+                    )
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                     write_session_snapshot_in_txn(&tx, session)
                         .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                     if let Some(delta) = session_delta.as_ref() {

@@ -3558,12 +3558,11 @@ class MeerkatClient:
         message: TranscriptRewriteInputMessage,
     ) -> dict[str, Any]:
         if isinstance(message, SessionMessage):
-            if message.raw:
-                return dict(message.raw)
-            payload: dict[str, Any] = {
+            payload: dict[str, Any] = dict(message.raw)
+            payload.update({
                 "role": message.role,
                 "created_at": message.created_at,
-            }
+            })
             if message.kind is not None:
                 payload["kind"] = message.kind
             if message.body is not None:
@@ -3578,7 +3577,10 @@ class MeerkatClient:
             if message.stop_reason is not None:
                 payload["stop_reason"] = message.stop_reason
             if message.blocks:
-                payload["blocks"] = [asdict(block) for block in message.blocks]
+                payload["blocks"] = [
+                    MeerkatClient._serialize_session_assistant_block(block)
+                    for block in message.blocks
+                ]
             if message.results:
                 payload["results"] = [
                     {
@@ -3590,6 +3592,40 @@ class MeerkatClient:
                 ]
             return payload
         return dict(message)
+
+    @staticmethod
+    def _serialize_session_assistant_block(
+        block: SessionAssistantBlock,
+    ) -> dict[str, Any]:
+        raw_data = block.raw.get("data")
+        data: dict[str, Any] = dict(raw_data) if isinstance(raw_data, dict) else {}
+        if block.text is not None:
+            data["text"] = block.text
+        if block.id is not None:
+            data["id"] = block.id
+        if block.name is not None:
+            data["name"] = block.name
+        if block.args is not None:
+            data["args"] = block.args
+        if block.image_id is not None:
+            data["image_id"] = block.image_id
+        if block.blob_id is not None:
+            data["blob_ref"] = {"blob_id": block.blob_id}
+        if block.media_type is not None:
+            data["media_type"] = block.media_type
+        if block.width is not None:
+            data["width"] = block.width
+        if block.height is not None:
+            data["height"] = block.height
+        if block.revised_prompt is not None:
+            data["revised_prompt"] = block.revised_prompt
+        if block.meta is not None:
+            data["meta"] = block.meta
+        if block.source is not None:
+            data["source"] = block.source
+        payload = dict(block.raw)
+        payload.update({"block_type": block.block_type, "data": data})
+        return payload
 
     @staticmethod
     def _parse_content_input(value: Any) -> ContentInput:
@@ -3656,6 +3692,7 @@ class MeerkatClient:
             revised_prompt=block_data.get("revised_prompt") if isinstance(block_data.get("revised_prompt"), dict) else None,
             meta=block_data.get("meta"),
             source=source,
+            raw=dict(data),
         )
 
     @staticmethod

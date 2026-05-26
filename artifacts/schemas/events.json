@@ -1574,7 +1574,7 @@
         "type": "object"
       },
       "TranscriptRewriteReason": {
-        "description": "Machine-readable reason carried with a transcript rewrite commit.",
+        "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance. It is not a\nsecond policy authority; rewrite admission is enforced by the typed\nselection, digest, parent-revision, and store-guard contracts.",
         "properties": {
           "kind": {
             "type": "string"
@@ -5258,7 +5258,7 @@
         "type": "object"
       },
       "TranscriptRewriteReason": {
-        "description": "Machine-readable reason carried with a transcript rewrite commit.",
+        "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance. It is not a\nsecond policy authority; rewrite admission is enforced by the typed\nselection, digest, parent-revision, and store-guard contracts.",
         "properties": {
           "kind": {
             "type": "string"

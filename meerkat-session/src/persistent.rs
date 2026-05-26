@@ -822,13 +822,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let Ok(_backfill_guard) = recovery_gate.try_lock_owned() else {
             return Ok(());
         };
-        self.backfill_transcript_rewrite_audit_events_locked(session)
+        self.backfill_transcript_rewrite_audit_events_locked(session, false)
             .await
     }
 
     async fn backfill_transcript_rewrite_audit_events_locked(
         &self,
         session: &Session,
+        fail_on_append_error: bool,
     ) -> Result<(), SessionError> {
         let Some(event_store) = self.event_store.as_ref() else {
             return Ok(());
@@ -884,6 +885,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     error = %error,
                     "failed to backfill transcript rewrite audit events from durable session graph"
                 );
+                if fail_on_append_error {
+                    return Err(SessionError::Store(Box::new(error)));
+                }
                 return Ok(());
             }
         };
@@ -1486,7 +1490,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     self.persist_replayed_transcript_projection_for_mutation(&session)
                         .await?;
                 }
-                self.backfill_transcript_rewrite_audit_events_locked(&session)
+                self.backfill_transcript_rewrite_audit_events_locked(&session, true)
                     .await?;
                 session
             }
@@ -1581,6 +1585,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         commit: &meerkat_core::TranscriptRewriteCommit,
     ) -> Result<Session, SessionError> {
         let session = self.normalized_session_for_persistence(session).await?;
+        self.persist_normalized_transcript_rewrite(session, commit, true)
+            .await
+    }
+
+    async fn persist_normalized_transcript_rewrite(
+        &self,
+        session: Session,
+        commit: &meerkat_core::TranscriptRewriteCommit,
+        converge_live: bool,
+    ) -> Result<Session, SessionError> {
         if let Some(runtime_store) = self.runtime_store.as_ref() {
             let session_snapshot = serde_json::to_vec(&session).map_err(|err| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
@@ -1617,8 +1631,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
         self.append_transcript_rewrite_commit_event(&session, commit)
             .await?;
-        self.converge_live_session_after_transcript_rewrite(&session)
-            .await?;
+        if converge_live {
+            self.converge_live_session_after_transcript_rewrite(&session)
+                .await?;
+        }
         Ok(session)
     }
 
@@ -2455,6 +2471,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     async fn save_normalized_session(&self, session: Session) -> Result<Session, SessionError> {
         let session = self.normalized_session_for_persistence(session).await?;
+        if let Some(commit) = self
+            .transcript_rewrite_commit_for_persistence(&session)
+            .await?
+        {
+            return self
+                .persist_normalized_transcript_rewrite(session, &commit, false)
+                .await;
+        }
         if let Some(runtime_store) = self.runtime_store.as_ref() {
             let session_snapshot = serde_json::to_vec(&session).map_err(|err| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
@@ -2484,6 +2508,76 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .map_err(|e| SessionError::Store(Box::new(e)))?;
         }
         Ok(session)
+    }
+
+    async fn transcript_rewrite_commit_for_persistence(
+        &self,
+        session: &Session,
+    ) -> Result<Option<meerkat_core::TranscriptRewriteCommit>, SessionError> {
+        let previous = if let Some(runtime_store) = self.runtime_store.as_ref() {
+            Self::load_runtime_session_snapshot_for_session(runtime_store, session.id()).await?
+        } else {
+            self.store
+                .load(session.id())
+                .await
+                .map_err(|e| SessionError::Store(Box::new(e)))?
+        };
+        let Some(previous) = previous else {
+            return Ok(None);
+        };
+        let previous_revision = meerkat_core::transcript_messages_digest(previous.messages())
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to digest previous transcript for persistence: {err}"
+                )))
+            })?;
+        let incoming_revision = meerkat_core::transcript_messages_digest(session.messages())
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to digest incoming transcript for persistence: {err}"
+                )))
+            })?;
+        if previous_revision == incoming_revision
+            || Self::incoming_extends_previous_transcript(&previous, session, &previous_revision)?
+        {
+            return Ok(None);
+        }
+
+        let Some(state) = session.transcript_history_state().map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to read transcript history for persistence: {err}"
+            )))
+        })?
+        else {
+            return Ok(None);
+        };
+        Ok(state
+            .commits
+            .iter()
+            .rev()
+            .find(|commit| {
+                commit.parent_revision == previous_revision && commit.revision == incoming_revision
+            })
+            .cloned())
+    }
+
+    fn incoming_extends_previous_transcript(
+        previous: &Session,
+        incoming: &Session,
+        previous_revision: &str,
+    ) -> Result<bool, SessionError> {
+        if incoming.messages().len() < previous.messages().len() {
+            return Ok(false);
+        }
+        let prefix_revision = meerkat_core::transcript_messages_digest(
+            &incoming.messages()[..previous.messages().len()],
+        )
+        .map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to digest incoming transcript prefix for persistence: {err}"
+            )))
+        })?;
+        Ok(prefix_revision == previous_revision)
     }
 
     pub async fn checkpoint_committed_runtime_session_snapshot(
@@ -9309,6 +9403,33 @@ mod tests {
             Message::Assistant(assistant)
                 if assistant.content == "compact answer despite audit outage"
         ));
+
+        let second_err = service
+            .rewrite_session_transcript(
+                &session_id,
+                meerkat_core::SessionTranscriptRewriteRequest {
+                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
+                        content: "second compact answer must wait for audit backfill".to_string(),
+                        tool_calls: Vec::new(),
+                        stop_reason: StopReason::EndTurn,
+                        usage: Usage::default(),
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    })],
+                    reason: TranscriptRewriteReason::new("compaction"),
+                    actor: Some("audit-failure-test".to_string()),
+                    expected_parent_revision: Some(rewrite.revision.clone()),
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect_err("new rewrites must fail closed while prior audit backfill fails");
+        assert!(
+            second_err
+                .to_string()
+                .contains("synthetic transcript rewrite audit append failure"),
+            "unexpected error: {second_err}"
+        );
 
         event_store.allow_appends();
         let recovered = service

@@ -231,6 +231,7 @@ export interface SessionAssistantBlock {
    * for non-transcript block types.
    */
   readonly source?: string;
+  readonly raw?: Record<string, unknown>;
 }
 
 export interface SessionMessage {

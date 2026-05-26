@@ -287,6 +287,11 @@ jobs:
         with:
           fetch-depth: 1
 
+      - uses: ./.github/actions/setup-rust-ci
+
+      - name: Verify schema freshness
+        run: make verify-schema-freshness
+
       - name: Select native lanes
         id: lanes
         shell: bash

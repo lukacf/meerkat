@@ -86,6 +86,66 @@ describe("Contract Version", () => {
   });
 });
 
+describe("Transcript Rewrite Serialization", () => {
+  it("serializes edited parsed messages over their preserved raw payload", () => {
+    const parsed = MeerkatClient.parseSessionMessage({
+      role: "assistant",
+      content: "old",
+      created_at: "2026-05-26T10:00:00Z",
+      provider_trace_id: "trace-1",
+    });
+
+    const serialized = MeerkatClient.serializeTranscriptRewriteMessage({
+      ...parsed,
+      content: "new",
+    });
+
+    assert.deepEqual(serialized, {
+      role: "assistant",
+      content: "new",
+      created_at: "2026-05-26T10:00:00Z",
+      provider_trace_id: "trace-1",
+    });
+  });
+
+  it("serializes parsed block assistant messages back to wire-shaped blocks", () => {
+    const parsed = MeerkatClient.parseSessionMessage({
+      role: "block_assistant",
+      created_at: "2026-05-26T10:00:00Z",
+      blocks: [
+        {
+          block_type: "text",
+          data: {
+            text: "old",
+            source: "spoken",
+          },
+          provider_block_id: "block-1",
+        },
+      ],
+    });
+
+    const serialized = MeerkatClient.serializeTranscriptRewriteMessage({
+      ...parsed,
+      blocks: [{ ...parsed.blocks[0], text: "new" }],
+    });
+
+    assert.deepEqual(serialized, {
+      role: "block_assistant",
+      created_at: "2026-05-26T10:00:00Z",
+      blocks: [
+        {
+          block_type: "text",
+          data: {
+            text: "new",
+            source: "spoken",
+          },
+          provider_block_id: "block-1",
+        },
+      ],
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Error hierarchy
 // ---------------------------------------------------------------------------

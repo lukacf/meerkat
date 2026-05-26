@@ -14,6 +14,7 @@ use crate::hooks::{
 use crate::image_content::{MissingBlobBehavior, hydrate_messages_for_execution};
 use crate::lifecycle::RunId;
 use crate::lifecycle::run_primitive::ProviderParamsOverride;
+use crate::session::TranscriptRewriteReason;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
@@ -983,7 +984,29 @@ where
                                 | crate::memory::MemoryIndexDelivery::Delivered(_) => {}
                             }
 
-                            self.session.replace_messages_internal(outcome.new_messages);
+                            if let Err(error) = self.session.replace_messages_internal(
+                                outcome.new_messages,
+                                TranscriptRewriteReason::new("compaction"),
+                            ) {
+                                let error_message = format!(
+                                    "failed to commit compaction transcript rewrite: {error}"
+                                );
+                                tracing::warn!(error = %error, "failed to commit compaction transcript rewrite");
+                                if !crate::event_tap::tap_emit(
+                                    &self.event_tap,
+                                    event_tx.as_ref(),
+                                    AgentEvent::CompactionFailed {
+                                        error: error_message,
+                                    },
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        "compaction event stream receiver dropped before rewrite CompactionFailed"
+                                    );
+                                }
+                                continue;
+                            }
                             self.session.record_usage(outcome.summary_usage.clone());
                             self.budget.record_usage(&outcome.summary_usage);
                             self.last_input_tokens = 0;
@@ -1322,9 +1345,14 @@ where
                     //
                     //    Strip prior synthetic AuthReauthRequired notices
                     //    so the notice always reflects current DSL state.
-                    self.session.retain_messages_internal(|message| {
-                        !is_synthetic_notice(message, SystemNoticeKind::AuthReauthRequired)
-                    });
+                    if let Err(error) = self.session.retain_messages_internal(
+                        |message| {
+                            !is_synthetic_notice(message, SystemNoticeKind::AuthReauthRequired)
+                        },
+                        TranscriptRewriteReason::new("synthetic_notice_cleanup"),
+                    ) {
+                        tracing::warn!(error = %error, "failed to clean up auth synthetic notices");
+                    }
 
                     // 1. Poll external updates BEFORE tool capture so newly
                     //    connected tools are visible in the same LLM call.
@@ -1342,9 +1370,12 @@ where
                     // 3. Manage [MCP_PENDING] notice lifecycle.
                     //    Always strip prior synthetic notices to avoid stale state.
                     //    Uses starts_with on a strict prefix to avoid matching user text.
-                    self.session.retain_messages_internal(|message| {
-                        !is_synthetic_notice(message, SystemNoticeKind::McpPending)
-                    });
+                    if let Err(error) = self.session.retain_messages_internal(
+                        |message| !is_synthetic_notice(message, SystemNoticeKind::McpPending),
+                        TranscriptRewriteReason::new("synthetic_notice_cleanup"),
+                    ) {
+                        tracing::warn!(error = %error, "failed to clean up MCP synthetic notices");
+                    }
                     // The MCP lifecycle handle is the only authoritative read
                     // side for pending server notices. Without it, core has no
                     // typed owner to project from.
@@ -1373,9 +1404,12 @@ where
                     }
 
                     // 3b. Background shell job completion notices via CompletionFeed.
-                    self.session.retain_messages_internal(|message| {
-                        !is_synthetic_notice(message, SystemNoticeKind::BackgroundJob)
-                    });
+                    if let Err(error) = self.session.retain_messages_internal(
+                        |message| !is_synthetic_notice(message, SystemNoticeKind::BackgroundJob),
+                        TranscriptRewriteReason::new("synthetic_notice_cleanup"),
+                    ) {
+                        tracing::warn!(error = %error, "failed to clean up background-job synthetic notices");
+                    }
                     // Feed path: ops-lifecycle-tracked completions from the runtime.
                     if let Some(ref feed) = self.completion_feed {
                         let batch = feed.list_since(self.applied_cursor);

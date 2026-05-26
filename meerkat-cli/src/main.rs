@@ -1893,57 +1893,14 @@ impl From<WorkAttentionModeArg> for meerkat::WorkAttentionMode {
 enum WorkCompletionPolicyArg {
     SelfAttest,
     HostConfirmed,
-    PrincipalConfirmed,
-    Supervisor,
-    ReviewerQuorum,
 }
 
 fn work_completion_policy_from_args(
     policy: WorkCompletionPolicyArg,
-    supervisor: Option<String>,
-    reviewer_threshold: Option<u8>,
-) -> anyhow::Result<meerkat::WorkCompletionPolicy> {
+) -> meerkat::WorkCompletionPolicy {
     match policy {
-        WorkCompletionPolicyArg::SelfAttest => Ok(meerkat::WorkCompletionPolicy::SelfAttest),
-        WorkCompletionPolicyArg::HostConfirmed => Ok(meerkat::WorkCompletionPolicy::HostConfirmed),
-        WorkCompletionPolicyArg::PrincipalConfirmed => {
-            Ok(meerkat::WorkCompletionPolicy::PrincipalConfirmed)
-        }
-        WorkCompletionPolicyArg::Supervisor => {
-            let supervisor = supervisor.ok_or_else(|| {
-                anyhow::anyhow!("--supervisor is required for --completion-policy supervisor")
-            })?;
-            Ok(meerkat::WorkCompletionPolicy::Supervisor {
-                owner_key: parse_work_owner_key(&supervisor)?,
-            })
-        }
-        WorkCompletionPolicyArg::ReviewerQuorum => {
-            let threshold = reviewer_threshold.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--reviewer-threshold is required for --completion-policy reviewer-quorum"
-                )
-            })?;
-            if threshold == 0 {
-                anyhow::bail!("--reviewer-threshold must be greater than zero");
-            }
-            Ok(meerkat::WorkCompletionPolicy::ReviewerQuorum {
-                threshold: threshold.into(),
-            })
-        }
-    }
-}
-
-fn parse_work_owner_key(value: &str) -> anyhow::Result<meerkat::WorkOwnerKey> {
-    let Some((kind, id)) = value.split_once(':') else {
-        return Ok(meerkat::WorkOwnerKey::principal(value)?);
-    };
-    match kind {
-        "principal" => Ok(meerkat::WorkOwnerKey::principal(id)?),
-        "agent" => Ok(meerkat::WorkOwnerKey::agent(id)?),
-        "session" => Ok(meerkat::WorkOwnerKey::session(id)?),
-        "mob" => Ok(meerkat::WorkOwnerKey::mob(id)?),
-        "label" => Ok(meerkat::WorkOwnerKey::label(id)?),
-        other => Err(anyhow::anyhow!("unsupported work owner kind {other}")),
+        WorkCompletionPolicyArg::SelfAttest => meerkat::WorkCompletionPolicy::SelfAttest,
+        WorkCompletionPolicyArg::HostConfirmed => meerkat::WorkCompletionPolicy::HostConfirmed,
     }
 }
 
@@ -2048,10 +2005,6 @@ enum WorkGraphCommands {
         mode: WorkAttentionModeArg,
         #[arg(long, value_enum, default_value = "self-attest")]
         completion_policy: WorkCompletionPolicyArg,
-        #[arg(long)]
-        supervisor: Option<String>,
-        #[arg(long)]
-        reviewer_threshold: Option<u8>,
         #[arg(long)]
         json: bool,
     },
@@ -6181,16 +6134,10 @@ async fn handle_workgraph_command(
             description,
             mode,
             completion_policy,
-            supervisor,
-            reviewer_threshold,
             json,
         } => {
             let session_id = resolve_scoped_session_id(&session_id, scope)?;
-            let completion_policy = work_completion_policy_from_args(
-                completion_policy,
-                supervisor,
-                reviewer_threshold,
-            )?;
+            let completion_policy = work_completion_policy_from_args(completion_policy);
             let result = service
                 .create_goal(meerkat::GoalCreateRequest {
                     realm_id: None,
@@ -15164,6 +15111,25 @@ default_model = "gemma"
                 .contains("unexpected argument '--principal'")
                 || err.to_string().contains("Found argument '--principal'"),
             "unexpected parse error for --principal: {err}"
+        );
+
+        let err = match Cli::try_parse_from([
+            "rkat",
+            "workgraph",
+            "goal-create",
+            "019e63c2-0000-7000-8000-000000000030",
+            "trusted principal goal",
+            "--completion-policy",
+            "principal-confirmed",
+        ]) {
+            Ok(_) => panic!("goal-create must not expose unconfirmable principal policies"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("invalid value 'principal-confirmed'")
+                || err.to_string().contains("possible values"),
+            "unexpected parse error for unsupported policy: {err}"
         );
     }
 

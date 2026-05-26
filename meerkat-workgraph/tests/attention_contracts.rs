@@ -292,6 +292,47 @@ async fn goal_confirmation_and_close_are_policy_gated() {
 }
 
 #[tokio::test]
+async fn goal_policy_only_gates_successful_completion() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000109").expect("valid session id");
+
+    for status in [WorkStatus::Failed, WorkStatus::Cancelled] {
+        let goal = service
+            .create_goal(GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: format!("Close as {status:?} without acceptance"),
+                description: None,
+                target: GoalAttentionTarget::Session {
+                    session_id: session_id.clone(),
+                },
+                mode: WorkAttentionMode::Pursue,
+                completion_policy: WorkCompletionPolicy::HostConfirmed,
+                delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+                projection_policy: AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("create goal");
+
+        let closed = service
+            .goal_request_close(GoalRequestCloseRequest {
+                binding_id: goal.attention.binding_id,
+                realm_id: None,
+                namespace: None,
+                expected_revision: None,
+                status,
+            })
+            .await
+            .expect("non-success terminal close should not require completion evidence");
+        assert_eq!(closed.item.status, status);
+        assert_eq!(closed.attention.status, WorkAttentionStatus::Stopped);
+    }
+}
+
+#[tokio::test]
 async fn raw_evidence_cannot_satisfy_reserved_completion_policy() {
     let service = WorkGraphService::new(std::sync::Arc::new(
         meerkat_workgraph::MemoryWorkGraphStore::new(),

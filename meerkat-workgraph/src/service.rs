@@ -473,7 +473,7 @@ impl WorkGraphService {
                 attention.work_ref.item_id.clone(),
             )
             .await?;
-        if !completion_policy_is_satisfied(&item) {
+        if request.status.is_terminal_success() && !completion_policy_is_satisfied(&item) {
             return Err(WorkGraphError::InvalidTransition(format!(
                 "work item {} completion policy {} is not satisfied",
                 item.id,

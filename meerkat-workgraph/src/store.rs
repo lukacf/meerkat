@@ -87,30 +87,38 @@ pub trait WorkGraphStore: Send + Sync {
 
     async fn insert_goal(
         &self,
-        item: WorkItem,
-        item_event: WorkGraphEvent,
-        attention: WorkAttentionBinding,
-        attention_event: WorkGraphEvent,
-    ) -> Result<(WorkItem, WorkAttentionBinding), WorkGraphError>;
+        _item: WorkItem,
+        _item_event: WorkGraphEvent,
+        _attention: WorkAttentionBinding,
+        _attention_event: WorkGraphEvent,
+    ) -> Result<(WorkItem, WorkAttentionBinding), WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
 
     async fn update_attention_cas(
         &self,
-        attention: WorkAttentionBinding,
-        expected_previous_revision: u64,
-        event: WorkGraphEvent,
-    ) -> Result<WorkAttentionBinding, WorkGraphError>;
+        _attention: WorkAttentionBinding,
+        _expected_previous_revision: u64,
+        _event: WorkGraphEvent,
+    ) -> Result<WorkAttentionBinding, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
 
     async fn get_attention(
         &self,
-        realm_id: &str,
-        namespace: &WorkNamespace,
-        binding_id: &WorkAttentionBindingId,
-    ) -> Result<Option<WorkAttentionBinding>, WorkGraphError>;
+        _realm_id: &str,
+        _namespace: &WorkNamespace,
+        _binding_id: &WorkAttentionBindingId,
+    ) -> Result<Option<WorkAttentionBinding>, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
 
     async fn list_attention(
         &self,
-        filter: AttentionListRequest,
-    ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError>;
+        _filter: AttentionListRequest,
+    ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
 
     async fn insert_edge(
         &self,

@@ -37,7 +37,7 @@ pub use surface::wire_workgraph_tools;
 pub use tool_surface::{
     WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY, WorkGraphToolSurface,
     workgraph_attention_context_append, workgraph_attention_continuation_key,
-    workgraph_attention_turn_append,
+    workgraph_attention_supersession_key, workgraph_attention_turn_append,
 };
 pub use tools::{
     CAPABILITY_UNAVAILABLE as WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE,

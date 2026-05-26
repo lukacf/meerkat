@@ -132,11 +132,14 @@ Operators and UIs can inspect WorkGraph without mutating it:
 
 - CLI: `rkat workgraph list`, `show`, `ready`, `snapshot`, `events`
 - REST: `GET /workgraph/items`, `/workgraph/ready`, `/workgraph/snapshot`,
-  `/workgraph/events`, plus narrow `POST /workgraph/goal/*` and
-  `/workgraph/attention/*` host-control routes
+  `/workgraph/events`, plus public `POST /workgraph/goal/status` and
+  `/workgraph/attention/list` observability routes
 - RPC: `workgraph/get`, `workgraph/list`, `workgraph/ready`,
-  `workgraph/snapshot`, `workgraph/events`, plus narrow
-  `workgraph/goal/*` and `workgraph/attention/*` host-control methods
+  `workgraph/snapshot`, `workgraph/events`, plus public
+  `workgraph/goal/status` and `workgraph/attention/list` observability methods
+
+Goal and attention mutation APIs are trusted in-process host/runtime authority;
+they are not part of the public REST or JSON-RPC catalogs.
 
 ## Agent Instruction Manual
 

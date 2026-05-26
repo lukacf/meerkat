@@ -10,7 +10,8 @@ use meerkat_workgraph::{
     GoalStatusRequest, GoalTerminalStatus, LinkWorkItemsRequest, UpdateWorkItemRequest,
     WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMode,
     WorkAttentionStatus, WorkAttentionTarget, WorkCompletionPolicy, WorkEdgeKind, WorkEvidenceRef,
-    WorkGraphService, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkStatus,
+    WorkGraphService, WorkGraphSnapshotFilter, WorkItemRef, WorkNamespace, WorkOwnerKey,
+    WorkStatus, workgraph_attention_continuation_key, workgraph_attention_supersession_key,
 };
 use serde_json::json;
 
@@ -1018,6 +1019,98 @@ async fn expired_timed_pause_normalizes_on_attention_reads() {
         .await
         .expect("list paused");
     assert!(paused.attention.is_empty());
+}
+
+#[tokio::test]
+async fn snapshot_attention_uses_normalized_binding_state() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000043").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Snapshot paused briefly".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    service
+        .pause_attention(AttentionPauseRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.attention.machine_state.revision,
+            until: Some(Utc::now() - Duration::minutes(1)),
+        })
+        .await
+        .expect("pause attention");
+
+    let snapshot = service
+        .snapshot(WorkGraphSnapshotFilter::default())
+        .await
+        .expect("snapshot");
+    let binding = snapshot
+        .attention
+        .iter()
+        .find(|binding| binding.binding_id == goal.attention.binding_id)
+        .expect("snapshot attention binding");
+    assert_eq!(binding.status, WorkAttentionStatus::Active);
+}
+
+#[tokio::test]
+async fn attention_continuation_supersession_is_binding_scoped_not_projection_scoped() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000044").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Supersede stale continuations".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let projection = service
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("project attention")
+        .projection;
+    let mut stale_successor = projection.clone();
+    stale_successor.item_revision += 1;
+    stale_successor.binding_revision += 1;
+
+    assert_ne!(
+        workgraph_attention_continuation_key(&projection),
+        workgraph_attention_continuation_key(&stale_successor),
+        "idempotency stays projection-specific"
+    );
+    assert_eq!(
+        workgraph_attention_supersession_key(&projection),
+        workgraph_attention_supersession_key(&stale_successor),
+        "supersession must retire older queued continuations for the same binding"
+    );
 }
 
 #[tokio::test]

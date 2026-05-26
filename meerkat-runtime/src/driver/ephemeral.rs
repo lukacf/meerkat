@@ -1358,7 +1358,6 @@ impl EphemeralRuntimeDriver {
         candidates.extend(self.steer_queue.input_ids());
         candidates.extend(self.dsl_queue_lane());
         candidates.extend(self.dsl_steer_lane());
-        candidates.extend(self.ledger.active_input_ids());
         let mut seen = Vec::<InputId>::new();
         candidates.retain(|id| {
             if seen.contains(id) {

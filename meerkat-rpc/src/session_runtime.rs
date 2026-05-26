@@ -3117,6 +3117,7 @@ impl SessionRuntime {
 
         let input_id = InputId::new();
         let attention_key = meerkat::workgraph_attention_continuation_key(&projection);
+        let supersession_key = meerkat::workgraph_attention_supersession_key(&projection);
         let context_key = format!("{attention_key}:{input_id}");
         let input = Input::Continuation(ContinuationInput {
             header: InputHeader {
@@ -3129,7 +3130,7 @@ impl SessionRuntime {
                     operator_eligible: false,
                 },
                 idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(attention_key.clone())),
-                supersession_key: Some(SupersessionKey::new(attention_key)),
+                supersession_key: Some(SupersessionKey::new(supersession_key)),
                 correlation_id: None,
             },
             reason: "workgraph_attention".to_string(),

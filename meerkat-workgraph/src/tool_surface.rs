@@ -36,6 +36,13 @@ pub fn workgraph_attention_continuation_key(projection: &AttentionContextProject
     )
 }
 
+pub fn workgraph_attention_supersession_key(projection: &AttentionContextProjection) -> String {
+    format!(
+        "workgraph_attention:{}:{}:{}",
+        projection.work_ref.realm_id, projection.work_ref.namespace, projection.binding_id
+    )
+}
+
 pub fn workgraph_attention_turn_append(
     projection: &AttentionContextProjection,
 ) -> ConversationAppend {

@@ -688,16 +688,21 @@ impl WorkGraphService {
         let mut attention = Vec::new();
         for namespace in &namespaces {
             edges.extend(self.store.list_edges(&realm_id, namespace).await?);
-            attention.extend(
-                self.store
-                    .list_attention(AttentionListRequest {
-                        realm_id: Some(realm_id.clone()),
-                        namespace: Some(namespace.clone()),
-                        target: None,
-                        status: None,
-                    })
-                    .await?,
-            );
+            for binding in self
+                .store
+                .list_attention(AttentionListRequest {
+                    realm_id: Some(realm_id.clone()),
+                    namespace: Some(namespace.clone()),
+                    target: None,
+                    status: None,
+                })
+                .await?
+            {
+                attention.push(
+                    self.normalize_attention_for_read(binding, captured_at)
+                        .await?,
+                );
+            }
         }
 
         let ready_item_ids = self

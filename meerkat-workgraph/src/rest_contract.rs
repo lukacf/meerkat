@@ -122,7 +122,7 @@ const WORKGRAPH_ATTENTION_RESUME_OPERATIONS: &[WorkGraphRestOperationDescriptor]
     &[WorkGraphRestOperationDescriptor {
         method: "post",
         summary: "Resume WorkGraph attention binding",
-        request_schema: Some("AttentionBindingRequest"),
+        request_schema: Some("AttentionResumeRequest"),
         response_schema: "AttentionBindingResult",
     }];
 

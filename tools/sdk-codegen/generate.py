@@ -179,6 +179,7 @@ WORKGRAPH_RPC_CONTRACT_TYPES = [
     "AttentionListRequest",
     "AttentionListResult",
     "AttentionPauseRequest",
+    "AttentionResumeRequest",
     "AttentionProjectionPolicy",
     "AttentionProjectionRequest",
     "AttentionProjectionResult",

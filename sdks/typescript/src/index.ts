@@ -201,6 +201,7 @@ export type {
   AttentionListRequest,
   AttentionListResult,
   AttentionPauseRequest,
+  AttentionResumeRequest,
   AttentionProjectionPolicy,
   AttentionProjectionRequest,
   AttentionProjectionResult,

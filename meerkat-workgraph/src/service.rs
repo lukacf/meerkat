@@ -10,14 +10,14 @@ use crate::types::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,
     AttentionContextProjection, AttentionListRequest, AttentionListResult, AttentionPauseRequest,
     AttentionProjectionRequest, AttentionProjectionResult, AttentionProjectionText,
-    ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest, GoalConfirmRequest,
-    GoalConfirmResult, GoalCreateRequest, GoalCreateResult, GoalRequestCloseRequest,
-    GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult, LinkWorkItemsRequest,
-    ProjectedAttentionAuthority, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
-    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMode, WorkAttentionStatus,
-    WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphEvent,
-    WorkGraphEventKind, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter,
-    WorkItemId, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkOwnerKind,
+    AttentionResumeRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
+    GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest, GoalCreateResult,
+    GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult,
+    LinkWorkItemsRequest, ProjectedAttentionAuthority, ReadyWorkFilter, ReleaseWorkItemRequest,
+    UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMode,
+    WorkAttentionStatus, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef,
+    WorkGraphEvent, WorkGraphEventKind, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem,
+    WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkOwnerKind,
 };
 
 const BEST_EFFORT_REFRESH_ATTEMPTS: usize = 3;
@@ -300,13 +300,20 @@ impl WorkGraphService {
         let now = self.store.get_store_time_utc().await?;
         let current = self
             .attention_binding(AttentionBindingRequest {
-                binding_id: request.binding_id,
-                realm_id: request.realm_id,
-                namespace: request.namespace,
+                binding_id: request.binding_id.clone(),
+                realm_id: request.realm_id.clone(),
+                namespace: request.namespace.clone(),
             })
             .await?
             .attention;
-        let expected_previous_revision = current.machine_state.revision;
+        if current.machine_state.revision != request.expected_revision {
+            return Err(WorkGraphError::StaleRevision {
+                id: current.work_ref.item_id,
+                expected: request.expected_revision,
+                actual: current.machine_state.revision,
+            });
+        }
+        let expected_previous_revision = request.expected_revision;
         let paused =
             WorkAttentionMachine::pause(current, expected_previous_revision, request.until, now)?;
         let event = attention_updated_event(&paused, now);
@@ -319,10 +326,17 @@ impl WorkGraphService {
 
     pub async fn resume_attention(
         &self,
-        request: AttentionBindingRequest,
+        request: AttentionResumeRequest,
     ) -> Result<AttentionBindingResult, WorkGraphError> {
         let now = self.store.get_store_time_utc().await?;
-        let current = self.attention_binding(request).await?.attention;
+        let current = self
+            .attention_binding(AttentionBindingRequest {
+                binding_id: request.binding_id,
+                realm_id: request.realm_id,
+                namespace: request.namespace,
+            })
+            .await?
+            .attention;
         let item = self
             .get(
                 Some(current.work_ref.realm_id.clone()),
@@ -336,7 +350,14 @@ impl WorkGraphService {
                 current.binding_id, item.id
             )));
         }
-        let expected_previous_revision = current.machine_state.revision;
+        if current.machine_state.revision != request.expected_revision {
+            return Err(WorkGraphError::StaleRevision {
+                id: current.work_ref.item_id,
+                expected: request.expected_revision,
+                actual: current.machine_state.revision,
+            });
+        }
+        let expected_previous_revision = request.expected_revision;
         let resumed = WorkAttentionMachine::resume(current, expected_previous_revision, now)?;
         let event = attention_updated_event(&resumed, now);
         let attention = self

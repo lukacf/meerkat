@@ -3870,6 +3870,12 @@ fn workgraph_error_to_api(error: meerkat::WorkGraphError) -> ApiError {
     }
 }
 
+fn public_workgraph_goal_mutation_error(route: &str) -> ApiError {
+    ApiError::BadRequest(format!(
+        "{route} requires trusted in-process host/session authority; the public REST WorkGraph surface is fail-closed for goal and attention mutations"
+    ))
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct WorkGraphItemsQuery {
     #[serde(default)]
@@ -4637,15 +4643,12 @@ async fn workgraph_events(
 }
 
 async fn workgraph_goal_create(
-    State(state): State<AppState>,
-    Json(request): Json<meerkat::PublicGoalCreateRequest>,
+    State(_state): State<AppState>,
+    Json(_request): Json<meerkat::PublicGoalCreateRequest>,
 ) -> Result<Json<meerkat::GoalCreateResult>, ApiError> {
-    state
-        .workgraph_service
-        .create_goal(request.into())
-        .await
-        .map(Json)
-        .map_err(workgraph_error_to_api)
+    Err(public_workgraph_goal_mutation_error(
+        "/workgraph/goal/create",
+    ))
 }
 
 async fn workgraph_goal_status(
@@ -4661,27 +4664,21 @@ async fn workgraph_goal_status(
 }
 
 async fn workgraph_goal_confirm(
-    State(state): State<AppState>,
-    Json(request): Json<meerkat::GoalConfirmRequest>,
+    State(_state): State<AppState>,
+    Json(_request): Json<meerkat::GoalConfirmRequest>,
 ) -> Result<Json<meerkat::GoalConfirmResult>, ApiError> {
-    state
-        .workgraph_service
-        .goal_confirm_public(request)
-        .await
-        .map(Json)
-        .map_err(workgraph_error_to_api)
+    Err(public_workgraph_goal_mutation_error(
+        "/workgraph/goal/confirm",
+    ))
 }
 
 async fn workgraph_goal_request_close(
-    State(state): State<AppState>,
-    Json(request): Json<meerkat::PublicGoalRequestCloseRequest>,
+    State(_state): State<AppState>,
+    Json(_request): Json<meerkat::PublicGoalRequestCloseRequest>,
 ) -> Result<Json<meerkat::GoalRequestCloseResult>, ApiError> {
-    state
-        .workgraph_service
-        .goal_request_close(request.into())
-        .await
-        .map(Json)
-        .map_err(workgraph_error_to_api)
+    Err(public_workgraph_goal_mutation_error(
+        "/workgraph/goal/request_close",
+    ))
 }
 
 async fn workgraph_attention_list(
@@ -4697,46 +4694,30 @@ async fn workgraph_attention_list(
 }
 
 async fn workgraph_attention_pause(
-    State(state): State<AppState>,
-    Json(request): Json<meerkat::AttentionPauseRequest>,
+    State(_state): State<AppState>,
+    Json(_request): Json<meerkat::AttentionPauseRequest>,
 ) -> Result<Json<meerkat::AttentionBindingResult>, ApiError> {
-    state
-        .workgraph_service
-        .pause_attention(request)
-        .await
-        .map(Json)
-        .map_err(workgraph_error_to_api)
+    Err(public_workgraph_goal_mutation_error(
+        "/workgraph/attention/pause",
+    ))
 }
 
 async fn workgraph_attention_resume(
-    State(state): State<AppState>,
-    Json(request): Json<meerkat::AttentionBindingRequest>,
+    State(_state): State<AppState>,
+    Json(_request): Json<meerkat::AttentionResumeRequest>,
 ) -> Result<Json<meerkat::AttentionBindingResult>, ApiError> {
-    state
-        .workgraph_service
-        .resume_attention(request)
-        .await
-        .map(Json)
-        .map_err(workgraph_error_to_api)
+    Err(public_workgraph_goal_mutation_error(
+        "/workgraph/attention/resume",
+    ))
 }
 
 async fn workgraph_attention_continue(
-    State(state): State<AppState>,
-    Json(request): Json<meerkat::AttentionBindingRequest>,
+    State(_state): State<AppState>,
+    Json(_request): Json<meerkat::AttentionBindingRequest>,
 ) -> Result<Json<meerkat::AttentionContinueResult>, ApiError> {
-    let (session_id, input) = workgraph_attention_continuation_input(&state, request)
-        .await
-        .map_err(workgraph_error_to_api)?;
-    ensure_rest_session_exists(&state, &session_id).await?;
-    ensure_rest_session_runtime_executor(&state, &session_id).await;
-    let (outcome, _handle) = state
-        .runtime_adapter
-        .accept_input_with_completion(&session_id, input)
-        .await
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
-    rest_runtime_accept_result(outcome)
-        .map(Json)
-        .map_err(ApiError::Internal)
+    Err(public_workgraph_goal_mutation_error(
+        "/workgraph/attention/continue",
+    ))
 }
 
 async fn ensure_rest_session_exists(
@@ -9671,6 +9652,15 @@ mod tests {
         let blocked_tools = overlay
             .blocked_tools
             .expect("attention continuation should carry scoped tool overlay");
+        let allowed_tools = overlay
+            .allowed_tools
+            .expect("attention continuation should restrict visible tools");
+        assert!(
+            allowed_tools
+                .iter()
+                .all(|name| name.starts_with("workgraph_"))
+        );
+        assert!(allowed_tools.contains(&"workgraph_get".to_string()));
         assert!(!blocked_tools.contains(&"workgraph_add_evidence".to_string()));
         assert!(blocked_tools.contains(&"workgraph_link".to_string()));
         assert!(
@@ -9729,8 +9719,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let binding_id = scoped_goal.attention.binding_id.as_str().to_string();
+        let binding_revision = scoped_goal.attention.machine_state.revision;
         let goal_revision = scoped_goal.item.revision;
         let namespace = "scoped-goals";
 
@@ -9765,13 +9756,13 @@ mod tests {
                     .uri("/workgraph/attention/pause")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
-                        r#"{{"binding_id":"{binding_id}","namespace":"{namespace}"}}"#
+                        r#"{{"binding_id":"{binding_id}","namespace":"{namespace}","expected_revision":{binding_revision}}}"#
                     )))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let response = app
             .clone()
@@ -9781,13 +9772,13 @@ mod tests {
                     .uri("/workgraph/attention/resume")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
-                        r#"{{"binding_id":"{binding_id}","namespace":"{namespace}"}}"#
+                        r#"{{"binding_id":"{binding_id}","namespace":"{namespace}","expected_revision":{binding_revision}}}"#
                     )))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let response = app
             .clone()
@@ -9803,7 +9794,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let response = app
             .clone()
@@ -9828,10 +9819,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let confirmed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let confirmed_revision = confirmed["item"]["revision"].as_u64().unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let response = app
             .clone()
@@ -9841,13 +9829,13 @@ mod tests {
                     .uri("/workgraph/goal/request_close")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
-                        r#"{{"binding_id":"{binding_id}","namespace":"{namespace}","expected_revision":{confirmed_revision},"status":"completed"}}"#
+                        r#"{{"binding_id":"{binding_id}","namespace":"{namespace}","expected_revision":{goal_revision},"status":"completed"}}"#
                     )))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let events_path = meerkat::workgraph_rest_path_catalog()
             .iter()

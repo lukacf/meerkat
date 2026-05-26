@@ -21,6 +21,7 @@ from .generated.types import (
     AttentionListRequest as AttentionListRequest,
     AttentionListResult as AttentionListResult,
     AttentionPauseRequest as AttentionPauseRequest,
+    AttentionResumeRequest as AttentionResumeRequest,
     AttentionProjectionPolicy as AttentionProjectionPolicy,
     AttentionProjectionRequest as AttentionProjectionRequest,
     AttentionProjectionResult as AttentionProjectionResult,

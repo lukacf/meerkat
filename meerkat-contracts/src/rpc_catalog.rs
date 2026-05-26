@@ -530,7 +530,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             RpcMethodDescriptor::typed(
                 "workgraph/attention/resume",
                 "Resume a WorkGraph attention binding",
-                "AttentionBindingRequest",
+                "AttentionResumeRequest",
                 "AttentionBindingResult",
             ),
             RpcMethodDescriptor::typed(

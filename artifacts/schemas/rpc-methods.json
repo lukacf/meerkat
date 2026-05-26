@@ -419,7 +419,7 @@
     {
       "description": "Resume a WorkGraph attention binding",
       "name": "workgraph/attention/resume",
-      "params_type": "AttentionBindingRequest",
+      "params_type": "AttentionResumeRequest",
       "result_type": "AttentionBindingResult"
     },
     {

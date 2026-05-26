@@ -184,6 +184,11 @@ subset.
 | `workgraph/attention/continue` | WorkGraph | Queue a hidden continuation for a session-bound attention binding (workgraph feature) |
 | `comms/send` | Comms | Dispatch a comms command to a session |
 | `comms/peers` | Comms | List discoverable peers (comms feature) |
+
+WorkGraph goal and attention mutation methods require trusted in-process
+host/session authority. Public JSON-RPC servers keep the methods visible for
+contract stability, but fail closed for create, confirm, close, pause, resume,
+and continuation injection.
 | `skills/list` | Skills | List skills with provenance |
 | `mcp/add` | MCP | Stage live MCP server addition (mcp feature) |
 | `mcp/remove` | MCP | Stage live MCP server removal (mcp feature) |

@@ -1299,8 +1299,20 @@ pub struct AttentionPauseRequest {
     pub realm_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<WorkNamespace>,
+    pub expected_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AttentionResumeRequest {
+    pub binding_id: WorkAttentionBindingId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<WorkNamespace>,
+    pub expected_revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

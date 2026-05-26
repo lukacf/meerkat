@@ -98,6 +98,11 @@ This overview follows the generated OpenAPI artifact at
 | `POST` | `/sessions/{id}/mcp/remove` | Stage live MCP server removal (mcp feature) |
 | `POST` | `/sessions/{id}/mcp/reload` | Reload MCP server(s) (mcp feature) |
 | `POST` | `/comms/send` | Push comms message into a session (comms feature) |
+
+WorkGraph goal and attention mutation routes require trusted in-process
+host/session authority. Public REST servers keep the routes visible for
+contract stability, but fail closed for create, confirm, close, pause, resume,
+and continuation injection.
 | `GET` | `/comms/peers` | List discoverable peers (comms feature) |
 | `GET` | `/auth/profiles` | List realm auth profiles, backend profiles, and bindings |
 | `POST` | `/auth/profiles` | Store binding-scoped credentials |

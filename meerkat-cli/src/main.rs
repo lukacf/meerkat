@@ -2093,6 +2093,8 @@ enum WorkGraphCommands {
         #[arg(long)]
         namespace: Option<String>,
         #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
         json: bool,
     },
     /// Resume an attention binding
@@ -2100,6 +2102,8 @@ enum WorkGraphCommands {
         binding_id: String,
         #[arg(long)]
         namespace: Option<String>,
+        #[arg(long)]
+        expected_revision: u64,
         #[arg(long)]
         json: bool,
     },
@@ -6280,6 +6284,7 @@ async fn handle_workgraph_command(
         WorkGraphCommands::AttentionPause {
             binding_id,
             namespace,
+            expected_revision,
             json,
         } => {
             let result = service
@@ -6287,6 +6292,7 @@ async fn handle_workgraph_command(
                     binding_id: meerkat::WorkAttentionBindingId::new(binding_id)?,
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
+                    expected_revision,
                     until: None,
                 })
                 .await?;
@@ -6295,13 +6301,15 @@ async fn handle_workgraph_command(
         WorkGraphCommands::AttentionResume {
             binding_id,
             namespace,
+            expected_revision,
             json,
         } => {
             let result = service
-                .resume_attention(meerkat::AttentionBindingRequest {
+                .resume_attention(meerkat::AttentionResumeRequest {
                     binding_id: meerkat::WorkAttentionBindingId::new(binding_id)?,
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
+                    expected_revision,
                 })
                 .await?;
             print_workgraph_attention(vec![result.attention], json)

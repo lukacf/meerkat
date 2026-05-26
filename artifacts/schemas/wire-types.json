@@ -3798,6 +3798,11 @@
       "binding_id": {
         "type": "string"
       },
+      "expected_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
       "namespace": {
         "type": [
           "string",
@@ -3819,7 +3824,8 @@
       }
     },
     "required": [
-      "binding_id"
+      "binding_id",
+      "expected_revision"
     ],
     "title": "AttentionPauseRequest",
     "type": "object"
@@ -4109,6 +4115,37 @@
       "target"
     ],
     "title": "AttentionReassignRequest",
+    "type": "object"
+  },
+  "AttentionResumeRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "expected_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "binding_id",
+      "expected_revision"
+    ],
+    "title": "AttentionResumeRequest",
     "type": "object"
   },
   "BridgeAck": {

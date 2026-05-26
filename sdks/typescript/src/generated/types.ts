@@ -842,9 +842,17 @@ export interface AttentionListResult {
 
 export interface AttentionPauseRequest {
   binding_id: string;
+  expected_revision: number;
   namespace?: string;
   realm_id?: string;
   until?: string;
+}
+
+export interface AttentionResumeRequest {
+  binding_id: string;
+  expected_revision: number;
+  namespace?: string;
+  realm_id?: string;
 }
 
 export interface AttentionProjectionPolicy {

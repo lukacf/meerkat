@@ -44,6 +44,7 @@ from .generated.types import (
     AttentionListRequest,
     AttentionListResult,
     AttentionPauseRequest,
+    AttentionResumeRequest,
     GoalConfirmRequest,
     GoalConfirmResult,
     GoalCreateResult,
@@ -1372,7 +1373,7 @@ class MeerkatClient:
 
     async def resume_workgraph_attention(
         self,
-        params: AttentionBindingRequest,
+        params: AttentionResumeRequest,
     ) -> AttentionBindingResult:
         return await self._request("workgraph/attention/resume", _wire_params(params))
 

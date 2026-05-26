@@ -214,6 +214,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "AttentionListRequest": schema_for!(meerkat_workgraph::AttentionListRequest),
         "AttentionListResult": schema_for!(meerkat_workgraph::AttentionListResult),
         "AttentionPauseRequest": schema_for!(meerkat_workgraph::AttentionPauseRequest),
+        "AttentionResumeRequest": schema_for!(meerkat_workgraph::AttentionResumeRequest),
         "AttentionContextProjection": schema_for!(meerkat_workgraph::AttentionContextProjection),
         "AttentionProjectionPolicy": schema_for!(meerkat_workgraph::AttentionProjectionPolicy),
         "AttentionProjectionRequest": schema_for!(meerkat_workgraph::AttentionProjectionRequest),

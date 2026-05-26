@@ -49,6 +49,7 @@ import {
   type AttentionListRequest,
   type AttentionListResult,
   type AttentionPauseRequest,
+  type AttentionResumeRequest,
   type GoalConfirmRequest,
   type GoalStatusRequest,
   type PublicGoalCreateRequest,
@@ -1267,7 +1268,7 @@ export class MeerkatClient {
   }
 
   async resumeWorkGraphAttention(
-    params: AttentionBindingRequest,
+    params: AttentionResumeRequest,
   ): Promise<AttentionBindingResult> {
     return this.request<AttentionBindingResult>("workgraph/attention/resume", params);
   }

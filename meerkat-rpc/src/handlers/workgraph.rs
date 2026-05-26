@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use meerkat::{
-    AttentionBindingRequest, AttentionContinueResult, AttentionListRequest, AttentionPauseRequest,
+    AttentionBindingRequest, AttentionListRequest, AttentionPauseRequest, AttentionResumeRequest,
     GoalConfirmRequest, GoalStatusRequest, PublicGoalCreateRequest, PublicGoalRequestCloseRequest,
     ReadyWorkFilter, WorkGraphError, WorkGraphEventFilter, WorkGraphSnapshotFilter, WorkItemFilter,
     WorkItemId, WorkNamespace,
@@ -49,6 +49,14 @@ fn map_workgraph_error(id: Option<RpcId>, error: WorkGraphError) -> RpcResponse 
     }
 }
 
+fn trusted_workgraph_goal_mutation_required(id: Option<RpcId>) -> RpcResponse {
+    RpcResponse::error(
+        id,
+        error::INVALID_PARAMS,
+        "WorkGraph goal and attention mutations require trusted in-process host/session authority; the public JSON-RPC surface is fail-closed for these operations",
+    )
+}
+
 pub async fn handle_get(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -71,20 +79,13 @@ pub async fn handle_get(
 pub async fn handle_goal_create(
     id: Option<RpcId>,
     params: Option<&RawValue>,
-    runtime: Arc<SessionRuntime>,
+    _runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let request: PublicGoalCreateRequest = match parse_params(params) {
+    let _request: PublicGoalCreateRequest = match parse_params(params) {
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
-    match runtime
-        .workgraph_service()
-        .create_goal(request.into())
-        .await
-    {
-        Ok(result) => RpcResponse::success(id, result),
-        Err(error) => map_workgraph_error(id, error),
-    }
+    trusted_workgraph_goal_mutation_required(id)
 }
 
 pub async fn handle_goal_status(
@@ -105,39 +106,25 @@ pub async fn handle_goal_status(
 pub async fn handle_goal_confirm(
     id: Option<RpcId>,
     params: Option<&RawValue>,
-    runtime: Arc<SessionRuntime>,
+    _runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let request: GoalConfirmRequest = match parse_params(params) {
+    let _request: GoalConfirmRequest = match parse_params(params) {
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
-    match runtime
-        .workgraph_service()
-        .goal_confirm_public(request)
-        .await
-    {
-        Ok(result) => RpcResponse::success(id, result),
-        Err(error) => map_workgraph_error(id, error),
-    }
+    trusted_workgraph_goal_mutation_required(id)
 }
 
 pub async fn handle_goal_request_close(
     id: Option<RpcId>,
     params: Option<&RawValue>,
-    runtime: Arc<SessionRuntime>,
+    _runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let request: PublicGoalRequestCloseRequest = match parse_params(params) {
+    let _request: PublicGoalRequestCloseRequest = match parse_params(params) {
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
-    match runtime
-        .workgraph_service()
-        .goal_request_close(request.into())
-        .await
-    {
-        Ok(result) => RpcResponse::success(id, result),
-        Err(error) => map_workgraph_error(id, error),
-    }
+    trusted_workgraph_goal_mutation_required(id)
 }
 
 pub async fn handle_attention_list(
@@ -167,83 +154,37 @@ pub async fn handle_attention_list(
 pub async fn handle_attention_pause(
     id: Option<RpcId>,
     params: Option<&RawValue>,
-    runtime: Arc<SessionRuntime>,
+    _runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let request: AttentionPauseRequest = match parse_params(params) {
+    let _request: AttentionPauseRequest = match parse_params(params) {
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
-    match runtime.workgraph_service().pause_attention(request).await {
-        Ok(result) => RpcResponse::success(id, result),
-        Err(error) => map_workgraph_error(id, error),
-    }
+    trusted_workgraph_goal_mutation_required(id)
 }
 
 pub async fn handle_attention_resume(
     id: Option<RpcId>,
     params: Option<&RawValue>,
-    runtime: Arc<SessionRuntime>,
+    _runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let request: AttentionBindingRequest = match parse_params(params) {
+    let _request: AttentionResumeRequest = match parse_params(params) {
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
-    match runtime.workgraph_service().resume_attention(request).await {
-        Ok(result) => RpcResponse::success(id, result),
-        Err(error) => map_workgraph_error(id, error),
-    }
+    trusted_workgraph_goal_mutation_required(id)
 }
 
 pub async fn handle_attention_continue(
     id: Option<RpcId>,
     params: Option<&RawValue>,
-    runtime: Arc<SessionRuntime>,
+    _runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let request: AttentionBindingRequest = match parse_params(params) {
+    let _request: AttentionBindingRequest = match parse_params(params) {
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
-    match runtime
-        .enqueue_workgraph_attention_binding_continuation(request)
-        .await
-    {
-        Ok(outcome) => RpcResponse::success(id, rpc_attention_continue_result(outcome)),
-        Err(error) => RpcResponse::error(id, error.code, error.message),
-    }
-}
-
-fn rpc_attention_continue_result(
-    outcome: meerkat_runtime::AcceptOutcome,
-) -> AttentionContinueResult {
-    match outcome {
-        meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } => AttentionContinueResult {
-            outcome: meerkat::AttentionContinueOutcome::Accepted,
-            input_id: Some(input_id.to_string()),
-            existing_id: None,
-            reason: None,
-        },
-        meerkat_runtime::AcceptOutcome::Deduplicated {
-            input_id,
-            existing_id,
-        } => AttentionContinueResult {
-            outcome: meerkat::AttentionContinueOutcome::Deduplicated,
-            input_id: Some(input_id.to_string()),
-            existing_id: Some(existing_id.to_string()),
-            reason: None,
-        },
-        meerkat_runtime::AcceptOutcome::Rejected { reason } => AttentionContinueResult {
-            outcome: meerkat::AttentionContinueOutcome::Rejected,
-            input_id: None,
-            existing_id: None,
-            reason: Some(reason.to_string()),
-        },
-        _ => AttentionContinueResult {
-            outcome: meerkat::AttentionContinueOutcome::Rejected,
-            input_id: None,
-            existing_id: None,
-            reason: Some("unsupported accept outcome variant".to_string()),
-        },
-    }
+    trusted_workgraph_goal_mutation_required(id)
 }
 
 pub async fn handle_list(

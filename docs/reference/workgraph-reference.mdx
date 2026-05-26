@@ -124,9 +124,11 @@ Evidence refs are pointers. WorkGraph does not own the artifact content.
 | `workgraph/attention/resume` | Resume an attention binding |
 | `workgraph/attention/continue` | Queue a hidden continuation for a session-bound binding |
 
-General WorkGraph item mutation remains tool-owned. The narrow goal and
-attention RPC methods above are host-control methods for creating, observing,
-pausing, resuming, and driving attention over WorkGraph items.
+General WorkGraph item mutation remains tool-owned. The goal and attention
+mutation methods are trusted host-control methods: public REST and JSON-RPC
+servers expose observability, but fail closed for create, confirm, close, pause,
+resume, and continuation injection unless the call is made through an in-process
+host/runtime authority.
 
 ## REST
 

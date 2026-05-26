@@ -1148,9 +1148,19 @@ class AttentionListResult:
 class AttentionPauseRequest:
     """Wire payload for AttentionPauseRequest."""
     binding_id: str
+    expected_revision: int
     namespace: Optional[str] = None
     realm_id: Optional[str] = None
     until: Optional[str] = None
+
+
+@dataclass
+class AttentionResumeRequest:
+    """Wire payload for AttentionResumeRequest."""
+    binding_id: str
+    expected_revision: int
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
 
 
 @dataclass

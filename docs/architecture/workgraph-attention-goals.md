@@ -451,8 +451,12 @@ Suggested minimal host APIs:
 - `workgraph/attention/continue`: enqueue a hidden continuation for a
   session-bound binding.
 
-These are WorkGraph-feature APIs. They are unavailable when WorkGraph is not
-compiled or enabled.
+These are WorkGraph-feature host APIs. Public REST and JSON-RPC entrypoints keep
+the contract names visible for discovery and compatibility, but fail closed for
+mutating goal/attention calls; only trusted in-process host/runtime authority may
+create goals, add confirmation evidence, close goals, pause/resume attention, or
+inject continuations. They are unavailable when WorkGraph is not compiled or
+enabled.
 
 The CLI mirrors the narrow session-first subset under `rkat workgraph`:
 `goal-create`, `goal-status`, `goal-confirm`, `goal-close`, `attention-list`,

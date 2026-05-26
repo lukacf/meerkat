@@ -5,12 +5,12 @@ use meerkat_core::SessionId;
 use meerkat_workgraph::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionDelegatedAuthority, AttentionListRequest,
     AttentionPauseRequest, AttentionProjectionPolicy, AttentionProjectionRequest,
-    AttentionReassignRequest, CloseWorkItemRequest, CreateWorkItemRequest, GoalAttentionTarget,
-    GoalConfirmRequest, GoalCreateRequest, GoalRequestCloseRequest, GoalStatusRequest,
-    LinkWorkItemsRequest, UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionBindingId,
-    WorkAttentionMachine, WorkAttentionMode, WorkAttentionStatus, WorkAttentionTarget,
-    WorkCompletionPolicy, WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkItemRef,
-    WorkNamespace, WorkOwnerKey, WorkStatus,
+    AttentionReassignRequest, AttentionResumeRequest, CloseWorkItemRequest, CreateWorkItemRequest,
+    GoalAttentionTarget, GoalConfirmRequest, GoalCreateRequest, GoalRequestCloseRequest,
+    GoalStatusRequest, LinkWorkItemsRequest, UpdateWorkItemRequest, WorkAttentionBinding,
+    WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMode, WorkAttentionStatus,
+    WorkAttentionTarget, WorkCompletionPolicy, WorkEdgeKind, WorkEvidenceRef, WorkGraphService,
+    WorkItemRef, WorkNamespace, WorkOwnerKey, WorkStatus,
 };
 use serde_json::json;
 
@@ -196,6 +196,7 @@ async fn goal_create_is_atomic_and_attention_status_is_service_owned() {
             binding_id: goal.attention.binding_id.clone(),
             realm_id: Some("realm-a".to_string()),
             namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
+            expected_revision: goal.attention.machine_state.revision,
             until: Some(paused_until),
         })
         .await
@@ -771,9 +772,10 @@ async fn attention_projection_is_eligible_bounded_and_role_aware() {
 
     service
         .pause_attention(AttentionPauseRequest {
-            binding_id: goal.attention.binding_id,
+            binding_id: goal.attention.binding_id.clone(),
             realm_id: None,
             namespace: None,
+            expected_revision: goal.attention.machine_state.revision,
             until: None,
         })
         .await
@@ -940,10 +942,11 @@ async fn closed_goal_stops_attention_and_cannot_resume() {
     ));
 
     let resume_err = service
-        .resume_attention(AttentionBindingRequest {
-            binding_id: goal.attention.binding_id,
+        .resume_attention(AttentionResumeRequest {
+            binding_id: goal.attention.binding_id.clone(),
             realm_id: None,
             namespace: None,
+            expected_revision: goal.attention.machine_state.revision,
         })
         .await
         .expect_err("closed goal attention must not resume");
@@ -980,6 +983,7 @@ async fn expired_timed_pause_normalizes_on_attention_reads() {
             binding_id: goal.attention.binding_id.clone(),
             realm_id: None,
             namespace: None,
+            expected_revision: goal.attention.machine_state.revision,
             until: Some(Utc::now() - Duration::minutes(1)),
         })
         .await
@@ -1014,6 +1018,84 @@ async fn expired_timed_pause_normalizes_on_attention_reads() {
         .await
         .expect("list paused");
     assert!(paused.attention.is_empty());
+}
+
+#[tokio::test]
+async fn pause_and_resume_require_current_binding_revision() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000044").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "CAS attention".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let stale_pause = service
+        .pause_attention(AttentionPauseRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.attention.machine_state.revision + 1,
+            until: None,
+        })
+        .await
+        .expect_err("stale pause must fail");
+    assert!(matches!(
+        stale_pause,
+        meerkat_workgraph::WorkGraphError::StaleRevision { .. }
+    ));
+
+    let paused = service
+        .pause_attention(AttentionPauseRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.attention.machine_state.revision,
+            until: None,
+        })
+        .await
+        .expect("pause attention");
+    assert_eq!(
+        paused.attention.status,
+        WorkAttentionStatus::Paused { until: None }
+    );
+
+    let stale_resume = service
+        .resume_attention(AttentionResumeRequest {
+            binding_id: paused.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.attention.machine_state.revision,
+        })
+        .await
+        .expect_err("stale resume must fail");
+    assert!(matches!(
+        stale_resume,
+        meerkat_workgraph::WorkGraphError::StaleRevision { .. }
+    ));
+
+    let resumed = service
+        .resume_attention(AttentionResumeRequest {
+            binding_id: paused.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: paused.attention.machine_state.revision,
+        })
+        .await
+        .expect("resume attention");
+    assert_eq!(resumed.attention.status, WorkAttentionStatus::Active);
 }
 
 #[tokio::test]
@@ -1154,6 +1236,7 @@ fn narrow_goal_and_attention_control_contracts_round_trip() {
         binding_id: binding_id.clone(),
         realm_id: Some("realm-a".to_string()),
         namespace: Some(namespace.clone()),
+        expected_revision: 9,
         until: Some(paused_until),
     };
     let reassign = AttentionReassignRequest {

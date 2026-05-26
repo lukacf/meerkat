@@ -138,7 +138,7 @@ impl WorkGraphToolSurface {
             dispatch_context.insert(WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY.to_string(), value);
         }
         TurnToolOverlay {
-            allowed_tools: None,
+            allowed_tools: Some(allowed.into_iter().map(ToOwned::to_owned).collect()),
             blocked_tools: Some(blocked_tools),
             dispatch_context,
         }

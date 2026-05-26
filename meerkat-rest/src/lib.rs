@@ -4640,6 +4640,12 @@ async fn workgraph_goal_create(
     State(state): State<AppState>,
     Json(request): Json<meerkat::GoalCreateRequest>,
 ) -> Result<Json<meerkat::GoalCreateResult>, ApiError> {
+    if request.completion_policy.requires_trusted_principal() {
+        return Err(ApiError::BadRequest(
+            "principal-gated WorkGraph goal policies require trusted in-process principal authority and are not available on the public REST /workgraph/goal/create surface"
+                .to_string(),
+        ));
+    }
     state
         .workgraph_service
         .create_goal(request)
@@ -9733,6 +9739,29 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let goal: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let binding_id = goal["attention"]["binding_id"].as_str().unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/workgraph/goal/create")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{
+                            "title":"supervised",
+                            "target":{{"kind":"session","session_id":"{session_id}"}},
+                            "completion_policy":{{
+                                "kind":"supervisor",
+                                "owner_key":{{"kind":"principal","id":"lead"}}
+                            }}
+                        }}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let response = app
             .clone()

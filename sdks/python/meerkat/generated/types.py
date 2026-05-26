@@ -1116,6 +1116,20 @@ class AttentionContinueResult:
 
 
 @dataclass
+class AttentionContextProjection:
+    """Wire payload for AttentionContextProjection."""
+    authority: ProjectedAttentionAuthority
+    binding_id: str
+    binding_revision: int
+    item_revision: int
+    mode: WorkAttentionMode
+    text: AttentionProjectionText
+    work_ref: WorkItemRef
+    evidence_refs: Optional[list[WorkEvidenceRef]] = None
+    parent_refs: Optional[list[WorkItemRef]] = None
+
+
+@dataclass
 class AttentionListRequest:
     """Wire payload for AttentionListRequest."""
     namespace: Optional[str] = None
@@ -1157,7 +1171,7 @@ class AttentionProjectionRequest:
 @dataclass
 class AttentionProjectionResult:
     """Wire payload for AttentionProjectionResult."""
-    projection: dict[str, Any]
+    projection: AttentionContextProjection
 
 
 @dataclass
@@ -1183,7 +1197,6 @@ class GoalConfirmRequest:
     binding_id: str
     evidence: WorkEvidenceRef
     namespace: Optional[str] = None
-    principal: Optional[WorkOwnerKey] = None
     realm_id: Optional[str] = None
 
 

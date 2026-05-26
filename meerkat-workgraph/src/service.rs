@@ -411,7 +411,7 @@ impl WorkGraphService {
             realm_id: request.realm_id,
             namespace: request.namespace,
         };
-        let principal = request.trusted_principal.or(request.principal);
+        let principal = request.trusted_principal;
         let evidence_request = request.evidence;
         let attention = self.attention_binding(binding_request).await?.attention;
         for attempt in 0..BEST_EFFORT_REFRESH_ATTEMPTS {

@@ -175,6 +175,7 @@ WORKGRAPH_RPC_CONTRACT_TYPES = [
     "AttentionBindingRequest",
     "AttentionBindingResult",
     "AttentionContinueResult",
+    "AttentionContextProjection",
     "AttentionListRequest",
     "AttentionListResult",
     "AttentionPauseRequest",

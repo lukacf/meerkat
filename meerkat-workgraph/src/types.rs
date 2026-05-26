@@ -265,6 +265,13 @@ pub enum WorkCompletionPolicy {
 }
 
 impl WorkCompletionPolicy {
+    pub fn requires_trusted_principal(&self) -> bool {
+        matches!(
+            self,
+            Self::PrincipalConfirmed | Self::Supervisor { .. } | Self::ReviewerQuorum { .. }
+        )
+    }
+
     pub(crate) fn to_machine(&self) -> wg_dsl::WorkCompletionPolicy {
         match self {
             Self::SelfAttest => wg_dsl::WorkCompletionPolicy::SelfAttest,
@@ -1111,7 +1118,8 @@ pub struct GoalConfirmRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<WorkNamespace>,
     pub evidence: WorkEvidenceRef,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
     pub principal: Option<WorkOwnerKey>,
     #[serde(skip)]
     #[cfg_attr(feature = "schema", schemars(skip))]

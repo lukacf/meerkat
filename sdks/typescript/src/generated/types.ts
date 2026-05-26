@@ -817,6 +817,18 @@ export interface AttentionContinueResult {
   reason?: string;
 }
 
+export interface AttentionContextProjection {
+  authority: ProjectedAttentionAuthority;
+  binding_id: string;
+  binding_revision: number;
+  evidence_refs?: WorkEvidenceRef[];
+  item_revision: number;
+  mode: WorkAttentionMode;
+  parent_refs?: WorkItemRef[];
+  text: AttentionProjectionText;
+  work_ref: WorkItemRef;
+}
+
 export interface AttentionListRequest {
   namespace?: string;
   realm_id?: string;
@@ -847,7 +859,7 @@ export interface AttentionProjectionRequest {
 }
 
 export interface AttentionProjectionResult {
-  projection: Record<string, unknown>;
+  projection: AttentionContextProjection;
 }
 
 export interface AttentionProjectionText {
@@ -867,7 +879,6 @@ export interface GoalConfirmRequest {
   binding_id: string;
   evidence: WorkEvidenceRef;
   namespace?: string;
-  principal?: WorkOwnerKey;
   realm_id?: string;
 }
 

@@ -2449,16 +2449,6 @@
               "null"
             ]
           },
-          "principal": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WorkOwnerKey"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "realm_id": {
             "type": [
               "string",

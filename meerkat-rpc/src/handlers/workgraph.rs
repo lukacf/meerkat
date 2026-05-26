@@ -76,6 +76,13 @@ pub async fn handle_goal_create(
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
+    if request.completion_policy.requires_trusted_principal() {
+        return RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            "principal-gated WorkGraph goal policies require trusted in-process principal authority and are not available on the public RPC workgraph/goal/create surface",
+        );
+    }
     match runtime.workgraph_service().create_goal(request).await {
         Ok(result) => RpcResponse::success(id, result),
         Err(error) => map_workgraph_error(id, error),

@@ -1118,10 +1118,10 @@ pub struct GoalConfirmRequest {
 }
 
 impl GoalConfirmRequest {
-    /// Promote the surface-authenticated principal into the service authority field.
-    pub fn with_host_trusted_principal(mut self) -> Self {
+    /// Promote an already-authenticated host principal into the service authority field.
+    pub fn with_trusted_principal(mut self, principal: Option<WorkOwnerKey>) -> Self {
         if self.trusted_principal.is_none() {
-            self.trusted_principal = self.principal.clone();
+            self.trusted_principal = principal;
         }
         self
     }

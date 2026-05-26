@@ -4664,7 +4664,6 @@ async fn workgraph_goal_confirm(
     State(state): State<AppState>,
     Json(request): Json<meerkat::GoalConfirmRequest>,
 ) -> Result<Json<meerkat::GoalConfirmResult>, ApiError> {
-    let request = request.with_host_trusted_principal();
     state
         .workgraph_service
         .goal_confirm(request)
@@ -5681,7 +5680,10 @@ async fn continue_session_inner(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                         skill_references: skill_references.clone(),
-                        flow_tool_overlay: req.flow_tool_overlay.clone(),
+                        flow_tool_overlay: req
+                            .flow_tool_overlay
+                            .clone()
+                            .map(meerkat_core::service::TurnToolOverlay::without_dispatch_context),
                         additional_instructions: resolve_turn_additional_instructions(
                             req.additional_instructions.clone(),
                         ),
@@ -5953,7 +5955,10 @@ async fn continue_session_inner(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                         skill_references: skill_references.clone(),
-                        flow_tool_overlay: req.flow_tool_overlay.clone(),
+                        flow_tool_overlay: req
+                            .flow_tool_overlay
+                            .clone()
+                            .map(meerkat_core::service::TurnToolOverlay::without_dispatch_context),
                         additional_instructions: resolve_turn_additional_instructions(
                             req.additional_instructions.clone(),
                         ),

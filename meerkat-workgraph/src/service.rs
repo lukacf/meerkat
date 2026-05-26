@@ -60,6 +60,7 @@ impl WorkGraphService {
 
     pub async fn create(&self, request: CreateWorkItemRequest) -> Result<WorkItem, WorkGraphError> {
         let now = self.store.get_store_time_utc().await?;
+        reject_reserved_confirmation_evidence_refs(&request.evidence_refs)?;
         let (realm_id, namespace) = self.scope(request.realm_id.clone(), request.namespace.clone());
         let (item, event) = WorkGraphMachine::create_item(request, realm_id, namespace, now)?;
         self.store.insert_item(item, event).await
@@ -166,9 +167,20 @@ impl WorkGraphService {
         if filter.namespace.is_none() {
             filter.namespace = Some(self.default_namespace.clone());
         }
-        Ok(AttentionListResult {
-            attention: self.store.list_attention(filter).await?,
-        })
+        let status_filter = filter.status.take();
+        let now = self.store.get_store_time_utc().await?;
+        let attention = self
+            .store
+            .list_attention(filter)
+            .await?
+            .into_iter()
+            .filter(|binding| {
+                status_filter
+                    .as_ref()
+                    .is_none_or(|status| attention_status_matches_at(&binding.status, status, now))
+            })
+            .collect();
+        Ok(AttentionListResult { attention })
     }
 
     pub async fn pause_attention(
@@ -385,6 +397,16 @@ impl WorkGraphService {
             .await
     }
 
+    async fn best_effort_stop_attention_bindings_for_item(&self, item: &WorkItem) {
+        for _ in 0..BEST_EFFORT_REFRESH_ATTEMPTS {
+            match self.stop_attention_bindings_for_item(item).await {
+                Ok(()) => return,
+                Err(WorkGraphError::StaleRevision { .. }) => continue,
+                Err(_) => return,
+            }
+        }
+    }
+
     async fn stop_attention_bindings_for_item(
         &self,
         item: &WorkItem,
@@ -409,6 +431,38 @@ impl WorkGraphService {
             })
         {
             self.stop_attention_binding(binding).await?;
+        }
+        Ok(())
+    }
+
+    async fn validate_completion_policy_update(
+        &self,
+        item: &WorkItem,
+        requested: Option<&WorkCompletionPolicy>,
+    ) -> Result<(), WorkGraphError> {
+        let Some(requested) = requested else {
+            return Ok(());
+        };
+        if requested == &item.completion_policy {
+            return Ok(());
+        }
+        let bindings = self
+            .store
+            .list_attention(AttentionListRequest {
+                realm_id: Some(item.realm_id.clone()),
+                namespace: Some(item.namespace.clone()),
+                target: None,
+                status: None,
+            })
+            .await?;
+        if bindings
+            .into_iter()
+            .any(|binding| binding.work_ref.item_id == item.id)
+        {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "completion policy for attention-bound work item {} cannot be changed by update",
+                item.id
+            )));
         }
         Ok(())
     }
@@ -577,6 +631,8 @@ impl WorkGraphService {
                 request.id.clone(),
             )
             .await?;
+        self.validate_completion_policy_update(&item, request.completion_policy.as_ref())
+            .await?;
         let expected_previous_revision = item.revision;
         let (item, event) = WorkGraphMachine::update_item(item, request, now)?;
         self.store
@@ -610,12 +666,20 @@ impl WorkGraphService {
             )
             .await?;
         let expected_previous_revision = item.revision;
+        if request.status.is_terminal_success() && !completion_policy_is_satisfied(&item) {
+            return Err(WorkGraphError::InvalidTransition(format!(
+                "work item {} completion policy {} is not satisfied",
+                item.id,
+                completion_policy_name(&item.completion_policy)
+            )));
+        }
         let (item, event) = WorkGraphMachine::close_item(item, request, now)?;
         let closed = self
             .store
             .update_item_cas(item, expected_previous_revision, event)
             .await?;
-        self.stop_attention_bindings_for_item(&closed).await?;
+        self.best_effort_stop_attention_bindings_for_item(&closed)
+            .await;
         self.best_effort_refresh_dependents_after_blocker_change(&closed, now)
             .await;
         Ok(closed)
@@ -1111,7 +1175,9 @@ fn confirmation_evidence_for_policy(
                 )));
             }
             require_evidence_kind(policy, &evidence, "principal_confirmation")?;
-            evidence.label.get_or_insert_with(|| principal.canonical());
+            let principal = principal.canonical();
+            evidence.id = principal.clone();
+            evidence.label = Some(principal);
         }
         WorkCompletionPolicy::Supervisor { owner_key } => {
             let principal = require_principal(policy, principal)?;
@@ -1123,12 +1189,16 @@ fn confirmation_evidence_for_policy(
                 )));
             }
             require_evidence_kind(policy, &evidence, "supervisor_confirmation")?;
-            evidence.label.get_or_insert_with(|| owner_key.canonical());
+            let owner = owner_key.canonical();
+            evidence.id = owner.clone();
+            evidence.label = Some(owner);
         }
         WorkCompletionPolicy::ReviewerQuorum { .. } => {
             let principal = require_principal(policy, principal)?;
             require_evidence_kind(policy, &evidence, "reviewer_confirmation")?;
-            evidence.label.get_or_insert_with(|| principal.canonical());
+            let principal = principal.canonical();
+            evidence.id = principal.clone();
+            evidence.label = Some(principal);
         }
     }
     Ok(evidence)
@@ -1161,6 +1231,21 @@ fn require_evidence_kind(
     )))
 }
 
+fn reject_reserved_confirmation_evidence_refs(
+    evidence_refs: &[WorkEvidenceRef],
+) -> Result<(), WorkGraphError> {
+    if let Some(evidence) = evidence_refs
+        .iter()
+        .find(|evidence| is_reserved_confirmation_evidence_kind(&evidence.kind))
+    {
+        return Err(WorkGraphError::InvalidInput(format!(
+            "reserved completion evidence kind {} must be added through goal_confirm",
+            evidence.kind
+        )));
+    }
+    Ok(())
+}
+
 fn is_reserved_confirmation_evidence_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -1169,6 +1254,21 @@ fn is_reserved_confirmation_evidence_kind(kind: &str) -> bool {
             | "supervisor_confirmation"
             | "reviewer_confirmation"
     )
+}
+
+fn attention_status_matches_at(
+    status: &WorkAttentionStatus,
+    filter: &WorkAttentionStatus,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    match filter {
+        WorkAttentionStatus::Active => status.is_active_at(now),
+        WorkAttentionStatus::Paused { .. } => {
+            matches!(status, WorkAttentionStatus::Paused { .. }) && !status.is_active_at(now)
+        }
+        WorkAttentionStatus::Superseded => matches!(status, WorkAttentionStatus::Superseded),
+        WorkAttentionStatus::Stopped => matches!(status, WorkAttentionStatus::Stopped),
+    }
 }
 
 fn completion_policy_is_satisfied(item: &WorkItem) -> bool {

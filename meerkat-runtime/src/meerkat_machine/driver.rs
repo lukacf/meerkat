@@ -77,6 +77,18 @@ impl IngressView<'_> {
         self.driver.admitted_policy(input_id)
     }
 
+    pub(crate) fn flow_tool_overlay(
+        &self,
+        input_id: &InputId,
+    ) -> Option<Option<meerkat_core::service::TurnToolOverlay>> {
+        self.driver
+            .stored_input_state(input_id)?
+            .state
+            .persisted_input
+            .as_ref()
+            .map(input_flow_tool_overlay)
+    }
+
     pub(crate) fn request_id(&self, input_id: &InputId) -> Option<crate::ingress_types::RequestId> {
         self.driver.admitted_request_id(input_id)
     }
@@ -1112,6 +1124,21 @@ pub(crate) fn machine_input_peer_response_terminal_apply_intent(
         .and_then(|semantics| semantics.peer_response_terminal_apply_intent)
 }
 
+fn input_flow_tool_overlay(input: &Input) -> Option<meerkat_core::service::TurnToolOverlay> {
+    match input {
+        Input::Prompt(prompt) => prompt
+            .turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.flow_tool_overlay.clone()),
+        Input::FlowStep(flow_step) => flow_step
+            .turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.flow_tool_overlay.clone()),
+        Input::Continuation(continuation) => continuation.flow_tool_overlay.clone(),
+        Input::Peer(_) | Input::ExternalEvent(_) | Input::Operation(_) => None,
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn machine_batch_execution_kind(
     driver: &DriverEntry,
@@ -1183,6 +1210,7 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
         };
         let target_peer_response_terminal_apply_intent =
             machine_input_peer_response_terminal_apply_intent(driver, first);
+        let target_flow_tool_overlay = ingress.flow_tool_overlay(first);
         return steer
             .iter()
             .take_while(|id| {
@@ -1190,6 +1218,7 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
                     && machine_input_execution_kind(driver, id) == Some(target_execution_kind)
                     && machine_input_peer_response_terminal_apply_intent(driver, id)
                         == target_peer_response_terminal_apply_intent
+                    && ingress.flow_tool_overlay(id) == target_flow_tool_overlay
             })
             .cloned()
             .collect();
@@ -1573,10 +1602,7 @@ fn expected_recovered_runtime_semantics(
     let persisted_input = state.persisted_input.as_ref()?;
     let policy = &state.policy.as_ref()?.decision;
     Some(
-        crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
-            policy,
-            persisted_input.kind(),
-        ),
+        crate::ingress_types::RuntimeInputSemantics::from_policy_and_input(policy, persisted_input),
     )
 }
 
@@ -1587,9 +1613,9 @@ pub(crate) fn machine_build_recovered_ingress_entry(
     let runtime_semantics = state.runtime_semantics?;
     let policy = state.policy.as_ref()?.decision.clone();
     if runtime_semantics
-        != crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+        != crate::ingress_types::RuntimeInputSemantics::from_policy_and_input(
             &policy,
-            persisted_input.kind(),
+            persisted_input,
         )
     {
         return None;
@@ -3047,23 +3073,26 @@ mod recovery_tests {
     }
 
     #[test]
-    fn recovered_ingress_entry_rejects_continuation_stamped_as_content_turn() {
-        let input = Input::Continuation(
-            crate::input::ContinuationInput::detached_background_op_completed(),
-        );
+    fn recovered_ingress_entry_accepts_turn_append_continuation_stamped_as_content_turn() {
+        let mut continuation = crate::input::ContinuationInput::detached_background_op_completed();
+        continuation.turn_append =
+            Some(meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::SystemNotice,
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
+                    text: "attention continuation".to_string(),
+                },
+            });
+        let input = Input::Continuation(continuation);
         let decision = policy(ApplyMode::StageRunBoundary);
         let mut runtime_semantics =
-            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
-                &decision,
-                input.kind(),
-            );
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_input(&decision, &input);
         runtime_semantics.execution_kind =
             meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn;
         let state = state_with_runtime_semantics(input, decision, runtime_semantics);
 
         assert!(
-            machine_build_recovered_ingress_entry(&state).is_none(),
-            "recovery must reject a continuation row whose durable stamp says ContentTurn"
+            machine_build_recovered_ingress_entry(&state).is_some(),
+            "recovery must accept an attention continuation whose turn append makes it a ContentTurn"
         );
     }
 

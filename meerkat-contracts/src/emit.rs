@@ -1350,12 +1350,18 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 "items": { "type": "string" }
             })
         };
+        let work_status_array = || {
+            serde_json::json!({
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/WorkStatus" }
+            })
+        };
         match path {
             "/workgraph/items" | "/workgraph/snapshot" => vec![
                 rest_query_parameter("realm_id", string()),
                 rest_query_parameter("namespace", string()),
                 rest_query_parameter("all_namespaces", boolean()),
-                rest_query_parameter("statuses", string_array()),
+                rest_query_parameter("statuses", work_status_array()),
                 rest_query_parameter("labels", string_array()),
                 rest_query_parameter("include_terminal", boolean()),
                 rest_query_parameter("limit", integer()),

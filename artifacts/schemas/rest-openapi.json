@@ -12207,7 +12207,7 @@
             "required": false,
             "schema": {
               "items": {
-                "type": "string"
+                "$ref": "#/components/schemas/WorkStatus"
               },
               "type": "array"
             }
@@ -12420,7 +12420,7 @@
             "required": false,
             "schema": {
               "items": {
-                "type": "string"
+                "$ref": "#/components/schemas/WorkStatus"
               },
               "type": "array"
             }

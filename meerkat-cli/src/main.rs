@@ -1897,7 +1897,7 @@ fn work_completion_policy_from_args(
                 anyhow::anyhow!("--supervisor is required for --completion-policy supervisor")
             })?;
             Ok(meerkat::WorkCompletionPolicy::Supervisor {
-                owner_key: meerkat::WorkOwnerKey::principal(supervisor)?,
+                owner_key: parse_work_owner_key(&supervisor)?,
             })
         }
         WorkCompletionPolicyArg::ReviewerQuorum => {
@@ -1910,6 +1910,20 @@ fn work_completion_policy_from_args(
                 threshold: threshold.into(),
             })
         }
+    }
+}
+
+fn parse_work_owner_key(value: &str) -> anyhow::Result<meerkat::WorkOwnerKey> {
+    let Some((kind, id)) = value.split_once(':') else {
+        return Ok(meerkat::WorkOwnerKey::principal(value)?);
+    };
+    match kind {
+        "principal" => Ok(meerkat::WorkOwnerKey::principal(id)?),
+        "agent" => Ok(meerkat::WorkOwnerKey::agent(id)?),
+        "session" => Ok(meerkat::WorkOwnerKey::session(id)?),
+        "mob" => Ok(meerkat::WorkOwnerKey::mob(id)?),
+        "label" => Ok(meerkat::WorkOwnerKey::label(id)?),
+        other => Err(anyhow::anyhow!("unsupported work owner kind {other}")),
     }
 }
 

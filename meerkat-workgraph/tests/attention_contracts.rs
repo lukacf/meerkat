@@ -7,10 +7,10 @@ use meerkat_workgraph::{
     AttentionPauseRequest, AttentionProjectionPolicy, AttentionProjectionRequest,
     AttentionReassignRequest, CloseWorkItemRequest, CreateWorkItemRequest, GoalAttentionTarget,
     GoalConfirmRequest, GoalCreateRequest, GoalRequestCloseRequest, GoalStatusRequest,
-    LinkWorkItemsRequest, WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine,
-    WorkAttentionMode, WorkAttentionStatus, WorkAttentionTarget, WorkCompletionPolicy,
-    WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkItemRef, WorkNamespace, WorkOwnerKey,
-    WorkStatus,
+    LinkWorkItemsRequest, UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionBindingId,
+    WorkAttentionMachine, WorkAttentionMode, WorkAttentionStatus, WorkAttentionTarget,
+    WorkCompletionPolicy, WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkItemRef,
+    WorkNamespace, WorkOwnerKey, WorkStatus,
 };
 use serde_json::json;
 
@@ -97,7 +97,7 @@ async fn attention_pause_is_machine_owned_and_does_not_snooze_item() {
         .single()
         .expect("valid timestamp");
     let paused_until = Utc
-        .with_ymd_and_hms(2026, 5, 26, 12, 30, 0)
+        .with_ymd_and_hms(2126, 5, 26, 12, 30, 0)
         .single()
         .expect("valid timestamp");
     let session_id =
@@ -177,7 +177,7 @@ async fn goal_create_is_atomic_and_attention_status_is_service_owned() {
     assert_eq!(status.item.id, goal.item.id);
 
     let paused_until = Utc
-        .with_ymd_and_hms(2026, 5, 26, 12, 30, 0)
+        .with_ymd_and_hms(2126, 5, 26, 12, 30, 0)
         .single()
         .expect("valid timestamp");
     let paused = service
@@ -315,6 +315,116 @@ async fn raw_evidence_cannot_satisfy_reserved_completion_policy() {
         })
         .await
         .expect_err("reserved confirmation evidence is only accepted through goal_confirm");
+    assert!(matches!(
+        err,
+        meerkat_workgraph::WorkGraphError::InvalidInput(_)
+    ));
+}
+
+#[tokio::test]
+async fn create_rejects_reserved_completion_evidence() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+
+    let err = service
+        .create(CreateWorkItemRequest {
+            title: "Spoofed evidence".to_string(),
+            completion_policy: WorkCompletionPolicy::HostConfirmed,
+            evidence_refs: vec![WorkEvidenceRef {
+                kind: "host_confirmation".to_string(),
+                id: "spoofed".to_string(),
+                label: None,
+                summary: None,
+            }],
+            ..CreateWorkItemRequest::default()
+        })
+        .await
+        .expect_err("reserved evidence cannot be seeded at creation");
+    assert!(matches!(
+        err,
+        meerkat_workgraph::WorkGraphError::InvalidInput(_)
+    ));
+}
+
+#[tokio::test]
+async fn direct_completed_close_is_policy_gated() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000111").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Needs acceptance".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::HostConfirmed,
+            delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let err = service
+        .close(CloseWorkItemRequest {
+            id: goal.item.id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            status: WorkStatus::Completed,
+        })
+        .await
+        .expect_err("completed close requires completion policy satisfaction");
+    assert!(matches!(
+        err,
+        meerkat_workgraph::WorkGraphError::InvalidTransition(_)
+    ));
+}
+
+#[tokio::test]
+async fn attention_bound_update_cannot_change_completion_policy() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000112").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Protected policy".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::HostConfirmed,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let err = service
+        .update(UpdateWorkItemRequest {
+            id: goal.item.id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            title: None,
+            description: None,
+            priority: None,
+            completion_policy: Some(WorkCompletionPolicy::SelfAttest),
+            labels: None,
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+        })
+        .await
+        .expect_err("attention-bound completion policy is immutable through update");
     assert!(matches!(
         err,
         meerkat_workgraph::WorkGraphError::InvalidInput(_)

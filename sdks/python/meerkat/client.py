@@ -1328,6 +1328,33 @@ class MeerkatClient:
         events = raw.get("events", [])
         return {"events": events if isinstance(events, list) else []}
 
+    async def create_workgraph_goal(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("workgraph/goal/create", dict(params))
+
+    async def get_workgraph_goal_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("workgraph/goal/status", dict(params))
+
+    async def confirm_workgraph_goal(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("workgraph/goal/confirm", dict(params))
+
+    async def request_close_workgraph_goal(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("workgraph/goal/request_close", dict(params))
+
+    async def list_workgraph_attention(
+        self,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._request("workgraph/attention/list", dict(params or {}))
+
+    async def pause_workgraph_attention(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("workgraph/attention/pause", dict(params))
+
+    async def resume_workgraph_attention(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("workgraph/attention/resume", dict(params))
+
+    async def continue_workgraph_attention(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("workgraph/attention/continue", dict(params))
+
     async def mcp_add(
         self,
         session_id: str,

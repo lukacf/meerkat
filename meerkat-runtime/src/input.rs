@@ -506,6 +506,9 @@ pub struct ContinuationInput {
     /// Optional request/correlation handle tied to the continuation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// Optional runtime-owned context projected into the next turn boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_append: Option<ConversationContextAppend>,
 }
 
 impl ContinuationInput {
@@ -532,6 +535,7 @@ impl ContinuationInput {
             reason: "detached_background_op_completed".to_string(),
             handling_mode: HandlingMode::Steer,
             request_id: None,
+            context_append: None,
         }
     }
 }
@@ -894,6 +898,9 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
 
 fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
     let (projection, content) = match input {
+        Input::Continuation(continuation) => {
+            return continuation.context_append.clone();
+        }
         Input::Peer(peer) => {
             let projection = peer_projection_from_peer_input(peer)?;
             let content = peer_notice_renderable(peer)?;
@@ -1280,6 +1287,31 @@ mod tests {
     }
 
     #[test]
+    fn continuation_projection_can_carry_runtime_context_append() {
+        let input = Input::Continuation(ContinuationInput {
+            header: make_header(),
+            reason: "workgraph_attention".into(),
+            handling_mode: HandlingMode::Steer,
+            request_id: Some("binding-1".into()),
+            context_append: Some(ConversationContextAppend {
+                key: "workgraph_attention:binding-1:2:5".into(),
+                content: CoreRenderable::Text {
+                    text: "WorkGraph attention projection".into(),
+                },
+            }),
+        });
+        let projection = runtime_input_projection_for_machine_batch(&input);
+        let appends = projection_to_pending_system_context_appends(input.id(), &projection);
+
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].text, "WorkGraph attention projection");
+        assert_eq!(
+            appends[0].source.as_deref(),
+            Some("workgraph_attention:binding-1:2:5")
+        );
+    }
+
+    #[test]
     fn steer_projection_falls_back_to_ordinary_peer_append() {
         let mut header = make_header();
         header.source = InputOrigin::Peer {
@@ -1637,6 +1669,7 @@ mod tests {
             reason: "continue".into(),
             handling_mode: HandlingMode::Steer,
             request_id: None,
+            context_append: None,
         });
         assert_eq!(continuation.kind(), InputKind::Continuation);
 

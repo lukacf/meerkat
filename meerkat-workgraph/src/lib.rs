@@ -20,7 +20,7 @@ mod tools;
 mod types;
 
 pub use error::WorkGraphError;
-pub use machine::WorkGraphMachine;
+pub use machine::{WorkAttentionMachine, WorkGraphMachine};
 pub use rest_contract::{
     WORKGRAPH_REST_PATHS, WorkGraphRestOperationDescriptor, WorkGraphRestPathDescriptor,
     WorkGraphRestRoute, workgraph_rest_path_catalog, workgraph_rest_response_schema,
@@ -40,12 +40,21 @@ pub use tools::{
     WorkGraphToolError, handle_workgraph_tools_call, workgraph_tools_list,
 };
 pub use types::{
-    AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    ExternalWorkRef, LinkWorkItemsRequest, ReadyWorkFilter, ReleaseWorkItemRequest,
-    UpdateWorkItemRequest, WorkClaim, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphEvent,
-    WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphItemsResponse, WorkGraphMachineState,
-    WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter, WorkItemId,
-    WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus,
+    AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,
+    AttentionContextProjection, AttentionContinueOutcome, AttentionContinueResult,
+    AttentionDelegatedAuthority, AttentionListRequest, AttentionListResult, AttentionPauseRequest,
+    AttentionProjectionPolicy, AttentionProjectionRequest, AttentionProjectionResult,
+    AttentionProjectionText, AttentionReassignRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
+    CreateWorkItemRequest, ExternalWorkRef, GoalAttentionTarget, GoalConfirmRequest,
+    GoalConfirmResult, GoalCreateRequest, GoalCreateResult, GoalRequestCloseRequest,
+    GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult, LinkWorkItemsRequest,
+    ProjectedAttentionAuthority, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
+    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachineState, WorkAttentionMode,
+    WorkAttentionStatus, WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge,
+    WorkEdgeKind, WorkEvidenceRef, WorkGraphEvent, WorkGraphEventKind, WorkGraphEventsResponse,
+    WorkGraphItemsResponse, WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter,
+    WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey,
+    WorkOwnerKind, WorkPriority, WorkStatus,
 };
 
 pub const WORKGRAPH_CAPABILITY_DISABLED_DESCRIPTION: &str =
@@ -104,6 +113,12 @@ pub mod machine_schema_exports {
     pub fn workgraph_lifecycle_schema() -> meerkat_machine_schema::MachineSchema {
         meerkat_machine_schema::catalog::dsl::workgraph_lifecycle_schema_metadata().attach_to(
             crate::machines::workgraph_lifecycle::WorkGraphLifecycleMachineState::schema(),
+        )
+    }
+
+    pub fn work_attention_lifecycle_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::work_attention_lifecycle_schema_metadata().attach_to(
+            crate::machines::work_attention_lifecycle::WorkAttentionLifecycleMachineState::schema(),
         )
     }
 }

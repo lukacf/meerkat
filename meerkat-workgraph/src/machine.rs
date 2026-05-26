@@ -4,13 +4,58 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 
 use crate::WorkGraphError;
-use crate::machines::workgraph_lifecycle as wg_dsl;
+use crate::machines::{work_attention_lifecycle as attention_dsl, workgraph_lifecycle as wg_dsl};
 use crate::types::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkClaim, WorkEdge, WorkEdgeKind,
-    WorkGraphEvent, WorkGraphEventKind, WorkGraphMachineState, WorkItem, WorkItemId, WorkNamespace,
-    WorkStatus,
+    ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionStatus,
+    WorkClaim, WorkEdge, WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind, WorkGraphMachineState,
+    WorkItem, WorkItemId, WorkNamespace, WorkStatus,
 };
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WorkAttentionMachine;
+
+impl WorkAttentionMachine {
+    pub fn pause(
+        mut binding: WorkAttentionBinding,
+        expected_revision: u64,
+        until: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Result<WorkAttentionBinding, WorkGraphError> {
+        let input = attention_dsl::WorkAttentionLifecycleInput::Pause {
+            expected_revision,
+            until_utc_ms: until.map(datetime_to_millis),
+        };
+        binding.machine_state = apply_attention_dsl(&binding, input)?;
+        sync_attention_from_machine_state(&mut binding);
+        binding.updated_at = now;
+        Ok(binding)
+    }
+
+    pub fn resume(
+        mut binding: WorkAttentionBinding,
+        expected_revision: u64,
+        now: DateTime<Utc>,
+    ) -> Result<WorkAttentionBinding, WorkGraphError> {
+        let input = attention_dsl::WorkAttentionLifecycleInput::Resume { expected_revision };
+        binding.machine_state = apply_attention_dsl(&binding, input)?;
+        sync_attention_from_machine_state(&mut binding);
+        binding.updated_at = now;
+        Ok(binding)
+    }
+
+    pub fn is_eligible_at(binding: &WorkAttentionBinding, now: DateTime<Utc>) -> bool {
+        match binding.machine_state.lifecycle_phase {
+            attention_dsl::WorkAttentionLifecycleState::Active => true,
+            attention_dsl::WorkAttentionLifecycleState::Paused => binding
+                .machine_state
+                .paused_until_utc_ms
+                .is_some_and(|until| until <= datetime_to_millis(now)),
+            attention_dsl::WorkAttentionLifecycleState::Superseded
+            | attention_dsl::WorkAttentionLifecycleState::Stopped => false,
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WorkGraphMachine;
@@ -44,12 +89,22 @@ impl WorkGraphMachine {
                 due_at_utc_ms: request.due_at.map(datetime_to_millis),
                 not_before_utc_ms: request.not_before.map(datetime_to_millis),
                 snoozed_until_utc_ms: request.snoozed_until.map(datetime_to_millis),
+                completion_policy: request.completion_policy.clone().to_machine(),
+                completion_supervisor_owner_key: request.completion_policy.supervisor_owner_key(),
+                completion_reviewer_quorum_threshold: request
+                    .completion_policy
+                    .reviewer_quorum_threshold(),
                 unresolved_blocker_count: 0,
             },
             WorkStatus::Blocked => wg_dsl::WorkGraphLifecycleInput::CreateBlocked {
                 due_at_utc_ms: request.due_at.map(datetime_to_millis),
                 not_before_utc_ms: request.not_before.map(datetime_to_millis),
                 snoozed_until_utc_ms: request.snoozed_until.map(datetime_to_millis),
+                completion_policy: request.completion_policy.clone().to_machine(),
+                completion_supervisor_owner_key: request.completion_policy.supervisor_owner_key(),
+                completion_reviewer_quorum_threshold: request
+                    .completion_policy
+                    .reviewer_quorum_threshold(),
                 unresolved_blocker_count: 0,
             },
             WorkStatus::InProgress
@@ -65,6 +120,7 @@ impl WorkGraphMachine {
             title,
             description: request.description,
             status: work_status_from_dsl(dsl_state.lifecycle_phase)?,
+            completion_policy: request.completion_policy,
             priority: request.priority,
             labels: normalize_labels(request.labels)?,
             owner: None,
@@ -93,6 +149,9 @@ impl WorkGraphMachine {
         let due_at = request.due_at.or(item.due_at);
         let not_before = request.not_before.or(item.not_before);
         let snoozed_until = request.snoozed_until.or(item.snoozed_until);
+        let completion_policy = request
+            .completion_policy
+            .unwrap_or_else(|| item.completion_policy.clone());
         let dsl_state = apply_item_dsl(
             &item,
             item.machine_state.unresolved_blocker_count,
@@ -101,6 +160,9 @@ impl WorkGraphMachine {
                 due_at_utc_ms: due_at.map(datetime_to_millis),
                 not_before_utc_ms: not_before.map(datetime_to_millis),
                 snoozed_until_utc_ms: snoozed_until.map(datetime_to_millis),
+                completion_policy: completion_policy.clone().to_machine(),
+                completion_supervisor_owner_key: completion_policy.supervisor_owner_key(),
+                completion_reviewer_quorum_threshold: completion_policy.reviewer_quorum_threshold(),
                 unresolved_blocker_count: item.machine_state.unresolved_blocker_count,
             },
             Some(request.expected_revision),
@@ -399,6 +461,24 @@ fn apply_link_validation_dsl(
     Ok(())
 }
 
+fn apply_attention_dsl(
+    binding: &WorkAttentionBinding,
+    input: attention_dsl::WorkAttentionLifecycleInput,
+) -> Result<attention_dsl::WorkAttentionLifecycleMachineState, WorkGraphError> {
+    let mut dsl_auth = attention_dsl::WorkAttentionLifecycleMachineAuthority::from_state(
+        binding.machine_state.clone(),
+    );
+    attention_dsl::WorkAttentionLifecycleMachineMutator::apply(&mut dsl_auth, input).map_err(
+        |error| {
+            WorkGraphError::InvalidTransition(format!(
+                "attention binding {} refused transition: {error:?}",
+                binding.binding_id
+            ))
+        },
+    )?;
+    Ok(dsl_auth.state)
+}
+
 fn apply_item_dsl(
     item: &WorkItem,
     unresolved_blocker_count: u64,
@@ -422,6 +502,20 @@ fn apply_item_dsl(
         WorkGraphError::InvalidTransition(format!("{error:?}"))
     })?;
     Ok(dsl_auth.state)
+}
+
+fn sync_attention_from_machine_state(binding: &mut WorkAttentionBinding) {
+    binding.status = match binding.machine_state.lifecycle_phase {
+        attention_dsl::WorkAttentionLifecycleState::Active => WorkAttentionStatus::Active,
+        attention_dsl::WorkAttentionLifecycleState::Paused => WorkAttentionStatus::Paused {
+            until: binding
+                .machine_state
+                .paused_until_utc_ms
+                .and_then(millis_to_datetime),
+        },
+        attention_dsl::WorkAttentionLifecycleState::Superseded => WorkAttentionStatus::Superseded,
+        attention_dsl::WorkAttentionLifecycleState::Stopped => WorkAttentionStatus::Stopped,
+    };
 }
 
 fn work_status_from_dsl(status: wg_dsl::WorkLifecycleState) -> Result<WorkStatus, WorkGraphError> {
@@ -453,6 +547,11 @@ fn sync_item_from_machine_state(item: &mut WorkItem) -> Result<(), WorkGraphErro
         .machine_state
         .snoozed_until_utc_ms
         .and_then(millis_to_datetime);
+    item.completion_policy = crate::types::WorkCompletionPolicy::from_machine(
+        item.machine_state.completion_policy,
+        item.machine_state.completion_supervisor_owner_key.clone(),
+        item.machine_state.completion_reviewer_quorum_threshold,
+    );
     item.terminal_at = item
         .machine_state
         .terminal_at_utc_ms
@@ -489,6 +588,18 @@ fn validate_item_machine_projection(item: &WorkItem) -> Result<(), WorkGraphErro
     if item.snoozed_until.map(datetime_to_millis) != item.machine_state.snoozed_until_utc_ms {
         return Err(WorkGraphError::Store(format!(
             "work item {} snoozed_until projection does not match machine state",
+            item.id
+        )));
+    }
+    if item.completion_policy
+        != crate::types::WorkCompletionPolicy::from_machine(
+            item.machine_state.completion_policy,
+            item.machine_state.completion_supervisor_owner_key.clone(),
+            item.machine_state.completion_reviewer_quorum_threshold,
+        )
+    {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} completion_policy projection does not match machine state",
             item.id
         )));
     }
@@ -692,6 +803,7 @@ mod tests {
                 title: title.to_string(),
                 description: None,
                 priority: Default::default(),
+                completion_policy: Default::default(),
                 labels: BTreeSet::new(),
                 due_at: None,
                 not_before: None,
@@ -734,6 +846,7 @@ mod tests {
                 title: None,
                 description: None,
                 priority: None,
+                completion_policy: None,
                 labels: None,
                 due_at: Some(now + Duration::hours(1)),
                 not_before: None,

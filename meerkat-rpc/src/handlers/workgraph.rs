@@ -3,12 +3,14 @@
 use std::sync::Arc;
 
 use meerkat::{
-    ReadyWorkFilter, WorkGraphError, WorkGraphEventFilter, WorkGraphSnapshotFilter, WorkItemFilter,
-    WorkItemId, WorkNamespace,
+    AttentionBindingRequest, AttentionListRequest, AttentionPauseRequest, GoalConfirmRequest,
+    GoalCreateRequest, GoalRequestCloseRequest, GoalStatusRequest, ReadyWorkFilter, WorkGraphError,
+    WorkGraphEventFilter, WorkGraphSnapshotFilter, WorkItemFilter, WorkItemId, WorkNamespace,
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
+use super::runtime::to_wire_accept_result;
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
@@ -63,6 +65,148 @@ pub async fn handle_get(
     {
         Ok(item) => RpcResponse::success(id, item),
         Err(error) => map_workgraph_error(id, error),
+    }
+}
+
+pub async fn handle_goal_create(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let request: GoalCreateRequest = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    match runtime.workgraph_service().create_goal(request).await {
+        Ok(result) => RpcResponse::success(id, result),
+        Err(error) => map_workgraph_error(id, error),
+    }
+}
+
+pub async fn handle_goal_status(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let request: GoalStatusRequest = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    match runtime.workgraph_service().goal_status(request).await {
+        Ok(result) => RpcResponse::success(id, result),
+        Err(error) => map_workgraph_error(id, error),
+    }
+}
+
+pub async fn handle_goal_confirm(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let request: GoalConfirmRequest = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    match runtime.workgraph_service().goal_confirm(request).await {
+        Ok(result) => RpcResponse::success(id, result),
+        Err(error) => map_workgraph_error(id, error),
+    }
+}
+
+pub async fn handle_goal_request_close(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let request: GoalRequestCloseRequest = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    match runtime
+        .workgraph_service()
+        .goal_request_close(request)
+        .await
+    {
+        Ok(result) => RpcResponse::success(id, result),
+        Err(error) => map_workgraph_error(id, error),
+    }
+}
+
+pub async fn handle_attention_list(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let request: AttentionListRequest = match params {
+        Some(raw) => match serde_json::from_str(raw.get()) {
+            Ok(filter) => filter,
+            Err(error) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("invalid params: {error}"),
+                );
+            }
+        },
+        None => AttentionListRequest::default(),
+    };
+    match runtime.workgraph_service().list_attention(request).await {
+        Ok(result) => RpcResponse::success(id, result),
+        Err(error) => map_workgraph_error(id, error),
+    }
+}
+
+pub async fn handle_attention_pause(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let request: AttentionPauseRequest = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    match runtime.workgraph_service().pause_attention(request).await {
+        Ok(result) => RpcResponse::success(id, result),
+        Err(error) => map_workgraph_error(id, error),
+    }
+}
+
+pub async fn handle_attention_resume(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let request: AttentionBindingRequest = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    match runtime.workgraph_service().resume_attention(request).await {
+        Ok(result) => RpcResponse::success(id, result),
+        Err(error) => map_workgraph_error(id, error),
+    }
+}
+
+pub async fn handle_attention_continue(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let request: AttentionBindingRequest = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    match runtime
+        .enqueue_workgraph_attention_binding_continuation(request.binding_id)
+        .await
+        .and_then(|outcome| {
+            to_wire_accept_result(outcome).map_err(|message| crate::protocol::RpcError {
+                code: error::INTERNAL_ERROR,
+                message,
+                data: None,
+            })
+        }) {
+        Ok(result) => RpcResponse::success(id, result),
+        Err(error) => RpcResponse::error(id, error.code, error.message),
     }
 }
 

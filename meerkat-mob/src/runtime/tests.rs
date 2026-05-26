@@ -204,6 +204,8 @@ struct MockCommsRuntime {
     peer_statuses: RwLock<HashMap<String, (PeerReachability, Option<PeerReachabilityReason>)>>,
     sent_intents: RwLock<Vec<String>>,
     inbox_notify: Arc<tokio::sync::Notify>,
+    peer_lifecycle_in_flight: AtomicU64,
+    peer_lifecycle_max_in_flight: AtomicU64,
 }
 
 impl MockCommsRuntime {
@@ -238,6 +240,8 @@ impl MockCommsRuntime {
             peer_statuses: RwLock::new(HashMap::new()),
             sent_intents: RwLock::new(Vec::new()),
             inbox_notify: Arc::new(tokio::sync::Notify::new()),
+            peer_lifecycle_in_flight: AtomicU64::new(0),
+            peer_lifecycle_max_in_flight: AtomicU64::new(0),
         }
     }
 
@@ -293,6 +297,30 @@ impl MockCommsRuntime {
         self.sent_intents.read().await.clone()
     }
 
+    fn begin_peer_lifecycle_send(&self) -> PeerLifecycleSendGuard<'_> {
+        let in_flight = self.peer_lifecycle_in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+        loop {
+            let observed_max = self.peer_lifecycle_max_in_flight.load(Ordering::Acquire);
+            if in_flight <= observed_max {
+                break;
+            }
+            if self
+                .peer_lifecycle_max_in_flight
+                .compare_exchange(observed_max, in_flight, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
+            }
+        }
+        PeerLifecycleSendGuard {
+            in_flight: &self.peer_lifecycle_in_flight,
+        }
+    }
+
+    fn max_concurrent_peer_lifecycle_sends(&self) -> u64 {
+        self.peer_lifecycle_max_in_flight.load(Ordering::Acquire)
+    }
+
     async fn set_peer_status(
         &self,
         peer_name: &str,
@@ -303,6 +331,16 @@ impl MockCommsRuntime {
             .write()
             .await
             .insert(peer_name.to_string(), (reachability, reason));
+    }
+}
+
+struct PeerLifecycleSendGuard<'a> {
+    in_flight: &'a AtomicU64,
+}
+
+impl Drop for PeerLifecycleSendGuard<'_> {
+    fn drop(&mut self) {
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -426,6 +464,7 @@ impl CoreCommsRuntime for MockCommsRuntime {
     async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {
         match cmd {
             CommsCommand::PeerLifecycle { to, kind, .. } => {
+                let _in_flight = self.begin_peer_lifecycle_send();
                 let behavior = *self
                     .behavior
                     .read()
@@ -635,6 +674,8 @@ struct MockSessionService {
     archive_fail_comms_names: RwLock<HashSet<String>>,
     /// Sent intents for sessions that were archived and removed.
     archived_sent_intents: RwLock<HashMap<SessionId, Vec<String>>>,
+    /// Peer-lifecycle fanout concurrency observed before archive removed a runtime.
+    archived_peer_lifecycle_max_in_flight: RwLock<HashMap<SessionId, u64>>,
     fail_start_turn: std::sync::atomic::AtomicBool,
     fail_inject: std::sync::atomic::AtomicBool,
     disable_interaction_event_injector: std::sync::atomic::AtomicBool,
@@ -693,6 +734,7 @@ impl MockSessionService {
             archive_fail_sessions: RwLock::new(HashSet::new()),
             archive_fail_comms_names: RwLock::new(HashSet::new()),
             archived_sent_intents: RwLock::new(HashMap::new()),
+            archived_peer_lifecycle_max_in_flight: RwLock::new(HashMap::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
             fail_inject: std::sync::atomic::AtomicBool::new(false),
             disable_interaction_event_injector: std::sync::atomic::AtomicBool::new(false),
@@ -1060,6 +1102,23 @@ impl MockSessionService {
                 .await
                 .get(session_id)
                 .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    async fn max_concurrent_peer_lifecycle_sends(&self, session_id: &SessionId) -> u64 {
+        let runtime = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).cloned()
+        };
+        match runtime {
+            Some(runtime) => runtime.max_concurrent_peer_lifecycle_sends(),
+            None => self
+                .archived_peer_lifecycle_max_in_flight
+                .read()
+                .await
+                .get(session_id)
+                .copied()
                 .unwrap_or_default(),
         }
     }
@@ -1541,6 +1600,10 @@ impl SessionService for MockSessionService {
                 .write()
                 .await
                 .insert(id.clone(), intents);
+            self.archived_peer_lifecycle_max_in_flight
+                .write()
+                .await
+                .insert(id.clone(), runtime.max_concurrent_peer_lifecycle_sends());
         }
         Ok(())
     }
@@ -15945,13 +16008,20 @@ async fn test_retire_fanout_notifies_150_peers_with_bounded_parallelism() {
         .await
         .expect("retire high-degree member");
     let elapsed = started.elapsed();
+    let max_in_flight = service
+        .max_concurrent_peer_lifecycle_sends(&retiring_sid)
+        .await;
 
     assert!(
-        elapsed < Duration::from_secs(2),
-        "150 peer-retired notifications with {PER_NOTIFICATION_DELAY_MS}ms send delay should fan out with bounded parallelism, not run sequentially (elapsed={elapsed:?})"
+        max_in_flight > 1,
+        "150 peer-retired notifications should fan out concurrently, not run sequentially (max_in_flight={max_in_flight}, elapsed={elapsed:?})"
+    );
+    assert!(
+        max_in_flight <= 64,
+        "peer-retired notifications should respect the bounded fanout limit (max_in_flight={max_in_flight}, elapsed={elapsed:?})"
     );
     eprintln!(
-        "retire fanout stress: peers={PEERS}, per_notification_delay_ms={PER_NOTIFICATION_DELAY_MS}, retire={elapsed:?}"
+        "retire fanout stress: peers={PEERS}, per_notification_delay_ms={PER_NOTIFICATION_DELAY_MS}, max_in_flight={max_in_flight}, retire={elapsed:?}"
     );
     let retiring_intents = service.sent_intents(&retiring_sid).await;
     assert_eq!(

@@ -206,7 +206,38 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "ExecutionPlacementIdentity": schema_for!(meerkat_core::ExecutionPlacementIdentity),
         "ScheduleListResult": schema_for!(crate::wire::ScheduleListResult),
         "ScheduleOccurrencesResult": schema_for!(crate::wire::ScheduleOccurrencesResult),
+        "AttentionBindingRequest": schema_for!(meerkat_workgraph::AttentionBindingRequest),
+        "AttentionBindingResult": schema_for!(meerkat_workgraph::AttentionBindingResult),
+        "AttentionDelegatedAuthority": schema_for!(meerkat_workgraph::AttentionDelegatedAuthority),
+        "AttentionContinueOutcome": schema_for!(meerkat_workgraph::AttentionContinueOutcome),
+        "AttentionContinueResult": schema_for!(meerkat_workgraph::AttentionContinueResult),
+        "AttentionListRequest": schema_for!(meerkat_workgraph::AttentionListRequest),
+        "AttentionListResult": schema_for!(meerkat_workgraph::AttentionListResult),
+        "AttentionPauseRequest": schema_for!(meerkat_workgraph::AttentionPauseRequest),
+        "AttentionContextProjection": schema_for!(meerkat_workgraph::AttentionContextProjection),
+        "AttentionProjectionPolicy": schema_for!(meerkat_workgraph::AttentionProjectionPolicy),
+        "AttentionProjectionRequest": schema_for!(meerkat_workgraph::AttentionProjectionRequest),
+        "AttentionProjectionResult": schema_for!(meerkat_workgraph::AttentionProjectionResult),
+        "AttentionProjectionText": schema_for!(meerkat_workgraph::AttentionProjectionText),
+        "AttentionReassignRequest": schema_for!(meerkat_workgraph::AttentionReassignRequest),
+        "GoalAttentionTarget": schema_for!(meerkat_workgraph::GoalAttentionTarget),
+        "GoalConfirmRequest": schema_for!(meerkat_workgraph::GoalConfirmRequest),
+        "GoalConfirmResult": schema_for!(meerkat_workgraph::GoalConfirmResult),
+        "GoalCreateRequest": schema_for!(meerkat_workgraph::GoalCreateRequest),
+        "GoalCreateResult": schema_for!(meerkat_workgraph::GoalCreateResult),
+        "GoalRequestCloseRequest": schema_for!(meerkat_workgraph::GoalRequestCloseRequest),
+        "GoalRequestCloseResult": schema_for!(meerkat_workgraph::GoalRequestCloseResult),
+        "GoalStatusRequest": schema_for!(meerkat_workgraph::GoalStatusRequest),
+        "GoalStatusResult": schema_for!(meerkat_workgraph::GoalStatusResult),
+        "ProjectedAttentionAuthority": schema_for!(meerkat_workgraph::ProjectedAttentionAuthority),
+        "WorkAttentionBinding": schema_for!(meerkat_workgraph::WorkAttentionBinding),
+        "WorkAttentionBindingId": schema_for!(meerkat_workgraph::WorkAttentionBindingId),
+        "WorkAttentionMode": schema_for!(meerkat_workgraph::WorkAttentionMode),
+        "WorkAttentionStatus": schema_for!(meerkat_workgraph::WorkAttentionStatus),
+        "WorkAttentionTarget": schema_for!(meerkat_workgraph::WorkAttentionTarget),
+        "WorkCompletionPolicy": schema_for!(meerkat_workgraph::WorkCompletionPolicy),
         "WorkItem": schema_for!(meerkat_workgraph::WorkItem),
+        "WorkItemRef": schema_for!(meerkat_workgraph::WorkItemRef),
         "WorkGraphSnapshot": schema_for!(meerkat_workgraph::WorkGraphSnapshot),
         "WorkGraphItemsResponse": schema_for!(meerkat_workgraph::WorkGraphItemsResponse),
         "WorkGraphEventsResponse": schema_for!(meerkat_workgraph::WorkGraphEventsResponse),
@@ -2228,6 +2259,110 @@ mod tests {
                 );
             }
         }
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_workgraph_rpc_contract_names_resolve_to_exported_schemas() {
+        let output_dir = temp_output_dir("typed-workgraph-rpc-catalog-resolution");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let exported_contracts = ["params.json", "wire-types.json"]
+            .into_iter()
+            .flat_map(|file| {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(output_dir.join(file)).unwrap()).unwrap();
+                value
+                    .as_object()
+                    .expect("schema artifact is an object")
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let rpc_methods: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("rpc-methods.json")).unwrap())
+                .unwrap();
+
+        for method in rpc_methods["methods"].as_array().expect("methods array") {
+            let Some(name) = method["name"].as_str() else {
+                continue;
+            };
+            if !(name.starts_with("workgraph/goal/") || name.starts_with("workgraph/attention/")) {
+                continue;
+            }
+            for field in ["params_type", "result_type"] {
+                let Some(contract_name) = method.get(field).and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                assert!(
+                    exported_contracts.contains(contract_name),
+                    "{name} advertises {field}={contract_name}, but no emitted schema exports that contract"
+                );
+            }
+        }
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_workgraph_goal_attention_contracts_are_exported() {
+        let output_dir = temp_output_dir("workgraph-goal-attention-contracts");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let wire_types: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("wire-types.json")).unwrap()).unwrap();
+        let contracts = wire_types.as_object().expect("wire-types object");
+        for expected in [
+            "AttentionBindingRequest",
+            "AttentionBindingResult",
+            "AttentionContinueOutcome",
+            "AttentionContinueResult",
+            "AttentionDelegatedAuthority",
+            "AttentionContextProjection",
+            "AttentionListRequest",
+            "AttentionListResult",
+            "AttentionPauseRequest",
+            "AttentionProjectionPolicy",
+            "AttentionProjectionRequest",
+            "AttentionProjectionResult",
+            "AttentionProjectionText",
+            "AttentionReassignRequest",
+            "GoalAttentionTarget",
+            "GoalConfirmRequest",
+            "GoalConfirmResult",
+            "GoalCreateRequest",
+            "GoalCreateResult",
+            "GoalRequestCloseRequest",
+            "GoalRequestCloseResult",
+            "GoalStatusRequest",
+            "GoalStatusResult",
+            "ProjectedAttentionAuthority",
+            "WorkAttentionBinding",
+            "WorkAttentionBindingId",
+            "WorkAttentionMode",
+            "WorkAttentionStatus",
+            "WorkAttentionTarget",
+            "WorkCompletionPolicy",
+            "WorkItemRef",
+        ] {
+            assert!(
+                contracts.contains_key(expected),
+                "missing WorkGraph goal/attention schema {expected}"
+            );
+        }
+
+        let goal_create = contracts
+            .get("GoalCreateRequest")
+            .expect("GoalCreateRequest schema");
+        assert!(
+            goal_create
+                .pointer("/properties/target")
+                .is_some_and(|target| target.to_string().contains("GoalAttentionTarget")),
+            "goal create must use the narrow host target contract"
+        );
 
         fs::remove_dir_all(&output_dir).unwrap();
     }

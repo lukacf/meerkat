@@ -66,6 +66,7 @@ pub mod spec;
 pub mod storage;
 pub mod store;
 pub mod validate;
+pub mod workgraph_attention;
 
 // Re-exports for convenience
 pub use backend::{MobBackendKind, RuntimeBinding};
@@ -93,6 +94,9 @@ pub use mob_machine::{
     canonical_mob_machine_runtime_internal_classifications,
     canonical_mob_machine_runtime_internal_input_variant_manifest,
     canonical_mob_machine_runtime_internal_manifest,
+};
+pub use workgraph_attention::{
+    lower_agent_identity_attention_target, lower_agent_identity_owner_key,
 };
 
 #[doc(hidden)]

@@ -86,6 +86,14 @@ This overview follows the generated OpenAPI artifact at
 | `GET` | `/workgraph/ready` | List ready WorkGraph items |
 | `GET` | `/workgraph/snapshot` | Read a WorkGraph observability snapshot |
 | `GET` | `/workgraph/events` | Read WorkGraph event history |
+| `POST` | `/workgraph/goal/create` | Create a session-scoped attention goal |
+| `POST` | `/workgraph/goal/status` | Read goal and attention status |
+| `POST` | `/workgraph/goal/confirm` | Attach completion confirmation evidence |
+| `POST` | `/workgraph/goal/request_close` | Request policy-gated goal closure |
+| `POST` | `/workgraph/attention/list` | List attention bindings |
+| `POST` | `/workgraph/attention/pause` | Pause an attention binding |
+| `POST` | `/workgraph/attention/resume` | Resume an attention binding |
+| `POST` | `/workgraph/attention/continue` | Queue a hidden continuation for a session-bound attention binding |
 | `POST` | `/sessions/{id}/mcp/add` | Stage live MCP server addition (mcp feature) |
 | `POST` | `/sessions/{id}/mcp/remove` | Stage live MCP server removal (mcp feature) |
 | `POST` | `/sessions/{id}/mcp/reload` | Reload MCP server(s) (mcp feature) |

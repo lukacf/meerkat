@@ -132,9 +132,11 @@ Operators and UIs can inspect WorkGraph without mutating it:
 
 - CLI: `rkat workgraph list`, `show`, `ready`, `snapshot`, `events`
 - REST: `GET /workgraph/items`, `/workgraph/ready`, `/workgraph/snapshot`,
-  `/workgraph/events`
+  `/workgraph/events`, plus narrow `POST /workgraph/goal/*` and
+  `/workgraph/attention/*` host-control routes
 - RPC: `workgraph/get`, `workgraph/list`, `workgraph/ready`,
-  `workgraph/snapshot`, `workgraph/events`
+  `workgraph/snapshot`, `workgraph/events`, plus narrow
+  `workgraph/goal/*` and `workgraph/attention/*` host-control methods
 
 ## Agent Instruction Manual
 

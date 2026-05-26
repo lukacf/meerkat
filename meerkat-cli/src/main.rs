@@ -1849,6 +1849,65 @@ impl From<WorkGraphStatusArg> for meerkat::WorkStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum WorkAttentionModeArg {
+    Pursue,
+    Coordinate,
+    Review,
+    Falsify,
+    Judge,
+    Observe,
+}
+
+impl From<WorkAttentionModeArg> for meerkat::WorkAttentionMode {
+    fn from(value: WorkAttentionModeArg) -> Self {
+        match value {
+            WorkAttentionModeArg::Pursue => Self::Pursue,
+            WorkAttentionModeArg::Coordinate => Self::Coordinate,
+            WorkAttentionModeArg::Review => Self::Review,
+            WorkAttentionModeArg::Falsify => Self::Falsify,
+            WorkAttentionModeArg::Judge => Self::Judge,
+            WorkAttentionModeArg::Observe => Self::Observe,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum WorkCompletionPolicyArg {
+    SelfAttest,
+    HostConfirmed,
+    PrincipalConfirmed,
+}
+
+impl From<WorkCompletionPolicyArg> for meerkat::WorkCompletionPolicy {
+    fn from(value: WorkCompletionPolicyArg) -> Self {
+        match value {
+            WorkCompletionPolicyArg::SelfAttest => Self::SelfAttest,
+            WorkCompletionPolicyArg::HostConfirmed => Self::HostConfirmed,
+            WorkCompletionPolicyArg::PrincipalConfirmed => Self::PrincipalConfirmed,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum WorkAttentionStatusArg {
+    Active,
+    Paused,
+    Superseded,
+    Stopped,
+}
+
+impl From<WorkAttentionStatusArg> for meerkat::WorkAttentionStatus {
+    fn from(value: WorkAttentionStatusArg) -> Self {
+        match value {
+            WorkAttentionStatusArg::Active => Self::Active,
+            WorkAttentionStatusArg::Paused => Self::Paused { until: None },
+            WorkAttentionStatusArg::Superseded => Self::Superseded,
+            WorkAttentionStatusArg::Stopped => Self::Stopped,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum WorkGraphCommands {
     /// List WorkGraph items
@@ -1914,6 +1973,82 @@ enum WorkGraphCommands {
         after_seq: Option<i64>,
         #[arg(long)]
         limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a goal item bound to a session attention target
+    GoalCreate {
+        /// Session ID, session ref, or handle for the goal's attention binding
+        session_id: String,
+        /// Goal title
+        title: String,
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long, value_enum, default_value = "pursue")]
+        mode: WorkAttentionModeArg,
+        #[arg(long, value_enum, default_value = "self-attest")]
+        completion_policy: WorkCompletionPolicyArg,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a goal item and its attention binding
+    GoalStatus {
+        binding_id: String,
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Attach confirmation evidence to a goal
+    GoalConfirm {
+        binding_id: String,
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        summary: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Request policy-gated goal closure
+    GoalClose {
+        binding_id: String,
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long = "status", value_enum, default_value = "completed")]
+        status: WorkGraphStatusArg,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List attention bindings
+    AttentionList {
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long = "status", value_enum)]
+        status: Option<WorkAttentionStatusArg>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pause an attention binding
+    AttentionPause {
+        binding_id: String,
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resume an attention binding
+    AttentionResume {
+        binding_id: String,
+        #[arg(long)]
+        namespace: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -5969,6 +6104,130 @@ async fn handle_workgraph_command(
             }
             Ok(())
         }
+        WorkGraphCommands::GoalCreate {
+            session_id,
+            title,
+            namespace,
+            description,
+            mode,
+            completion_policy,
+            json,
+        } => {
+            let session_id = resolve_scoped_session_id(&session_id, scope)?;
+            let result = service
+                .create_goal(meerkat::GoalCreateRequest {
+                    realm_id: None,
+                    namespace: parse_work_namespace(namespace)?,
+                    title,
+                    description,
+                    target: meerkat::GoalAttentionTarget::Session { session_id },
+                    mode: mode.into(),
+                    completion_policy: completion_policy.into(),
+                    delegated_authority: Default::default(),
+                    projection_policy: Default::default(),
+                })
+                .await?;
+            print_workgraph_goal_result(&result.item, &result.attention, json)
+        }
+        WorkGraphCommands::GoalStatus {
+            binding_id,
+            namespace,
+            json,
+        } => {
+            let result = service
+                .goal_status(meerkat::GoalStatusRequest {
+                    binding_id: meerkat::WorkAttentionBindingId::new(binding_id)?,
+                    realm_id: None,
+                    namespace: parse_work_namespace(namespace)?,
+                })
+                .await?;
+            print_workgraph_goal_result(&result.item, &result.attention, json)
+        }
+        WorkGraphCommands::GoalConfirm {
+            binding_id,
+            namespace,
+            kind,
+            id,
+            label,
+            summary,
+            json,
+        } => {
+            let result = service
+                .goal_confirm(meerkat::GoalConfirmRequest {
+                    binding_id: meerkat::WorkAttentionBindingId::new(binding_id)?,
+                    realm_id: None,
+                    namespace: parse_work_namespace(namespace)?,
+                    evidence: meerkat::WorkEvidenceRef {
+                        kind,
+                        id,
+                        label,
+                        summary,
+                    },
+                    principal: None,
+                })
+                .await?;
+            print_workgraph_goal_result(&result.item, &result.attention, json)
+        }
+        WorkGraphCommands::GoalClose {
+            binding_id,
+            namespace,
+            status,
+            json,
+        } => {
+            let result = service
+                .goal_request_close(meerkat::GoalRequestCloseRequest {
+                    binding_id: meerkat::WorkAttentionBindingId::new(binding_id)?,
+                    realm_id: None,
+                    namespace: parse_work_namespace(namespace)?,
+                    status: status.into(),
+                })
+                .await?;
+            print_workgraph_goal_result(&result.item, &result.attention, json)
+        }
+        WorkGraphCommands::AttentionList {
+            namespace,
+            status,
+            json,
+        } => {
+            let result = service
+                .list_attention(meerkat::AttentionListRequest {
+                    realm_id: None,
+                    namespace: parse_work_namespace(namespace)?,
+                    target: None,
+                    status: status.map(Into::into),
+                })
+                .await?;
+            print_workgraph_attention(result.attention, json)
+        }
+        WorkGraphCommands::AttentionPause {
+            binding_id,
+            namespace,
+            json,
+        } => {
+            let result = service
+                .pause_attention(meerkat::AttentionPauseRequest {
+                    binding_id: meerkat::WorkAttentionBindingId::new(binding_id)?,
+                    realm_id: None,
+                    namespace: parse_work_namespace(namespace)?,
+                    until: None,
+                })
+                .await?;
+            print_workgraph_attention(vec![result.attention], json)
+        }
+        WorkGraphCommands::AttentionResume {
+            binding_id,
+            namespace,
+            json,
+        } => {
+            let result = service
+                .resume_attention(meerkat::AttentionBindingRequest {
+                    binding_id: meerkat::WorkAttentionBindingId::new(binding_id)?,
+                    realm_id: None,
+                    namespace: parse_work_namespace(namespace)?,
+                })
+                .await?;
+            print_workgraph_attention(vec![result.attention], json)
+        }
     }
 }
 
@@ -6065,6 +6324,70 @@ fn print_workgraph_item(item: &meerkat::WorkItem) {
     }
 }
 
+fn print_workgraph_goal_result(
+    item: &meerkat::WorkItem,
+    attention: &meerkat::WorkAttentionBinding,
+    json: bool,
+) -> anyhow::Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({ "item": item, "attention": attention })
+            )?
+        );
+        return Ok(());
+    }
+    print_workgraph_item(item);
+    println!("attention_binding_id: {}", attention.binding_id);
+    println!(
+        "attention_status: {}",
+        work_attention_status_label(&attention.status)
+    );
+    println!(
+        "attention_mode: {}",
+        work_attention_mode_label(attention.mode)
+    );
+    println!(
+        "attention_target: {}",
+        work_attention_target_label(&attention.target)
+    );
+    Ok(())
+}
+
+fn print_workgraph_attention(
+    attention: Vec<meerkat::WorkAttentionBinding>,
+    json: bool,
+) -> anyhow::Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "attention": attention }))?
+        );
+        return Ok(());
+    }
+    if attention.is_empty() {
+        println!("No WorkGraph attention bindings found.");
+        return Ok(());
+    }
+    println!(
+        "{:<48} {:<12} {:<10} {:<42} TARGET",
+        "BINDING", "STATUS", "MODE", "WORK_ITEM"
+    );
+    println!("{}", "-".repeat(130));
+    for binding in attention {
+        println!(
+            "{:<48} {:<12} {:<10} {:<42} {}",
+            binding.binding_id,
+            work_attention_status_label(&binding.status),
+            work_attention_mode_label(binding.mode),
+            binding.work_ref.item_id,
+            work_attention_target_label(&binding.target)
+        );
+    }
+    Ok(())
+}
+
 fn print_workgraph_events(events: &[meerkat::WorkGraphEvent]) {
     if events.is_empty() {
         println!("No WorkGraph events found.");
@@ -6113,6 +6436,33 @@ fn work_priority_label(priority: meerkat::WorkPriority) -> &'static str {
     }
 }
 
+fn work_attention_mode_label(mode: meerkat::WorkAttentionMode) -> &'static str {
+    match mode {
+        meerkat::WorkAttentionMode::Pursue => "pursue",
+        meerkat::WorkAttentionMode::Coordinate => "coordinate",
+        meerkat::WorkAttentionMode::Review => "review",
+        meerkat::WorkAttentionMode::Falsify => "falsify",
+        meerkat::WorkAttentionMode::Judge => "judge",
+        meerkat::WorkAttentionMode::Observe => "observe",
+    }
+}
+
+fn work_attention_status_label(status: &meerkat::WorkAttentionStatus) -> &'static str {
+    match status {
+        meerkat::WorkAttentionStatus::Active => "active",
+        meerkat::WorkAttentionStatus::Paused { .. } => "paused",
+        meerkat::WorkAttentionStatus::Superseded => "superseded",
+        meerkat::WorkAttentionStatus::Stopped => "stopped",
+    }
+}
+
+fn work_attention_target_label(target: &meerkat::WorkAttentionTarget) -> String {
+    match target {
+        meerkat::WorkAttentionTarget::Session { session_id } => format!("session:{session_id}"),
+        meerkat::WorkAttentionTarget::LoweredOwner { owner_key } => owner_key.canonical(),
+    }
+}
+
 fn work_event_kind_label(kind: meerkat::WorkGraphEventKind) -> &'static str {
     match kind {
         meerkat::WorkGraphEventKind::Created => "created",
@@ -6123,6 +6473,8 @@ fn work_event_kind_label(kind: meerkat::WorkGraphEventKind) -> &'static str {
         meerkat::WorkGraphEventKind::Closed => "closed",
         meerkat::WorkGraphEventKind::Linked => "linked",
         meerkat::WorkGraphEventKind::EvidenceAdded => "evidence_added",
+        meerkat::WorkGraphEventKind::AttentionCreated => "attention_created",
+        meerkat::WorkGraphEventKind::AttentionUpdated => "attention_updated",
     }
 }
 

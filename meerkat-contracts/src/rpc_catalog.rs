@@ -491,6 +491,54 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "WorkGraphEventFilter",
                 "WorkGraphEventsResult",
             ),
+            RpcMethodDescriptor::typed(
+                "workgraph/goal/create",
+                "Create a WorkGraph goal and session attention binding",
+                "GoalCreateRequest",
+                "GoalCreateResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "workgraph/goal/status",
+                "Read WorkGraph goal item and attention status",
+                "GoalStatusRequest",
+                "GoalStatusResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "workgraph/goal/confirm",
+                "Attach WorkGraph goal confirmation evidence",
+                "GoalConfirmRequest",
+                "GoalConfirmResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "workgraph/goal/request_close",
+                "Request policy-gated WorkGraph goal closure",
+                "GoalRequestCloseRequest",
+                "GoalRequestCloseResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "workgraph/attention/list",
+                "List WorkGraph attention bindings",
+                "AttentionListRequest",
+                "AttentionListResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "workgraph/attention/pause",
+                "Pause a WorkGraph attention binding",
+                "AttentionPauseRequest",
+                "AttentionBindingResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "workgraph/attention/resume",
+                "Resume a WorkGraph attention binding",
+                "AttentionBindingRequest",
+                "AttentionBindingResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "workgraph/attention/continue",
+                "Queue a WorkGraph attention continuation for its target session",
+                "AttentionBindingRequest",
+                "RuntimeAcceptResult",
+            ),
         ]);
     }
 
@@ -1069,7 +1117,7 @@ mod tests {
     }
 
     #[test]
-    fn workgraph_rpc_surface_is_read_only_observability() {
+    fn workgraph_rpc_surface_exposes_observability_and_narrow_goal_control() {
         let methods = rpc_method_names(RpcMethodCatalogOptions::documented_surface());
         for supported in [
             "workgraph/get",
@@ -1077,10 +1125,18 @@ mod tests {
             "workgraph/ready",
             "workgraph/snapshot",
             "workgraph/events",
+            "workgraph/goal/create",
+            "workgraph/goal/status",
+            "workgraph/goal/confirm",
+            "workgraph/goal/request_close",
+            "workgraph/attention/list",
+            "workgraph/attention/pause",
+            "workgraph/attention/resume",
+            "workgraph/attention/continue",
         ] {
             assert!(
                 methods.iter().any(|m| m == supported),
-                "read-only WorkGraph RPC method must be advertised: {supported}"
+                "WorkGraph RPC method must be advertised: {supported}"
             );
         }
         for retired in [

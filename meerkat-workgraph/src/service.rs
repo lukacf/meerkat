@@ -4,13 +4,20 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::WorkGraphError;
-use crate::machine::WorkGraphMachine;
+use crate::machine::{WorkAttentionMachine, WorkGraphMachine};
 use crate::store::{WorkGraphEventFilter, WorkGraphStore};
 use crate::types::{
-    AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    LinkWorkItemsRequest, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkEdge,
-    WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind, WorkGraphSnapshot, WorkGraphSnapshotFilter,
-    WorkItem, WorkItemFilter, WorkItemId, WorkNamespace,
+    AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,
+    AttentionContextProjection, AttentionListRequest, AttentionListResult, AttentionPauseRequest,
+    AttentionProjectionRequest, AttentionProjectionResult, AttentionProjectionText,
+    ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest, GoalConfirmRequest,
+    GoalConfirmResult, GoalCreateRequest, GoalCreateResult, GoalRequestCloseRequest,
+    GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult, LinkWorkItemsRequest,
+    ProjectedAttentionAuthority, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
+    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMode, WorkAttentionStatus,
+    WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphEvent,
+    WorkGraphEventKind, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter,
+    WorkItemId, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkOwnerKind,
 };
 
 const BEST_EFFORT_REFRESH_ATTEMPTS: usize = 3;
@@ -56,6 +63,267 @@ impl WorkGraphService {
         let (realm_id, namespace) = self.scope(request.realm_id.clone(), request.namespace.clone());
         let (item, event) = WorkGraphMachine::create_item(request, realm_id, namespace, now)?;
         self.store.insert_item(item, event).await
+    }
+
+    pub async fn create_goal(
+        &self,
+        request: GoalCreateRequest,
+    ) -> Result<GoalCreateResult, WorkGraphError> {
+        let now = self.store.get_store_time_utc().await?;
+        let (realm_id, namespace) = self.scope(request.realm_id.clone(), request.namespace.clone());
+        let create_request = CreateWorkItemRequest {
+            realm_id: Some(realm_id.clone()),
+            namespace: Some(namespace.clone()),
+            title: request.title,
+            description: request.description,
+            completion_policy: request.completion_policy,
+            ..CreateWorkItemRequest::default()
+        };
+        let (item, item_event) = WorkGraphMachine::create_item(
+            create_request,
+            realm_id.clone(),
+            namespace.clone(),
+            now,
+        )?;
+        let attention = WorkAttentionBinding {
+            binding_id: WorkAttentionBindingId::generated(),
+            work_ref: WorkItemRef {
+                realm_id: realm_id.clone(),
+                namespace: namespace.clone(),
+                item_id: item.id.clone(),
+            },
+            target: request.target.to_attention_target(),
+            mode: request.mode,
+            status: WorkAttentionStatus::Active,
+            machine_state: Default::default(),
+            delegated_authority: request.delegated_authority,
+            projection_policy: request.projection_policy,
+            created_at: now,
+            updated_at: now,
+        };
+        let attention_event = WorkGraphEvent::graph(
+            realm_id,
+            namespace,
+            WorkGraphEventKind::AttentionCreated,
+            now,
+            json!({ "attention": attention }),
+        );
+        let (item, attention) = self
+            .store
+            .insert_goal(item, item_event, attention, attention_event)
+            .await?;
+        Ok(GoalCreateResult { item, attention })
+    }
+
+    pub async fn goal_status(
+        &self,
+        request: GoalStatusRequest,
+    ) -> Result<GoalStatusResult, WorkGraphError> {
+        let attention = self
+            .attention_binding(AttentionBindingRequest {
+                binding_id: request.binding_id,
+                realm_id: request.realm_id,
+                namespace: request.namespace,
+            })
+            .await?
+            .attention;
+        let item = self
+            .get(
+                Some(attention.work_ref.realm_id.clone()),
+                Some(attention.work_ref.namespace.clone()),
+                attention.work_ref.item_id.clone(),
+            )
+            .await?;
+        Ok(GoalStatusResult { item, attention })
+    }
+
+    pub async fn attention_binding(
+        &self,
+        request: AttentionBindingRequest,
+    ) -> Result<AttentionBindingResult, WorkGraphError> {
+        let (realm_id, namespace) = self.scope(request.realm_id, request.namespace);
+        let attention = self
+            .store
+            .get_attention(&realm_id, &namespace, &request.binding_id)
+            .await?
+            .ok_or_else(|| {
+                WorkGraphError::InvalidInput(format!(
+                    "work attention binding {} not found",
+                    request.binding_id
+                ))
+            })?;
+        Ok(AttentionBindingResult { attention })
+    }
+
+    pub async fn list_attention(
+        &self,
+        request: AttentionListRequest,
+    ) -> Result<AttentionListResult, WorkGraphError> {
+        let mut filter = request;
+        if filter.realm_id.is_none() {
+            filter.realm_id = Some(self.default_realm_id.to_string());
+        }
+        if filter.namespace.is_none() {
+            filter.namespace = Some(self.default_namespace.clone());
+        }
+        Ok(AttentionListResult {
+            attention: self.store.list_attention(filter).await?,
+        })
+    }
+
+    pub async fn pause_attention(
+        &self,
+        request: AttentionPauseRequest,
+    ) -> Result<AttentionBindingResult, WorkGraphError> {
+        let now = self.store.get_store_time_utc().await?;
+        let current = self
+            .attention_binding(AttentionBindingRequest {
+                binding_id: request.binding_id,
+                realm_id: request.realm_id,
+                namespace: request.namespace,
+            })
+            .await?
+            .attention;
+        let expected_previous_revision = current.machine_state.revision;
+        let paused =
+            WorkAttentionMachine::pause(current, expected_previous_revision, request.until, now)?;
+        let event = attention_updated_event(&paused, now);
+        let attention = self
+            .store
+            .update_attention_cas(paused, expected_previous_revision, event)
+            .await?;
+        Ok(AttentionBindingResult { attention })
+    }
+
+    pub async fn resume_attention(
+        &self,
+        request: AttentionBindingRequest,
+    ) -> Result<AttentionBindingResult, WorkGraphError> {
+        let now = self.store.get_store_time_utc().await?;
+        let current = self.attention_binding(request).await?.attention;
+        let expected_previous_revision = current.machine_state.revision;
+        let resumed = WorkAttentionMachine::resume(current, expected_previous_revision, now)?;
+        let event = attention_updated_event(&resumed, now);
+        let attention = self
+            .store
+            .update_attention_cas(resumed, expected_previous_revision, event)
+            .await?;
+        Ok(AttentionBindingResult { attention })
+    }
+
+    pub async fn attention_projection(
+        &self,
+        request: AttentionProjectionRequest,
+    ) -> Result<AttentionProjectionResult, WorkGraphError> {
+        let now = self.store.get_store_time_utc().await?;
+        let attention = self
+            .attention_binding(AttentionBindingRequest {
+                binding_id: request.binding_id,
+                realm_id: request.realm_id,
+                namespace: request.namespace,
+            })
+            .await?
+            .attention;
+        if !WorkAttentionMachine::is_eligible_at(&attention, now) {
+            return Err(WorkGraphError::InvalidTransition(format!(
+                "work attention binding {} is not eligible for projection",
+                attention.binding_id
+            )));
+        }
+        let item = self
+            .get(
+                Some(attention.work_ref.realm_id.clone()),
+                Some(attention.work_ref.namespace.clone()),
+                attention.work_ref.item_id.clone(),
+            )
+            .await?;
+        if item.status.is_terminal() {
+            return Err(WorkGraphError::InvalidTransition(format!(
+                "work item {} is terminal and cannot produce attention projection",
+                item.id
+            )));
+        }
+        let edges = self
+            .store
+            .list_edges(&item.realm_id, &item.namespace)
+            .await?;
+        Ok(AttentionProjectionResult {
+            projection: build_attention_projection(&attention, &item, &edges),
+        })
+    }
+
+    pub async fn goal_confirm(
+        &self,
+        request: GoalConfirmRequest,
+    ) -> Result<GoalConfirmResult, WorkGraphError> {
+        let attention = self
+            .attention_binding(AttentionBindingRequest {
+                binding_id: request.binding_id,
+                realm_id: request.realm_id,
+                namespace: request.namespace,
+            })
+            .await?
+            .attention;
+        let item = self
+            .get(
+                Some(attention.work_ref.realm_id.clone()),
+                Some(attention.work_ref.namespace.clone()),
+                attention.work_ref.item_id.clone(),
+            )
+            .await?;
+        let evidence = confirmation_evidence_for_policy(
+            &item.completion_policy,
+            request.principal.as_ref(),
+            request.evidence,
+        )?;
+        let item = self
+            .add_evidence(AddEvidenceRequest {
+                id: item.id.clone(),
+                realm_id: Some(item.realm_id.clone()),
+                namespace: Some(item.namespace.clone()),
+                expected_revision: item.revision,
+                evidence,
+            })
+            .await?;
+        Ok(GoalConfirmResult { item, attention })
+    }
+
+    pub async fn goal_request_close(
+        &self,
+        request: GoalRequestCloseRequest,
+    ) -> Result<GoalRequestCloseResult, WorkGraphError> {
+        let attention = self
+            .attention_binding(AttentionBindingRequest {
+                binding_id: request.binding_id,
+                realm_id: request.realm_id,
+                namespace: request.namespace,
+            })
+            .await?
+            .attention;
+        let item = self
+            .get(
+                Some(attention.work_ref.realm_id.clone()),
+                Some(attention.work_ref.namespace.clone()),
+                attention.work_ref.item_id.clone(),
+            )
+            .await?;
+        if !completion_policy_is_satisfied(&item) {
+            return Err(WorkGraphError::InvalidTransition(format!(
+                "work item {} completion policy {} is not satisfied",
+                item.id,
+                completion_policy_name(&item.completion_policy)
+            )));
+        }
+        let item = self
+            .close(CloseWorkItemRequest {
+                id: item.id.clone(),
+                realm_id: Some(item.realm_id.clone()),
+                namespace: Some(item.namespace.clone()),
+                expected_revision: item.revision,
+                status: request.status,
+            })
+            .await?;
+        Ok(GoalRequestCloseResult { item, attention })
     }
 
     pub async fn get(
@@ -554,6 +822,243 @@ impl WorkGraphService {
     }
 }
 
+fn attention_updated_event(
+    binding: &WorkAttentionBinding,
+    now: chrono::DateTime<chrono::Utc>,
+) -> WorkGraphEvent {
+    WorkGraphEvent::graph(
+        binding.work_ref.realm_id.clone(),
+        binding.work_ref.namespace.clone(),
+        WorkGraphEventKind::AttentionUpdated,
+        now,
+        json!({ "attention": binding }),
+    )
+}
+
+fn build_attention_projection(
+    attention: &WorkAttentionBinding,
+    item: &WorkItem,
+    edges: &[WorkEdge],
+) -> AttentionContextProjection {
+    let parent_refs = edges
+        .iter()
+        .filter(|edge| edge.kind == WorkEdgeKind::Parent && edge.from_id == item.id)
+        .map(|edge| WorkItemRef {
+            realm_id: edge.realm_id.clone(),
+            namespace: edge.namespace.clone(),
+            item_id: edge.to_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    let authority = projected_attention_authority(attention);
+    let (rendered, truncated) = bounded_attention_projection_text(attention, item, &authority);
+    AttentionContextProjection {
+        binding_id: attention.binding_id.clone(),
+        work_ref: attention.work_ref.clone(),
+        mode: attention.mode,
+        binding_revision: attention.machine_state.revision,
+        item_revision: item.revision,
+        parent_refs,
+        evidence_refs: item.evidence_refs.clone(),
+        authority,
+        text: AttentionProjectionText {
+            title: item.title.clone(),
+            rendered,
+            truncated,
+        },
+    }
+}
+
+fn projected_attention_authority(attention: &WorkAttentionBinding) -> ProjectedAttentionAuthority {
+    let adversarial = matches!(
+        attention.mode,
+        WorkAttentionMode::Review | WorkAttentionMode::Falsify | WorkAttentionMode::Observe
+    );
+    ProjectedAttentionAuthority {
+        can_add_evidence: !matches!(attention.mode, WorkAttentionMode::Observe),
+        can_request_closure: matches!(
+            attention.delegated_authority,
+            crate::types::AttentionDelegatedAuthority::RequestClosure
+                | crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows
+        ) && !adversarial,
+        can_close_if_policy_allows: matches!(
+            attention.delegated_authority,
+            crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows
+        ) && !adversarial,
+        can_close_parent: matches!(
+            attention.delegated_authority,
+            crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows
+        ) && !adversarial,
+    }
+}
+
+fn bounded_attention_projection_text(
+    attention: &WorkAttentionBinding,
+    item: &WorkItem,
+    authority: &ProjectedAttentionAuthority,
+) -> (String, bool) {
+    let stance = match attention.mode {
+        WorkAttentionMode::Pursue => "Advance this work item.",
+        WorkAttentionMode::Coordinate => "Coordinate decomposition, routing, and evidence.",
+        WorkAttentionMode::Review => "Review the claim and report whether evidence supports it.",
+        WorkAttentionMode::Falsify => {
+            "Treat the claim as something to test; look for bugs, blockers, and missing evidence."
+        }
+        WorkAttentionMode::Judge => "Evaluate the evidence under the completion policy.",
+        WorkAttentionMode::Observe => "Use this as read-only context.",
+    };
+    let authority_text = format!(
+        "Authority: add_evidence={}, request_closure={}, close_if_policy_allows={}, close_parent={}",
+        authority.can_add_evidence,
+        authority.can_request_closure,
+        authority.can_close_if_policy_allows,
+        authority.can_close_parent
+    );
+    let mut rendered = format!(
+        "WorkGraph attention projection\nBinding: {}\nMode: {:?}\nItem: {}\nStatus: {:?}\nItem revision: {}\nBinding revision: {}\nStance: {}\n{}\n",
+        attention.binding_id,
+        attention.mode,
+        item.title,
+        item.status,
+        item.revision,
+        attention.machine_state.revision,
+        stance,
+        authority_text
+    );
+    if let Some(description) = item.description.as_deref()
+        && !description.trim().is_empty()
+    {
+        rendered.push_str("Description:\n");
+        rendered.push_str(description.trim());
+        rendered.push('\n');
+    }
+    let max_chars =
+        usize::try_from(attention.projection_policy.max_text_chars).unwrap_or(usize::MAX);
+    if rendered.chars().count() <= max_chars {
+        return (rendered, false);
+    }
+    (rendered.chars().take(max_chars).collect(), true)
+}
+
+fn confirmation_evidence_for_policy(
+    policy: &WorkCompletionPolicy,
+    principal: Option<&WorkOwnerKey>,
+    mut evidence: WorkEvidenceRef,
+) -> Result<WorkEvidenceRef, WorkGraphError> {
+    match policy {
+        WorkCompletionPolicy::SelfAttest => {
+            if evidence.kind.trim().is_empty() {
+                return Err(WorkGraphError::InvalidInput(
+                    "self-attest confirmation evidence kind must not be empty".to_string(),
+                ));
+            }
+        }
+        WorkCompletionPolicy::HostConfirmed => {
+            require_evidence_kind(policy, &evidence, "host_confirmation")?;
+        }
+        WorkCompletionPolicy::PrincipalConfirmed => {
+            let principal = require_principal(policy, principal)?;
+            if principal.kind != WorkOwnerKind::Principal {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "{} requires a principal owner key",
+                    completion_policy_name(policy)
+                )));
+            }
+            require_evidence_kind(policy, &evidence, "principal_confirmation")?;
+            evidence.label.get_or_insert_with(|| principal.canonical());
+        }
+        WorkCompletionPolicy::Supervisor { owner_key } => {
+            let principal = require_principal(policy, principal)?;
+            if principal != owner_key {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "{} requires confirmation from {}",
+                    completion_policy_name(policy),
+                    owner_key.canonical()
+                )));
+            }
+            require_evidence_kind(policy, &evidence, "supervisor_confirmation")?;
+            evidence.label.get_or_insert_with(|| owner_key.canonical());
+        }
+        WorkCompletionPolicy::ReviewerQuorum { .. } => {
+            let principal = require_principal(policy, principal)?;
+            require_evidence_kind(policy, &evidence, "reviewer_confirmation")?;
+            evidence.label.get_or_insert_with(|| principal.canonical());
+        }
+    }
+    Ok(evidence)
+}
+
+fn require_principal<'a>(
+    policy: &WorkCompletionPolicy,
+    principal: Option<&'a WorkOwnerKey>,
+) -> Result<&'a WorkOwnerKey, WorkGraphError> {
+    principal.ok_or_else(|| {
+        WorkGraphError::InvalidInput(format!(
+            "{} requires a confirming principal",
+            completion_policy_name(policy)
+        ))
+    })
+}
+
+fn require_evidence_kind(
+    policy: &WorkCompletionPolicy,
+    evidence: &WorkEvidenceRef,
+    expected: &str,
+) -> Result<(), WorkGraphError> {
+    if evidence.kind == expected {
+        return Ok(());
+    }
+    Err(WorkGraphError::InvalidInput(format!(
+        "{} requires {expected} evidence, got {}",
+        completion_policy_name(policy),
+        evidence.kind
+    )))
+}
+
+fn completion_policy_is_satisfied(item: &WorkItem) -> bool {
+    match &item.completion_policy {
+        WorkCompletionPolicy::SelfAttest => true,
+        WorkCompletionPolicy::HostConfirmed => item
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "host_confirmation"),
+        WorkCompletionPolicy::PrincipalConfirmed => item
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "principal_confirmation"),
+        WorkCompletionPolicy::Supervisor { owner_key } => {
+            let owner = owner_key.canonical();
+            item.evidence_refs.iter().any(|evidence| {
+                evidence.kind == "supervisor_confirmation"
+                    && (evidence.id == owner || evidence.label.as_deref() == Some(owner.as_str()))
+            })
+        }
+        WorkCompletionPolicy::ReviewerQuorum { threshold } => {
+            let reviewers = item
+                .evidence_refs
+                .iter()
+                .filter(|evidence| evidence.kind == "reviewer_confirmation")
+                .filter_map(|evidence| {
+                    evidence
+                        .label
+                        .as_deref()
+                        .or_else(|| (!evidence.id.is_empty()).then_some(evidence.id.as_str()))
+                })
+                .collect::<BTreeSet<_>>();
+            reviewers.len() >= usize::from(*threshold)
+        }
+    }
+}
+
+fn completion_policy_name(policy: &WorkCompletionPolicy) -> &'static str {
+    match policy {
+        WorkCompletionPolicy::SelfAttest => "self_attest",
+        WorkCompletionPolicy::HostConfirmed => "host_confirmed",
+        WorkCompletionPolicy::PrincipalConfirmed => "principal_confirmed",
+        WorkCompletionPolicy::Supervisor { .. } => "supervisor",
+        WorkCompletionPolicy::ReviewerQuorum { .. } => "reviewer_quorum",
+    }
+}
+
 fn unresolved_blocker_count(
     item: &WorkItem,
     all_items: &BTreeMap<WorkItemId, WorkItem>,
@@ -585,8 +1090,9 @@ mod tests {
 
     use crate::store::WorkGraphEventFilter;
     use crate::types::{
-        ClaimWorkItemRequest, LinkWorkItemsRequest, WorkEdge, WorkEdgeKind, WorkGraphEvent,
-        WorkGraphEventKind, WorkItem, WorkItemFilter, WorkOwner, WorkOwnerKey,
+        AttentionListRequest, ClaimWorkItemRequest, LinkWorkItemsRequest, WorkAttentionBinding,
+        WorkAttentionBindingId, WorkEdge, WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind,
+        WorkItem, WorkItemFilter, WorkOwner, WorkOwnerKey,
     };
     use crate::{
         CreateWorkItemRequest, MemoryWorkGraphStore, UpdateWorkItemRequest, WorkGraphService,
@@ -600,6 +1106,7 @@ mod tests {
             title: title.to_string(),
             description: None,
             priority: Default::default(),
+            completion_policy: Default::default(),
             labels: BTreeSet::new(),
             due_at: None,
             not_before: None,
@@ -685,6 +1192,47 @@ mod tests {
             filter: WorkItemFilter,
         ) -> Result<Vec<WorkItem>, crate::WorkGraphError> {
             self.inner.list_items(filter).await
+        }
+
+        async fn insert_goal(
+            &self,
+            item: WorkItem,
+            item_event: WorkGraphEvent,
+            attention: WorkAttentionBinding,
+            attention_event: WorkGraphEvent,
+        ) -> Result<(WorkItem, WorkAttentionBinding), crate::WorkGraphError> {
+            self.inner
+                .insert_goal(item, item_event, attention, attention_event)
+                .await
+        }
+
+        async fn update_attention_cas(
+            &self,
+            attention: WorkAttentionBinding,
+            expected_previous_revision: u64,
+            event: WorkGraphEvent,
+        ) -> Result<WorkAttentionBinding, crate::WorkGraphError> {
+            self.inner
+                .update_attention_cas(attention, expected_previous_revision, event)
+                .await
+        }
+
+        async fn get_attention(
+            &self,
+            realm_id: &str,
+            namespace: &WorkNamespace,
+            binding_id: &WorkAttentionBindingId,
+        ) -> Result<Option<WorkAttentionBinding>, crate::WorkGraphError> {
+            self.inner
+                .get_attention(realm_id, namespace, binding_id)
+                .await
+        }
+
+        async fn list_attention(
+            &self,
+            filter: AttentionListRequest,
+        ) -> Result<Vec<WorkAttentionBinding>, crate::WorkGraphError> {
+            self.inner.list_attention(filter).await
         }
 
         async fn insert_edge(
@@ -877,6 +1425,7 @@ mod tests {
                 title: Some("blocked, updated".to_string()),
                 description: None,
                 priority: None,
+                completion_policy: None,
                 labels: None,
                 due_at: None,
                 not_before: None,

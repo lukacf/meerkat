@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -6,11 +7,15 @@ use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use serde_json::Value;
 
-use crate::{WorkGraphService, handle_workgraph_tools_call, workgraph_tools_list};
+use crate::{
+    AttentionContextProjection, WorkAttentionMode, WorkGraphService, handle_workgraph_tools_call,
+    workgraph_tools_list,
+};
 
 pub struct WorkGraphToolSurface {
     service: WorkGraphService,
     tool_defs: Arc<[Arc<ToolDef>]>,
+    attention_projection: Option<AttentionContextProjection>,
 }
 
 impl WorkGraphToolSurface {
@@ -18,6 +23,19 @@ impl WorkGraphToolSurface {
         Self {
             service,
             tool_defs: build_tool_defs(),
+            attention_projection: None,
+        }
+    }
+
+    pub fn with_attention_projection(
+        service: WorkGraphService,
+        projection: AttentionContextProjection,
+    ) -> Self {
+        let allowed = allowed_tools_for_projection(&projection);
+        Self {
+            service,
+            tool_defs: build_filtered_tool_defs(&allowed),
+            attention_projection: Some(projection),
         }
     }
 
@@ -44,6 +62,9 @@ impl AgentToolDispatcher for WorkGraphToolSurface {
         }
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+        if let Some(projection) = &self.attention_projection {
+            validate_attention_scoped_call(projection, call.name, &args)?;
+        }
         let result = handle_workgraph_tools_call(&self.service, call.name, &args)
             .await
             .map_err(|error| ToolError::ExecutionFailed {
@@ -54,7 +75,24 @@ impl AgentToolDispatcher for WorkGraphToolSurface {
 }
 
 fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
-    workgraph_tools_list()
+    tool_defs_from_values(workgraph_tools_list())
+}
+
+fn build_filtered_tool_defs(allowed: &BTreeSet<&'static str>) -> Arc<[Arc<ToolDef>]> {
+    tool_defs_from_values(
+        workgraph_tools_list()
+            .into_iter()
+            .filter(|tool| {
+                tool["name"]
+                    .as_str()
+                    .is_some_and(|name| allowed.contains(name))
+            })
+            .collect(),
+    )
+}
+
+fn tool_defs_from_values(tools: Vec<Value>) -> Arc<[Arc<ToolDef>]> {
+    tools
         .into_iter()
         .map(|tool| {
             Arc::new(ToolDef {
@@ -71,6 +109,81 @@ fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
         .into()
 }
 
+fn allowed_tools_for_projection(projection: &AttentionContextProjection) -> BTreeSet<&'static str> {
+    let mut allowed = BTreeSet::from([
+        "workgraph_get",
+        "workgraph_list",
+        "workgraph_ready",
+        "workgraph_snapshot",
+        "workgraph_events",
+    ]);
+    match projection.mode {
+        WorkAttentionMode::Observe => {}
+        WorkAttentionMode::Review | WorkAttentionMode::Falsify => {
+            allowed.insert("workgraph_add_evidence");
+        }
+        WorkAttentionMode::Pursue => {
+            allowed.extend([
+                "workgraph_claim",
+                "workgraph_release",
+                "workgraph_update",
+                "workgraph_block",
+                "workgraph_add_evidence",
+            ]);
+            if projection.authority.can_close_if_policy_allows {
+                allowed.insert("workgraph_close");
+            }
+        }
+        WorkAttentionMode::Coordinate => {
+            allowed.extend([
+                "workgraph_create",
+                "workgraph_update",
+                "workgraph_link",
+                "workgraph_add_evidence",
+            ]);
+        }
+        WorkAttentionMode::Judge => {
+            allowed.insert("workgraph_add_evidence");
+            if projection.authority.can_close_if_policy_allows {
+                allowed.insert("workgraph_close");
+            }
+        }
+    }
+    allowed
+}
+
+fn validate_attention_scoped_call(
+    projection: &AttentionContextProjection,
+    name: &str,
+    args: &Value,
+) -> Result<(), ToolError> {
+    if !matches!(
+        name,
+        "workgraph_claim"
+            | "workgraph_release"
+            | "workgraph_update"
+            | "workgraph_block"
+            | "workgraph_close"
+            | "workgraph_add_evidence"
+    ) {
+        return Ok(());
+    }
+    let Some(id) = args.get("id").and_then(Value::as_str) else {
+        return Err(ToolError::ExecutionFailed {
+            message: format!("{name} requires an id inside attention-scoped WorkGraph tools"),
+        });
+    };
+    if id == projection.work_ref.item_id.as_str() {
+        return Ok(());
+    }
+    Err(ToolError::ExecutionFailed {
+        message: format!(
+            "{name} is scoped to attention work item {}, got {id}",
+            projection.work_ref.item_id
+        ),
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -78,7 +191,11 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::{MemoryWorkGraphStore, WorkGraphService};
+    use crate::{
+        AttentionDelegatedAuthority, AttentionProjectionPolicy, GoalAttentionTarget,
+        GoalCreateRequest, MemoryWorkGraphStore, WorkAttentionMode, WorkCompletionPolicy,
+        WorkGraphService,
+    };
 
     #[tokio::test]
     async fn workgraph_tool_surface_dispatches_tools() {
@@ -109,5 +226,59 @@ mod tests {
                 .as_ref()
                 .is_some_and(|p| p.kind == ToolSourceKind::WorkGraph)
         }));
+    }
+
+    #[tokio::test]
+    async fn attention_scoped_surface_hides_parent_close_for_falsifier() {
+        let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+        let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-000000000020")
+            .expect("valid session id");
+        let goal = service
+            .create_goal(GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "Review target".to_string(),
+                description: None,
+                target: GoalAttentionTarget::Session { session_id },
+                mode: WorkAttentionMode::Falsify,
+                completion_policy: WorkCompletionPolicy::SelfAttest,
+                delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+                projection_policy: AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("create goal");
+        let projection = service
+            .attention_projection(crate::AttentionProjectionRequest {
+                binding_id: goal.attention.binding_id,
+                realm_id: None,
+                namespace: None,
+            })
+            .await
+            .expect("projection")
+            .projection;
+        let surface = WorkGraphToolSurface::with_attention_projection(service, projection);
+        let names = surface
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<BTreeSet<_>>();
+
+        assert!(names.contains("workgraph_add_evidence"));
+        assert!(!names.contains("workgraph_close"));
+
+        let args = serde_json::value::RawValue::from_string(
+            json!({ "id": "different", "expected_revision": 1, "evidence": { "kind": "review", "id": "r1" } })
+                .to_string(),
+        )
+        .unwrap();
+        let err = surface
+            .dispatch(ToolCallView {
+                id: "call-2",
+                name: "workgraph_add_evidence",
+                args: &args,
+            })
+            .await
+            .expect_err("wrong scoped item should be denied");
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
     }
 }

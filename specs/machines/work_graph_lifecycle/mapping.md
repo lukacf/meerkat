@@ -156,6 +156,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `terminal_has_no_claim`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_claim_release_recovery`
+- `supervisor_policy_has_owner`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_claim_release_recovery`, `workgraph_block_close_evidence`
+- `non_supervisor_policy_has_no_owner`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_claim_release_recovery`, `workgraph_block_close_evidence`
+- `reviewer_quorum_policy_has_positive_threshold`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `non_reviewer_quorum_policy_has_no_threshold`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_claim_release_recovery`, `workgraph_block_close_evidence`
 
 
 <!-- GENERATED_COVERAGE_END -->

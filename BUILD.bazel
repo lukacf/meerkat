@@ -373,6 +373,7 @@ test_suite(
         "//meerkat-web-runtime:meerkat_web_runtime_unit_test",
         "//meerkat-web-runtime:release_targets_test",
         "//meerkat-web-runtime:wasm_external_resolver_test",
+        "//meerkat-workgraph:attention_contracts_test",
         "//meerkat-workgraph:meerkat_workgraph_unit_test",
         "//meerkat:agent_builder_policy_canary_test",
         "//meerkat:agent_factory_auth_binding_test",

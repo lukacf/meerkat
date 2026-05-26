@@ -242,6 +242,7 @@ mod tests {
             reason: "test".into(),
             handling_mode: meerkat_core::types::HandlingMode::Steer,
             request_id: None,
+            context_append: None,
         });
         assert!(validate_durability(&input).is_err());
     }

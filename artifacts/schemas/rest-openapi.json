@@ -4,6 +4,96 @@
       "AssistantImageId": {
         "type": "string"
       },
+      "AttentionBindingResult": {
+        "properties": {
+          "attention": {
+            "$ref": "#/components/schemas/WorkAttentionBinding"
+          }
+        },
+        "required": [
+          "attention"
+        ],
+        "title": "AttentionBindingResult",
+        "type": "object"
+      },
+      "AttentionContinueOutcome": {
+        "enum": [
+          "accepted",
+          "deduplicated",
+          "rejected"
+        ],
+        "title": "AttentionContinueOutcome",
+        "type": "string"
+      },
+      "AttentionContinueResult": {
+        "properties": {
+          "existing_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/AttentionContinueOutcome"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "title": "AttentionContinueResult",
+        "type": "object"
+      },
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionListResult": {
+        "properties": {
+          "attention": {
+            "items": {
+              "$ref": "#/components/schemas/WorkAttentionBinding"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "attention"
+        ],
+        "title": "AttentionListResult",
+        "type": "object"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": false,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "AuthStatusPhase": {
         "description": "Public auth status phase shared by REST, RPC, CLI, and generated SDK wire\npayloads.\n\nThis is the compatibility projection of typed auth lease truth. Surfaces\nshould map to this enum first and only then emit [`Self::as_public_str`].",
         "enum": [
@@ -2230,6 +2320,70 @@
         "required": [
           "target_model"
         ],
+        "type": "object"
+      },
+      "GoalConfirmResult": {
+        "properties": {
+          "attention": {
+            "$ref": "#/components/schemas/WorkAttentionBinding"
+          },
+          "item": {
+            "$ref": "#/components/schemas/WorkItem"
+          }
+        },
+        "required": [
+          "item",
+          "attention"
+        ],
+        "title": "GoalConfirmResult",
+        "type": "object"
+      },
+      "GoalCreateResult": {
+        "properties": {
+          "attention": {
+            "$ref": "#/components/schemas/WorkAttentionBinding"
+          },
+          "item": {
+            "$ref": "#/components/schemas/WorkItem"
+          }
+        },
+        "required": [
+          "item",
+          "attention"
+        ],
+        "title": "GoalCreateResult",
+        "type": "object"
+      },
+      "GoalRequestCloseResult": {
+        "properties": {
+          "attention": {
+            "$ref": "#/components/schemas/WorkAttentionBinding"
+          },
+          "item": {
+            "$ref": "#/components/schemas/WorkItem"
+          }
+        },
+        "required": [
+          "item",
+          "attention"
+        ],
+        "title": "GoalRequestCloseResult",
+        "type": "object"
+      },
+      "GoalStatusResult": {
+        "properties": {
+          "attention": {
+            "$ref": "#/components/schemas/WorkAttentionBinding"
+          },
+          "item": {
+            "$ref": "#/components/schemas/WorkItem"
+          }
+        },
+        "required": [
+          "item",
+          "attention"
+        ],
+        "title": "GoalStatusResult",
         "type": "object"
       },
       "HandlingMode": {
@@ -8103,6 +8257,160 @@
         ],
         "type": "object"
       },
+      "WorkAttentionBinding": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delegated_authority": {
+            "$ref": "#/components/schemas/AttentionDelegatedAuthority"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/WorkAttentionMode"
+          },
+          "projection_policy": {
+            "$ref": "#/components/schemas/AttentionProjectionPolicy",
+            "default": {
+              "include_parent_context": true,
+              "max_text_chars": 4096
+            }
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkAttentionStatus"
+          },
+          "target": {
+            "$ref": "#/components/schemas/WorkAttentionTarget"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "work_ref": {
+            "$ref": "#/components/schemas/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "target",
+          "mode",
+          "status",
+          "delegated_authority",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkAttentionStatus": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "paused",
+                "type": "string"
+              },
+              "until": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/components/schemas/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "lowered_owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/components/schemas/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WorkEdge": {
         "properties": {
           "created_at": {
@@ -8192,7 +8500,9 @@
           "blocked",
           "closed",
           "linked",
-          "evidence_added"
+          "evidence_added",
+          "attention_created",
+          "attention_updated"
         ],
         "type": "string"
       },
@@ -8310,6 +8620,94 @@
               },
               {
                 "type": "null"
+              }
+            ]
+          },
+          "completion_policy": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "self_attest"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "host_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "principal_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "supervisor"
+                  },
+                  "owner_key": {
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "principal",
+                          "agent",
+                          "session",
+                          "mob",
+                          "label"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "owner_key"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "reviewer_quorum"
+                  },
+                  "threshold": {
+                    "format": "uint16",
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "threshold"
+                ],
+                "type": "object"
               }
             ]
           },
@@ -8506,6 +8904,7 @@
           "namespace",
           "title",
           "status",
+          "completion_policy",
           "priority",
           "machine_state",
           "revision",
@@ -8513,6 +8912,50 @@
           "updated_at"
         ],
         "type": "object"
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
       }
     }
   },
@@ -10934,6 +11377,118 @@
         "summary": "List available skills"
       }
     },
+    "/workgraph/attention/continue": {
+      "post": {
+        "operationId": "post_workgraph_attention_continue",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttentionContinueResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Queue WorkGraph attention continuation for its target session"
+      }
+    },
+    "/workgraph/attention/list": {
+      "post": {
+        "operationId": "post_workgraph_attention_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttentionListResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "List WorkGraph attention bindings"
+      }
+    },
+    "/workgraph/attention/pause": {
+      "post": {
+        "operationId": "post_workgraph_attention_pause",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttentionBindingResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Pause WorkGraph attention binding"
+      }
+    },
+    "/workgraph/attention/resume": {
+      "post": {
+        "operationId": "post_workgraph_attention_resume",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttentionBindingResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Resume WorkGraph attention binding"
+      }
+    },
     "/workgraph/events": {
       "get": {
         "operationId": "get_workgraph_events",
@@ -10960,6 +11515,118 @@
           }
         },
         "summary": "List WorkGraph events"
+      }
+    },
+    "/workgraph/goal/confirm": {
+      "post": {
+        "operationId": "post_workgraph_goal_confirm",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalConfirmResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Attach WorkGraph goal confirmation evidence"
+      }
+    },
+    "/workgraph/goal/create": {
+      "post": {
+        "operationId": "post_workgraph_goal_create",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalCreateResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Create WorkGraph goal and attention binding"
+      }
+    },
+    "/workgraph/goal/request_close": {
+      "post": {
+        "operationId": "post_workgraph_goal_request_close",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalRequestCloseResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Request policy-gated WorkGraph goal closure"
+      }
+    },
+    "/workgraph/goal/status": {
+      "post": {
+        "operationId": "post_workgraph_goal_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalStatusResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Read WorkGraph goal item and attention status"
       }
     },
     "/workgraph/items": {

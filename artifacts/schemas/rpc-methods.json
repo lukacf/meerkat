@@ -381,6 +381,54 @@
       "result_type": "WorkGraphEventsResult"
     },
     {
+      "description": "Create a WorkGraph goal and session attention binding",
+      "name": "workgraph/goal/create",
+      "params_type": "GoalCreateRequest",
+      "result_type": "GoalCreateResult"
+    },
+    {
+      "description": "Read WorkGraph goal item and attention status",
+      "name": "workgraph/goal/status",
+      "params_type": "GoalStatusRequest",
+      "result_type": "GoalStatusResult"
+    },
+    {
+      "description": "Attach WorkGraph goal confirmation evidence",
+      "name": "workgraph/goal/confirm",
+      "params_type": "GoalConfirmRequest",
+      "result_type": "GoalConfirmResult"
+    },
+    {
+      "description": "Request policy-gated WorkGraph goal closure",
+      "name": "workgraph/goal/request_close",
+      "params_type": "GoalRequestCloseRequest",
+      "result_type": "GoalRequestCloseResult"
+    },
+    {
+      "description": "List WorkGraph attention bindings",
+      "name": "workgraph/attention/list",
+      "params_type": "AttentionListRequest",
+      "result_type": "AttentionListResult"
+    },
+    {
+      "description": "Pause a WorkGraph attention binding",
+      "name": "workgraph/attention/pause",
+      "params_type": "AttentionPauseRequest",
+      "result_type": "AttentionBindingResult"
+    },
+    {
+      "description": "Resume a WorkGraph attention binding",
+      "name": "workgraph/attention/resume",
+      "params_type": "AttentionBindingRequest",
+      "result_type": "AttentionBindingResult"
+    },
+    {
+      "description": "Queue a WorkGraph attention continuation for its target session",
+      "name": "workgraph/attention/continue",
+      "params_type": "AttentionBindingRequest",
+      "result_type": "RuntimeAcceptResult"
+    },
+    {
       "description": "List available skills",
       "name": "skills/list"
     },

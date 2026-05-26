@@ -2040,6 +2040,30 @@ fn workgraph_observability_router() -> Router<AppState> {
             meerkat::WorkGraphRestRoute::Events => {
                 router.route(descriptor.path, get(workgraph_events))
             }
+            meerkat::WorkGraphRestRoute::GoalCreate => {
+                router.route(descriptor.path, post(workgraph_goal_create))
+            }
+            meerkat::WorkGraphRestRoute::GoalStatus => {
+                router.route(descriptor.path, post(workgraph_goal_status))
+            }
+            meerkat::WorkGraphRestRoute::GoalConfirm => {
+                router.route(descriptor.path, post(workgraph_goal_confirm))
+            }
+            meerkat::WorkGraphRestRoute::GoalRequestClose => {
+                router.route(descriptor.path, post(workgraph_goal_request_close))
+            }
+            meerkat::WorkGraphRestRoute::AttentionList => {
+                router.route(descriptor.path, post(workgraph_attention_list))
+            }
+            meerkat::WorkGraphRestRoute::AttentionPause => {
+                router.route(descriptor.path, post(workgraph_attention_pause))
+            }
+            meerkat::WorkGraphRestRoute::AttentionResume => {
+                router.route(descriptor.path, post(workgraph_attention_resume))
+            }
+            meerkat::WorkGraphRestRoute::AttentionContinue => {
+                router.route(descriptor.path, post(workgraph_attention_continue))
+            }
         })
 }
 
@@ -4613,6 +4637,202 @@ async fn workgraph_events(
         .await
         .map(|events| Json(meerkat::WorkGraphEventsResponse { events }))
         .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_goal_create(
+    State(state): State<AppState>,
+    Json(request): Json<meerkat::GoalCreateRequest>,
+) -> Result<Json<meerkat::GoalCreateResult>, ApiError> {
+    state
+        .workgraph_service
+        .create_goal(request)
+        .await
+        .map(Json)
+        .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_goal_status(
+    State(state): State<AppState>,
+    Json(request): Json<meerkat::GoalStatusRequest>,
+) -> Result<Json<meerkat::GoalStatusResult>, ApiError> {
+    state
+        .workgraph_service
+        .goal_status(request)
+        .await
+        .map(Json)
+        .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_goal_confirm(
+    State(state): State<AppState>,
+    Json(request): Json<meerkat::GoalConfirmRequest>,
+) -> Result<Json<meerkat::GoalConfirmResult>, ApiError> {
+    state
+        .workgraph_service
+        .goal_confirm(request)
+        .await
+        .map(Json)
+        .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_goal_request_close(
+    State(state): State<AppState>,
+    Json(request): Json<meerkat::GoalRequestCloseRequest>,
+) -> Result<Json<meerkat::GoalRequestCloseResult>, ApiError> {
+    state
+        .workgraph_service
+        .goal_request_close(request)
+        .await
+        .map(Json)
+        .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_attention_list(
+    State(state): State<AppState>,
+    Json(request): Json<meerkat::AttentionListRequest>,
+) -> Result<Json<meerkat::AttentionListResult>, ApiError> {
+    state
+        .workgraph_service
+        .list_attention(request)
+        .await
+        .map(Json)
+        .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_attention_pause(
+    State(state): State<AppState>,
+    Json(request): Json<meerkat::AttentionPauseRequest>,
+) -> Result<Json<meerkat::AttentionBindingResult>, ApiError> {
+    state
+        .workgraph_service
+        .pause_attention(request)
+        .await
+        .map(Json)
+        .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_attention_resume(
+    State(state): State<AppState>,
+    Json(request): Json<meerkat::AttentionBindingRequest>,
+) -> Result<Json<meerkat::AttentionBindingResult>, ApiError> {
+    state
+        .workgraph_service
+        .resume_attention(request)
+        .await
+        .map(Json)
+        .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_attention_continue(
+    State(state): State<AppState>,
+    Json(request): Json<meerkat::AttentionBindingRequest>,
+) -> Result<Json<meerkat::AttentionContinueResult>, ApiError> {
+    let (session_id, input) = workgraph_attention_continuation_input(&state, request.binding_id)
+        .await
+        .map_err(workgraph_error_to_api)?;
+    ensure_rest_session_runtime_executor(&state, &session_id).await;
+    let outcome = state
+        .runtime_adapter
+        .accept_input(&session_id, input)
+        .await
+        .map_err(|error| ApiError::Internal(format!("runtime accept failed: {error}")))?;
+    rest_runtime_accept_result(outcome)
+        .map(Json)
+        .map_err(ApiError::Internal)
+}
+
+async fn workgraph_attention_continuation_input(
+    state: &AppState,
+    binding_id: meerkat::WorkAttentionBindingId,
+) -> Result<(SessionId, meerkat_runtime::Input), meerkat::WorkGraphError> {
+    let binding = state
+        .workgraph_service
+        .attention_binding(meerkat::AttentionBindingRequest {
+            binding_id: binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+        })
+        .await?;
+    let session_id = match binding.attention.target {
+        meerkat::WorkAttentionTarget::Session { session_id } => session_id,
+        meerkat::WorkAttentionTarget::LoweredOwner { owner_key } => {
+            return Err(meerkat::WorkGraphError::InvalidInput(format!(
+                "work attention binding {binding_id} targets lowered owner {}, not a session",
+                owner_key.canonical()
+            )));
+        }
+    };
+    let projection = state
+        .workgraph_service
+        .attention_projection(meerkat::AttentionProjectionRequest {
+            binding_id: binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+        })
+        .await?
+        .projection;
+    let context_key = format!(
+        "workgraph_attention:{}:{}:{}",
+        projection.binding_id, projection.binding_revision, projection.item_revision
+    );
+    let input = meerkat_runtime::Input::Continuation(meerkat_runtime::ContinuationInput {
+        header: meerkat_runtime::InputHeader {
+            id: meerkat_core::lifecycle::InputId::new(),
+            timestamp: chrono::Utc::now(),
+            source: meerkat_runtime::InputOrigin::System,
+            durability: meerkat_runtime::InputDurability::Derived,
+            visibility: meerkat_runtime::InputVisibility {
+                transcript_eligible: false,
+                operator_eligible: false,
+            },
+            idempotency_key: Some(meerkat_runtime::identifiers::IdempotencyKey::new(
+                context_key.clone(),
+            )),
+            supersession_key: None,
+            correlation_id: None,
+        },
+        reason: "workgraph_attention".to_string(),
+        handling_mode: meerkat_core::types::HandlingMode::Steer,
+        request_id: Some(binding_id.to_string()),
+        context_append: Some(ConversationContextAppend {
+            key: context_key,
+            content: CoreRenderable::Text {
+                text: projection.text.rendered,
+            },
+        }),
+    });
+    Ok((session_id, input))
+}
+
+fn rest_runtime_accept_result(
+    outcome: meerkat_runtime::AcceptOutcome,
+) -> Result<meerkat::AttentionContinueResult, String> {
+    Ok(match outcome {
+        meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } => {
+            meerkat::AttentionContinueResult {
+                outcome: meerkat::AttentionContinueOutcome::Accepted,
+                input_id: Some(input_id.to_string()),
+                existing_id: None,
+                reason: None,
+            }
+        }
+        meerkat_runtime::AcceptOutcome::Deduplicated {
+            input_id,
+            existing_id,
+        } => meerkat::AttentionContinueResult {
+            outcome: meerkat::AttentionContinueOutcome::Deduplicated,
+            input_id: Some(input_id.to_string()),
+            existing_id: Some(existing_id.to_string()),
+            reason: None,
+        },
+        meerkat_runtime::AcceptOutcome::Rejected { reason } => meerkat::AttentionContinueResult {
+            outcome: meerkat::AttentionContinueOutcome::Rejected,
+            input_id: None,
+            existing_id: None,
+            reason: Some(reason.to_string()),
+        },
+        _ => return Err("unsupported accept outcome variant".to_string()),
+    })
 }
 
 async fn list_schedules(
@@ -9335,7 +9555,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_workgraph_rest_routes_are_read_only() {
+    async fn test_workgraph_rest_routes_expose_observability_and_narrow_goal_control() {
         use axum::body::Body;
         use http_body_util::BodyExt;
         use tower::ServiceExt;
@@ -9352,6 +9572,7 @@ mod tests {
                 title: "observe me".to_string(),
                 description: None,
                 priority: Default::default(),
+                completion_policy: Default::default(),
                 labels: Default::default(),
                 due_at: None,
                 not_before: None,
@@ -9370,6 +9591,7 @@ mod tests {
                 title: "observe other namespace".to_string(),
                 description: None,
                 priority: Default::default(),
+                completion_policy: Default::default(),
                 labels: Default::default(),
                 due_at: None,
                 not_before: None,
@@ -9383,6 +9605,13 @@ mod tests {
         let app = router(state);
 
         for descriptor in meerkat::workgraph_rest_path_catalog() {
+            if descriptor
+                .operations
+                .iter()
+                .any(|operation| operation.method != "get")
+            {
+                continue;
+            }
             let uri = match descriptor.route {
                 meerkat::WorkGraphRestRoute::Item => {
                     descriptor.path.replace("{id}", item.id.as_str())
@@ -9402,6 +9631,120 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
         }
+
+        let session_id = "019e63c2-0000-7000-8000-000000000007";
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/workgraph/goal/create")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{
+                            "title":"ship it",
+                            "target":{{"kind":"session","session_id":"{session_id}"}},
+                            "mode":"pursue",
+                            "completion_policy":{{"kind":"host_confirmed"}}
+                        }}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let goal: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let binding_id = goal["attention"]["binding_id"].as_str().unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/workgraph/attention/pause")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"binding_id":"{binding_id}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let paused: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(paused["attention"]["status"]["state"], "paused");
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/workgraph/attention/continue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"binding_id":"{binding_id}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/workgraph/goal/request_close")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"binding_id":"{binding_id}","status":"completed"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/workgraph/goal/confirm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{
+                            "binding_id":"{binding_id}",
+                            "evidence":{{
+                                "kind":"host_confirmation",
+                                "id":"acceptance-1",
+                                "label":"accepted"
+                            }}
+                        }}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/workgraph/goal/request_close")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"binding_id":"{binding_id}","status":"completed"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let closed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(closed["item"]["status"], "completed");
 
         let events_path = meerkat::workgraph_rest_path_catalog()
             .iter()

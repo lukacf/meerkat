@@ -1213,6 +1213,54 @@ export class MeerkatClient {
     };
   }
 
+  async createWorkGraphGoal(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("workgraph/goal/create", params);
+  }
+
+  async getWorkGraphGoalStatus(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("workgraph/goal/status", params);
+  }
+
+  async confirmWorkGraphGoal(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("workgraph/goal/confirm", params);
+  }
+
+  async requestCloseWorkGraphGoal(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("workgraph/goal/request_close", params);
+  }
+
+  async listWorkGraphAttention(
+    params: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> {
+    return this.request("workgraph/attention/list", params);
+  }
+
+  async pauseWorkGraphAttention(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("workgraph/attention/pause", params);
+  }
+
+  async resumeWorkGraphAttention(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("workgraph/attention/resume", params);
+  }
+
+  async continueWorkGraphAttention(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("workgraph/attention/continue", params);
+  }
+
   async subscribeSessionEvents(sessionId: string): Promise<EventSubscription<AgentEventEnvelope>> {
     return this.openEventSubscription(
       "session/stream_open",

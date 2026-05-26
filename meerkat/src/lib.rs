@@ -197,16 +197,25 @@ pub use meerkat_tools::ToolError;
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_workgraph::SqliteWorkGraphStore;
 pub use meerkat_workgraph::{
-    AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    ExternalWorkRef, LinkWorkItemsRequest, MemoryWorkGraphStore, ReadyWorkFilter,
+    AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,
+    AttentionContextProjection, AttentionContinueOutcome, AttentionContinueResult,
+    AttentionDelegatedAuthority, AttentionListRequest, AttentionListResult, AttentionPauseRequest,
+    AttentionProjectionPolicy, AttentionProjectionRequest, AttentionProjectionResult,
+    AttentionProjectionText, AttentionReassignRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
+    CreateWorkItemRequest, DisabledWorkGraphStore, ExternalWorkRef, GoalAttentionTarget,
+    GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest, GoalCreateResult,
+    GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult,
+    LinkWorkItemsRequest, MemoryWorkGraphStore, ProjectedAttentionAuthority, ReadyWorkFilter,
     ReleaseWorkItemRequest, UpdateWorkItemRequest, WORKGRAPH_TOOL_INVALID_ARGUMENTS,
-    WORKGRAPH_TOOL_NOT_FOUND, WorkClaim, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphError,
+    WORKGRAPH_TOOL_NOT_FOUND, WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine,
+    WorkAttentionMachineState, WorkAttentionMode, WorkAttentionStatus, WorkAttentionTarget,
+    WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphError,
     WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind, WorkGraphEventsResponse,
-    WorkGraphItemsResponse, WorkGraphMachine, WorkGraphRestRoute, WorkGraphService,
-    WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkGraphStore, WorkGraphStoreKind,
-    WorkGraphToolError, WorkGraphToolSurface, WorkItem, WorkItemFilter, WorkItemId, WorkNamespace,
-    WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus, handle_workgraph_tools_call,
-    workgraph_rest_path_catalog, workgraph_tools_list,
+    WorkGraphItemsResponse, WorkGraphMachine, WorkGraphMachineState, WorkGraphRestRoute,
+    WorkGraphService, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkGraphStore,
+    WorkGraphStoreKind, WorkGraphToolError, WorkGraphToolSurface, WorkItem, WorkItemFilter,
+    WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority,
+    WorkStatus, handle_workgraph_tools_call, workgraph_rest_path_catalog, workgraph_tools_list,
 };
 
 // AgentFactory and build_agent types

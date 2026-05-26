@@ -1467,7 +1467,7 @@ pub struct WorkGraphSnapshot {
     pub event_high_water_mark: Option<i64>,
     pub items: Vec<WorkItem>,
     pub edges: Vec<WorkEdge>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub attention: Vec<WorkAttentionBinding>,
     pub ready_item_ids: Vec<WorkItemId>,
 }

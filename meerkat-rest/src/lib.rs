@@ -4681,7 +4681,8 @@ async fn workgraph_attention_continuation_input(
     let input_id = meerkat_core::lifecycle::InputId::new();
     let attention_key = meerkat::workgraph_attention_continuation_key(&projection);
     let supersession_key = meerkat::workgraph_attention_supersession_key(&projection);
-    let context_key = format!("{attention_key}:{input_id}");
+    let idempotency_key = format!("{attention_key}:{input_id}");
+    let context_key = idempotency_key.clone();
     let input = meerkat_runtime::Input::Continuation(meerkat_runtime::ContinuationInput {
         header: meerkat_runtime::InputHeader {
             id: input_id,
@@ -4692,7 +4693,7 @@ async fn workgraph_attention_continuation_input(
                 transcript_eligible: false,
                 operator_eligible: false,
             },
-            idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(attention_key.clone())),
+            idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(idempotency_key)),
             supersession_key: Some(meerkat_runtime::identifiers::SupersessionKey::new(
                 supersession_key,
             )),

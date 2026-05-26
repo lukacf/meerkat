@@ -3118,7 +3118,8 @@ impl SessionRuntime {
         let input_id = InputId::new();
         let attention_key = meerkat::workgraph_attention_continuation_key(&projection);
         let supersession_key = meerkat::workgraph_attention_supersession_key(&projection);
-        let context_key = format!("{attention_key}:{input_id}");
+        let idempotency_key = format!("{attention_key}:{input_id}");
+        let context_key = idempotency_key.clone();
         let input = Input::Continuation(ContinuationInput {
             header: InputHeader {
                 id: input_id,
@@ -3129,7 +3130,7 @@ impl SessionRuntime {
                     transcript_eligible: false,
                     operator_eligible: false,
                 },
-                idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(attention_key.clone())),
+                idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(idempotency_key)),
                 supersession_key: Some(SupersessionKey::new(supersession_key)),
                 correlation_id: None,
             },
@@ -11402,23 +11403,18 @@ mod tests {
             .await
             .expect("join first continuation")
             .expect("enqueue attention continuation");
-        let deduplicated = [&outcome, &retry]
-            .iter()
-            .filter(|outcome| {
-                matches!(outcome, meerkat_runtime::AcceptOutcome::Deduplicated { .. })
-            })
-            .count();
-        assert_eq!(
-            deduplicated, 1,
-            "concurrent unchanged attention continuations should admit once and deduplicate once: first={outcome:?}, retry={retry:?}"
+        assert!(
+            !matches!(outcome, meerkat_runtime::AcceptOutcome::Deduplicated { .. })
+                && !matches!(retry, meerkat_runtime::AcceptOutcome::Deduplicated { .. }),
+            "distinct attention continuation requests should not be idempotency-deduplicated: first={outcome:?}, retry={retry:?}"
         );
         assert!(
-            matches!(
-                outcome,
-                meerkat_runtime::AcceptOutcome::Accepted { .. }
-                    | meerkat_runtime::AcceptOutcome::Deduplicated { .. }
-            ),
+            matches!(outcome, meerkat_runtime::AcceptOutcome::Accepted { .. }),
             "attention continuation should enter runtime admission: {outcome:?}"
+        );
+        assert!(
+            matches!(retry, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "retry attention continuation should enter runtime admission with its own idempotency key: {retry:?}"
         );
     }
 

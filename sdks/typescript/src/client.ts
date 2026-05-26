@@ -44,9 +44,6 @@ import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js"
 import {
   CONTRACT_VERSION,
   type AttentionBindingRequest,
-  type AttentionListRequest,
-  type AttentionListResult,
-  type GoalStatusRequest,
   type LiveChannelParams,
   type LiveCommitInputParams,
   type LiveOpenParams,
@@ -154,12 +151,16 @@ import type {
   Usage,
   WorkGraphClaim,
   WorkCompletionPolicy,
+  WorkGraphAttentionListRequest,
+  WorkGraphAttentionListResult,
+  WorkGraphAttentionTarget,
   WorkGraphEdge,
   WorkGraphEdgeKind,
   WorkGraphEvent,
   WorkGraphEventFilter,
   WorkGraphEventsResult,
   WorkGraphEventKind,
+  WorkGraphGoalStatusRequest,
   WorkGraphItemFilter,
   WorkGraphItemLookupOptions,
   WorkGraphGoalResult,
@@ -1221,16 +1222,25 @@ export class MeerkatClient {
   }
 
   async getWorkGraphGoalStatus(
-    params: GoalStatusRequest,
+    params: WorkGraphGoalStatusRequest,
   ): Promise<WorkGraphGoalResult> {
-    const result = await this.request<Record<string, unknown>>("workgraph/goal/status", params);
+    const result = await this.request<Record<string, unknown>>(
+      "workgraph/goal/status",
+      MeerkatClient.toWireWorkGraphGoalStatusRequest(params),
+    );
     return MeerkatClient.parseWorkGraphGoalResult(result);
   }
 
   async listWorkGraphAttention(
-    params: AttentionListRequest = {},
-  ): Promise<AttentionListResult> {
-    return this.request<AttentionListResult>("workgraph/attention/list", params);
+    params: WorkGraphAttentionListRequest = {},
+  ): Promise<WorkGraphAttentionListResult> {
+    const result = await this.request<Record<string, unknown>>(
+      "workgraph/attention/list",
+      MeerkatClient.toWireWorkGraphAttentionListRequest(params),
+    );
+    return {
+      attention: MeerkatClient.parseWorkAttentionBindingArray(result.attention),
+    };
   }
 
   async subscribeSessionEvents(sessionId: string): Promise<EventSubscription<AgentEventEnvelope>> {
@@ -3384,6 +3394,34 @@ export class MeerkatClient {
     return params;
   }
 
+  private static toWireWorkGraphGoalStatusRequest(
+    request: WorkGraphGoalStatusRequest,
+  ): Record<string, unknown> {
+    const params = MeerkatClient.toWireWorkGraphScope(request);
+    params.binding_id = request.bindingId;
+    return params;
+  }
+
+  private static toWireWorkGraphAttentionTarget(
+    target: WorkGraphAttentionTarget,
+  ): Record<string, unknown> {
+    if (target.kind === "session") {
+      return { kind: "session", session_id: target.sessionId };
+    }
+    return { kind: "lowered_owner", owner_key: target.ownerKey };
+  }
+
+  private static toWireWorkGraphAttentionListRequest(
+    request: WorkGraphAttentionListRequest,
+  ): Record<string, unknown> {
+    const params = MeerkatClient.toWireWorkGraphScope(request);
+    setIfDefined(params, "status", request.status);
+    if (request.target !== undefined) {
+      params.target = MeerkatClient.toWireWorkGraphAttentionTarget(request.target);
+    }
+    return params;
+  }
+
   private static parseStringArray(value: unknown, context: string): string[] {
     if (value == null) {
       return [];
@@ -3630,12 +3668,84 @@ export class MeerkatClient {
       item: MeerkatClient.parseWorkItem(
         MeerkatClient.requireRecord(data.item, "item", "Invalid workgraph goal result"),
       ),
-      attention: MeerkatClient.requireRecord(
-        data.attention,
-        "attention",
-        "Invalid workgraph goal result",
-      ) as unknown as WorkGraphGoalResult["attention"],
+      attention: MeerkatClient.parseWorkAttentionBinding(
+        MeerkatClient.requireRecord(data.attention, "attention", "Invalid workgraph goal result"),
+      ),
     };
+  }
+
+  private static parseWorkAttentionBinding(
+    data: Record<string, unknown>,
+  ): WorkGraphGoalResult["attention"] {
+    MeerkatClient.requireStringField(data, "binding_id", "Invalid workgraph attention binding");
+    MeerkatClient.requireStringField(data, "created_at", "Invalid workgraph attention binding");
+    MeerkatClient.requireStringField(
+      data,
+      "delegated_authority",
+      "Invalid workgraph attention binding",
+    );
+    MeerkatClient.requireStringField(data, "mode", "Invalid workgraph attention binding");
+    MeerkatClient.requireStringField(data, "updated_at", "Invalid workgraph attention binding");
+
+    const status = MeerkatClient.requireRecord(
+      data.status,
+      "status",
+      "Invalid workgraph attention binding",
+    );
+    const statusState = MeerkatClient.requireStringField(
+      status,
+      "state",
+      "Invalid workgraph attention status",
+    );
+    if (!["active", "paused", "superseded", "stopped"].includes(statusState)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid workgraph attention status: invalid state",
+      );
+    }
+
+    const target = MeerkatClient.requireRecord(
+      data.target,
+      "target",
+      "Invalid workgraph attention binding",
+    );
+    const targetKind = MeerkatClient.requireStringField(
+      target,
+      "kind",
+      "Invalid workgraph attention target",
+    );
+    if (targetKind === "session") {
+      MeerkatClient.requireStringField(target, "session_id", "Invalid workgraph attention target");
+    } else if (targetKind === "lowered_owner") {
+      MeerkatClient.requireRecord(
+        target.owner_key,
+        "owner_key",
+        "Invalid workgraph attention target",
+      );
+    } else {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid workgraph attention target: invalid kind",
+      );
+    }
+
+    const workRef = MeerkatClient.requireRecord(
+      data.work_ref,
+      "work_ref",
+      "Invalid workgraph attention binding",
+    );
+    MeerkatClient.requireStringField(workRef, "realm_id", "Invalid workgraph attention work ref");
+    MeerkatClient.requireStringField(workRef, "namespace", "Invalid workgraph attention work ref");
+    MeerkatClient.requireStringField(workRef, "item_id", "Invalid workgraph attention work ref");
+    return data as unknown as WorkGraphGoalResult["attention"];
+  }
+
+  private static parseWorkAttentionBindingArray(
+    value: unknown,
+  ): WorkGraphAttentionListResult["attention"] {
+    return MeerkatClient.requireRecordArray(value, "Invalid workgraph attention list").map(
+      (attention) => MeerkatClient.parseWorkAttentionBinding(attention),
+    );
   }
 
   private static parseWorkGraphEdge(data: Record<string, unknown>): WorkGraphEdge {
@@ -3714,10 +3824,7 @@ export class MeerkatClient {
       attention:
         data.attention === undefined
           ? []
-          : (MeerkatClient.requireRecordArray(
-              data.attention,
-              "Invalid workgraph snapshot attention",
-            ) as unknown as WorkGraphSnapshot["attention"]),
+          : MeerkatClient.parseWorkAttentionBindingArray(data.attention),
       readyItemIds: MeerkatClient.requireStringArray(
         data.ready_item_ids,
         "Invalid workgraph snapshot ready item ids",

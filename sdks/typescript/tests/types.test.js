@@ -2232,6 +2232,22 @@ describe("Parity wrappers", () => {
       external_refs: [{ kind: "calendar_event", id: "dentist-visit" }],
       evidence_refs: [{ kind: "message_draft", id: "draft-1" }],
     };
+    const attention = {
+      binding_id: "attention-1",
+      target: { kind: "session", session_id: "session-1" },
+      work_ref: {
+        realm_id: "homecore",
+        namespace: "family/appointments",
+        item_id: "prep-dentist-ride",
+      },
+      mode: "pursue",
+      status: { state: "active" },
+      delegated_authority: "request_closure",
+      projection_policy: { include_parent_context: true, max_text_chars: 12000 },
+      machine_state: { revision: 1 },
+      created_at: timestamp,
+      updated_at: timestamp,
+    };
     client.request = async (method, params) => {
       calls.push({ method, params });
       if (method === "workgraph/get") {
@@ -2249,6 +2265,7 @@ describe("Parity wrappers", () => {
           event_high_water_mark: 7,
           items: [item],
           edges: [],
+          attention: [attention],
           ready_item_ids: ["prep-dentist-ride"],
         };
       }
@@ -2264,6 +2281,12 @@ describe("Parity wrappers", () => {
             payload: {},
           }],
         };
+      }
+      if (method === "workgraph/goal/status") {
+        return { item, attention };
+      }
+      if (method === "workgraph/attention/list") {
+        return { attention: [attention] };
       }
       throw new Error(`unexpected method ${method}`);
     };
@@ -2282,18 +2305,34 @@ describe("Parity wrappers", () => {
       namespace: "family/appointments",
     });
     const events = await client.listWorkGraphEvents({ realmId: "homecore", limit: 10 });
+    const goal = await client.getWorkGraphGoalStatus({
+      realmId: "homecore",
+      namespace: "family/appointments",
+      bindingId: "attention-1",
+    });
+    const attentionList = await client.listWorkGraphAttention({
+      realmId: "homecore",
+      status: { state: "active" },
+      target: { kind: "session", sessionId: "session-1" },
+    });
 
     assert.equal(fetched.id, "prep-dentist-ride");
     assert.equal(listed.items[0].priority, "high");
     assert.equal(ready.items[0].status, "open");
     assert.deepEqual(snapshot.readyItemIds, ["prep-dentist-ride"]);
+    assert.equal(snapshot.attention[0].binding_id, "attention-1");
     assert.equal(events.events[0].kind, "created");
+    assert.equal(goal.item.id, "prep-dentist-ride");
+    assert.equal(goal.attention.binding_id, "attention-1");
+    assert.equal(attentionList.attention[0].binding_id, "attention-1");
     assert.deepEqual(calls.map((c) => c.method), [
       "workgraph/get",
       "workgraph/list",
       "workgraph/ready",
       "workgraph/snapshot",
       "workgraph/events",
+      "workgraph/goal/status",
+      "workgraph/attention/list",
     ]);
     assert.deepEqual(calls[0].params, {
       id: "prep-dentist-ride",
@@ -2302,6 +2341,16 @@ describe("Parity wrappers", () => {
     });
     assert.deepEqual(calls[1].params, { realm_id: "homecore", limit: 5 });
     assert.deepEqual(calls[2].params, { namespace: "family/appointments", limit: 3 });
+    assert.deepEqual(calls[5].params, {
+      binding_id: "attention-1",
+      realm_id: "homecore",
+      namespace: "family/appointments",
+    });
+    assert.deepEqual(calls[6].params, {
+      realm_id: "homecore",
+      status: { state: "active" },
+      target: { kind: "session", session_id: "session-1" },
+    });
   });
 
   it("adds wrappers for mob events, batch spawn, and profile CRUD", async () => {

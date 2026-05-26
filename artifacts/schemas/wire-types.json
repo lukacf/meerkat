@@ -42299,6 +42299,7 @@
         "type": "boolean"
       },
       "attention": {
+        "default": [],
         "items": {
           "$ref": "#/$defs/WorkAttentionBinding"
         },

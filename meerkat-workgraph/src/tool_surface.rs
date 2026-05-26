@@ -262,18 +262,23 @@ async fn validate_attention_projection_current(
             ),
         })?
         .projection;
-    if &current == projection {
+    if current.binding_id == projection.binding_id
+        && current.work_ref == projection.work_ref
+        && current.mode == projection.mode
+        && current.binding_revision == projection.binding_revision
+        && current.authority == projection.authority
+    {
         return Ok(());
     }
     Err(ToolError::ExecutionFailed {
         message: format!(
-            "{name} cannot use stale WorkGraph attention projection for binding {} item {}; current binding revision {} item revision {}, projected binding revision {} item revision {}",
+            "{name} cannot use stale WorkGraph attention projection for binding {} item {}; current binding revision {} authority {:?}, projected binding revision {} authority {:?}",
             projection.binding_id,
             projection.work_ref.item_id,
             current.binding_revision,
-            current.item_revision,
+            current.authority,
             projection.binding_revision,
-            projection.item_revision
+            projection.authority
         ),
     })
 }
@@ -767,6 +772,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attention_scoped_projection_survives_own_item_mutations() {
+        let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+        let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-000000000026")
+            .expect("valid session id");
+        let goal = service
+            .create_goal(GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "Review item".to_string(),
+                description: None,
+                target: GoalAttentionTarget::Session { session_id },
+                mode: WorkAttentionMode::Review,
+                completion_policy: WorkCompletionPolicy::SelfAttest,
+                delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+                projection_policy: AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("create goal");
+        let projection = service
+            .attention_projection(crate::AttentionProjectionRequest {
+                binding_id: goal.attention.binding_id.clone(),
+                realm_id: None,
+                namespace: None,
+            })
+            .await
+            .expect("projection")
+            .projection;
+        let surface = WorkGraphToolSurface::with_attention_projection(service, projection);
+        let first_args = serde_json::value::RawValue::from_string(
+            json!({
+                "id": goal.item.id,
+                "expected_revision": goal.item.revision,
+                "evidence": { "kind": "review", "id": "r1" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let first = surface
+            .dispatch(ToolCallView {
+                id: "call-8",
+                name: "workgraph_add_evidence",
+                args: &first_args,
+            })
+            .await
+            .expect("first scoped evidence");
+        let first_value: Value = serde_json::from_str(&first.result.text_content()).unwrap();
+        let next_revision = first_value["item"]["revision"]
+            .as_u64()
+            .expect("updated item revision");
+        let second_args = serde_json::value::RawValue::from_string(
+            json!({
+                "id": goal.item.id,
+                "expected_revision": next_revision,
+                "evidence": { "kind": "review", "id": "r2" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let second = surface
+            .dispatch(ToolCallView {
+                id: "call-9",
+                name: "workgraph_add_evidence",
+                args: &second_args,
+            })
+            .await
+            .expect("same attention projection remains usable after own item mutation");
+        let second_value: Value = serde_json::from_str(&second.result.text_content()).unwrap();
+        assert_eq!(
+            second_value["item"]["evidence_refs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
     async fn scoped_close_if_policy_allows_uses_goal_policy() {
         let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
         let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-000000000023")
@@ -881,6 +963,6 @@ mod tests {
         let ToolError::ExecutionFailed { message } = err else {
             panic!("expected execution failure for stale revision");
         };
-        assert!(message.contains("stale WorkGraph attention projection"));
+        assert!(message.contains("revision"));
     }
 }

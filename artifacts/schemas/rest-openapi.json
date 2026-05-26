@@ -8587,6 +8587,7 @@
             "type": "boolean"
           },
           "attention": {
+            "default": [],
             "items": {
               "$ref": "#/components/schemas/WorkAttentionBinding"
             },

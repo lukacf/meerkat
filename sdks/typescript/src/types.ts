@@ -29,12 +29,14 @@ import type {
   WireToolAccessPolicy,
   WireToolFilter,
   WorkAttentionBinding,
+  WorkAttentionStatus,
   WorkCompletionPolicy,
+  WorkOwnerKey,
 } from "./generated/types.js";
 import type { TurnTerminalCauseKind, Usage } from "./events.js";
 
 export type { TurnTerminalCauseKind, Usage } from "./events.js";
-export type { WorkCompletionPolicy } from "./generated/types.js";
+export type { WorkAttentionStatus, WorkCompletionPolicy } from "./generated/types.js";
 
 declare const peerIdBrand: unique symbol;
 declare const peerCorrelationIdBrand: unique symbol;
@@ -1065,6 +1067,23 @@ export interface WorkItemListResult {
 export interface WorkGraphGoalResult {
   readonly item: WorkItem;
   readonly attention: WorkAttentionBinding;
+}
+
+export interface WorkGraphGoalStatusRequest extends WorkGraphItemLookupOptions {
+  readonly bindingId: string;
+}
+
+export type WorkGraphAttentionTarget =
+  | { readonly kind: "session"; readonly sessionId: string }
+  | { readonly kind: "loweredOwner"; readonly ownerKey: WorkOwnerKey };
+
+export interface WorkGraphAttentionListRequest extends WorkGraphItemLookupOptions {
+  readonly status?: WorkAttentionStatus;
+  readonly target?: WorkGraphAttentionTarget;
+}
+
+export interface WorkGraphAttentionListResult {
+  readonly attention: readonly WorkAttentionBinding[];
 }
 
 export interface WorkGraphEventsResult {

@@ -182,8 +182,7 @@ pub fn runtime_stamped_prompt_turn_metadata(
         metadata,
     ));
     let policy = policy_table::DefaultPolicyTable::resolve(&input, true);
-    let semantics =
-        ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, input.kind());
+    let semantics = ingress_types::RuntimeInputSemantics::from_policy_and_input(&policy, &input);
     runtime_loop::for_input(&input, semantics)
 }
 

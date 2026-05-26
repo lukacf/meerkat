@@ -14,6 +14,7 @@ use meerkat_core::lifecycle::run_primitive::{
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::{InputKind, KindId};
+use crate::input::Input;
 use crate::policy::{ApplyMode, PolicyDecision};
 
 /// Content shape classification for admitted inputs.
@@ -144,6 +145,16 @@ impl RuntimeInputSemantics {
             execution_kind,
             peer_response_terminal_apply_intent,
         )
+    }
+
+    pub fn from_policy_and_input(policy: &PolicyDecision, input: &Input) -> Self {
+        let mut semantics = Self::from_policy_and_kind(policy, input.kind());
+        if let Input::Continuation(continuation) = input
+            && continuation.turn_append.is_some()
+        {
+            semantics.execution_kind = RuntimeExecutionKind::ContentTurn;
+        }
+        semantics
     }
 }
 

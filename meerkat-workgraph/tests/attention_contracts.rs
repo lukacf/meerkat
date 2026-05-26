@@ -3,13 +3,14 @@
 use chrono::{TimeZone, Utc};
 use meerkat_core::SessionId;
 use meerkat_workgraph::{
-    AttentionBindingRequest, AttentionDelegatedAuthority, AttentionListRequest,
+    AddEvidenceRequest, AttentionBindingRequest, AttentionDelegatedAuthority, AttentionListRequest,
     AttentionPauseRequest, AttentionProjectionPolicy, AttentionProjectionRequest,
-    AttentionReassignRequest, CreateWorkItemRequest, GoalAttentionTarget, GoalConfirmRequest,
-    GoalCreateRequest, GoalRequestCloseRequest, GoalStatusRequest, LinkWorkItemsRequest,
-    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMode,
-    WorkAttentionStatus, WorkAttentionTarget, WorkCompletionPolicy, WorkEdgeKind, WorkEvidenceRef,
-    WorkGraphService, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkStatus,
+    AttentionReassignRequest, CloseWorkItemRequest, CreateWorkItemRequest, GoalAttentionTarget,
+    GoalConfirmRequest, GoalCreateRequest, GoalRequestCloseRequest, GoalStatusRequest,
+    LinkWorkItemsRequest, WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine,
+    WorkAttentionMode, WorkAttentionStatus, WorkAttentionTarget, WorkCompletionPolicy,
+    WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkItemRef, WorkNamespace, WorkOwnerKey,
+    WorkStatus,
 };
 use serde_json::json;
 
@@ -274,6 +275,95 @@ async fn goal_confirmation_and_close_are_policy_gated() {
         .expect("close after policy satisfied");
     assert_eq!(closed.item.status, WorkStatus::Completed);
     assert_eq!(closed.attention.binding_id, goal.attention.binding_id);
+    assert_eq!(closed.attention.status, WorkAttentionStatus::Stopped);
+}
+
+#[tokio::test]
+async fn raw_evidence_cannot_satisfy_reserved_completion_policy() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000109").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Needs host acceptance".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::HostConfirmed,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let err = service
+        .add_evidence(AddEvidenceRequest {
+            id: goal.item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            evidence: WorkEvidenceRef {
+                kind: "host_confirmation".to_string(),
+                id: "spoofed".to_string(),
+                label: None,
+                summary: None,
+            },
+        })
+        .await
+        .expect_err("reserved confirmation evidence is only accepted through goal_confirm");
+    assert!(matches!(
+        err,
+        meerkat_workgraph::WorkGraphError::InvalidInput(_)
+    ));
+}
+
+#[tokio::test]
+async fn direct_terminal_close_stops_attention_bindings_for_item() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000110").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Closable item".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    service
+        .close(CloseWorkItemRequest {
+            id: goal.item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            status: WorkStatus::Completed,
+        })
+        .await
+        .expect("direct close");
+
+    let attention = service
+        .attention_binding(AttentionBindingRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("attention")
+        .attention;
+    assert_eq!(attention.status, WorkAttentionStatus::Stopped);
 }
 
 #[tokio::test]

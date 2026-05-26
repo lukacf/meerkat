@@ -1877,14 +1877,38 @@ enum WorkCompletionPolicyArg {
     SelfAttest,
     HostConfirmed,
     PrincipalConfirmed,
+    Supervisor,
+    ReviewerQuorum,
 }
 
-impl From<WorkCompletionPolicyArg> for meerkat::WorkCompletionPolicy {
-    fn from(value: WorkCompletionPolicyArg) -> Self {
-        match value {
-            WorkCompletionPolicyArg::SelfAttest => Self::SelfAttest,
-            WorkCompletionPolicyArg::HostConfirmed => Self::HostConfirmed,
-            WorkCompletionPolicyArg::PrincipalConfirmed => Self::PrincipalConfirmed,
+fn work_completion_policy_from_args(
+    policy: WorkCompletionPolicyArg,
+    supervisor: Option<String>,
+    reviewer_threshold: Option<u8>,
+) -> anyhow::Result<meerkat::WorkCompletionPolicy> {
+    match policy {
+        WorkCompletionPolicyArg::SelfAttest => Ok(meerkat::WorkCompletionPolicy::SelfAttest),
+        WorkCompletionPolicyArg::HostConfirmed => Ok(meerkat::WorkCompletionPolicy::HostConfirmed),
+        WorkCompletionPolicyArg::PrincipalConfirmed => {
+            Ok(meerkat::WorkCompletionPolicy::PrincipalConfirmed)
+        }
+        WorkCompletionPolicyArg::Supervisor => {
+            let supervisor = supervisor.ok_or_else(|| {
+                anyhow::anyhow!("--supervisor is required for --completion-policy supervisor")
+            })?;
+            Ok(meerkat::WorkCompletionPolicy::Supervisor {
+                owner_key: meerkat::WorkOwnerKey::principal(supervisor)?,
+            })
+        }
+        WorkCompletionPolicyArg::ReviewerQuorum => {
+            let threshold = reviewer_threshold.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--reviewer-threshold is required for --completion-policy reviewer-quorum"
+                )
+            })?;
+            Ok(meerkat::WorkCompletionPolicy::ReviewerQuorum {
+                threshold: threshold.into(),
+            })
         }
     }
 }
@@ -1990,6 +2014,10 @@ enum WorkGraphCommands {
         mode: WorkAttentionModeArg,
         #[arg(long, value_enum, default_value = "self-attest")]
         completion_policy: WorkCompletionPolicyArg,
+        #[arg(long)]
+        supervisor: Option<String>,
+        #[arg(long)]
+        reviewer_threshold: Option<u8>,
         #[arg(long)]
         json: bool,
     },
@@ -6113,9 +6141,16 @@ async fn handle_workgraph_command(
             description,
             mode,
             completion_policy,
+            supervisor,
+            reviewer_threshold,
             json,
         } => {
             let session_id = resolve_scoped_session_id(&session_id, scope)?;
+            let completion_policy = work_completion_policy_from_args(
+                completion_policy,
+                supervisor,
+                reviewer_threshold,
+            )?;
             let result = service
                 .create_goal(meerkat::GoalCreateRequest {
                     realm_id: None,
@@ -6124,7 +6159,7 @@ async fn handle_workgraph_command(
                     description,
                     target: meerkat::GoalAttentionTarget::Session { session_id },
                     mode: mode.into(),
-                    completion_policy: completion_policy.into(),
+                    completion_policy,
                     delegated_authority: Default::default(),
                     projection_policy: Default::default(),
                 })

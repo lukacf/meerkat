@@ -990,7 +990,16 @@ pub struct TurnToolOverlay {
     pub blocked_tools: Option<Vec<String>>,
     /// Tool-dispatch metadata visible only to dispatchers for this turn.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[cfg_attr(feature = "schema", schemars(skip))]
     pub dispatch_context: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl TurnToolOverlay {
+    /// Return a caller-safe overlay by dropping runtime-owned dispatch metadata.
+    pub fn without_dispatch_context(mut self) -> Self {
+        self.dispatch_context.clear();
+        self
+    }
 }
 
 /// Query parameters for listing sessions.

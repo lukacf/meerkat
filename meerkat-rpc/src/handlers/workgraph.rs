@@ -107,6 +107,7 @@ pub async fn handle_goal_confirm(
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
+    let request = request.with_host_trusted_principal();
     match runtime.workgraph_service().goal_confirm(request).await {
         Ok(result) => RpcResponse::success(id, result),
         Err(error) => map_workgraph_error(id, error),

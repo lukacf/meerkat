@@ -4664,6 +4664,7 @@ async fn workgraph_goal_confirm(
     State(state): State<AppState>,
     Json(request): Json<meerkat::GoalConfirmRequest>,
 ) -> Result<Json<meerkat::GoalConfirmResult>, ApiError> {
+    let request = request.with_host_trusted_principal();
     state
         .workgraph_service
         .goal_confirm(request)
@@ -4809,12 +4810,10 @@ async fn workgraph_attention_continuation_input(
         handling_mode: meerkat_core::types::HandlingMode::Steer,
         request_id: Some(binding_id.to_string()),
         flow_tool_overlay: Some(flow_tool_overlay),
-        context_append: Some(ConversationContextAppend {
-            key: context_key,
-            content: CoreRenderable::Text {
-                text: projection.text.rendered.clone(),
-            },
-        }),
+        context_append: Some(meerkat::workgraph_attention_context_append(
+            context_key,
+            &projection,
+        )),
         turn_append: Some(meerkat::workgraph_attention_turn_append(&projection)),
     });
     Ok((session_id, input))

@@ -2866,6 +2866,16 @@
           "delegated_authority": {
             "$ref": "#/$defs/AttentionDelegatedAuthority"
           },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
           "mode": {
             "$ref": "#/$defs/WorkAttentionMode"
           },
@@ -2899,6 +2909,45 @@
           "delegated_authority",
           "created_at",
           "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
         ],
         "type": "object"
       },
@@ -3492,6 +3541,16 @@
           "delegated_authority": {
             "$ref": "#/$defs/AttentionDelegatedAuthority"
           },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
           "mode": {
             "$ref": "#/$defs/WorkAttentionMode"
           },
@@ -3525,6 +3584,45 @@
           "delegated_authority",
           "created_at",
           "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
         ],
         "type": "object"
       },
@@ -9940,6 +10038,16 @@
           "delegated_authority": {
             "$ref": "#/$defs/AttentionDelegatedAuthority"
           },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
           "mode": {
             "$ref": "#/$defs/WorkAttentionMode"
           },
@@ -9973,6 +10081,45 @@
           "delegated_authority",
           "created_at",
           "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
         ],
         "type": "object"
       },
@@ -10724,6 +10871,16 @@
           "delegated_authority": {
             "$ref": "#/$defs/AttentionDelegatedAuthority"
           },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
           "mode": {
             "$ref": "#/$defs/WorkAttentionMode"
           },
@@ -10757,6 +10914,45 @@
           "delegated_authority",
           "created_at",
           "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
         ],
         "type": "object"
       },
@@ -11333,6 +11529,16 @@
           "delegated_authority": {
             "$ref": "#/$defs/AttentionDelegatedAuthority"
           },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
           "mode": {
             "$ref": "#/$defs/WorkAttentionMode"
           },
@@ -11366,6 +11572,45 @@
           "delegated_authority",
           "created_at",
           "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
         ],
         "type": "object"
       },
@@ -11925,6 +12170,16 @@
           "delegated_authority": {
             "$ref": "#/$defs/AttentionDelegatedAuthority"
           },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
           "mode": {
             "$ref": "#/$defs/WorkAttentionMode"
           },
@@ -11958,6 +12213,45 @@
           "delegated_authority",
           "created_at",
           "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
         ],
         "type": "object"
       },
@@ -40228,6 +40522,45 @@
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
       },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
+        ],
+        "type": "object"
+      },
       "WorkAttentionMode": {
         "enum": [
           "pursue",
@@ -40390,6 +40723,16 @@
       },
       "delegated_authority": {
         "$ref": "#/$defs/AttentionDelegatedAuthority"
+      },
+      "machine_state": {
+        "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+        "default": {
+          "lifecycle_phase": "active",
+          "paused_until_utc_ms": null,
+          "revision": 1,
+          "superseded_by_binding_key": null,
+          "terminal_at_utc_ms": null
+        }
       },
       "mode": {
         "$ref": "#/$defs/WorkAttentionMode"

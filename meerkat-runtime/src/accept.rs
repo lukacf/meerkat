@@ -269,7 +269,7 @@ pub fn resolve_admission(
     crate::silent_intent::apply_silent_intent_override(input, silent_intents, &mut policy);
     let handling_mode = handling_mode_from_policy(&policy);
     let runtime_semantics =
-        crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, input.kind());
+        crate::ingress_types::RuntimeInputSemantics::from_policy_and_input(&policy, input);
     let primitive_projection = crate::input::runtime_input_projection(input);
     let admission_plan = admission_plan_from_policy(&policy, handling_mode, existing_superseded_id);
     let request_immediate_processing = requests_immediate_processing(input);

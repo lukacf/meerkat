@@ -485,13 +485,24 @@ pub struct WorkAttentionBinding {
     pub mode: WorkAttentionMode,
     pub status: WorkAttentionStatus,
     #[serde(default = "default_work_attention_machine_state")]
-    #[cfg_attr(feature = "schema", schemars(skip))]
+    #[cfg_attr(feature = "schema", schemars(with = "WorkAttentionMachineStateSchema"))]
     pub machine_state: WorkAttentionMachineState,
     pub delegated_authority: AttentionDelegatedAuthority,
     #[serde(default)]
     pub projection_policy: AttentionProjectionPolicy,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[cfg(feature = "schema")]
+#[derive(schemars::JsonSchema)]
+#[allow(dead_code)]
+struct WorkAttentionMachineStateSchema {
+    lifecycle_phase: String,
+    revision: u64,
+    paused_until_utc_ms: Option<u64>,
+    superseded_by_binding_key: Option<String>,
+    terminal_at_utc_ms: Option<u64>,
 }
 
 fn default_work_attention_machine_state() -> WorkAttentionMachineState {
@@ -1104,6 +1115,16 @@ pub struct GoalConfirmRequest {
     pub principal: Option<WorkOwnerKey>,
     #[serde(skip)]
     pub trusted_principal: Option<WorkOwnerKey>,
+}
+
+impl GoalConfirmRequest {
+    /// Promote the surface-authenticated principal into the service authority field.
+    pub fn with_host_trusted_principal(mut self) -> Self {
+        if self.trusted_principal.is_none() {
+            self.trusted_principal = self.principal.clone();
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

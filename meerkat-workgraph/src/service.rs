@@ -305,13 +305,16 @@ impl WorkGraphService {
             request.evidence,
         )?;
         let item = self
-            .add_evidence(AddEvidenceRequest {
-                id: item.id.clone(),
-                realm_id: Some(item.realm_id.clone()),
-                namespace: Some(item.namespace.clone()),
-                expected_revision: item.revision,
-                evidence,
-            })
+            .add_evidence_internal(
+                AddEvidenceRequest {
+                    id: item.id.clone(),
+                    realm_id: Some(item.realm_id.clone()),
+                    namespace: Some(item.namespace.clone()),
+                    expected_revision: item.revision,
+                    evidence,
+                },
+                true,
+            )
             .await?;
         Ok(GoalConfirmResult { item, attention })
     }
@@ -351,7 +354,14 @@ impl WorkGraphService {
                 status: request.status,
             })
             .await?;
-        let attention = self.stop_attention_binding(attention).await?;
+        let attention = self
+            .attention_binding(AttentionBindingRequest {
+                binding_id: attention.binding_id,
+                realm_id: Some(item.realm_id.clone()),
+                namespace: Some(item.namespace.clone()),
+            })
+            .await?
+            .attention;
         Ok(GoalRequestCloseResult { item, attention })
     }
 
@@ -373,6 +383,34 @@ impl WorkGraphService {
         self.store
             .update_attention_cas(stopped, expected_previous_revision, event)
             .await
+    }
+
+    async fn stop_attention_bindings_for_item(
+        &self,
+        item: &WorkItem,
+    ) -> Result<(), WorkGraphError> {
+        let bindings = self
+            .store
+            .list_attention(AttentionListRequest {
+                realm_id: Some(item.realm_id.clone()),
+                namespace: Some(item.namespace.clone()),
+                target: None,
+                status: None,
+            })
+            .await?;
+        for binding in bindings
+            .into_iter()
+            .filter(|binding| binding.work_ref.item_id == item.id)
+            .filter(|binding| {
+                !matches!(
+                    binding.status,
+                    WorkAttentionStatus::Stopped | WorkAttentionStatus::Superseded
+                )
+            })
+        {
+            self.stop_attention_binding(binding).await?;
+        }
+        Ok(())
     }
 
     pub async fn get(
@@ -577,6 +615,7 @@ impl WorkGraphService {
             .store
             .update_item_cas(item, expected_previous_revision, event)
             .await?;
+        self.stop_attention_bindings_for_item(&closed).await?;
         self.best_effort_refresh_dependents_after_blocker_change(&closed, now)
             .await;
         Ok(closed)
@@ -631,6 +670,22 @@ impl WorkGraphService {
         &self,
         request: AddEvidenceRequest,
     ) -> Result<WorkItem, WorkGraphError> {
+        self.add_evidence_internal(request, false).await
+    }
+
+    async fn add_evidence_internal(
+        &self,
+        request: AddEvidenceRequest,
+        allow_reserved_completion_evidence: bool,
+    ) -> Result<WorkItem, WorkGraphError> {
+        if !allow_reserved_completion_evidence
+            && is_reserved_confirmation_evidence_kind(&request.evidence.kind)
+        {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "reserved completion evidence kind {} must be added through goal_confirm",
+                request.evidence.kind
+            )));
+        }
         let now = self.store.get_store_time_utc().await?;
         let item = self
             .get(
@@ -1104,6 +1159,16 @@ fn require_evidence_kind(
         completion_policy_name(policy),
         evidence.kind
     )))
+}
+
+fn is_reserved_confirmation_evidence_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "host_confirmation"
+            | "principal_confirmation"
+            | "supervisor_confirmation"
+            | "reviewer_confirmation"
+    )
 }
 
 fn completion_policy_is_satisfied(item: &WorkItem) -> bool {

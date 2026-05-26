@@ -1328,6 +1328,59 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             .collect()
     }
 
+    fn rest_query_parameter(name: &str, schema: Value) -> Value {
+        serde_json::json!({
+            "name": name,
+            "in": "query",
+            "required": false,
+            "schema": schema,
+        })
+    }
+
+    fn rest_workgraph_query_parameters(path: &str, method: &str) -> Vec<Value> {
+        if method != "get" {
+            return Vec::new();
+        }
+        let string = || serde_json::json!({ "type": "string" });
+        let boolean = || serde_json::json!({ "type": "boolean" });
+        let integer = || serde_json::json!({ "type": "integer", "format": "int64" });
+        let string_array = || {
+            serde_json::json!({
+                "type": "array",
+                "items": { "type": "string" }
+            })
+        };
+        match path {
+            "/workgraph/items" | "/workgraph/snapshot" => vec![
+                rest_query_parameter("realm_id", string()),
+                rest_query_parameter("namespace", string()),
+                rest_query_parameter("all_namespaces", boolean()),
+                rest_query_parameter("statuses", string_array()),
+                rest_query_parameter("labels", string_array()),
+                rest_query_parameter("include_terminal", boolean()),
+                rest_query_parameter("limit", integer()),
+            ],
+            "/workgraph/items/{id}" => vec![
+                rest_query_parameter("realm_id", string()),
+                rest_query_parameter("namespace", string()),
+            ],
+            "/workgraph/ready" => vec![
+                rest_query_parameter("realm_id", string()),
+                rest_query_parameter("namespace", string()),
+                rest_query_parameter("labels", string_array()),
+                rest_query_parameter("limit", integer()),
+            ],
+            "/workgraph/events" => vec![
+                rest_query_parameter("realm_id", string()),
+                rest_query_parameter("namespace", string()),
+                rest_query_parameter("all_namespaces", boolean()),
+                rest_query_parameter("after_seq", integer()),
+                rest_query_parameter("limit", integer()),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
     fn rest_responses(contract: RestOperationContract) -> Value {
         serde_json::json!({
             "200": {
@@ -1377,7 +1430,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                             Value::String(description.to_string()),
                         );
                     }
-                    let parameters = rest_path_parameters(path.path);
+                    let mut parameters = rest_path_parameters(path.path);
+                    parameters.extend(rest_workgraph_query_parameters(path.path, operation.method));
                     if !parameters.is_empty() {
                         operation_map.insert("parameters".to_string(), Value::Array(parameters));
                     }
@@ -2031,6 +2085,31 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("#/components/schemas/SessionDetailsResponse")
         );
+
+        let workgraph_items = &rest_openapi["paths"]["/workgraph/items"]["get"];
+        let workgraph_item_query_names = workgraph_items["parameters"]
+            .as_array()
+            .expect("workgraph items parameters")
+            .iter()
+            .filter(|parameter| {
+                parameter.get("in").and_then(serde_json::Value::as_str) == Some("query")
+            })
+            .filter_map(|parameter| parameter.get("name").and_then(serde_json::Value::as_str))
+            .collect::<std::collections::BTreeSet<_>>();
+        for expected in [
+            "realm_id",
+            "namespace",
+            "all_namespaces",
+            "statuses",
+            "labels",
+            "include_terminal",
+            "limit",
+        ] {
+            assert!(
+                workgraph_item_query_names.contains(expected),
+                "WorkGraph items REST OpenAPI must expose query parameter {expected}"
+            );
+        }
 
         for descriptor in meerkat_workgraph::workgraph_rest_path_catalog() {
             for catalog_operation in descriptor.operations {

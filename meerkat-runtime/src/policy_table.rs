@@ -83,6 +83,26 @@ impl DefaultPolicyTable {
                 true,
             );
         }
+        if let Input::Continuation(continuation) = input
+            && continuation
+                .flow_tool_overlay
+                .as_ref()
+                .is_some_and(|overlay| !overlay.dispatch_context.is_empty())
+        {
+            return pd(
+                ApplyMode::StageRunBoundary,
+                if runtime_idle {
+                    WakeMode::WakeIfIdle
+                } else {
+                    WakeMode::InterruptYielding
+                },
+                QueueMode::Fifo,
+                ConsumePoint::OnRunComplete,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Steer,
+                false,
+            );
+        }
         if !is_response_progress && let Some(mode) = input.handling_mode() {
             return match mode {
                 meerkat_core::types::HandlingMode::Queue => pd(

@@ -1493,6 +1493,8 @@ impl SessionRuntime {
                 .or_else(|| ov.model.as_ref().and(provider_hint))
                 .and_then(|provider| parse_provider_override(provider).ok())
         });
+        let flow_tool_overlay =
+            flow_tool_overlay.map(meerkat_core::service::TurnToolOverlay::without_dispatch_context);
         let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
             handling_mode: None,
             keep_alive: overrides.and_then(|ov| Self::turn_keep_alive_policy(ov.keep_alive)),
@@ -3133,12 +3135,10 @@ impl SessionRuntime {
             handling_mode: meerkat_core::types::HandlingMode::Steer,
             request_id: Some(binding_id.to_string()),
             flow_tool_overlay: Some(flow_tool_overlay),
-            context_append: Some(ConversationContextAppend {
-                key: context_key,
-                content: CoreRenderable::Text {
-                    text: projection.text.rendered.clone(),
-                },
-            }),
+            context_append: Some(meerkat::workgraph_attention_context_append(
+                context_key,
+                &projection,
+            )),
             turn_append: Some(meerkat::workgraph_attention_turn_append(&projection)),
         });
         self.runtime_adapter

@@ -139,7 +139,6 @@ export interface BlobPayload {
 export interface TurnToolOverlay {
   readonly allowedTools?: readonly string[];
   readonly blockedTools?: readonly string[];
-  readonly dispatchContext?: Record<string, unknown>;
 }
 
 /** Result of an agent session creation or turn. */

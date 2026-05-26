@@ -222,7 +222,7 @@ where
     ) -> Result<(), ToolScopeStageError> {
         let handle = self.tool_scope.handle();
         if let Some(overlay) = overlay {
-            self.turn_tool_dispatch_metadata = overlay.dispatch_context;
+            let dispatch_context = overlay.dispatch_context;
             let allow = overlay
                 .allowed_tools
                 .map(|tools| tools.into_iter().collect::<HashSet<_>>());
@@ -232,6 +232,7 @@ where
                 .into_iter()
                 .collect::<HashSet<_>>();
             handle.set_turn_overlay(allow, deny)?;
+            self.turn_tool_dispatch_metadata = dispatch_context;
         } else {
             self.turn_tool_dispatch_metadata.clear();
             handle.clear_turn_overlay();

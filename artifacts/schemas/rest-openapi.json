@@ -8527,6 +8527,16 @@
           "delegated_authority": {
             "$ref": "#/components/schemas/AttentionDelegatedAuthority"
           },
+          "machine_state": {
+            "$ref": "#/components/schemas/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
           "mode": {
             "$ref": "#/components/schemas/WorkAttentionMode"
           },
@@ -8560,6 +8570,45 @@
           "delegated_authority",
           "created_at",
           "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
         ],
         "type": "object"
       },
@@ -11903,6 +11952,50 @@
     "/workgraph/events": {
       "get": {
         "operationId": "get_workgraph_events",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "realm_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all_namespaces",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_seq",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -12083,6 +12176,71 @@
     "/workgraph/items": {
       "get": {
         "operationId": "get_workgraph_items",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "realm_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all_namespaces",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "statuses",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "labels",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_terminal",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -12119,6 +12277,22 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "realm_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -12149,6 +12323,44 @@
     "/workgraph/ready": {
       "get": {
         "operationId": "get_workgraph_ready",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "realm_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "labels",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -12177,6 +12389,71 @@
     "/workgraph/snapshot": {
       "get": {
         "operationId": "get_workgraph_snapshot",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "realm_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all_namespaces",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "statuses",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "labels",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_terminal",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {

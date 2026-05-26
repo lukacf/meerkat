@@ -1911,7 +1911,7 @@ pub struct ContinueSessionRequest {
     pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
     /// Optional per-turn flow tool overlay.
     #[serde(default)]
-    pub flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+    pub flow_tool_overlay: Option<meerkat_core::service::PublicTurnToolOverlay>,
     /// Additional instruction sections prepended as system notices to the prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
@@ -4788,20 +4788,23 @@ async fn workgraph_attention_continuation_input(
         .projection;
     let flow_tool_overlay =
         meerkat::WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection);
-    let context_key = meerkat::workgraph_attention_continuation_key(&projection);
+    let input_id = meerkat_core::lifecycle::InputId::new();
+    let context_key = format!(
+        "{}:{}",
+        meerkat::workgraph_attention_continuation_key(&projection),
+        input_id
+    );
     let input = meerkat_runtime::Input::Continuation(meerkat_runtime::ContinuationInput {
         header: meerkat_runtime::InputHeader {
-            id: meerkat_core::lifecycle::InputId::new(),
+            id: input_id,
             timestamp: chrono::Utc::now(),
             source: meerkat_runtime::InputOrigin::System,
-            durability: meerkat_runtime::InputDurability::Derived,
+            durability: meerkat_runtime::InputDurability::Ephemeral,
             visibility: meerkat_runtime::InputVisibility {
                 transcript_eligible: false,
                 operator_eligible: false,
             },
-            idempotency_key: Some(meerkat_runtime::identifiers::IdempotencyKey::new(
-                context_key.clone(),
-            )),
+            idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
         },
@@ -5680,10 +5683,7 @@ async fn continue_session_inner(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                         skill_references: skill_references.clone(),
-                        flow_tool_overlay: req
-                            .flow_tool_overlay
-                            .clone()
-                            .map(meerkat_core::service::TurnToolOverlay::without_dispatch_context),
+                        flow_tool_overlay: req.flow_tool_overlay.clone().map(Into::into),
                         additional_instructions: resolve_turn_additional_instructions(
                             req.additional_instructions.clone(),
                         ),
@@ -5955,10 +5955,7 @@ async fn continue_session_inner(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                         skill_references: skill_references.clone(),
-                        flow_tool_overlay: req
-                            .flow_tool_overlay
-                            .clone()
-                            .map(meerkat_core::service::TurnToolOverlay::without_dispatch_context),
+                        flow_tool_overlay: req.flow_tool_overlay.clone().map(Into::into),
                         additional_instructions: resolve_turn_additional_instructions(
                             req.additional_instructions.clone(),
                         ),
@@ -11006,7 +11003,7 @@ mod tests {
         assert!(rest_continue_requires_rebuild(&req));
         req.model = None;
 
-        req.flow_tool_overlay = Some(meerkat_core::service::TurnToolOverlay::default());
+        req.flow_tool_overlay = Some(meerkat_core::service::PublicTurnToolOverlay::default());
         assert!(
             !rest_continue_requires_rebuild(&req),
             "flow tool overlay stays on the live path"

@@ -19,7 +19,7 @@ use meerkat_contracts::{
     MobWireMembersBatchParams, MobWireMembersBatchResult, SupervisorRotationReportWire,
     WireMemberState, WireMobBackendKind, WireMobMemberStatus, WireMobRuntimeMode,
 };
-use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
+use meerkat_core::service::{AppendSystemContextRequest, PublicTurnToolOverlay};
 use meerkat_core::skills::SkillRef;
 use meerkat_core::types::ContentInput;
 use meerkat_mob::runtime::MobMemberSnapshot;
@@ -1890,7 +1890,7 @@ pub struct MobTurnStartParams {
     #[serde(default, deserialize_with = "reject_retired_skill_references")]
     pub skill_references: Option<Vec<String>>,
     #[serde(default)]
-    pub flow_tool_overlay: Option<TurnToolOverlay>,
+    pub flow_tool_overlay: Option<PublicTurnToolOverlay>,
     #[serde(default)]
     pub additional_instructions: Option<Vec<String>>,
     #[serde(default)]

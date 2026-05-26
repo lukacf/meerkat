@@ -63,6 +63,7 @@ from .generated.types import (
     MobWireMembersBatchParams as MobWireMembersBatchParams,
     MobWireMembersBatchResult as MobWireMembersBatchResult,
     MobWiringRulesInput as MobWiringRulesInput,
+    PublicTurnToolOverlay as PublicTurnToolOverlay,
     LiveChannelParams as LiveChannelParams,
     LiveCommitInputParams as LiveCommitInputParams,
     LiveInputChunkWire as LiveInputChunkWire,

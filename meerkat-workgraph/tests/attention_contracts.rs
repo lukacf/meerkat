@@ -1,6 +1,6 @@
 #![allow(clippy::expect_used)]
 
-use chrono::{TimeZone, Utc};
+use chrono::{Duration, TimeZone, Utc};
 use meerkat_core::SessionId;
 use meerkat_workgraph::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionDelegatedAuthority, AttentionListRequest,
@@ -59,19 +59,30 @@ async fn completion_policy_is_item_state_and_survives_memory_store_round_trip() 
     let service = WorkGraphService::new(std::sync::Arc::new(
         meerkat_workgraph::MemoryWorkGraphStore::new(),
     ));
-    let item = service
-        .create(CreateWorkItemRequest {
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000044").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
             title: "Ship a match-3 game".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
             completion_policy: WorkCompletionPolicy::HostConfirmed,
-            ..CreateWorkItemRequest::default()
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
         })
         .await
-        .expect("create work item");
+        .expect("create goal");
 
-    assert_eq!(item.completion_policy, WorkCompletionPolicy::HostConfirmed);
+    assert_eq!(
+        goal.item.completion_policy,
+        WorkCompletionPolicy::HostConfirmed
+    );
 
     let fetched = service
-        .get(None, None, item.id.clone())
+        .get(None, None, goal.item.id.clone())
         .await
         .expect("fetch work item");
     assert_eq!(
@@ -778,6 +789,110 @@ async fn closed_goal_stops_attention_and_cannot_resume() {
     assert!(matches!(
         resume_err,
         meerkat_workgraph::WorkGraphError::InvalidTransition(_)
+    ));
+}
+
+#[tokio::test]
+async fn expired_timed_pause_normalizes_on_attention_reads() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000042").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Paused briefly".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    service
+        .pause_attention(AttentionPauseRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+            until: Some(Utc::now() - Duration::minutes(1)),
+        })
+        .await
+        .expect("pause attention");
+
+    let binding = service
+        .attention_binding(AttentionBindingRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("read binding")
+        .attention;
+    assert_eq!(binding.status, WorkAttentionStatus::Active);
+
+    let active = service
+        .list_attention(AttentionListRequest {
+            status: Some(WorkAttentionStatus::Active),
+            ..AttentionListRequest::default()
+        })
+        .await
+        .expect("list active");
+    assert_eq!(active.attention.len(), 1);
+    assert_eq!(active.attention[0].binding_id, goal.attention.binding_id);
+
+    let paused = service
+        .list_attention(AttentionListRequest {
+            status: Some(WorkAttentionStatus::Paused { until: None }),
+            ..AttentionListRequest::default()
+        })
+        .await
+        .expect("list paused");
+    assert!(paused.attention.is_empty());
+}
+
+#[tokio::test]
+async fn completion_policy_legality_is_enforced_by_service() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000043").expect("valid session id");
+
+    let non_goal_err = service
+        .create(CreateWorkItemRequest {
+            title: "Ordinary item".to_string(),
+            completion_policy: WorkCompletionPolicy::HostConfirmed,
+            ..CreateWorkItemRequest::default()
+        })
+        .await
+        .expect_err("ordinary items must not carry goal policies");
+    assert!(matches!(
+        non_goal_err,
+        meerkat_workgraph::WorkGraphError::InvalidInput(_)
+    ));
+
+    let zero_quorum_err = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Impossible quorum".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::ReviewerQuorum { threshold: 0 },
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect_err("zero quorum must be rejected");
+    assert!(matches!(
+        zero_quorum_err,
+        meerkat_workgraph::WorkGraphError::InvalidInput(_)
     ));
 }
 

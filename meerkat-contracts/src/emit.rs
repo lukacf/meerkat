@@ -705,6 +705,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     fn rest_manual_components() -> Map<String, Value> {
         let mut components = Map::new();
         let json_value = schema_ref("JsonValue");
+        let public_turn_tool_overlay = schema_ref("PublicTurnToolOverlay");
         let content_input = serde_json::json!({
             "oneOf": [
                 { "type": "string" },
@@ -795,6 +796,28 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             ),
         );
         components.insert(
+            "PublicTurnToolOverlay".to_string(),
+            closed_object_schema(
+                vec![
+                    (
+                        "allowed_tools",
+                        nullable(serde_json::json!({
+                            "type": "array",
+                            "items": { "type": "string" }
+                        })),
+                    ),
+                    (
+                        "blocked_tools",
+                        nullable(serde_json::json!({
+                            "type": "array",
+                            "items": { "type": "string" }
+                        })),
+                    ),
+                ],
+                vec![],
+            ),
+        );
+        components.insert(
             "RestCreateSessionRequest".to_string(),
             object_schema(
                 vec![
@@ -870,7 +893,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                             "items": json_value
                         }),
                     ),
-                    ("flow_tool_overlay", json_value.clone()),
+                    ("flow_tool_overlay", public_turn_tool_overlay),
                     ("additional_instructions", string_array),
                 ],
                 vec!["session_id", "prompt"],

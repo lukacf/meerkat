@@ -1111,9 +1111,11 @@ pub struct GoalConfirmRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<WorkNamespace>,
     pub evidence: WorkEvidenceRef,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
     pub principal: Option<WorkOwnerKey>,
     #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
     pub trusted_principal: Option<WorkOwnerKey>,
 }
 

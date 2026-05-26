@@ -678,7 +678,7 @@ class MobTurnStartParams:
     auth_binding: Optional[WireAuthBindingRef] = None
     clear_auth_binding: Optional[bool] = None
     clear_provider_params: Optional[bool] = None
-    flow_tool_overlay: Optional[dict[str, Any]] = None
+    flow_tool_overlay: Optional[PublicTurnToolOverlay] = None
     keep_alive: Optional[bool] = None
     max_tokens: Optional[int] = None
     model: Optional[str] = None
@@ -877,6 +877,13 @@ class MobStreamCloseResult:
     already_closed: bool
     closed: bool
     stream_id: str
+
+
+@dataclass
+class PublicTurnToolOverlay:
+    """Public caller-safe per-turn tool overlay."""
+    allowed_tools: Optional[list[str]] = None
+    blocked_tools: Optional[list[str]] = None
 
 
 @dataclass

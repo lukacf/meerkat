@@ -496,7 +496,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attention_scoped_surface_allows_own_review_item_close_only() {
+    async fn attention_scoped_surface_does_not_expose_unsafe_review_close() {
         let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
         let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-000000000021")
             .expect("valid session id");
@@ -523,7 +523,7 @@ mod tests {
             .await
             .expect("projection")
             .projection;
-        assert!(projection.authority.can_close_own_review_item);
+        assert!(!projection.authority.can_close_own_review_item);
         assert!(!projection.authority.can_close_parent);
         let surface = WorkGraphToolSurface::with_attention_projection(service, projection);
         let names = surface
@@ -533,28 +533,8 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert!(names.contains("workgraph_add_evidence"));
-        assert!(names.contains("workgraph_close"));
+        assert!(!names.contains("workgraph_close"));
         assert!(!names.contains("workgraph_link"));
-
-        let args = serde_json::value::RawValue::from_string(
-            json!({
-                "id": goal.item.id,
-                "expected_revision": goal.item.revision,
-                "status": "completed"
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let outcome = surface
-            .dispatch(ToolCallView {
-                id: "call-3",
-                name: "workgraph_close",
-                args: &args,
-            })
-            .await
-            .expect("close own review item");
-        let value: Value = serde_json::from_str(&outcome.result.text_content()).unwrap();
-        assert_eq!(value["item"]["status"].as_str(), Some("completed"));
     }
 
     #[tokio::test]

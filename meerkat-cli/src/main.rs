@@ -1906,6 +1906,9 @@ fn work_completion_policy_from_args(
                     "--reviewer-threshold is required for --completion-policy reviewer-quorum"
                 )
             })?;
+            if threshold == 0 {
+                anyhow::bail!("--reviewer-threshold must be greater than zero");
+            }
             Ok(meerkat::WorkCompletionPolicy::ReviewerQuorum {
                 threshold: threshold.into(),
             })
@@ -6215,12 +6218,10 @@ async fn handle_workgraph_command(
                         label,
                         summary,
                     },
-                    principal: principal
-                        .clone()
-                        .map(meerkat::WorkOwnerKey::principal)
-                        .transpose()?,
+                    principal: None,
                     trusted_principal: principal
-                        .map(meerkat::WorkOwnerKey::principal)
+                        .as_deref()
+                        .map(parse_work_owner_key)
                         .transpose()?,
                 })
                 .await?;

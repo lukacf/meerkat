@@ -50,6 +50,7 @@ from .generated.types import (
     MobTurnStartParams,
     MobWireMembersBatchEdge,
     MobWireMembersBatchResult,
+    PublicTurnToolOverlay,
     WireAuthBindingRef,
     WireBudgetSplitPolicy,
     WireContentInput,
@@ -1856,7 +1857,7 @@ class MeerkatClient:
         prompt: WireContentInput,
         *,
         skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: dict[str, Any] | None = None,
+        flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
         model: str | None = None,
@@ -2474,7 +2475,7 @@ class MeerkatClient:
         prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: dict[str, Any] | None = None,
+        flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
         model: str | None = None,
@@ -2490,7 +2491,7 @@ class MeerkatClient:
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
         if flow_tool_overlay is not None:
-            params["flow_tool_overlay"] = flow_tool_overlay
+            params["flow_tool_overlay"] = _wire_value(flow_tool_overlay)
         if additional_instructions is not None:
             params["additional_instructions"] = additional_instructions
         if keep_alive is not None:
@@ -2518,7 +2519,7 @@ class MeerkatClient:
         prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: dict[str, Any] | None = None,
+        flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
         model: str | None = None,
@@ -2541,7 +2542,7 @@ class MeerkatClient:
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
         if flow_tool_overlay is not None:
-            params["flow_tool_overlay"] = flow_tool_overlay
+            params["flow_tool_overlay"] = _wire_value(flow_tool_overlay)
         if additional_instructions is not None:
             params["additional_instructions"] = additional_instructions
         if keep_alive is not None:

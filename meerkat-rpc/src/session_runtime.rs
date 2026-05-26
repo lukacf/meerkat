@@ -3068,7 +3068,6 @@ impl SessionRuntime {
         session_id: &SessionId,
         request: meerkat::AttentionBindingRequest,
     ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
-        use meerkat_runtime::identifiers::IdempotencyKey;
         use meerkat_runtime::input::{
             ContinuationInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
         };
@@ -3116,18 +3115,23 @@ impl SessionRuntime {
             meerkat::WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection);
 
         self.ensure_runtime_executor(session_id).await?;
-        let context_key = meerkat::workgraph_attention_continuation_key(&projection);
+        let input_id = InputId::new();
+        let context_key = format!(
+            "{}:{}",
+            meerkat::workgraph_attention_continuation_key(&projection),
+            input_id
+        );
         let input = Input::Continuation(ContinuationInput {
             header: InputHeader {
-                id: InputId::new(),
+                id: input_id,
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::System,
-                durability: InputDurability::Derived,
+                durability: InputDurability::Ephemeral,
                 visibility: InputVisibility {
                     transcript_eligible: false,
                     operator_eligible: false,
                 },
-                idempotency_key: Some(IdempotencyKey::new(context_key.clone())),
+                idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
             },

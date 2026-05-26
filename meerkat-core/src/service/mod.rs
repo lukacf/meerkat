@@ -1002,6 +1002,28 @@ impl TurnToolOverlay {
     }
 }
 
+/// Public caller-safe per-turn tool overlay.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PublicTurnToolOverlay {
+    /// Optional allow-list for this turn.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    /// Optional deny-list for this turn.
+    #[serde(default)]
+    pub blocked_tools: Option<Vec<String>>,
+}
+
+impl From<PublicTurnToolOverlay> for TurnToolOverlay {
+    fn from(value: PublicTurnToolOverlay) -> Self {
+        Self {
+            allowed_tools: value.allowed_tools,
+            blocked_tools: value.blocked_tools,
+            dispatch_context: BTreeMap::new(),
+        }
+    }
+}
+
 /// Query parameters for listing sessions.
 #[derive(Debug, Default)]
 pub struct SessionQuery {

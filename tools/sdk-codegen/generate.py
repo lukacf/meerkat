@@ -200,6 +200,7 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
 ]
 
 MOB_RPC_CONTRACT_HELPER_TYPES = [
+    "PublicTurnToolOverlay",
     "MobDefinitionInput",
     "MobBackendConfigInput",
     "MobEventRouterConfigInput",
@@ -240,6 +241,7 @@ MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
         "WireMobProfile",
         "WireMobToolConfig",
         "WireResolvedModelCapabilities",
+        "PublicTurnToolOverlay",
     ]
 )
 

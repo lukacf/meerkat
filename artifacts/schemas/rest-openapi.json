@@ -2449,16 +2449,6 @@
               "null"
             ]
           },
-          "principal": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WorkOwnerKey"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "realm_id": {
             "type": [
               "string",
@@ -3945,6 +3935,39 @@
           }
         ]
       },
+      "PublicTurnToolOverlay": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "blocked_tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
       "RealmId": {
         "description": "Opaque slug identifying a realm.",
         "type": "string"
@@ -4064,7 +4087,7 @@
             "type": "string"
           },
           "flow_tool_overlay": {
-            "$ref": "#/components/schemas/JsonValue"
+            "$ref": "#/components/schemas/PublicTurnToolOverlay"
           },
           "hooks_override": {
             "$ref": "#/components/schemas/JsonValue"

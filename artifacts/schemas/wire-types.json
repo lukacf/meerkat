@@ -9931,31 +9931,6 @@
           "id"
         ],
         "type": "object"
-      },
-      "WorkOwnerKey": {
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "kind": {
-            "$ref": "#/$defs/WorkOwnerKind"
-          }
-        },
-        "required": [
-          "kind",
-          "id"
-        ],
-        "type": "object"
-      },
-      "WorkOwnerKind": {
-        "enum": [
-          "principal",
-          "agent",
-          "session",
-          "mob",
-          "label"
-        ],
-        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -9970,16 +9945,6 @@
         "type": [
           "string",
           "null"
-        ]
-      },
-      "principal": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/WorkOwnerKey"
-          },
-          {
-            "type": "null"
-          }
         ]
       },
       "realm_id": {

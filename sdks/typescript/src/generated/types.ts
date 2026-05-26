@@ -492,7 +492,7 @@ export interface MobTurnStartParams {
   auth_binding?: WireAuthBindingRef;
   clear_auth_binding?: boolean;
   clear_provider_params?: boolean;
-  flow_tool_overlay?: Record<string, unknown>;
+  flow_tool_overlay?: PublicTurnToolOverlay;
   keep_alive?: boolean;
   max_tokens?: number;
   mob_id: string;
@@ -641,6 +641,11 @@ export interface MobStreamCloseResult {
   already_closed: boolean;
   closed: boolean;
   stream_id: string;
+}
+
+export interface PublicTurnToolOverlay {
+  allowed_tools?: string[];
+  blocked_tools?: string[];
 }
 
 export interface MobDefinitionInput {
